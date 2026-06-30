@@ -1,0 +1,8 @@
+# 自动检测文本文件并统一转化为 LF 提交，在 Windows 上检出时转为 CRLF
+* text=auto
+
+# 强制某些文件始终使用 LF (比如 Shell 脚本)
+*.sh text eol=lf
+
+# 强制某些文件始终使用 CRLF (比如 Windows 批处理)
+*.bat text eol=crlf
