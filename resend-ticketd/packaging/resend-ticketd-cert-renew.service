@@ -1,0 +1,16 @@
+[Unit]
+Description=Renew Resend Ticketd TLS certificate
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+EnvironmentFile=/etc/resend-ticketd/.env
+ExecStart=/usr/local/bin/resend-ticketd cert renew --config /etc/resend-ticketd/.env
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/etc/resend-ticketd/tls
