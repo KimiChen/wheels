@@ -156,12 +156,22 @@ async fn handle_resend_webhook(state: AppState, headers: HeaderMap, body: Bytes)
 
     let email_id =
         extract_email_id(&event.data).context("email.received webhook missing email id")?;
-    let received = state
+    let received = match state
         .resend()
         .retrieve_received_email(&state.config().resend_api_key, &email_id)
-        .await?;
+        .await
+    {
+        Ok(received) => received,
+        Err(error) => {
+            state
+                .database()
+                .finish_webhook_event(&event_id, "failed")
+                .await?;
+            return Err(error);
+        }
+    };
 
-    state
+    if let Err(error) = state
         .database()
         .upsert_inbound_message(NewInboundMessage {
             resend_email_id: received.id,
@@ -175,7 +185,14 @@ async fn handle_resend_webhook(state: AppState, headers: HeaderMap, body: Bytes)
             headers_json: received.headers_json,
             attachments: received.attachments,
         })
-        .await?;
+        .await
+    {
+        state
+            .database()
+            .finish_webhook_event(&event_id, "failed")
+            .await?;
+        return Err(error);
+    }
     state
         .database()
         .finish_webhook_event(&event_id, "processed")

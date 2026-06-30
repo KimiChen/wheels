@@ -85,7 +85,7 @@ async fn inbound_message_creates_reopens_and_matches_ticket() {
 }
 
 #[tokio::test]
-async fn webhook_events_are_idempotent() {
+async fn processed_webhook_events_are_idempotent() {
     let database = Database::open("sqlite::memory:").unwrap();
     database.migrate().await.unwrap();
 
@@ -93,8 +93,39 @@ async fn webhook_events_are_idempotent() {
         .try_begin_webhook_event("evt_1", "email.received")
         .await
         .unwrap());
+    database
+        .finish_webhook_event("evt_1", "processed")
+        .await
+        .unwrap();
     assert!(!database
         .try_begin_webhook_event("evt_1", "email.received")
+        .await
+        .unwrap());
+}
+
+#[tokio::test]
+async fn webhook_events_can_retry_after_failure() {
+    let database = Database::open("sqlite::memory:").unwrap();
+    database.migrate().await.unwrap();
+
+    assert!(database
+        .try_begin_webhook_event("evt_retry", "email.received")
+        .await
+        .unwrap());
+    database
+        .finish_webhook_event("evt_retry", "failed")
+        .await
+        .unwrap();
+    assert!(database
+        .try_begin_webhook_event("evt_retry", "email.received")
+        .await
+        .unwrap());
+    database
+        .finish_webhook_event("evt_retry", "processed")
+        .await
+        .unwrap();
+    assert!(!database
+        .try_begin_webhook_event("evt_retry", "email.received")
         .await
         .unwrap());
 }

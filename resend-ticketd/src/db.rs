@@ -208,8 +208,12 @@ INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (1, datetim
         let connection = self.connection.lock().await;
         let changed = connection
             .execute(
-                "INSERT OR IGNORE INTO webhook_events (event_id, event_type, processing_status, created_at)
-                 VALUES (?1, ?2, 'processing', ?3)",
+                "INSERT INTO webhook_events (event_id, event_type, processing_status, created_at)
+                 VALUES (?1, ?2, 'processing', ?3)
+                 ON CONFLICT(event_id) DO UPDATE SET
+                    event_type = excluded.event_type,
+                    processing_status = 'processing'
+                 WHERE webhook_events.processing_status != 'processed'",
                 params![event_id, event_type, now],
             )
             .context("failed to insert webhook event")?;
