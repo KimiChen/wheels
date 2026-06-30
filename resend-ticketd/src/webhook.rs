@@ -2,7 +2,6 @@ use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
-use std::collections::HashMap;
 use subtle::ConstantTimeEq;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -34,7 +33,7 @@ pub fn verify_svix_signature(
     mac.update(body);
     let expected = mac.finalize().into_bytes();
 
-    for signature in parse_signature_header(signature_header).values() {
+    for signature in parse_signature_header(signature_header) {
         if let Ok(actual) = BASE64.decode(signature) {
             if expected.as_slice().ct_eq(actual.as_slice()).into() {
                 return Ok(());
@@ -45,10 +44,41 @@ pub fn verify_svix_signature(
     bail!("invalid webhook signature")
 }
 
-fn parse_signature_header(header: &str) -> HashMap<String, String> {
+fn parse_signature_header(header: &str) -> Vec<&str> {
     header
         .split_whitespace()
-        .filter_map(|part| part.split_once(',').unwrap_or(("", part)).1.split_once('='))
-        .map(|(version, value)| (version.to_string(), value.to_string()))
+        .filter_map(|part| {
+            part.split_once(',')
+                .or_else(|| part.split_once('='))
+                .map(|(_, signature)| signature)
+        })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verifies_svix_v1_signature_with_base64_padding() {
+        let key = b"0123456789abcdef01234567";
+        let secret = format!("whsec_{}", BASE64.encode(key));
+        let message_id = "msg_test";
+        let timestamp = chrono::Utc::now().timestamp().to_string();
+        let body = br#"{"event_type":"email.received"}"#;
+
+        let mut mac = HmacSha256::new_from_slice(key).unwrap();
+        mac.update(format!("{message_id}.{timestamp}.").as_bytes());
+        mac.update(body);
+        let signature = BASE64.encode(mac.finalize().into_bytes());
+
+        verify_svix_signature(
+            &secret,
+            message_id,
+            &timestamp,
+            &format!("v1,{signature}"),
+            body,
+        )
+        .unwrap();
+    }
 }
