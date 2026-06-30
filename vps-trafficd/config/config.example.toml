@@ -1,0 +1,12 @@
+# Copy to /etc/vps-trafficd/config.toml and change auth_token before starting.
+listen_addr = "0.0.0.0:9733"
+auth_token = "replace-with-a-long-random-token"
+interfaces = ["eth0"]
+node_id = "vps-trafficd-01"
+
+# Example: 1 TiB monthly quota.
+quota_bytes = 1099511627776
+billing_mode = "total"
+cycle_anchor = "2026-01-31T08:00:00+08:00"
+cycle_months = 1
+state_path = "/var/lib/vps-trafficd/state.json"
