@@ -158,7 +158,7 @@ impl Config {
         if !self.tls_key_path.is_file() {
             bail!("TLS_KEY_PATH does not exist or is not a file");
         }
-        validate_secret_file_mode(&self.tls_key_path)?;
+        validate_tls_key_file_mode(&self.tls_key_path)?;
         Ok(())
     }
 
@@ -250,6 +250,26 @@ fn sqlite_path_from_url(url: &str) -> Result<Option<PathBuf>> {
         return Ok(Some(PathBuf::from(path)));
     }
     bail!("DATABASE_URL must use sqlite:// or sqlite: format")
+}
+
+#[cfg(unix)]
+fn validate_tls_key_file_mode(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mode = fs::metadata(path)
+        .with_context(|| format!("failed to inspect {}", path.display()))?
+        .permissions()
+        .mode()
+        & 0o777;
+    if mode & 0o007 != 0 {
+        bail!("{} must not be readable by others", path.display());
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_tls_key_file_mode(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 #[cfg(unix)]

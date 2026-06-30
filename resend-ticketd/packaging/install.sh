@@ -3,6 +3,8 @@ set -eu
 
 SERVICE_USER="resend-ticketd"
 CONFIG_DIR="/etc/resend-ticketd"
+ACME_DIR="$CONFIG_DIR/acme"
+TLS_DIR="$CONFIG_DIR/tls"
 DATA_DIR="/var/lib/resend-ticketd"
 LOG_DIR="/var/log/resend-ticketd"
 
@@ -16,6 +18,8 @@ if ! id "$SERVICE_USER" >/dev/null 2>&1; then
 fi
 
 install -d -m 0750 -o root -g "$SERVICE_USER" "$CONFIG_DIR"
+install -d -m 0700 -o root -g root "$ACME_DIR"
+install -d -m 2750 -o root -g "$SERVICE_USER" "$TLS_DIR"
 install -d -m 0750 -o "$SERVICE_USER" -g "$SERVICE_USER" "$DATA_DIR"
 install -d -m 0750 -o "$SERVICE_USER" -g "$SERVICE_USER" "$LOG_DIR"
 install -d -m 0755 /usr/local/bin
