@@ -94,6 +94,7 @@ impl AppState {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/healthz", get(health))
         .route("/webhooks/resend", post(resend_webhook))
         .route("/login", get(login_page).post(login))
         .route("/logout", post(logout))
