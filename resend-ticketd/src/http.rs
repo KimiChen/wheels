@@ -98,7 +98,7 @@ pub fn router(state: AppState) -> Router {
         .route("/webhooks/resend", post(resend_webhook))
         .route("/login", get(login_page).post(login))
         .route("/logout", post(logout))
-        .route("/", get(root))
+        .route("/", get(root).post(resend_webhook))
         .route("/tickets", get(list_tickets))
         .route("/tickets/:id", get(ticket_detail))
         .route("/tickets/:id/reply", post(reply_ticket))
