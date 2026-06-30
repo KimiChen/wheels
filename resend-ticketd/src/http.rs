@@ -93,7 +93,7 @@ impl AppState {
 
 pub fn router(state: AppState) -> Router {
     Router::new()
-        .route("/healthz", get(healthz))
+        .route("/health", get(health))
         .route("/webhooks/resend", post(resend_webhook))
         .route("/login", get(login_page).post(login))
         .route("/logout", post(logout))
@@ -105,7 +105,7 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-async fn healthz() -> &'static str {
+async fn health() -> &'static str {
     "ok"
 }
 
