@@ -1,0 +1,113 @@
+use crate::{
+    api,
+    billing::current_cycle,
+    config::{BillingMode, Config},
+    service::TrafficService,
+};
+use axum::{
+    body::Body,
+    http::{header, Request, StatusCode},
+};
+use chrono::{DateTime, FixedOffset};
+use std::{fs, path::Path};
+use tempfile::TempDir;
+use tower::ServiceExt;
+
+fn dt(value: &str) -> DateTime<FixedOffset> {
+    DateTime::parse_from_rfc3339(value).unwrap()
+}
+
+fn base_config(temp: &TempDir) -> Config {
+    Config {
+        listen_addr: "0.0.0.0:9733".parse().unwrap(),
+        auth_token: "unit-test-secret".to_string(),
+        interfaces: vec!["eth0".to_string()],
+        node_id: "node-a".to_string(),
+        quota_bytes: 1_000,
+        billing_mode: BillingMode::Total,
+        cycle_anchor: dt("2026-01-31T08:00:00+08:00"),
+        cycle_months: 1,
+        state_path: temp.path().join("state.json"),
+    }
+}
+
+fn write_iface(root: &Path, iface: &str, rx: u64, tx: u64) {
+    let stats = root.join(iface).join("statistics");
+    fs::create_dir_all(&stats).unwrap();
+    fs::write(stats.join("rx_bytes"), rx.to_string()).unwrap();
+    fs::write(stats.join("tx_bytes"), tx.to_string()).unwrap();
+}
+
+#[test]
+fn billing_cycle_uses_month_end_when_anchor_day_is_missing() {
+    let anchor = dt("2026-01-31T08:00:00+08:00");
+    let cycle = current_cycle(anchor, 1, dt("2026-02-28T09:00:00+08:00")).unwrap();
+
+    assert_eq!(cycle.start, dt("2026-02-28T08:00:00+08:00"));
+    assert_eq!(cycle.end, dt("2026-03-31T08:00:00+08:00"));
+}
+
+#[test]
+fn service_accumulates_growth_and_ignores_counter_reset() {
+    let temp = TempDir::new().unwrap();
+    let sysfs = temp.path().join("sys");
+    let config = base_config(&temp);
+    let service = TrafficService::with_sysfs_root(config, sysfs.clone());
+
+    write_iface(&sysfs, "eth0", 100, 200);
+    let initial = service.snapshot().unwrap();
+    assert_eq!(initial.rx_bytes, 0);
+    assert_eq!(initial.tx_bytes, 0);
+
+    write_iface(&sysfs, "eth0", 180, 260);
+    let grown = service.snapshot().unwrap();
+    assert_eq!(grown.rx_bytes, 80);
+    assert_eq!(grown.tx_bytes, 60);
+    assert_eq!(grown.used_bytes, 140);
+    assert_eq!(grown.remaining_bytes, 860);
+
+    write_iface(&sysfs, "eth0", 10, 20);
+    let reset = service.snapshot().unwrap();
+    assert_eq!(reset.rx_bytes, 80);
+    assert_eq!(reset.tx_bytes, 60);
+
+    write_iface(&sysfs, "eth0", 25, 45);
+    let after_reset = service.snapshot().unwrap();
+    assert_eq!(after_reset.rx_bytes, 95);
+    assert_eq!(after_reset.tx_bytes, 85);
+}
+
+#[tokio::test]
+async fn traffic_endpoint_requires_bearer_token() {
+    let temp = TempDir::new().unwrap();
+    let sysfs = temp.path().join("sys");
+    let config = base_config(&temp);
+    write_iface(&sysfs, "eth0", 100, 200);
+
+    let service = std::sync::Arc::new(TrafficService::with_sysfs_root(config, sysfs));
+    let app = api::router(service);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/traffic")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/traffic")
+                .header(header::AUTHORIZATION, "Bearer unit-test-secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
