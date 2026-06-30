@@ -99,7 +99,7 @@ ACME_DOMAIN=tickets.example.com
 ACME_LEGO_PATH=/usr/local/bin/lego
 ACME_DNS_PROVIDER=cloudflare
 ACME_DNS_ENV_FILE=/etc/resend-ticketd/acme.env
-ACME_CERT_DIR=/etc/resend-ticketd/tls
+ACME_CERT_DIR=/etc/resend-ticketd/acme
 ```
 
 配置校验必须拒绝：
@@ -139,8 +139,17 @@ resend-ticketd cert renew --config /etc/resend-ticketd/.env
 
 - DNS 服务商凭据写入 `ACME_DNS_ENV_FILE`。
 - `ACME_DNS_ENV_FILE` 权限必须是 `0600`。
-- 证书输出到 `ACME_CERT_DIR`。
+- lego 状态和原始输出保存到 `ACME_CERT_DIR`。
+- 申请或续期成功后，将 `ACME_CERT_DIR/certificates/<domain>.crt` 安装为 `TLS_CERT_PATH`，将 `<domain>.key` 安装为 `TLS_KEY_PATH`。通配符域名文件名按 lego 规则把 `*` 写作 `_`。
 - 续期成功后执行 `systemctl reload-or-restart resend-ticketd`。
+
+Cloudflare 示例凭据文件：
+
+```dotenv
+CF_DNS_API_TOKEN=replace-with-cloudflare-token
+# 可选：使用独立 Zone Read token 时再设置
+# CF_ZONE_API_TOKEN=replace-with-zone-read-token
+```
 
 第一版不内置 ACME 客户端逻辑，避免把 DNS provider 差异、续期失败恢复和账号状态管理放进主服务。
 
@@ -162,7 +171,10 @@ resend-ticketd cert renew --config /etc/resend-ticketd/.env
 3. 配置目录权限：
    - `/etc/resend-ticketd`：`0750 root:resend-ticketd`
    - `/etc/resend-ticketd/.env`：`0640 root:resend-ticketd`
-   - TLS 私钥和 DNS 凭据：`0600 root:root`
+   - `/etc/resend-ticketd/acme`：`0700 root:root`
+   - `/etc/resend-ticketd/tls`：`2750 root:resend-ticketd`
+   - TLS 私钥：`0640 root:resend-ticketd`
+   - DNS 凭据：`0600 root:root`
    - `/var/lib/resend-ticketd`：`0750 resend-ticketd:resend-ticketd`
 4. 安装 systemd unit 和 timer。
 5. 运行配置检查。
