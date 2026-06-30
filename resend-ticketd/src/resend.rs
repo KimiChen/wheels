@@ -116,7 +116,7 @@ impl ResendClient {
     ) -> Result<ReceivedEmail> {
         let response = self
             .http
-            .get(format!("{RESEND_BASE_URL}/emails/{email_id}"))
+            .get(received_email_url(email_id))
             .bearer_auth(api_key)
             .send()
             .await
@@ -221,11 +221,28 @@ impl EmailAddress {
     }
 }
 
+fn received_email_url(email_id: &str) -> String {
+    format!("{RESEND_BASE_URL}/emails/receiving/{email_id}")
+}
+
 fn ensure_success(status: StatusCode, action: &str) -> Result<()> {
     if status.is_success() {
         Ok(())
     } else {
         anyhow::bail!("Resend {action} API returned HTTP {status}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn received_email_url_uses_receiving_endpoint() {
+        assert_eq!(
+            received_email_url("email_123"),
+            "https://api.resend.com/emails/receiving/email_123"
+        );
     }
 }
 
