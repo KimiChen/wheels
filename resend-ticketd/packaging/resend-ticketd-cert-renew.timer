@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Resend Ticketd certificate renewal daily
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=1h
+
+[Install]
+WantedBy=timers.target
