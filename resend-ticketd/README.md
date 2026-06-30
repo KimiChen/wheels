@@ -49,7 +49,7 @@ Resend 侧手动完成收信域名和 webhook 配置：
 
 公开接口：
 
-- `GET /healthz`：健康检查。
+- `GET /health`：健康检查。
 - `POST /webhooks/resend`：Resend inbound webhook。
 
 后台接口：
@@ -228,7 +228,7 @@ checksums.txt
 - 工单状态：关闭后收到客户回复自动重开。
 - 发信回复：调用 Resend Send Email API，带 `In-Reply-To` 和 `References`。
 - 后台认证：登录、退出、会话过期、CSRF 拒绝、登录限速。
-- HTTPS 启动：使用测试证书启动并访问 `/healthz`。
+- HTTPS 启动：使用测试证书启动并访问 `/health`。
 - 打包：两个 musl target release 构建成功，安装脚本在支持系统上冒烟通过。
 
 ## 参考文档
