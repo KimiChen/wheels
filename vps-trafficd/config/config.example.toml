@@ -1,12 +1,28 @@
-# Copy to /etc/vps-trafficd/config.toml and change auth_token before starting.
+# 复制到 /etc/vps-trafficd/config.toml 后使用；启动前必须修改 auth_token。
+
+# 服务监听地址。0.0.0.0 表示监听所有公网/内网地址，9733 是默认端口。
 listen_addr = "0.0.0.0:9733"
+
+# API 鉴权 Token。必须改成足够长的随机字符串，不能留空或使用示例值。
 auth_token = "replace-with-a-long-random-token"
+
+# 要统计的 Linux 网卡名列表。多网卡时可写成 ["eth0", "ens3"]。
 interfaces = ["eth0"]
+
+# 节点标识。多台 VPS 汇总时用来区分来源，不参与鉴权。
 node_id = "vps-trafficd-01"
 
-# Example: 1 TiB monthly quota.
+# 本账期总流量额度，单位为字节。示例值为 1.00 T，即 1099511627776 字节。
 quota_bytes = 1099511627776
+
+# 计费口径，可选 total/rx/tx：total 表示下载+上传，rx 表示只算接收，tx 表示只算发送。
 billing_mode = "total"
+
+# 账期锚点，即购买/续费开始时间。程序会按这个日期和时间推算每个账期边界。
 cycle_anchor = "2026-01-31T08:00:00+08:00"
+
+# 账期月数。1 表示每月一个账期，3 表示每三个月一个账期。
 cycle_months = 1
+
+# 本机状态文件路径。保存网卡上次计数、账期累计和校准偏移；不会保存 auth_token。
 state_path = "/var/lib/vps-trafficd/state.json"

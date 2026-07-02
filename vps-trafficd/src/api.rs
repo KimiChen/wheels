@@ -284,14 +284,14 @@ const INDEX_HTML: &str = r#"<!doctype html>
 
     function formatBytes(value) {
       if (!Number.isFinite(value)) return "-";
-      const units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+      const units = ["B", "K", "M", "G", "T", "P"];
       let size = value;
       let unit = 0;
       while (size >= 1024 && unit < units.length - 1) {
         size /= 1024;
         unit += 1;
       }
-      return `${size.toFixed(unit === 0 ? 0 : 2)} ${units[unit]}`;
+      return `${size.toFixed(2)} ${units[unit]}`;
     }
 
     function metric(label, value) {
@@ -310,11 +310,11 @@ const INDEX_HTML: &str = r#"<!doctype html>
       const items = [
         ["Node", data.node_id || "-"],
         ["Billing", `${data.cycle_start || "-"} to ${data.cycle_end || "-"}`],
-        ["Used", formatBytes(data.used_bytes)],
-        ["Remaining", formatBytes(data.remaining_bytes)],
-        ["RX", formatBytes(data.rx_bytes)],
-        ["TX", formatBytes(data.tx_bytes)],
-        ["Quota", formatBytes(data.quota_bytes)],
+        ["Used", data.used_display || formatBytes(data.used_bytes)],
+        ["Remaining", data.remaining_display || formatBytes(data.remaining_bytes)],
+        ["RX", data.rx_display || formatBytes(data.rx_bytes)],
+        ["TX", data.tx_display || formatBytes(data.tx_bytes)],
+        ["Quota", data.quota_display || formatBytes(data.quota_bytes)],
         ["Usage", `${ratio.toFixed(4)}%`]
       ];
       metricsEl.replaceChildren(...items.map(([label, value]) => metric(label, value)));
