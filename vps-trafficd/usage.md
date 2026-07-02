@@ -54,9 +54,10 @@ curl http://127.0.0.1:9733/health
 
 `GET /api/v1/traffic` 必须携带 `Authorization: Bearer <token>`。鉴权失败返回
 `401`，且不会暴露节点、网卡、流量或账期数据。`GET /api/v1/config` 和
-`PUT /api/v1/config` 用于读取和更新不含 token 的配置字段，包括流量充值周期和流量限额。
+`PUT /api/v1/config` 用于读取和更新不含 token 的配置字段，包括流量充值周期、流量限额和计费口径。
 `PUT /api/v1/config` 也可以携带 `current_cycle_used_bytes` 来校准当前未完整周期的已用流量。
 `GET /health` 公开访问，只返回最小健康信息。
 
 浏览器打开 `/` 会弹框输入 Bearer token，页面可查看流量，并保存流量充值周期和流量限额到
-`/etc/vps-trafficd/config.toml`；“Current cycle used” 会更新状态文件中的校准偏移，用来计算当前周期剩余流量。
+`/etc/vps-trafficd/config.toml`；计费口径可选 total、rx、tx、max，其中 max 取接收/发送较大值。
+“Traffic quota”和“Current cycle used” 会以 G 作为表单回填单位；“Current cycle used” 会更新状态文件中的校准偏移，用来计算当前周期剩余流量。

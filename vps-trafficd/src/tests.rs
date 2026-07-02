@@ -78,6 +78,28 @@ fn service_accumulates_growth_and_ignores_counter_reset() {
     assert_eq!(after_reset.tx_bytes, 85);
 }
 
+#[test]
+fn service_uses_larger_direction_for_max_billing_mode() {
+    let temp = TempDir::new().unwrap();
+    let sysfs = temp.path().join("sys");
+    let mut config = base_config(&temp);
+    config.billing_mode = BillingMode::Max;
+    let service =
+        TrafficService::with_sysfs_root(config, temp.path().join("config.toml"), sysfs.clone());
+
+    write_iface(&sysfs, "eth0", 100, 200);
+    let initial = service.snapshot().unwrap();
+    assert_eq!(initial.used_bytes, 0);
+    assert_eq!(initial.billing_mode, "max");
+
+    write_iface(&sysfs, "eth0", 180, 260);
+    let grown = service.snapshot().unwrap();
+    assert_eq!(grown.rx_bytes, 80);
+    assert_eq!(grown.tx_bytes, 60);
+    assert_eq!(grown.used_bytes, 80);
+    assert_eq!(grown.remaining_bytes, 920);
+}
+
 #[tokio::test]
 async fn index_page_prompts_for_token() {
     let temp = TempDir::new().unwrap();
@@ -112,10 +134,17 @@ async fn index_page_prompts_for_token() {
     assert!(body.contains("/api/v1/config"));
     assert!(!body.contains("Billing start"));
     assert!(!body.contains("billing_cycle_anchor"));
+    assert!(body.contains("Billing mode"));
+    assert!(body.contains("billing-mode"));
+    assert!(body.contains("billing_mode"));
+    assert!(body.contains("Max of RX/TX"));
     assert!(body.contains("Current cycle used"));
     assert!(body.contains("current_cycle_used_bytes"));
     assert!(body.contains("const units = [\"B\", \"K\", \"M\", \"G\", \"T\", \"P\"]"));
     assert!(body.contains("size.toFixed(2)"));
+    assert!(body.contains("setByteInput(config.quota_bytes, quotaValueEl, quotaUnitEl, \"G\")"));
+    assert!(body
+        .contains("setByteInput(data.used_bytes, currentUsedValueEl, currentUsedUnitEl, \"G\")"));
 }
 
 #[tokio::test]
@@ -137,6 +166,7 @@ async fn config_endpoint_updates_config_file_runtime_quota_and_used_traffic() {
         "traffic_cycle_anchor":"2026-02-01T08:00:00+08:00",
         "traffic_cycle_months":1,
         "quota_bytes":2048,
+        "billing_mode":"max",
         "current_cycle_used_bytes":512
     }"#;
     let response = app
@@ -158,6 +188,8 @@ async fn config_endpoint_updates_config_file_runtime_quota_and_used_traffic() {
     assert!(!saved.contains("billing_cycle"));
     assert!(saved.contains("流量充值周期锚点"));
     assert!(saved.contains("quota_bytes = 2048"));
+    assert!(saved.contains("billing_mode = \"max\""));
+    assert!(saved.contains("max 表示取接收/发送较大值"));
 
     let response = app
         .oneshot(
@@ -173,6 +205,7 @@ async fn config_endpoint_updates_config_file_runtime_quota_and_used_traffic() {
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(body["quota_bytes"], 2048);
+    assert_eq!(body["billing_mode"], "max");
     assert_eq!(body["used_bytes"], 512);
     assert_eq!(body["remaining_bytes"], 1536);
 }

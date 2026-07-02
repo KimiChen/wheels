@@ -41,6 +41,7 @@ pub enum BillingMode {
     Rx,
     Tx,
     Total,
+    Max,
 }
 
 impl Default for BillingMode {
@@ -131,7 +132,7 @@ node_id = {node_id}
 # 本账期总流量额度，单位为字节。页面 JS 会显示为 K/M/G/T 两位小数。
 quota_bytes = {quota_bytes}
 
-# 计费口径，可选 total/rx/tx：total 表示下载+上传，rx 表示只算接收，tx 表示只算发送。
+# 计费口径，可选 total/rx/tx/max：total 表示下载+上传，rx 表示只算接收，tx 表示只算发送，max 表示取接收/发送较大值。
 billing_mode = {billing_mode}
 
 # 流量充值周期锚点，即服务商重置流量的开始时间。流量用量按这个周期计算。
@@ -162,6 +163,7 @@ impl BillingMode {
             Self::Rx => "rx",
             Self::Tx => "tx",
             Self::Total => "total",
+            Self::Max => "max",
         }
     }
 }

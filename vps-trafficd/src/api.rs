@@ -342,13 +342,22 @@ const INDEX_HTML: &str = r#"<!doctype html>
           <input id="traffic-months" type="number" min="1" step="1" required>
         </label>
         <label>
+          Billing mode
+          <select id="billing-mode" required>
+            <option value="total">Total (RX + TX)</option>
+            <option value="rx">RX only</option>
+            <option value="tx">TX only</option>
+            <option value="max">Max of RX/TX</option>
+          </select>
+        </label>
+        <label>
           Traffic quota
           <span class="quota-row">
             <input id="quota-value" type="number" min="0.01" step="0.01" required>
             <select id="quota-unit">
               <option value="K">K</option>
               <option value="M">M</option>
-              <option value="G">G</option>
+              <option value="G" selected>G</option>
               <option value="T">T</option>
             </select>
           </span>
@@ -360,7 +369,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
             <select id="current-used-unit">
               <option value="K">K</option>
               <option value="M">M</option>
-              <option value="G">G</option>
+              <option value="G" selected>G</option>
               <option value="T">T</option>
             </select>
           </span>
@@ -381,6 +390,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     const configForm = document.getElementById("config-form");
     const trafficAnchorEl = document.getElementById("traffic-anchor");
     const trafficMonthsEl = document.getElementById("traffic-months");
+    const billingModeEl = document.getElementById("billing-mode");
     const quotaValueEl = document.getElementById("quota-value");
     const quotaUnitEl = document.getElementById("quota-unit");
     const currentUsedValueEl = document.getElementById("current-used-value");
@@ -417,23 +427,27 @@ const INDEX_HTML: &str = r#"<!doctype html>
       return `${size.toFixed(2)} ${units[unit]}`;
     }
 
-    function splitBytes(bytes) {
+    function splitBytes(bytes, preferredUnit) {
+      const numericBytes = Number(bytes || 0);
+      if (preferredUnit && unitBytes[preferredUnit]) {
+        return { value: numericBytes / unitBytes[preferredUnit], unit: preferredUnit };
+      }
       const units = ["T", "G", "M", "K"];
       for (const unit of units) {
-        if (bytes >= unitBytes[unit] && bytes % unitBytes[unit] === 0) {
-          return { value: bytes / unitBytes[unit], unit };
+        if (numericBytes >= unitBytes[unit] && numericBytes % unitBytes[unit] === 0) {
+          return { value: numericBytes / unitBytes[unit], unit };
         }
       }
       for (const unit of units) {
-        if (bytes >= unitBytes[unit]) {
-          return { value: bytes / unitBytes[unit], unit };
+        if (numericBytes >= unitBytes[unit]) {
+          return { value: numericBytes / unitBytes[unit], unit };
         }
       }
-      return { value: bytes, unit: "K" };
+      return { value: numericBytes, unit: "K" };
     }
 
-    function setByteInput(bytes, valueEl, unitEl) {
-      const split = splitBytes(Number(bytes || 0));
+    function setByteInput(bytes, valueEl, unitEl, preferredUnit) {
+      const split = splitBytes(Number(bytes || 0), preferredUnit);
       valueEl.value = split.value.toFixed(2);
       unitEl.value = split.unit;
     }
@@ -495,6 +509,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
         ["Remaining", formatBytes(data.remaining_bytes)],
         ["RX", formatBytes(data.rx_bytes)],
         ["TX", formatBytes(data.tx_bytes)],
+        ["Billing", data.billing_mode || "-"],
         ["Quota", formatBytes(data.quota_bytes)],
         ["Usage", `${ratio.toFixed(4)}%`]
       ];
@@ -504,14 +519,15 @@ const INDEX_HTML: &str = r#"<!doctype html>
         document.activeElement !== currentUsedValueEl &&
         document.activeElement !== currentUsedUnitEl
       ) {
-        setByteInput(data.used_bytes, currentUsedValueEl, currentUsedUnitEl);
+        setByteInput(data.used_bytes, currentUsedValueEl, currentUsedUnitEl, "G");
       }
     }
 
     function renderConfig(config) {
       trafficAnchorEl.value = toLocalInputValue(config.traffic_cycle_anchor);
       trafficMonthsEl.value = config.traffic_cycle_months || 1;
-      setByteInput(config.quota_bytes, quotaValueEl, quotaUnitEl);
+      billingModeEl.value = config.billing_mode || "total";
+      setByteInput(config.quota_bytes, quotaValueEl, quotaUnitEl, "G");
       setConfigStatus(`Config loaded for ${config.node_id || "-"}.`);
     }
 
@@ -581,6 +597,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
           traffic_cycle_anchor: localInputToIso(trafficAnchorEl.value),
           traffic_cycle_months: Number(trafficMonthsEl.value),
           quota_bytes: quotaBytesFromForm(),
+          billing_mode: billingModeEl.value,
           current_cycle_used_bytes: usedBytesFromForm()
         };
         const response = await fetchAuthed("/api/v1/config", {

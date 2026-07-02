@@ -26,7 +26,7 @@
 - 统计与账期：
   - 聚合配置中指定网卡的 rx/tx。
   - 接口同时返回 `rx_bytes`、`tx_bytes`、`used_bytes`、`remaining_bytes`、`usage_ratio`。
-  - `used_bytes` 按 `billing_mode` 选择 rx、tx 或 total。
+  - `used_bytes` 按 `billing_mode` 选择 rx、tx、total 或 rx/tx 较大值。
   - 根据购买日锚点推算当前账期；短月份没有对应日期时使用月末同一时间。
 - 运维命令：
   - `vps-trafficd --config /etc/vps-trafficd/config.toml`
@@ -58,7 +58,7 @@
 - 测试公网监听默认值为 `0.0.0.0:9733`，但 `/api/v1/traffic` 无 token 或 token 错误时返回 `401`。
 - 测试购买日账期计算：跨月、跨年、29/30/31 号、短月份。
 - 测试网卡计数器正常增长、系统重启归零、计数器变小后的累计逻辑。
-- 测试 `rx` / `tx` / `total` 三种计费口径和剩余流量不低于 0。
+- 测试 `rx` / `tx` / `total` / `max` 四种计费口径和剩余流量不低于 0。
 - 测试 `check` 能发现缺失网卡、不可写状态目录、空 token、示例 token。
 - 测试两台模拟 VPS 使用相同默认 `state_path` 时，只写各自本机状态文件，互不影响。
 - 测试不同 `node_id` 的节点 API 返回可区分来源，外部汇总脚本能正确累加多节点用量。
