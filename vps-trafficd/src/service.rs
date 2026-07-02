@@ -2,6 +2,7 @@ use crate::{
     billing,
     config::{BillingMode, Config},
     counters::{read_interface_counters, InterfaceCounters},
+    next_state_update_delay,
     state::{self, State, STATE_VERSION},
 };
 use anyhow::{bail, Context, Result};
@@ -12,6 +13,7 @@ use std::{
     fs::{self, OpenOptions},
     path::{Path, PathBuf},
     sync::RwLock,
+    time::Duration,
 };
 
 pub struct TrafficService {
@@ -89,6 +91,17 @@ impl TrafficService {
     pub fn ensure_state(&self) -> Result<()> {
         let config = self.config()?;
         self.update_state(&config).map(|_| ())
+    }
+
+    pub fn refresh_state(&self) -> Result<()> {
+        self.ensure_state()
+    }
+
+    pub fn next_state_update_delay(&self, sample_interval: Duration) -> Result<Duration> {
+        let config = self.config()?;
+        let now = self.now(&config);
+        let cycle = billing::current_cycle(config.cycle_anchor, config.cycle_months, now)?;
+        Ok(next_state_update_delay(cycle.end, now, sample_interval))
     }
 
     pub fn snapshot(&self) -> Result<TrafficSnapshot> {

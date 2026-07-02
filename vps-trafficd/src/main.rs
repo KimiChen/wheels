@@ -18,6 +18,8 @@ use service::TrafficService;
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tracing_subscriber::EnvFilter;
 
+const STATE_SAMPLE_INTERVAL: Duration = Duration::from_secs(3600);
+
 #[tokio::main]
 async fn main() -> Result<()> {
     init_tracing();
@@ -46,6 +48,7 @@ async fn run_server(config_path: &str) -> Result<()> {
 
     let service = Arc::new(TrafficService::new(config.clone(), config_path));
     service.ensure_state()?;
+    tokio::spawn(run_state_updater(service.clone(), STATE_SAMPLE_INTERVAL));
 
     let tls_config = tls_config_if_available(&config).await?;
     let handle = Handle::<SocketAddr>::new();
@@ -84,6 +87,38 @@ async fn run_calibrate(config_path: &str, rx: u64, tx: u64) -> Result<()> {
     service.calibrate(rx, tx)?;
     println!("calibration saved");
     Ok(())
+}
+
+async fn run_state_updater(service: Arc<TrafficService>, sample_interval: Duration) {
+    let sample_interval = sample_interval.max(Duration::from_secs(1));
+
+    loop {
+        let delay = match service.next_state_update_delay(sample_interval) {
+            Ok(delay) => delay,
+            Err(error) => {
+                tracing::warn!(%error, "failed to calculate next state update delay");
+                sample_interval
+            }
+        };
+
+        tokio::time::sleep(delay).await;
+
+        if let Err(error) = service.refresh_state() {
+            tracing::warn!(%error, "background state update failed");
+        }
+    }
+}
+
+fn next_state_update_delay(
+    cycle_end: chrono::DateTime<chrono::FixedOffset>,
+    now: chrono::DateTime<chrono::FixedOffset>,
+    sample_interval: Duration,
+) -> Duration {
+    cycle_end
+        .signed_duration_since(now)
+        .to_std()
+        .unwrap_or_default()
+        .min(sample_interval)
 }
 
 async fn tls_config_if_available(config: &Config) -> Result<Option<RustlsConfig>> {
