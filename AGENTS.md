@@ -3,7 +3,7 @@
  - 根目录的每个文件夹是一个子项目，各个子项目默认配置放置在其根目录的.env文件中
  - 会话开始前先确定子项目的英文id，并输出到会话中
  - 子项目文档放置在其根目录，文件名为README.md
- - vps 信息在 ~/work/daily/docs/vps.md 文件中
+ - 服务器信息在 ~/work/daily/docs/vps.md 文件中
 
  ## Git 约定
  
@@ -17,7 +17,8 @@
    - `新增：更新工作区路径`
  - git pull、git push 的 PrivateKey 和 Passphrase 在 .env 文件中
  - Windows PowerShell 下已验证可用的 git pull/push 方式：
-   - 从 `.env` 读取 `PrivateKey` 和 `Passphrase`，不要把值输出到终端。
+   - 如果本机 `ssh-agent` 已启用并已加载 GitHub key，先在本仓库设置本地 Git SSH 命令：`git config --local core.sshCommand "C:/Windows/System32/OpenSSH/ssh.exe -o BatchMode=yes -o StrictHostKeyChecking=accept-new"`，之后普通 `git pull` / `git push` 会走 Windows OpenSSH 和当前 agent。
+   - 如果 `ssh-agent` 不可用或未加载 key，则从 `.env` 读取 `PrivateKey` 和 `Passphrase`，不要把值输出到终端。
    - 使用临时 `SSH_ASKPASS` 脚本把 passphrase 传给 `ssh`，不要依赖本机 `ssh-agent` 服务。
    - `GIT_SSH_COMMAND` 使用 `ssh -i "$keyPath" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new`，避免写未转义的 Windows 绝对路径可执行文件名。
    - 每次执行 `git pull` / `git push` 后检查 `$LASTEXITCODE`，PowerShell 不会自动把所有外部命令失败变成终止错误。
