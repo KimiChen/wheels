@@ -1,72 +1,262 @@
-# Rust VPS 流量 JSON 服务：公网鉴权版
+# vps-trafficd
 
-## Summary
+`vps-trafficd` 是一个轻量的 VPS 流量统计服务。它运行在 Linux VPS 上，
+通过读取 `/sys/class/net/<iface>/statistics/{rx_bytes,tx_bytes}` 中的网卡字节计数器，
+按服务商的流量充值周期计算当前周期已用流量、剩余流量，并提供带 Bearer Token 鉴权的 JSON API 和内置网页。
 
-构建一个 Linux Rust 常驻服务，适配 CentOS 7+、Debian 11+、Ubuntu 20.04+。程序默认监听公网地址，所有流量数据接口必须使用 Bearer Token 鉴权；通过读取指定网卡的 Linux 字节计数器，按购买日月周期计算 VPS 本账期已用和剩余流量。
+适合这些场景：
 
-## Key Changes
+- 你的 VPS 服务商按月或多月周期重置流量额度。
+- 你想用一个很小的常驻进程查看本机剩余流量。
+- 你需要给自建面板、脚本或多 VPS 汇总工具提供统一 JSON 数据。
+- 你希望手动录入服务商面板的当前已用流量，校准本周期剩余额度。
 
-- 构建与兼容：
-  - 发布 `x86_64-unknown-linux-musl` 静态二进制，避免 CentOS 7 的旧 glibc / OpenSSL 依赖问题。
-  - 不依赖 systemd 以外的发行版特性；统计只读 `/sys/class/net/<iface>/statistics/{rx_bytes,tx_bytes}`。
-  - 提供 systemd unit，适用于 CentOS 7+、Debian 11+、Ubuntu 20.04+。
-- 默认配置：
-  - `listen_addr = "0.0.0.0:9733"`，默认允许公网访问。
-  - `auth_token` 必填；缺失、为空或仍是示例值时服务拒绝启动。
-  - `interfaces = ["eth0"]`，用户按实际网卡名修改。
-  - `node_id = "vps-trafficd-01"`，用于多 VPS 查询时区分节点；不参与鉴权。
-  - `quota_bytes`、`billing_mode = "total"`、`cycle_anchor`、`cycle_months = 1`。
-  - `state_path = "/var/lib/vps-trafficd/state.json"`。
-- 鉴权与接口：
-  - `GET /` 提供浏览器查看与配置页面，页面输入 Bearer Token 后可查看流量并更新周期/额度配置。
-  - `GET /api/v1/traffic` 必须带 `Authorization: Bearer <token>`。
-  - `GET /api/v1/config`、`PUT /api/v1/config` 必须带 `Authorization: Bearer <token>`，用于读取和更新不含 token 的流量充值周期和流量限额配置；`PUT` 可同时携带当前周期已用流量来校准状态。
-  - 鉴权失败返回 `401`，不泄露流量、网卡、账期等信息。
-  - `GET /health` 可不鉴权，只返回最小健康信息，不包含敏感数据。
-- 统计与账期：
-  - 聚合配置中指定网卡的 rx/tx。
-  - 接口同时返回 `rx_bytes`、`tx_bytes`、`used_bytes`、`remaining_bytes`。
-  - `used_bytes` 按 `billing_mode` 选择 rx、tx、total 或 rx/tx 较大值。
-  - 根据购买日锚点推算当前账期；短月份没有对应日期时使用月末同一时间。
-- 运维命令：
-  - `vps-trafficd --config /etc/vps-trafficd/config.toml`
-  - `vps-trafficd check --config ...` 检查配置、网卡、权限、token。
-  - `vps-trafficd calibrate --rx <bytes> --tx <bytes>` 手动对齐服务商面板。
+## 特性
 
-## Data Storage Plan
+- **无数据库依赖**：配置保存在 TOML 文件，运行状态保存在本机 JSON 文件。
+- **低侵入统计**：只读取 Linux sysfs 网卡计数器，不抓包，不改 iptables/nftables。
+- **周期化流量计算**：按 `cycle_anchor` 和 `cycle_months` 推算当前流量充值周期；遇到短月份会自动使用月末同一时间。
+- **多网卡聚合**：可同时统计 `eth0`、`ens3` 等多个网卡。
+- **多种计费口径**：支持 `total`、`rx`、`tx`、`max`。
+  - `total`：接收 + 发送
+  - `rx`：只算接收
+  - `tx`：只算发送
+  - `max`：取接收/发送中的较大值
+- **鉴权 API**：流量和配置接口必须携带 `Authorization: Bearer <token>`。
+- **内置网页**：浏览器打开 `/` 后输入 token，即可查看流量、更新周期/额度/计费口径，并录入本周期已用流量做校准。
+- **配置在线更新**：`PUT /api/v1/config` 会写回 `config.toml`；`current_cycle_used_bytes` 只用于校准状态，不写入配置。
+- **静态二进制友好**：推荐构建 `x86_64-unknown-linux-musl`，避免旧发行版 glibc/OpenSSL 兼容问题。
+- **systemd 部署**：提供 unit 文件，包含基础硬化选项和明确的可写路径。
 
-- 单 VPS 存储：
-  - 不引入数据库，使用本地 JSON 状态文件持久化运行状态，默认路径为 `/var/lib/vps-trafficd/state.json`。
-  - 配置仍放在 `/etc/vps-trafficd/config.toml`，包括 `interfaces`、`quota_bytes`、`billing_mode`、`cycle_anchor`、`cycle_months`、`auth_token`、`node_id`。
-  - 状态文件保存当前账期边界、每个网卡的上次 rx/tx 计数器值、账期内累计 rx/tx、手动校准偏移、更新时间和状态格式版本。
-  - 状态文件不保存 `auth_token`，避免泄露鉴权凭据。
-- 多 VPS 存储：
-  - 每台 VPS 各自运行一份 `vps-trafficd`，各自保存自己的 `/etc/vps-trafficd/config.toml` 和 `/var/lib/vps-trafficd/state.json`。
-  - 多台 VPS 可以使用相同的默认 `state_path`，因为该路径只在本机文件系统内生效，不会互相冲突。
-  - 不让多台 VPS 写同一个共享状态文件，不把 `state.json` 放到 NFS、对象存储或远程挂载目录上。
-  - 不引入中心数据库；统一查看时由外部脚本或面板分别请求每台 VPS 的 `GET /api/v1/traffic`，再按 `node_id` 聚合展示。
-  - 客户端汇总时可将各节点的 `quota_bytes`、`used_bytes`、`remaining_bytes` 相加；如果各 VPS 账期不同，应按节点分别展示账期边界。
-- 状态更新：
-  - 服务启动时如果状态文件不存在，以当前网卡计数器作为本账期基准创建初始状态。
-  - 如果当前时间进入新账期，重置账期内累计值，并以当前网卡计数器作为新账期基准。
-  - 如果当前网卡计数器小于上次记录值，视为系统重启、网卡重置或计数器回绕，不产生负增量，只更新基准值。
-  - 写状态文件使用临时文件加原子 rename，避免写入过程中崩溃导致状态文件损坏。
+## 快速开始
 
-## Test Plan
+### 构建
 
-- 在 CentOS 7、Debian 11、Ubuntu 20.04 的容器或虚拟机中验证二进制可运行、systemd unit 可启动。
-- 测试公网监听默认值为 `0.0.0.0:9733`，但 `/api/v1/traffic` 无 token 或 token 错误时返回 `401`。
-- 测试购买日账期计算：跨月、跨年、29/30/31 号、短月份。
-- 测试网卡计数器正常增长、系统重启归零、计数器变小后的累计逻辑。
-- 测试 `rx` / `tx` / `total` / `max` 四种计费口径和剩余流量不低于 0。
-- 测试 `check` 能发现缺失网卡、不可写状态目录、空 token、示例 token。
-- 测试两台模拟 VPS 使用相同默认 `state_path` 时，只写各自本机状态文件，互不影响。
-- 测试不同 `node_id` 的节点 API 返回可区分来源，外部汇总脚本能正确累加多节点用量。
+```bash
+rustup target add x86_64-unknown-linux-musl
+cargo build --release --target x86_64-unknown-linux-musl
+```
 
-## Assumptions
+二进制输出位置：
 
-- 程序本身只提供 HTTP，不内置 HTTPS；公网部署时仍建议外层加 Nginx/Caddy/TLS。
-- 默认公网监听是产品默认值，但 API 强制鉴权，避免裸露流量信息。
-- 纯网卡计数器无法补回程序停止期间的流量；需要用 `calibrate` 手动校准。
-- 多个 VPS 默认采用各自独立存储模式，不做中心端持久化；统一查看属于外部客户端或面板职责。
-- 默认提供 amd64 静态二进制；如 VPS 是 ARM，再额外发布 `aarch64-unknown-linux-musl`。
+```text
+target/x86_64-unknown-linux-musl/release/vps-trafficd
+```
+
+### 安装
+
+```bash
+sudo install -d -m 0755 /etc/vps-trafficd /var/lib/vps-trafficd
+sudo install -m 0755 target/x86_64-unknown-linux-musl/release/vps-trafficd /usr/local/bin/vps-trafficd
+sudo install -m 0600 config/config.example.toml /etc/vps-trafficd/config.toml
+sudo editor /etc/vps-trafficd/config.toml
+```
+
+启动前至少修改：
+
+- `auth_token`
+- `interfaces`
+- `quota_bytes`
+- `cycle_anchor`
+
+如果 `auth_token` 为空或仍是示例值，服务会拒绝启动。
+
+### 检查并运行
+
+```bash
+vps-trafficd check --config /etc/vps-trafficd/config.toml
+vps-trafficd --config /etc/vps-trafficd/config.toml
+```
+
+安装 systemd 服务：
+
+```bash
+sudo install -m 0644 packaging/vps-trafficd.service /etc/systemd/system/vps-trafficd.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now vps-trafficd
+sudo systemctl status vps-trafficd
+```
+
+## 配置
+
+示例配置见 [config/config.example.toml](config/config.example.toml)。
+
+```toml
+listen_addr = "0.0.0.0:9733"
+auth_token = "replace-with-a-long-random-token"
+interfaces = ["eth0"]
+node_id = "vps-trafficd-01"
+quota_bytes = 1099511627776
+billing_mode = "total"
+cycle_anchor = "2026-01-31T08:00:00+08:00"
+cycle_months = 1
+state_path = "/var/lib/vps-trafficd/state.json"
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `listen_addr` | HTTP 监听地址。默认 `0.0.0.0:9733`，适合直接监听公网或被反向代理转发。 |
+| `auth_token` | API 和网页使用的 Bearer Token。必须替换示例值。 |
+| `interfaces` | 要统计的网卡名列表，多网卡会聚合 rx/tx。 |
+| `node_id` | 节点标识，用于多 VPS 汇总时区分来源。 |
+| `quota_bytes` | 本流量周期额度，单位为字节。 |
+| `billing_mode` | 计费口径：`total`、`rx`、`tx`、`max`。 |
+| `cycle_anchor` | 流量充值周期锚点，使用 RFC 3339 时间格式并携带时区。 |
+| `cycle_months` | 流量充值周期月数，`1` 表示每月重置，`3` 表示每三个月重置。 |
+| `state_path` | 本机状态文件路径。状态文件不保存 `auth_token`。 |
+
+## 网页
+
+访问服务根路径：
+
+```text
+http://<server>:9733/
+```
+
+页面会弹框要求输入 Bearer Token。登录后可以：
+
+- 查看节点、周期、已用、剩余、RX、TX、计费口径和额度。
+- 修改流量充值开始时间、周期月数、额度和计费口径。
+- 输入服务商面板上的“本周期已使用流量”，用于校准当前不完整周期。
+
+页面中的 `Traffic quota` 和 `Current cycle used` 表单默认以 `G` 为单位回填，提交时会转换为字节。
+
+## API
+
+除 `/health` 外，接口都需要：
+
+```http
+Authorization: Bearer <token>
+```
+
+### 健康检查
+
+```bash
+curl http://127.0.0.1:9733/health
+```
+
+返回：
+
+```json
+{"status":"ok"}
+```
+
+### 查询流量
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+  http://127.0.0.1:9733/api/v1/traffic
+```
+
+返回字段示例：
+
+```json
+{
+  "node_id": "vps-trafficd-01",
+  "cycle_start": "2026-07-01T08:00:00+08:00",
+  "cycle_end": "2026-08-01T08:00:00+08:00",
+  "quota_bytes": 1099511627776,
+  "billing_mode": "total",
+  "rx_bytes": 123456789,
+  "tx_bytes": 987654321,
+  "used_bytes": 1111111110,
+  "remaining_bytes": 1098400516666,
+  "updated_at": "2026-07-02T13:00:00+08:00"
+}
+```
+
+### 读取配置
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+  http://127.0.0.1:9733/api/v1/config
+```
+
+返回字段不包含 `auth_token`。
+
+### 更新配置并校准已用流量
+
+```bash
+curl -X PUT \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  --data '{
+    "traffic_cycle_anchor": "2026-07-01T08:00:00+08:00",
+    "traffic_cycle_months": 1,
+    "quota_bytes": 1099511627776,
+    "billing_mode": "max",
+    "current_cycle_used_bytes": 536870912000
+  }' \
+  http://127.0.0.1:9733/api/v1/config
+```
+
+`current_cycle_used_bytes` 是可选字段。传入时，服务会根据当前 `billing_mode`
+更新状态文件中的校准偏移，让 API 里的 `used_bytes` 与输入值对齐。
+
+## 命令行
+
+```bash
+vps-trafficd --config /etc/vps-trafficd/config.toml
+vps-trafficd check --config /etc/vps-trafficd/config.toml
+vps-trafficd calibrate --config /etc/vps-trafficd/config.toml --rx 1234 --tx 5678
+```
+
+- 默认子命令为空时启动 HTTP 服务。
+- `check` 会检查配置、token、网卡计数器和状态目录写入权限。
+- `calibrate` 用于手动设置当前周期 rx/tx 偏移，适合与服务商面板对齐。
+
+## 状态存储
+
+`vps-trafficd` 使用本地 JSON 状态文件保存运行状态，默认路径是：
+
+```text
+/var/lib/vps-trafficd/state.json
+```
+
+状态文件包含：
+
+- 当前周期边界。
+- 每个网卡上次读取到的 rx/tx 计数器。
+- 当前周期累计 rx/tx。
+- 校准偏移。
+- 更新时间和状态格式版本。
+
+服务启动时如果状态文件不存在，会以当前网卡计数器作为本周期基准创建状态。
+如果进入新周期，会重置周期累计并以当前计数器作为新周期基准。
+如果网卡计数器变小，服务会视为系统重启、网卡重置或计数器回绕，不产生负增量。
+
+状态写入使用临时文件和原子 rename，降低崩溃时损坏状态文件的风险。
+
+## 安全说明
+
+- `auth_token` 只保存在 `config.toml`，不会写入状态文件，也不会通过配置 API 返回。
+- 公开接口只有 `/health`，且只返回最小健康信息。
+- 服务自身只提供 HTTP；公网部署时建议使用 Nginx、Caddy 或其他反向代理提供 TLS。
+- 默认 systemd unit 使用 `NoNewPrivileges=true`、`PrivateTmp=true`、`ProtectSystem=full`，
+  并只开放 `/etc/vps-trafficd` 和 `/var/lib/vps-trafficd` 写权限。
+
+## 兼容性
+
+- 目标系统：CentOS 7+、Debian 11+、Ubuntu 20.04+ 或其他提供 Linux sysfs 网卡统计的发行版。
+- 推荐架构：`x86_64-unknown-linux-musl`。
+- systemd 不是程序运行的硬依赖，但推荐用于生产部署和自动重启。
+
+## 开发
+
+```bash
+cargo fmt --all
+cargo test
+cargo run -- --help
+```
+
+本项目使用：
+
+- Rust 2021
+- Axum + Tokio 提供 HTTP 服务
+- Clap 提供 CLI
+- Serde/TOML/JSON 处理配置和状态
+- Chrono 处理时区和周期边界
+
+## License
+
+MIT
