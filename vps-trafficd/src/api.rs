@@ -334,14 +334,6 @@ const INDEX_HTML: &str = r#"<!doctype html>
       <div id="config-status" class="status">Config is locked.</div>
       <form id="config-form">
         <label>
-          Billing start
-          <input id="billing-anchor" type="datetime-local" step="1" required>
-        </label>
-        <label>
-          Billing months
-          <input id="billing-months" type="number" min="1" step="1" required>
-        </label>
-        <label>
           Traffic refill start
           <input id="traffic-anchor" type="datetime-local" step="1" required>
         </label>
@@ -354,6 +346,18 @@ const INDEX_HTML: &str = r#"<!doctype html>
           <span class="quota-row">
             <input id="quota-value" type="number" min="0.01" step="0.01" required>
             <select id="quota-unit">
+              <option value="K">K</option>
+              <option value="M">M</option>
+              <option value="G">G</option>
+              <option value="T">T</option>
+            </select>
+          </span>
+        </label>
+        <label>
+          Current cycle used
+          <span class="quota-row">
+            <input id="current-used-value" type="number" min="0" step="0.01" required>
+            <select id="current-used-unit">
               <option value="K">K</option>
               <option value="M">M</option>
               <option value="G">G</option>
@@ -375,12 +379,12 @@ const INDEX_HTML: &str = r#"<!doctype html>
     const metricsEl = document.getElementById("metrics");
     const rawEl = document.getElementById("raw");
     const configForm = document.getElementById("config-form");
-    const billingAnchorEl = document.getElementById("billing-anchor");
-    const billingMonthsEl = document.getElementById("billing-months");
     const trafficAnchorEl = document.getElementById("traffic-anchor");
     const trafficMonthsEl = document.getElementById("traffic-months");
     const quotaValueEl = document.getElementById("quota-value");
     const quotaUnitEl = document.getElementById("quota-unit");
+    const currentUsedValueEl = document.getElementById("current-used-value");
+    const currentUsedUnitEl = document.getElementById("current-used-unit");
     const unitBytes = { B: 1, K: 1024, M: 1048576, G: 1073741824, T: 1099511627776, P: 1125899906842624 };
 
     function askToken() {
@@ -428,6 +432,12 @@ const INDEX_HTML: &str = r#"<!doctype html>
       return { value: bytes, unit: "K" };
     }
 
+    function setByteInput(bytes, valueEl, unitEl) {
+      const split = splitBytes(Number(bytes || 0));
+      valueEl.value = split.value.toFixed(2);
+      unitEl.value = split.unit;
+    }
+
     function toLocalInputValue(iso) {
       const date = new Date(iso);
       const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
@@ -443,11 +453,24 @@ const INDEX_HTML: &str = r#"<!doctype html>
       return `${value}${offset}`;
     }
 
-    function quotaBytesFromForm() {
-      const value = Number(quotaValueEl.value);
-      const unit = quotaUnitEl.value;
+    function bytesFromForm(valueEl, unitEl, message) {
+      const value = Number(valueEl.value);
+      const unit = unitEl.value;
       if (!Number.isFinite(value) || value <= 0 || !unitBytes[unit]) {
-        throw new Error("Invalid quota.");
+        throw new Error(message);
+      }
+      return Math.round(value * unitBytes[unit]);
+    }
+
+    function quotaBytesFromForm() {
+      return bytesFromForm(quotaValueEl, quotaUnitEl, "Invalid quota.");
+    }
+
+    function usedBytesFromForm() {
+      const value = Number(currentUsedValueEl.value);
+      const unit = currentUsedUnitEl.value;
+      if (!Number.isFinite(value) || value < 0 || !unitBytes[unit]) {
+        throw new Error("Invalid current cycle used traffic.");
       }
       return Math.round(value * unitBytes[unit]);
     }
@@ -467,7 +490,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       const ratio = Number(data.usage_ratio || 0) * 100;
       const items = [
         ["Node", data.node_id || "-"],
-        ["Billing", `${data.cycle_start || "-"} to ${data.cycle_end || "-"}`],
+        ["Cycle", `${data.cycle_start || "-"} to ${data.cycle_end || "-"}`],
         ["Used", formatBytes(data.used_bytes)],
         ["Remaining", formatBytes(data.remaining_bytes)],
         ["RX", formatBytes(data.rx_bytes)],
@@ -477,16 +500,18 @@ const INDEX_HTML: &str = r#"<!doctype html>
       ];
       metricsEl.replaceChildren(...items.map(([label, value]) => metric(label, value)));
       rawEl.textContent = JSON.stringify(data, null, 2);
+      if (
+        document.activeElement !== currentUsedValueEl &&
+        document.activeElement !== currentUsedUnitEl
+      ) {
+        setByteInput(data.used_bytes, currentUsedValueEl, currentUsedUnitEl);
+      }
     }
 
     function renderConfig(config) {
-      billingAnchorEl.value = toLocalInputValue(config.billing_cycle_anchor);
-      billingMonthsEl.value = config.billing_cycle_months || 1;
       trafficAnchorEl.value = toLocalInputValue(config.traffic_cycle_anchor);
       trafficMonthsEl.value = config.traffic_cycle_months || 1;
-      const quota = splitBytes(Number(config.quota_bytes || 0));
-      quotaValueEl.value = quota.value.toFixed(2);
-      quotaUnitEl.value = quota.unit;
+      setByteInput(config.quota_bytes, quotaValueEl, quotaUnitEl);
       setConfigStatus(`Config loaded for ${config.node_id || "-"}.`);
     }
 
@@ -553,11 +578,10 @@ const INDEX_HTML: &str = r#"<!doctype html>
       setConfigStatus("Saving config...");
       try {
         const payload = {
-          billing_cycle_anchor: localInputToIso(billingAnchorEl.value),
-          billing_cycle_months: Number(billingMonthsEl.value),
           traffic_cycle_anchor: localInputToIso(trafficAnchorEl.value),
           traffic_cycle_months: Number(trafficMonthsEl.value),
-          quota_bytes: quotaBytesFromForm()
+          quota_bytes: quotaBytesFromForm(),
+          current_cycle_used_bytes: usedBytesFromForm()
         };
         const response = await fetchAuthed("/api/v1/config", {
           method: "PUT",

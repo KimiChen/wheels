@@ -42,8 +42,6 @@ pub struct ConfigSnapshot {
     pub node_id: String,
     pub quota_bytes: u64,
     pub billing_mode: &'static str,
-    pub billing_cycle_anchor: DateTime<FixedOffset>,
-    pub billing_cycle_months: u32,
     pub traffic_cycle_anchor: DateTime<FixedOffset>,
     pub traffic_cycle_months: u32,
     pub state_path: String,
@@ -51,11 +49,11 @@ pub struct ConfigSnapshot {
 
 #[derive(Debug, Deserialize)]
 pub struct ConfigUpdate {
-    pub billing_cycle_anchor: DateTime<FixedOffset>,
-    pub billing_cycle_months: u32,
     pub traffic_cycle_anchor: DateTime<FixedOffset>,
     pub traffic_cycle_months: u32,
     pub quota_bytes: u64,
+    #[serde(default)]
+    pub current_cycle_used_bytes: Option<u64>,
 }
 
 impl TrafficService {
@@ -135,9 +133,6 @@ impl TrafficService {
     }
 
     pub fn update_config(&self, update: ConfigUpdate) -> Result<ConfigSnapshot> {
-        if update.billing_cycle_months == 0 {
-            bail!("billing_cycle_months must be greater than zero");
-        }
         if update.traffic_cycle_months == 0 {
             bail!("traffic_cycle_months must be greater than zero");
         }
@@ -146,11 +141,10 @@ impl TrafficService {
         }
 
         let mut next = self.config()?;
-        next.billing_cycle_anchor = Some(update.billing_cycle_anchor);
-        next.billing_cycle_months = Some(update.billing_cycle_months);
         next.cycle_anchor = update.traffic_cycle_anchor;
         next.cycle_months = update.traffic_cycle_months;
         next.quota_bytes = update.quota_bytes;
+        let current_cycle_used_bytes = update.current_cycle_used_bytes;
         next.validate()?;
         self.read_interfaces(&next)?;
         self.check_state_path(&next)?;
@@ -163,7 +157,12 @@ impl TrafficService {
                 .map_err(|_| anyhow::anyhow!("config lock poisoned"))?;
             *guard = next.clone();
         }
-        self.update_state(&next)?;
+        let mut state = self.update_state(&next)?;
+        if let Some(target_used) = current_cycle_used_bytes {
+            apply_used_calibration(&next, &mut state, target_used);
+            state.updated_at = self.now(&next);
+            state::save(&next.state_path, &state)?;
+        }
         Ok(config_snapshot(&next))
     }
 
@@ -267,6 +266,30 @@ fn billing_mode_name(mode: BillingMode) -> &'static str {
     mode.as_str()
 }
 
+fn apply_used_calibration(config: &Config, state: &mut State, target_used: u64) {
+    let current_rx = apply_offset(state.cycle_rx_bytes, state.calibration_rx_offset);
+    let current_tx = apply_offset(state.cycle_tx_bytes, state.calibration_tx_offset);
+    let (target_rx, target_tx) = match config.billing_mode {
+        BillingMode::Rx => (target_used, current_tx),
+        BillingMode::Tx => (current_rx, target_used),
+        BillingMode::Total => split_total_target(target_used, current_rx, current_tx),
+    };
+
+    state.calibration_rx_offset = i128::from(target_rx) - i128::from(state.cycle_rx_bytes);
+    state.calibration_tx_offset = i128::from(target_tx) - i128::from(state.cycle_tx_bytes);
+}
+
+fn split_total_target(target_used: u64, current_rx: u64, current_tx: u64) -> (u64, u64) {
+    let current_total = u128::from(current_rx) + u128::from(current_tx);
+    if current_total == 0 {
+        return (target_used, 0);
+    }
+
+    let target_rx = (u128::from(target_used) * u128::from(current_rx) / current_total)
+        .min(u128::from(u64::MAX)) as u64;
+    (target_rx, target_used.saturating_sub(target_rx))
+}
+
 fn config_snapshot(config: &Config) -> ConfigSnapshot {
     ConfigSnapshot {
         listen_addr: config.listen_addr.to_string(),
@@ -274,8 +297,6 @@ fn config_snapshot(config: &Config) -> ConfigSnapshot {
         node_id: config.node_id.clone(),
         quota_bytes: config.quota_bytes,
         billing_mode: billing_mode_name(config.billing_mode),
-        billing_cycle_anchor: config.billing_cycle_anchor.unwrap_or(config.cycle_anchor),
-        billing_cycle_months: config.billing_cycle_months.unwrap_or(config.cycle_months),
         traffic_cycle_anchor: config.cycle_anchor,
         traffic_cycle_months: config.cycle_months,
         state_path: config.state_path.display().to_string(),

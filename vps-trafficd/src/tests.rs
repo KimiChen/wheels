@@ -25,8 +25,6 @@ fn base_config(temp: &TempDir) -> Config {
         node_id: "node-a".to_string(),
         quota_bytes: 1_000,
         billing_mode: BillingMode::Total,
-        billing_cycle_anchor: Some(dt("2026-01-01T08:00:00+08:00")),
-        billing_cycle_months: Some(1),
         cycle_anchor: dt("2026-01-31T08:00:00+08:00"),
         cycle_months: 1,
         state_path: temp.path().join("state.json"),
@@ -41,7 +39,7 @@ fn write_iface(root: &Path, iface: &str, rx: u64, tx: u64) {
 }
 
 #[test]
-fn billing_cycle_uses_month_end_when_anchor_day_is_missing() {
+fn traffic_cycle_uses_month_end_when_anchor_day_is_missing() {
     let anchor = dt("2026-01-31T08:00:00+08:00");
     let cycle = current_cycle(anchor, 1, dt("2026-02-28T09:00:00+08:00")).unwrap();
 
@@ -112,13 +110,16 @@ async fn index_page_prompts_for_token() {
     assert!(body.contains("window.prompt"));
     assert!(body.contains("/api/v1/traffic"));
     assert!(body.contains("/api/v1/config"));
-    assert!(body.contains("billing_cycle_anchor"));
+    assert!(!body.contains("Billing start"));
+    assert!(!body.contains("billing_cycle_anchor"));
+    assert!(body.contains("Current cycle used"));
+    assert!(body.contains("current_cycle_used_bytes"));
     assert!(body.contains("const units = [\"B\", \"K\", \"M\", \"G\", \"T\", \"P\"]"));
     assert!(body.contains("size.toFixed(2)"));
 }
 
 #[tokio::test]
-async fn config_endpoint_updates_config_file_and_runtime_quota() {
+async fn config_endpoint_updates_config_file_runtime_quota_and_used_traffic() {
     let temp = TempDir::new().unwrap();
     let sysfs = temp.path().join("sys");
     let config_path = temp.path().join("config.toml");
@@ -133,11 +134,10 @@ async fn config_endpoint_updates_config_file_and_runtime_quota() {
     let app = api::router(service);
 
     let payload = r#"{
-        "billing_cycle_anchor":"2026-01-01T08:00:00+08:00",
-        "billing_cycle_months":12,
         "traffic_cycle_anchor":"2026-02-01T08:00:00+08:00",
         "traffic_cycle_months":1,
-        "quota_bytes":2048
+        "quota_bytes":2048,
+        "current_cycle_used_bytes":512
     }"#;
     let response = app
         .clone()
@@ -155,8 +155,8 @@ async fn config_endpoint_updates_config_file_and_runtime_quota() {
     assert_eq!(response.status(), StatusCode::OK);
 
     let saved = fs::read_to_string(&config_path).unwrap();
-    assert!(saved.contains("账单周期锚点"));
-    assert!(saved.contains("billing_cycle_months = 12"));
+    assert!(!saved.contains("billing_cycle"));
+    assert!(saved.contains("流量充值周期锚点"));
     assert!(saved.contains("quota_bytes = 2048"));
 
     let response = app
@@ -173,6 +173,8 @@ async fn config_endpoint_updates_config_file_and_runtime_quota() {
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(body["quota_bytes"], 2048);
+    assert_eq!(body["used_bytes"], 512);
+    assert_eq!(body["remaining_bytes"], 1536);
 }
 
 #[tokio::test]

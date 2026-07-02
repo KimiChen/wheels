@@ -28,10 +28,6 @@ pub struct Config {
     pub quota_bytes: u64,
     #[serde(default)]
     pub billing_mode: BillingMode,
-    #[serde(default)]
-    pub billing_cycle_anchor: Option<DateTime<FixedOffset>>,
-    #[serde(default)]
-    pub billing_cycle_months: Option<u32>,
     pub cycle_anchor: DateTime<FixedOffset>,
     #[serde(default = "default_cycle_months")]
     pub cycle_months: u32,
@@ -87,9 +83,6 @@ impl Config {
         if self.quota_bytes == 0 {
             bail!("quota_bytes must be greater than zero");
         }
-        if matches!(self.billing_cycle_months, Some(0)) {
-            bail!("billing_cycle_months must be greater than zero");
-        }
         if self.cycle_months == 0 {
             bail!("cycle_months must be greater than zero");
         }
@@ -122,8 +115,6 @@ impl Config {
     }
 
     pub fn to_commented_toml(&self) -> String {
-        let billing_anchor = self.billing_cycle_anchor.unwrap_or(self.cycle_anchor);
-        let billing_months = self.billing_cycle_months.unwrap_or(self.cycle_months);
         format!(
             r#"# 服务监听地址。0.0.0.0 表示监听所有公网/内网地址，9733 是默认端口。
 listen_addr = {listen_addr}
@@ -143,12 +134,6 @@ quota_bytes = {quota_bytes}
 # 计费口径，可选 total/rx/tx：total 表示下载+上传，rx 表示只算接收，tx 表示只算发送。
 billing_mode = {billing_mode}
 
-# 账单周期锚点，即购买/续费开始时间。仅用于记录账单周期，不参与流量累计。
-billing_cycle_anchor = {billing_cycle_anchor}
-
-# 账单周期月数。1 表示每月账单，3 表示每三个月账单。
-billing_cycle_months = {billing_cycle_months}
-
 # 流量充值周期锚点，即服务商重置流量的开始时间。流量用量按这个周期计算。
 cycle_anchor = {cycle_anchor}
 
@@ -164,8 +149,6 @@ state_path = {state_path}
             node_id = toml_string(&self.node_id),
             quota_bytes = self.quota_bytes,
             billing_mode = toml_string(self.billing_mode.as_str()),
-            billing_cycle_anchor = toml_string(&billing_anchor.to_rfc3339()),
-            billing_cycle_months = billing_months,
             cycle_anchor = toml_string(&self.cycle_anchor.to_rfc3339()),
             cycle_months = self.cycle_months,
             state_path = toml_string(&self.state_path.display().to_string()),
