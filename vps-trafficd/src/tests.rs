@@ -2,7 +2,7 @@ use crate::{
     api,
     billing::current_cycle,
     config::{BillingMode, Config},
-    service::TrafficService,
+    service::{format_traffic_bytes, TrafficService},
 };
 use axum::{
     body::{to_bytes, Body},
@@ -64,7 +64,9 @@ fn service_accumulates_growth_and_ignores_counter_reset() {
     assert_eq!(grown.rx_bytes, 80);
     assert_eq!(grown.tx_bytes, 60);
     assert_eq!(grown.used_bytes, 140);
+    assert_eq!(grown.used_display, "140.00 B");
     assert_eq!(grown.remaining_bytes, 860);
+    assert_eq!(grown.remaining_display, "860.00 B");
 
     write_iface(&sysfs, "eth0", 10, 20);
     let reset = service.snapshot().unwrap();
@@ -75,6 +77,15 @@ fn service_accumulates_growth_and_ignores_counter_reset() {
     let after_reset = service.snapshot().unwrap();
     assert_eq!(after_reset.rx_bytes, 95);
     assert_eq!(after_reset.tx_bytes, 85);
+}
+
+#[test]
+fn traffic_display_uses_compact_units_with_two_decimals() {
+    assert_eq!(format_traffic_bytes(999), "999.00 B");
+    assert_eq!(format_traffic_bytes(1536), "1.50 K");
+    assert_eq!(format_traffic_bytes(1_048_576), "1.00 M");
+    assert_eq!(format_traffic_bytes(1_610_612_736), "1.50 G");
+    assert_eq!(format_traffic_bytes(1_099_511_627_776), "1.00 T");
 }
 
 #[tokio::test]
