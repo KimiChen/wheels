@@ -115,6 +115,8 @@ backend/data/
 # ===================
 backend/config.yaml
 deploy/config.yaml
+ip-certd/config/config.toml
+ip-certd/config/iplist.toml
 backend/.installed
 docs/big/remnawave-nodes/*.secret
 docs/fpvps/key/
