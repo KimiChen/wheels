@@ -25,6 +25,7 @@
 - **鉴权 API**：流量和配置接口必须携带 `Authorization: Bearer <token>`。
 - **内置网页**：浏览器打开 `/` 后输入 token，即可查看流量、更新周期/额度/计费口径，并录入本周期已用流量做校准。
 - **配置在线更新**：`PUT /api/v1/config` 会写回 `config.toml`；`current_cycle_used_bytes` 只用于校准状态，不写入配置。
+- **原始方向流量独立展示**：API 返回的 `rx_bytes` / `tx_bytes` 始终是网卡原始周期增量；校准只影响 `used_bytes` 和 `remaining_bytes`。
 - **静态二进制友好**：推荐构建 `x86_64-unknown-linux-musl`，避免旧发行版 glibc/OpenSSL 兼容问题。
 - **systemd 部署**：提供 unit 文件，包含基础硬化选项和明确的可写路径。
 
@@ -165,6 +166,9 @@ curl -H "Authorization: Bearer $TOKEN" \
 }
 ```
 
+`rx_bytes` 和 `tx_bytes` 表示本机网卡在当前周期内的原始方向累计值。
+`used_bytes` 表示按 `billing_mode` 和校准偏移计算后的账单口径用量，因此手动校准后它不一定等于原始 `rx_bytes` / `tx_bytes` 的简单组合。
+
 ### 读取配置
 
 ```bash
@@ -191,7 +195,8 @@ curl -X PUT \
 ```
 
 `current_cycle_used_bytes` 是可选字段。传入时，服务会根据当前 `billing_mode`
-更新状态文件中的校准偏移，让 API 里的 `used_bytes` 与输入值对齐。
+更新状态文件中的校准偏移，让 API 里的 `used_bytes` 与输入值对齐；`rx_bytes` / `tx_bytes`
+仍然返回网卡原始周期增量。
 
 ## 命令行
 
@@ -203,7 +208,7 @@ vps-trafficd calibrate --config /etc/vps-trafficd/config.toml --rx 1234 --tx 567
 
 - 默认子命令为空时启动 HTTP 服务。
 - `check` 会检查配置、token、网卡计数器和状态目录写入权限。
-- `calibrate` 用于手动设置当前周期 rx/tx 偏移，适合与服务商面板对齐。
+- `calibrate` 用于手动设置当前周期 rx/tx 校准偏移，影响账单口径的 `used_bytes`，不改变 API 返回的原始 `rx_bytes` / `tx_bytes`。
 
 ## 状态存储
 

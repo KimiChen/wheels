@@ -61,3 +61,4 @@ curl http://127.0.0.1:9733/health
 浏览器打开 `/` 会弹框输入 Bearer token，页面可查看流量，并保存流量充值周期和流量限额到
 `/etc/vps-trafficd/config.toml`；计费口径可选 total、rx、tx、max，其中 max 取接收/发送较大值。
 “Traffic quota”和“Current cycle used” 会以 G 作为表单回填单位；“Current cycle used” 会更新状态文件中的校准偏移，用来计算当前周期剩余流量。
+API 返回的 `rx_bytes` / `tx_bytes` 始终是网卡原始周期增量，校准只影响账单口径的 `used_bytes` 和 `remaining_bytes`。
