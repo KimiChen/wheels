@@ -1,0 +1,27 @@
+domain = "ip.example.com"
+ttl = 60
+
+[server]
+listen = "127.0.0.1:9735"
+public_base_url = "https://api.ip.example.com"
+storage = "/var/lib/ip-certd"
+real_ip_header = "x-real-ip"
+trusted_proxies = ["127.0.0.1", "::1"]
+
+[cloudflare]
+zone_id = "your-cloudflare-zone-id"
+api_token_env = "CLOUDFLARE_API_TOKEN"
+
+[acme]
+enabled = true
+email = "admin@ip.example.com"
+directory = "https://acme-v02.api.letsencrypt.org/directory"
+staging_directory = "https://acme-staging-v02.api.letsencrypt.org/directory"
+use_staging = false
+storage = "/var/lib/ip-certd/certs"
+renew_before_days = 30
+dns_propagation_timeout_seconds = 120
+
+[security]
+allow_private_ip = false
+rate_limit_per_ip_per_minute = 6
