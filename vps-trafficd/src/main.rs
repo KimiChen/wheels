@@ -39,7 +39,7 @@ async fn run_server(config_path: &str) -> Result<()> {
     let config = Config::load(config_path)?;
     config.validate()?;
 
-    let service = Arc::new(TrafficService::new(config.clone()));
+    let service = Arc::new(TrafficService::new(config.clone(), config_path));
     service.ensure_state()?;
 
     let listener = TcpListener::bind(&config.listen_addr)
@@ -56,7 +56,7 @@ async fn run_server(config_path: &str) -> Result<()> {
 async fn run_check(config_path: &str) -> Result<()> {
     let config = Config::load(config_path)?;
     config.validate()?;
-    TrafficService::new(config).check()?;
+    TrafficService::new(config, config_path).check()?;
     println!("configuration ok");
     Ok(())
 }
@@ -64,7 +64,7 @@ async fn run_check(config_path: &str) -> Result<()> {
 async fn run_calibrate(config_path: &str, rx: u64, tx: u64) -> Result<()> {
     let config = Config::load(config_path)?;
     config.validate()?;
-    let service = TrafficService::new(config);
+    let service = TrafficService::new(config, config_path);
     service.calibrate(rx, tx)?;
     println!("calibration saved");
     Ok(())

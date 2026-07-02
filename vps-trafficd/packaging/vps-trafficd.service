@@ -14,7 +14,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=true
-ReadWritePaths=/var/lib/vps-trafficd
+ReadWritePaths=/etc/vps-trafficd /var/lib/vps-trafficd
 
 [Install]
 WantedBy=multi-user.target
