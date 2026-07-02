@@ -31,7 +31,6 @@ pub struct TrafficSnapshot {
     pub tx_bytes: u64,
     pub used_bytes: u64,
     pub remaining_bytes: u64,
-    pub usage_ratio: f64,
     pub updated_at: DateTime<FixedOffset>,
 }
 
@@ -104,7 +103,6 @@ impl TrafficService {
             BillingMode::Max => rx_bytes.max(tx_bytes),
         };
         let remaining_bytes = config.quota_bytes.saturating_sub(used_bytes);
-        let usage_ratio = used_bytes as f64 / config.quota_bytes as f64;
 
         Ok(TrafficSnapshot {
             node_id: config.node_id.clone(),
@@ -116,7 +114,6 @@ impl TrafficService {
             tx_bytes,
             used_bytes,
             remaining_bytes,
-            usage_ratio,
             updated_at: state.updated_at,
         })
     }

@@ -501,7 +501,6 @@ const INDEX_HTML: &str = r#"<!doctype html>
     }
 
     function render(data) {
-      const ratio = Number(data.usage_ratio || 0) * 100;
       const items = [
         ["Node", data.node_id || "-"],
         ["Cycle", `${data.cycle_start || "-"} to ${data.cycle_end || "-"}`],
@@ -510,8 +509,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
         ["RX", formatBytes(data.rx_bytes)],
         ["TX", formatBytes(data.tx_bytes)],
         ["Billing", data.billing_mode || "-"],
-        ["Quota", formatBytes(data.quota_bytes)],
-        ["Usage", `${ratio.toFixed(4)}%`]
+        ["Quota", formatBytes(data.quota_bytes)]
       ];
       metricsEl.replaceChildren(...items.map(([label, value]) => metric(label, value)));
       rawEl.textContent = JSON.stringify(data, null, 2);

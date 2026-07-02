@@ -142,6 +142,8 @@ async fn index_page_prompts_for_token() {
     assert!(body.contains("current_cycle_used_bytes"));
     assert!(body.contains("const units = [\"B\", \"K\", \"M\", \"G\", \"T\", \"P\"]"));
     assert!(body.contains("size.toFixed(2)"));
+    assert!(!body.contains("data.usage_ratio"));
+    assert!(!body.contains("[\"Usage\""));
     assert!(body.contains("setByteInput(config.quota_bytes, quotaValueEl, quotaUnitEl, \"G\")"));
     assert!(body
         .contains("setByteInput(data.used_bytes, currentUsedValueEl, currentUsedUnitEl, \"G\")"));
@@ -208,6 +210,7 @@ async fn config_endpoint_updates_config_file_runtime_quota_and_used_traffic() {
     assert_eq!(body["billing_mode"], "max");
     assert_eq!(body["used_bytes"], 512);
     assert_eq!(body["remaining_bytes"], 1536);
+    assert!(body.get("usage_ratio").is_none());
 }
 
 #[tokio::test]

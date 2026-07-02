@@ -25,7 +25,7 @@
   - `GET /health` 可不鉴权，只返回最小健康信息，不包含敏感数据。
 - 统计与账期：
   - 聚合配置中指定网卡的 rx/tx。
-  - 接口同时返回 `rx_bytes`、`tx_bytes`、`used_bytes`、`remaining_bytes`、`usage_ratio`。
+  - 接口同时返回 `rx_bytes`、`tx_bytes`、`used_bytes`、`remaining_bytes`。
   - `used_bytes` 按 `billing_mode` 选择 rx、tx、total 或 rx/tx 较大值。
   - 根据购买日锚点推算当前账期；短月份没有对应日期时使用月末同一时间。
 - 运维命令：
