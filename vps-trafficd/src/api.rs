@@ -310,11 +310,11 @@ const INDEX_HTML: &str = r#"<!doctype html>
       const items = [
         ["Node", data.node_id || "-"],
         ["Billing", `${data.cycle_start || "-"} to ${data.cycle_end || "-"}`],
-        ["Used", data.used_display || formatBytes(data.used_bytes)],
-        ["Remaining", data.remaining_display || formatBytes(data.remaining_bytes)],
-        ["RX", data.rx_display || formatBytes(data.rx_bytes)],
-        ["TX", data.tx_display || formatBytes(data.tx_bytes)],
-        ["Quota", data.quota_display || formatBytes(data.quota_bytes)],
+        ["Used", formatBytes(data.used_bytes)],
+        ["Remaining", formatBytes(data.remaining_bytes)],
+        ["RX", formatBytes(data.rx_bytes)],
+        ["TX", formatBytes(data.tx_bytes)],
+        ["Quota", formatBytes(data.quota_bytes)],
         ["Usage", `${ratio.toFixed(4)}%`]
       ];
       metricsEl.replaceChildren(...items.map(([label, value]) => metric(label, value)));

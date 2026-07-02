@@ -25,16 +25,11 @@ pub struct TrafficSnapshot {
     pub cycle_start: DateTime<FixedOffset>,
     pub cycle_end: DateTime<FixedOffset>,
     pub quota_bytes: u64,
-    pub quota_display: String,
     pub billing_mode: &'static str,
     pub rx_bytes: u64,
-    pub rx_display: String,
     pub tx_bytes: u64,
-    pub tx_display: String,
     pub used_bytes: u64,
-    pub used_display: String,
     pub remaining_bytes: u64,
-    pub remaining_display: String,
     pub usage_ratio: f64,
     pub updated_at: DateTime<FixedOffset>,
 }
@@ -84,16 +79,11 @@ impl TrafficService {
             cycle_start: state.cycle_start,
             cycle_end: state.cycle_end,
             quota_bytes: self.config.quota_bytes,
-            quota_display: format_traffic_bytes(self.config.quota_bytes),
             billing_mode: billing_mode_name(self.config.billing_mode),
             rx_bytes,
-            rx_display: format_traffic_bytes(rx_bytes),
             tx_bytes,
-            tx_display: format_traffic_bytes(tx_bytes),
             used_bytes,
-            used_display: format_traffic_bytes(used_bytes),
             remaining_bytes,
-            remaining_display: format_traffic_bytes(remaining_bytes),
             usage_ratio,
             updated_at: state.updated_at,
         })
@@ -207,17 +197,4 @@ fn billing_mode_name(mode: BillingMode) -> &'static str {
         BillingMode::Tx => "tx",
         BillingMode::Total => "total",
     }
-}
-
-pub(crate) fn format_traffic_bytes(bytes: u64) -> String {
-    const UNITS: [&str; 6] = ["B", "K", "M", "G", "T", "P"];
-
-    let mut value = bytes as f64;
-    let mut unit = 0_usize;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
-        value /= 1024.0;
-        unit += 1;
-    }
-
-    format!("{value:.2} {}", UNITS[unit])
 }
