@@ -1,189 +1,133 @@
-# ip-certd 白名单 DNS 与 SSL 证书管理方案
+# ip-certd
 
-## 1. 目标
+白名单驱动的 IP Hostname DNS 与 ACME DNS-01 证书分发服务。
 
-`ip-certd` 是一个受控的 IP 域名解析、Let's Encrypt 证书申请与证书打包下载服务。`example.com` 是部署时使用的示例域名，项目中必须作为配置项存在，不能写死。
+`ip-certd` 用来给一组受控 VPS 自动生成 `https://{ip}.{domain}` 形式的可访问域名，并按需签发、续期和分发 Let's Encrypt 证书。客户端不需要常驻 agent，也不需要 token；它只需要从自己的公网 IP 向统一 API 入口发起请求，服务端会校验来源 IP、更新 Cloudflare DNS、完成 ACME DNS-01 验证，并返回可直接安装到 Nginx 的证书包。
 
-示例目标：
+典型结果：
 
 ```text
+52.0.56.137.example.com -> 52.0.56.137
 https://52.0.56.137.example.com
 ```
 
-应满足：
+## 目录
 
-- `52.0.56.137.example.com` 解析到 `52.0.56.137`。
-- 只有写入 `iplist.toml` 白名单的 IP 才能发起证书请求。
-- API 必须校验客户端真实来源 IP，来源 IP 必须等于请求的 IP。
-- hostname 由程序根据 `{ip}.{domain}` 统一生成，例如 `52.0.56.137.example.com`。
-- 客户端使用 `curl POST` 请求证书包，不使用 agent。
-- 不设计 host token、pull token、enrollment，也不提供 token rotation/revoke。
-- DNS 托管只支持 Cloudflare，不考虑其他 DNS Provider。
-- DNS 记录策略只做 upsert，不自动删除 Cloudflare 上已有但不在白名单内的记录。
-- 主服务器负责按请求 upsert DNS A 记录、执行 ACME DNS-01、保存证书、返回证书 `tar.gz` 包。
-- 主服务器 API 自身只监听本地或内网 HTTP 端口，公网 HTTPS 由 Nginx 反代提供。
+- [核心特性](#核心特性)
+- [适用场景](#适用场景)
+- [工作原理](#工作原理)
+- [快速开始](#快速开始)
+- [配置说明](#配置说明)
+- [API](#api)
+- [客户端脚本](#客户端脚本)
+- [部署建议](#部署建议)
+- [安全模型](#安全模型)
+- [开发与测试](#开发与测试)
+- [项目边界](#项目边界)
+- [许可证](#许可证)
 
-## 2. 总体架构
+## 核心特性
+
+- **IP 白名单控制**：只有写入 `iplist.toml` 的公网 IPv4 才能申请证书。
+- **来源 IP 校验**：请求路径中的 IP 必须等于客户端真实来源 IP，默认不依赖共享 token。
+- **统一 Hostname 规则**：按 `{ip}.{domain}` 生成域名，例如 `52.0.56.137.example.com`。
+- **Cloudflare DNS 自动化**：请求证书时自动 upsert A 记录，并为 ACME DNS-01 创建和清理 TXT 记录。
+- **真实 ACME 签发**：基于 Let's Encrypt ACME v2 和 DNS-01 challenge 签发域名证书。
+- **请求驱动续期**：本地证书不存在或接近过期时自动签发/续期，默认提前 30 天。
+- **证书包下载**：返回包含 `fullchain.pem`、`privkey.pem`、`cert.pem`、`chain.pem`、`metadata.json` 的 `tar.gz`。
+- **公网 API 前缀**：推荐通过 `https://<domain>/api` 暴露 API，后端默认监听 `127.0.0.1:9735`。
+- **Nginx/宝塔友好**：客户端脚本默认安装到 `/etc/nginx/ssl/{ip}.{domain}/`，并优先兼容宝塔 Nginx 路径。
+- **内置基础防护**：支持受信反代真实 IP 解析、每 IP 限流、每 IP 证书操作锁、证书文件权限收紧。
+
+## 适用场景
+
+`ip-certd` 适合这些场景：
+
+- 你维护一批拥有独立公网 IPv4 的 VPS。
+- 你希望每台 VPS 都获得一个稳定的 HTTPS 域名。
+- 你不想在客户端部署长期运行的 agent。
+- 你可以把 DNS 托管在 Cloudflare，并授予受限的 DNS 编辑权限。
+- 你接受“客户端主动请求时签发/续期”的模型。
+
+不建议在这些场景使用：
+
+- 多个不可信客户端共享同一个出口 IP。
+- 需要支持 Cloudflare 之外的 DNS Provider。
+- 需要服务端主动 SSH 登录客户端机器安装证书。
+- 需要签发裸 IP 证书，而不是域名证书。
+
+## 工作原理
 
 ```text
-/etc/ip-certd/config.toml
-/etc/ip-certd/iplist.toml
-        |
-        v
-ip-certd 进程
-        |
-        +-- Cloudflare DNS API
-        |     +-- upsert A 记录
-        |     +-- upsert/delete ACME TXT 记录
-        |
-        +-- Let's Encrypt ACME
-        |     +-- DNS-01 challenge
-        |
-        +-- 本地证书存储
-        |     +-- /var/lib/ip-certd/certs/{ip}/
-        |     +-- metadata.json
-        |
-        +-- HTTP API
-              +-- certificate bundle request
-
-Nginx HTTPS 反代
-        |
-        v
 客户端 VPS
-        |
-        +-- curl POST /api/v1/certificates/{ip}/bundle
-              +-- ip-certd 校验来源 IP 和白名单
-              +-- 生成 hostname 并 upsert 当前 IP 的 A 记录
-              +-- 没有证书则签发
-              +-- 快过期则续期
-              +-- 返回 fullchain.pem / privkey.pem 等 tar.gz 包
+  |
+  | POST https://example.com/api/v1/certificates/52.0.56.137/bundle
+  v
+Nginx / 宝塔反代
+  |
+  | X-Real-IP: 52.0.56.137
+  v
+ip-certd 127.0.0.1:9735
+  |
+  +-- 校验 52.0.56.137 是否在 iplist.toml
+  +-- 校验来源 IP 是否等于请求 IP
+  +-- 生成 52.0.56.137.example.com
+  +-- Cloudflare upsert A 记录
+  +-- Let's Encrypt DNS-01 签发或续期
+  +-- 本地保存证书与 metadata
+  +-- 返回 tar.gz 证书包
 ```
 
-## 3. 安全模型
-
-本方案不使用 token，安全边界是：
+DNS 记录示例：
 
 ```text
-IP 在 iplist.toml 白名单中
-        +
-客户端真实来源 IP 等于请求的 IP
+A   52.0.56.137.example.com                  -> 52.0.56.137
+TXT _acme-challenge.52.0.56.137.example.com  -> <acme-token>
 ```
 
-请求必须同时满足：
+证书匹配的是域名 `52.0.56.137.example.com`，不是裸 IP `52.0.56.137`。
 
-- 请求 IP 存在于 `iplist.toml`。
-- 客户端真实来源 IP 等于请求 IP。
-- 配置中的 IP 是合法公网 IP，除非明确设置允许内网 IP。
+## 快速开始
 
-由于服务端会返回 `privkey.pem`，必须遵守：
+### 1. 构建
 
-- `ip-certd` 默认只监听 `127.0.0.1` 或内网地址，不能直接暴露到公网。
-- 公网 HTTPS 入口必须由 Nginx 反代提供。
-- `ip-certd` 只能信任来自受信反代的 `X-Real-IP` 或 `X-Forwarded-For`。
-- 如果 API 域名经过 Cloudflare Proxy、CDN 或其他代理，Nginx 必须先正确还原真实客户端 IP，否则会导致来源 IP 校验失效。
-- 本模型适合客户端 VPS 独占公网 IP 的场景；如果多个不可信客户端共享同一个出口 IP，则不应使用无 token 模式。
-- 日志不得输出证书私钥、Cloudflare API Token、ACME account key。
-- 证书文件、metadata 文件、ACME account key 必须限制文件权限。
-- API 建议做基础限流，尤其是证书签发/下载接口。
+```bash
+cargo build --release
+```
 
-## 4. DNS 策略
-
-`ip-certd` 根据客户端请求 IP 生成 hostname，并创建或更新真实 DNS 记录，而不是运行动态 DNS 服务。
-
-普通 A 记录：
+生成的二进制位于：
 
 ```text
-A 52.0.56.137.example.com -> 52.0.56.137
+target/release/ip-certd
 ```
 
-ACME DNS-01 TXT 记录：
+### 2. 准备配置目录
 
-```text
-TXT _acme-challenge.52.0.56.137.example.com -> <letsencrypt-token>
+```bash
+sudo mkdir -p /etc/ip-certd /var/lib/ip-certd/certs
+sudo cp config/config.example.toml /etc/ip-certd/config.toml
+sudo cp config/iplist.example.toml /etc/ip-certd/iplist.toml
 ```
 
-CAA 记录建议：
+### 3. 配置 Cloudflare Token
 
-```text
-CAA example.com 0 issue "letsencrypt.org"
-```
-
-策略要求：
-
-- 只支持 Cloudflare。
-- A 记录必须使用 DNS only。
-- 请求证书包时，先根据请求 IP 生成 hostname，再 upsert 当前 IP 的 A 记录。
-- 不提供全量同步命令。
-- 不自动删除 Cloudflare 上不在白名单中的旧记录。
-
-Cloudflare A 记录示例：
-
-```json
-{
-  "type": "A",
-  "name": "52.0.56.137.example.com",
-  "content": "52.0.56.137",
-  "ttl": 60,
-  "proxied": false
-}
-```
-
-Cloudflare API 权限建议限制为：
+Cloudflare API Token 建议只授予目标 Zone 的最小权限：
 
 - Zone:Read
 - DNS:Edit
-- 仅限 `example.com` 所在 zone
 
-## 5. Let's Encrypt 证书策略
+写入环境变量文件：
 
-本方案申请的是域名证书：
-
-```text
-DNS:52.0.56.137.example.com
+```bash
+sudo tee /etc/ip-certd/ip-certd.env >/dev/null <<'EOF'
+CLOUDFLARE_API_TOKEN=replace-with-cloudflare-dns-edit-token
+EOF
+sudo chmod 600 /etc/ip-certd/ip-certd.env
 ```
 
-不是裸 IP 证书：
+### 4. 修改主配置
 
-```text
-IP Address:52.0.56.137
-```
-
-因此浏览器访问：
-
-```text
-https://52.0.56.137.example.com
-```
-
-证书匹配的是 `52.0.56.137.example.com` 这个域名。
-
-推荐使用 DNS-01 challenge：
-
-- 不要求 `52.0.56.137:80` 对外开放。
-- 不要求客户端 VPS 参与 ACME challenge。
-- `ip-certd` 通过 Cloudflare API 自动创建和删除 `_acme-challenge` TXT 记录。
-
-注意：
-
-- `52.0.56.137.example.com` 是多级子域名。
-- `*.example.com` 通配符证书不能覆盖它。
-- 因此建议每个白名单 IP 单独签发一张证书。
-
-## 6. 配置文件
-
-配置拆分为两个文件：
-
-- `config.toml`：服务、Cloudflare、ACME、证书存储、安全策略。
-- `iplist.toml`：允许请求证书的 IP 白名单。
-
-### 6.1 config.toml
-
-示例路径：
-
-```text
-/etc/ip-certd/config.toml
-```
-
-示例配置：
+推荐公网入口使用 `https://example.com/api`，后端服务继续只监听本机默认端口 `9735`：
 
 ```toml
 domain = "example.com"
@@ -215,47 +159,83 @@ allow_private_ip = false
 rate_limit_per_ip_per_minute = 6
 ```
 
-### 6.2 iplist.toml
-
-示例路径：
-
-```text
-/etc/ip-certd/iplist.toml
-```
-
-示例配置：
+### 5. 添加 IP 白名单
 
 ```toml
 ips = [
   "52.0.56.137",
-  "1.2.3.4",
 ]
 ```
 
-`iplist.toml` 只保存允许使用服务的 IP。程序会按 `{ip}.{domain}` 自动生成 hostname。例如 `ip = "52.0.56.137"` 且 `domain = "example.com"` 时，生成的 hostname 是 `52.0.56.137.example.com`。
+`iplist.toml` 更新后需要重启 `ip-certd` 生效。
 
-`iplist.toml` 变更后通过重启 `ip-certd` 生效。
+### 6. 检查配置并启动
 
-## 7. API 设计
+```bash
+ip-certd --config /etc/ip-certd/config.toml --iplist /etc/ip-certd/iplist.toml check
+ip-certd --config /etc/ip-certd/config.toml --iplist /etc/ip-certd/iplist.toml serve
+```
 
-### 7.1 拉取证书包
+不指定子命令时默认执行 `serve`。
 
-客户端执行：
+## 配置说明
+
+| 配置项 | 默认值 | 说明 |
+| --- | --- | --- |
+| `domain` | `ip.example.com` | Hostname 后缀。最终域名为 `{ip}.{domain}`。 |
+| `ttl` | `60` | Cloudflare DNS 记录 TTL，允许 `1` 或 `60..86400`。 |
+| `server.listen` | `127.0.0.1:9735` | 后端 HTTP 监听地址，只允许 loopback、私网或 link-local。 |
+| `server.public_base_url` | 空 | 对外 API 基础地址，建议为 `https://<domain>/api`。 |
+| `server.real_ip_header` | `x-real-ip` | 从受信反代读取真实客户端 IP 的请求头。 |
+| `server.trusted_proxies` | `127.0.0.1`, `::1` | 只有这些反代来源的真实 IP 请求头会被信任。 |
+| `cloudflare.zone_id` | 空 | Cloudflare Zone ID，必填。 |
+| `cloudflare.api_token_env` | `CLOUDFLARE_API_TOKEN` | 保存 Cloudflare API Token 的环境变量名。 |
+| `acme.enabled` | `true` | 是否允许签发/续期。关闭后只能返回已经存在且未到续期窗口的证书。 |
+| `acme.use_staging` | `false` | 是否使用 Let's Encrypt staging 环境。 |
+| `acme.storage` | `/var/lib/ip-certd/certs` | 证书、metadata 和 ACME account 凭据目录。 |
+| `acme.renew_before_days` | `30` | 距离过期多少天以内触发续期。 |
+| `security.allow_private_ip` | `false` | 是否允许内网 IP 出现在白名单和请求路径中。 |
+| `security.rate_limit_per_ip_per_minute` | `6` | 每个来源 IP 每分钟请求上限，`0` 表示关闭。 |
+
+## API
+
+推荐公网 API 入口：
+
+```text
+https://example.com/api
+```
+
+后端路由同时支持带 `/api` 前缀和直接访问形式，方便 Nginx 反代：
+
+```text
+GET  /api/health
+GET  /health
+POST /api/v1/certificates/{ip}/bundle
+POST /v1/certificates/{ip}/bundle
+```
+
+### 健康检查
+
+```bash
+curl -fsS https://example.com/api/health
+```
+
+响应：
+
+```json
+{"status":"ok"}
+```
+
+### 获取证书包
 
 ```bash
 curl -fsS -X POST \
+  -H 'Accept: application/gzip' \
   "https://example.com/api/v1/certificates/52.0.56.137/bundle" \
   -o /tmp/ip-certd-bundle.tar.gz
 ```
 
-HTTP API：
-
-```http
-POST /api/v1/certificates/52.0.56.137/bundle
-Accept: application/gzip
-```
-
-成功响应：
+成功响应头：
 
 ```http
 HTTP/1.1 200 OK
@@ -266,7 +246,7 @@ X-Certificate-IP: 52.0.56.137
 X-Certificate-Not-After: 2026-09-30T00:00:00Z
 ```
 
-`tar.gz` 包内容：
+证书包内容：
 
 ```text
 fullchain.pem
@@ -276,77 +256,62 @@ chain.pem
 metadata.json
 ```
 
-`metadata.json` 示例：
+错误响应为 JSON：
 
 ```json
-{
-  "ip": "52.0.56.137",
-  "not_before": "2026-07-02T00:00:00Z",
-  "not_after": "2026-09-30T00:00:00Z",
-  "renewed_at": "2026-07-02T01:00:00Z",
-  "source_ip": "52.0.56.137"
-}
+{"error":"source IP must match requested IP 52.0.56.137"}
 ```
 
-### 7.2 接口行为
+常见状态码：
 
-收到请求后，`ip-certd` 按顺序执行：
+| 状态码 | 含义 |
+| --- | --- |
+| `400` | 请求 IP 格式错误，或请求了不允许的 IP 类型。 |
+| `403` | 无法确认真实来源 IP，或来源 IP 与请求 IP 不一致。 |
+| `404` | 请求 IP 不在 `iplist.toml` 白名单中。 |
+| `429` | 触发来源 IP 限流。 |
+| `500` | Cloudflare、ACME 或本地存储失败。 |
+| `501` | ACME 已关闭，且本地没有可返回的有效证书。 |
 
-1. 从受信反代请求头获取真实客户端 IP。
-2. 校验请求 IP 格式合法。
-3. 校验请求 IP 存在于 `iplist.toml` 的 `ips` 列表。
-4. 校验真实客户端 IP 等于请求 IP。
-5. 根据 `{ip}.{domain}` 生成 hostname。
-6. Upsert 当前 IP 对应 hostname 的 Cloudflare A 记录。
-7. 如果本地没有证书，执行 ACME DNS-01 签发。
-8. 如果证书将在 `renew_before_days` 内过期，执行续期。
-9. 保存或更新本地证书文件与 `metadata.json`。
-10. 返回证书 `tar.gz` 包。
+## 客户端脚本
 
-推荐错误码：
-
-```text
-400 Bad Request       请求 IP 格式错误
-403 Forbidden         来源 IP 与请求 IP 不匹配
-404 Not Found         IP 不在 iplist.toml
-429 Too Many Requests 请求过于频繁
-500 Internal Error    DNS、ACME 或存储失败
-```
-
-## 8. 客户端使用方式
-
-客户端不需要安装 agent，只需要用 `curl` 拉取证书包并安装。
-
-也可以直接使用仓库提供的客户端脚本。脚本只接收一个参数：公网 API 入口，例如 `https://example.com/api`。脚本会自动识别当前机器公网 IPv4，请求证书包，解包到 `/etc/nginx/ssl/{ip}.{domain}/`，并在本机存在 Nginx 时执行配置测试和 reload。
+仓库提供 `client/pull-ip-certd-cert.sh`，脚本只接收一个参数：公网 API 入口。
 
 ```bash
 sudo ./client/pull-ip-certd-cert.sh https://example.com/api
 ```
 
-如果自动识别公网 IPv4 失败，可以用环境变量覆盖；这不改变脚本的参数数量：
+脚本会执行：
+
+1. 自动识别当前机器公网 IPv4。
+2. 请求 `POST <api-base-url>/v1/certificates/{ip}/bundle`。
+3. 解包证书到 `/etc/nginx/ssl/{ip}.{domain}/`。
+4. 校验证书、私钥和 SAN。
+5. 测试并 reload Nginx。
+
+如果自动识别公网 IPv4 失败，可以用环境变量覆盖，脚本参数仍然只有一个：
 
 ```bash
 sudo IP_CERTD_IP="52.0.56.137" ./client/pull-ip-certd-cert.sh https://example.com/api
 ```
 
-示例：
+可选环境变量：
 
-```bash
-IP="52.0.56.137"
-DOMAIN="example.com"
-HOST="$IP.$DOMAIN"
-INSTALL_DIR="/etc/nginx/ssl/$HOST"
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `IP_CERTD_IP` | 自动检测 | 手动指定当前客户端公网 IPv4。 |
+| `IP_CERTD_INSTALL_ROOT` | `/etc/nginx/ssl` | 证书安装根目录。 |
+| `IP_CERTD_RELOAD_NGINX` | `1` | 是否安装后 reload Nginx，设为 `0` 可跳过。 |
 
-mkdir -p "$INSTALL_DIR"
+安装后的目录示例：
 
-curl -fsS -X POST \
-  "https://example.com/api/v1/certificates/$IP/bundle" \
-  -o /tmp/ip-certd-bundle.tar.gz
-
-tar -xzf /tmp/ip-certd-bundle.tar.gz -C "$INSTALL_DIR"
-chmod 600 "$INSTALL_DIR/privkey.pem"
-
-nginx -t && systemctl reload nginx
+```text
+/etc/nginx/ssl/52.0.56.137.example.com/
+  fullchain.pem
+  privkey.pem
+  cert.pem
+  chain.pem
+  metadata.json
 ```
 
 目标服务器 Nginx 示例：
@@ -365,23 +330,15 @@ server {
 }
 ```
 
-客户端可以用 cron 周期性请求。由于签发和续期由客户端请求驱动，如果客户端长期不请求，证书不会被后台自动续期。
+建议使用 cron 周期执行。续期由客户端请求驱动，如果客户端长期不请求，服务端不会后台主动续期。
 
 ```cron
-15 3 * * * /usr/local/bin/pull-ip-certd-cert.sh
+15 3 * * * /usr/local/bin/pull-ip-certd-cert.sh https://example.com/api
 ```
 
-## 9. 主服务器部署
+## 部署建议
 
-`ip-certd` 只作为 server 运行：
-
-```bash
-ip-certd \
-  --config /etc/ip-certd/config.toml \
-  --iplist /etc/ip-certd/iplist.toml
-```
-
-建议使用 systemd 托管：
+### systemd
 
 ```ini
 [Unit]
@@ -391,7 +348,7 @@ After=network-online.target
 [Service]
 Type=simple
 EnvironmentFile=/etc/ip-certd/ip-certd.env
-ExecStart=/usr/local/bin/ip-certd --config /etc/ip-certd/config.toml --iplist /etc/ip-certd/iplist.toml
+ExecStart=/usr/local/bin/ip-certd --config /etc/ip-certd/config.toml --iplist /etc/ip-certd/iplist.toml serve
 Restart=always
 RestartSec=5
 User=ip-certd
@@ -401,7 +358,9 @@ Group=ip-certd
 WantedBy=multi-user.target
 ```
 
-Nginx 反代示例：
+### Nginx 反代
+
+`ip-certd` 不应直接暴露公网，推荐只把 `/api/` 转发到后端默认端口 `9735`，这样同一个域名的普通网站根路径仍可正常访问。
 
 ```nginx
 server {
@@ -418,17 +377,46 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
     }
+
+    location / {
+        root /www/wwwroot/example.com;
+        index index.html index.htm;
+    }
 }
 ```
 
-如果 API 入口所在域名放在 Cloudflare DNS 中，建议该记录使用 DNS only，避免 Nginx 收到的是 Cloudflare 节点 IP。若必须开启 Cloudflare Proxy，则需要在 Nginx 中配置 Cloudflare IP 段的 real IP 还原。
+宝塔面板中可以先添加站点和反向代理，再在站点 Nginx 配置里确认代理规则只匹配 `/api/`。不要用全站 `location /` 代理到 `ip-certd`，否则会影响 `<domain>` 网站首页。
 
-## 10. 证书存储结构
+如果 API 入口域名经过 Cloudflare Proxy、CDN 或其他代理，Nginx 必须先把真实客户端 IP 还原到 `X-Real-IP`，否则 `ip-certd` 会看到代理节点 IP，来源 IP 校验会失败。
 
-默认保存为：
+## 安全模型
+
+默认安全边界是：
+
+```text
+IP 在 iplist.toml 白名单中
+  +
+客户端真实来源 IP 等于请求路径 IP
+```
+
+部署时应遵守：
+
+- 后端 `ip-certd` 只监听 `127.0.0.1` 或内网地址。
+- 公网 HTTPS 由 Nginx、宝塔或其他可信反代负责。
+- 只信任 `trusted_proxies` 中来源设置的真实 IP 请求头。
+- Cloudflare Token 使用最小权限，并通过环境变量传入。
+- 不在日志、README、配置示例或 Git 提交中写入真实 token、私钥、证书、服务器 IP 或生产域名。
+- `privkey.pem`、`metadata.json`、ACME account 凭据应使用 `0600` 权限。
+- 若多个不可信客户端共享同一出口 IP，不应使用当前无 token 模型。
+
+## 证书存储
+
+默认存储结构：
 
 ```text
 /var/lib/ip-certd/certs/
+  accounts/
+    production-account.json
   52.0.56.137/
     fullchain.pem
     privkey.pem
@@ -439,116 +427,89 @@ server {
 
 `metadata.json` 记录：
 
-- ip
-- certificate path，以 IP 目录保存
-- not_before
-- not_after
-- issued_at
-- renewed_at
-- last_requested_at
-- last_source_ip
-- last_bundle_sha256
+- `ip`
+- `hostname`
+- `certificate_path`
+- `not_before`
+- `not_after`
+- `issued_at`
+- `renewed_at`
+- `last_requested_at`
+- `last_source_ip`
+- `last_bundle_sha256`
 
-证书写入要求：
+## 技术栈
 
-- 私钥文件权限限制为 `0600`。
-- 证书目录权限限制为 `0700` 或至少避免普通用户读取私钥。
-- 签发和续期写入临时目录，校验证书和私钥匹配后再原子替换。
-- 同一 IP 的签发、续期、打包必须加锁，避免并发请求重复签发。
-- 运行状态以证书目录中的 `metadata.json` 为准。
+- Rust 2021
+- Tokio async runtime
+- Axum HTTP server
+- Reqwest + rustls
+- instant-acme
+- Cloudflare DNS API
+- TOML / JSON 配置与元数据
+- tar + gzip 证书包
 
-## 11. Rust 项目模块设计
+## 开发与测试
 
-```text
-src/
-  main.rs
-  config.rs
-  iplist.rs
-  whitelist.rs
-  real_ip.rs
-  cert_store.rs
-  bundle.rs
+格式化：
 
-  cloudflare.rs
-
-  acme/
-    mod.rs
-    manager.rs
-    dns01.rs
-    account.rs
-
-  api/
-    mod.rs
-    certificates.rs
-    errors.rs
+```bash
+cargo fmt
 ```
 
-核心职责：
+运行测试：
 
-- `config.rs`：读取 `config.toml` 与环境变量。
-- `iplist.rs`：读取 `iplist.toml`。
-- `whitelist.rs`：校验 IP 是否在白名单中，并根据 `{ip}.{domain}` 生成 hostname。
-- `real_ip.rs`：从受信反代请求头解析真实客户端 IP。
-- `cloudflare.rs`：调用 Cloudflare DNS API。
-- `acme/manager.rs`：申请和续期 Let's Encrypt 证书。
-- `acme/dns01.rs`：创建、等待、清理 DNS-01 TXT 记录。
-- `cert_store.rs`：保存证书、私钥和 metadata。
-- `bundle.rs`：生成证书 `tar.gz` 包。
-- `api/certificates.rs`：处理证书包请求。
-
-Cloudflare DNS 方法：
-
-```rust
-pub struct CloudflareDns {
-    // zone_id, api token, http client
-}
-
-impl CloudflareDns {
-    pub async fn upsert_a(&self, name: &str, ip: &str, ttl: u32) -> anyhow::Result<()>;
-    pub async fn upsert_txt(&self, name: &str, value: &str, ttl: u32) -> anyhow::Result<()>;
-    pub async fn delete_txt(&self, name: &str, value: &str) -> anyhow::Result<()>;
-    pub async fn upsert_caa(&self, name: &str, value: &str, ttl: u32) -> anyhow::Result<()>;
-}
+```bash
+cargo test
 ```
 
-## 12. MVP 开发顺序
+检查配置：
 
-1. 实现 `config.toml` 与 `iplist.toml` 读取。
-2. 实现白名单校验和真实来源 IP 校验。
-3. 实现 HTTP server 和 `POST /api/v1/certificates/{ip}/bundle`。
-4. 实现 Cloudflare A 记录 upsert。
-5. 实现 Cloudflare TXT 记录 upsert/delete。
-6. 实现 ACME DNS-01 单 IP 生成域名签发。
-7. 实现证书文件存储和 `metadata.json`。
-8. 实现 `tar.gz` 证书包返回。
-9. 实现 `renew_before_days` 请求驱动续期。
-10. 增加 per-IP 文件锁、限流、日志脱敏和错误码整理。
-11. 增加 Nginx 反代与客户端 curl 部署文档。
+```bash
+cargo run -- --config config/config.example.toml --iplist config/iplist.example.toml check
+```
 
-## 13. 最终边界
+本地启动：
 
-这个系统负责：
+```bash
+CLOUDFLARE_API_TOKEN=replace-with-token \
+cargo run -- --config config/config.example.toml --iplist config/iplist.example.toml serve
+```
 
-- 根据白名单 IP 和来源 IP 控制证书请求。
-- 请求时生成 hostname 并 upsert 当前 IP 的 Cloudflare A 记录。
-- 根据请求申请或续期 Let's Encrypt 域名证书。
-- 自动完成 DNS-01 TXT 验证。
-- 本地保存证书、私钥和续期状态。
-- 返回包含证书和私钥的 `tar.gz` 包。
+调试日志：
 
-这个系统不负责：
+```bash
+RUST_LOG=debug ip-certd --config /etc/ip-certd/config.toml --iplist /etc/ip-certd/iplist.toml serve
+```
+
+## 项目边界
+
+当前项目负责：
+
+- 根据 IP 白名单和真实来源 IP 控制证书请求。
+- 生成 `{ip}.{domain}` hostname。
+- upsert Cloudflare A 记录。
+- 通过 Cloudflare TXT 记录完成 ACME DNS-01。
+- 保存和复用本地证书。
+- 按请求返回证书包。
+- 提供一参数客户端安装脚本。
+
+当前项目不负责：
 
 - 支持 Cloudflare 之外的 DNS Provider。
 - 运行权威 DNS Server。
-- 自动 SSH 登录目标服务器。
-- 提供独立 agent。
-- 自动修改目标服务器业务配置。
-- 自动删除 Cloudflare 上不在白名单中的 DNS 记录。
-- 后台定时签发或续期没有请求过的证书。
-- 为没有写入 `iplist.toml` 的 IP 签发证书。
-- 为来源 IP 不匹配的客户端提供证书下载。
+- 为未加入白名单的 IP 签发证书。
+- 为来源 IP 不匹配的请求返回证书。
+- 主动 SSH 登录客户端安装证书。
+- 自动修改客户端业务站点配置。
+- 删除 Cloudflare 上不在白名单内的历史 DNS 记录。
+- 后台定时续期从未请求过的证书。
 
-## 14. 参考文档
+## 许可证
+
+MIT
+
+## 参考资料
 
 - Cloudflare DNS Records API: https://developers.cloudflare.com/api/resources/dns/subresources/records/
 - Cloudflare DNS Proxy Status: https://developers.cloudflare.com/dns/proxy-status/
