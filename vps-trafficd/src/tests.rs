@@ -20,6 +20,8 @@ fn dt(value: &str) -> DateTime<FixedOffset> {
 fn base_config(temp: &TempDir) -> Config {
     Config {
         listen_addr: "0.0.0.0:9733".parse().unwrap(),
+        tls_cert_path: temp.path().join("tls/fullchain.pem"),
+        tls_key_path: temp.path().join("tls/privkey.pem"),
         auth_token: "unit-test-secret".to_string(),
         interfaces: vec!["eth0".to_string()],
         node_id: "node-a".to_string(),
@@ -45,6 +47,30 @@ fn traffic_cycle_uses_month_end_when_anchor_day_is_missing() {
 
     assert_eq!(cycle.start, dt("2026-02-28T08:00:00+08:00"));
     assert_eq!(cycle.end, dt("2026-03-31T08:00:00+08:00"));
+}
+
+#[test]
+fn tls_is_disabled_when_default_certificate_pair_is_absent() {
+    let temp = TempDir::new().unwrap();
+    let config = base_config(&temp);
+
+    assert!(!config.tls_enabled());
+    config.validate().unwrap();
+    let rendered = config.to_commented_toml();
+    assert!(rendered.contains("tls_cert_path"));
+    assert!(rendered.contains("tls_key_path"));
+    assert!(rendered.contains("服务会启用 HTTPS"));
+}
+
+#[test]
+fn tls_certificate_and_key_must_exist_together() {
+    let temp = TempDir::new().unwrap();
+    let config = base_config(&temp);
+    fs::create_dir_all(config.tls_cert_path.parent().unwrap()).unwrap();
+    fs::write(&config.tls_cert_path, "not a real certificate").unwrap();
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("tls_cert_path and tls_key_path"));
 }
 
 #[test]
