@@ -18,7 +18,9 @@
   - `quota_bytes`、`billing_mode = "total"`、`cycle_anchor`、`cycle_months = 1`。
   - `state_path = "/var/lib/vps-trafficd/state.json"`。
 - 鉴权与接口：
+  - `GET /` 提供浏览器查看与配置页面，页面输入 Bearer Token 后可查看流量并更新周期/额度配置。
   - `GET /api/v1/traffic` 必须带 `Authorization: Bearer <token>`。
+  - `GET /api/v1/config`、`PUT /api/v1/config` 必须带 `Authorization: Bearer <token>`，用于读取和更新不含 token 的账单周期、流量充值周期和流量限额配置。
   - 鉴权失败返回 `401`，不泄露流量、网卡、账期等信息。
   - `GET /health` 可不鉴权，只返回最小健康信息，不包含敏感数据。
 - 统计与账期：

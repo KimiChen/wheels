@@ -25,6 +25,8 @@ fn base_config(temp: &TempDir) -> Config {
         node_id: "node-a".to_string(),
         quota_bytes: 1_000,
         billing_mode: BillingMode::Total,
+        billing_cycle_anchor: Some(dt("2026-01-01T08:00:00+08:00")),
+        billing_cycle_months: Some(1),
         cycle_anchor: dt("2026-01-31T08:00:00+08:00"),
         cycle_months: 1,
         state_path: temp.path().join("state.json"),
@@ -52,7 +54,8 @@ fn service_accumulates_growth_and_ignores_counter_reset() {
     let temp = TempDir::new().unwrap();
     let sysfs = temp.path().join("sys");
     let config = base_config(&temp);
-    let service = TrafficService::with_sysfs_root(config, sysfs.clone());
+    let service =
+        TrafficService::with_sysfs_root(config, temp.path().join("config.toml"), sysfs.clone());
 
     write_iface(&sysfs, "eth0", 100, 200);
     let initial = service.snapshot().unwrap();
@@ -84,7 +87,11 @@ async fn index_page_prompts_for_token() {
     let config = base_config(&temp);
     write_iface(&sysfs, "eth0", 100, 200);
 
-    let service = std::sync::Arc::new(TrafficService::with_sysfs_root(config, sysfs));
+    let service = std::sync::Arc::new(TrafficService::with_sysfs_root(
+        config,
+        temp.path().join("config.toml"),
+        sysfs,
+    ));
     let app = api::router(service);
 
     let response = app
@@ -104,8 +111,68 @@ async fn index_page_prompts_for_token() {
     let body = String::from_utf8(body.to_vec()).unwrap();
     assert!(body.contains("window.prompt"));
     assert!(body.contains("/api/v1/traffic"));
+    assert!(body.contains("/api/v1/config"));
+    assert!(body.contains("billing_cycle_anchor"));
     assert!(body.contains("const units = [\"B\", \"K\", \"M\", \"G\", \"T\", \"P\"]"));
     assert!(body.contains("size.toFixed(2)"));
+}
+
+#[tokio::test]
+async fn config_endpoint_updates_config_file_and_runtime_quota() {
+    let temp = TempDir::new().unwrap();
+    let sysfs = temp.path().join("sys");
+    let config_path = temp.path().join("config.toml");
+    let config = base_config(&temp);
+    write_iface(&sysfs, "eth0", 100, 200);
+
+    let service = std::sync::Arc::new(TrafficService::with_sysfs_root(
+        config,
+        config_path.clone(),
+        sysfs,
+    ));
+    let app = api::router(service);
+
+    let payload = r#"{
+        "billing_cycle_anchor":"2026-01-01T08:00:00+08:00",
+        "billing_cycle_months":12,
+        "traffic_cycle_anchor":"2026-02-01T08:00:00+08:00",
+        "traffic_cycle_months":1,
+        "quota_bytes":2048
+    }"#;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/v1/config")
+                .header(header::AUTHORIZATION, "Bearer unit-test-secret")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(payload))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let saved = fs::read_to_string(&config_path).unwrap();
+    assert!(saved.contains("账单周期锚点"));
+    assert!(saved.contains("billing_cycle_months = 12"));
+    assert!(saved.contains("quota_bytes = 2048"));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/traffic")
+                .header(header::AUTHORIZATION, "Bearer unit-test-secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["quota_bytes"], 2048);
 }
 
 #[tokio::test]
@@ -115,7 +182,11 @@ async fn traffic_endpoint_requires_bearer_token() {
     let config = base_config(&temp);
     write_iface(&sysfs, "eth0", 100, 200);
 
-    let service = std::sync::Arc::new(TrafficService::with_sysfs_root(config, sysfs));
+    let service = std::sync::Arc::new(TrafficService::with_sysfs_root(
+        config,
+        temp.path().join("config.toml"),
+        sysfs,
+    ));
     let app = api::router(service);
 
     let response = app

@@ -1,7 +1,12 @@
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, FixedOffset};
 use serde::Deserialize;
-use std::{fs, net::SocketAddr, path::PathBuf};
+use std::{
+    fs,
+    io::Write,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+};
 
 const EXAMPLE_TOKENS: &[&str] = &[
     "change-me",
@@ -23,6 +28,10 @@ pub struct Config {
     pub quota_bytes: u64,
     #[serde(default)]
     pub billing_mode: BillingMode,
+    #[serde(default)]
+    pub billing_cycle_anchor: Option<DateTime<FixedOffset>>,
+    #[serde(default)]
+    pub billing_cycle_months: Option<u32>,
     pub cycle_anchor: DateTime<FixedOffset>,
     #[serde(default = "default_cycle_months")]
     pub cycle_months: u32,
@@ -78,11 +87,119 @@ impl Config {
         if self.quota_bytes == 0 {
             bail!("quota_bytes must be greater than zero");
         }
+        if matches!(self.billing_cycle_months, Some(0)) {
+            bail!("billing_cycle_months must be greater than zero");
+        }
         if self.cycle_months == 0 {
             bail!("cycle_months must be greater than zero");
         }
         Ok(())
     }
+
+    pub fn save_commented(&self, path: &Path) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!("failed to create config directory {}", parent.display())
+            })?;
+        }
+
+        let content = self.to_commented_toml();
+        let tmp_path = path.with_extension("toml.tmp");
+        let mut file = fs::File::create(&tmp_path)
+            .with_context(|| format!("failed to create temp config file {}", tmp_path.display()))?;
+        file.write_all(content.as_bytes())
+            .with_context(|| format!("failed to write temp config file {}", tmp_path.display()))?;
+        file.sync_all()
+            .with_context(|| format!("failed to sync temp config file {}", tmp_path.display()))?;
+
+        if cfg!(windows) && path.exists() {
+            fs::remove_file(path)
+                .with_context(|| format!("failed to replace config file {}", path.display()))?;
+        }
+        fs::rename(&tmp_path, path)
+            .with_context(|| format!("failed to install config file {}", path.display()))?;
+        Ok(())
+    }
+
+    pub fn to_commented_toml(&self) -> String {
+        let billing_anchor = self.billing_cycle_anchor.unwrap_or(self.cycle_anchor);
+        let billing_months = self.billing_cycle_months.unwrap_or(self.cycle_months);
+        format!(
+            r#"# 服务监听地址。0.0.0.0 表示监听所有公网/内网地址，9733 是默认端口。
+listen_addr = {listen_addr}
+
+# API 鉴权 Token。必须是足够长的随机字符串；请勿公开或写入状态文件。
+auth_token = {auth_token}
+
+# 要统计的 Linux 网卡名列表。多网卡时可写成 ["eth0", "ens3"]。
+interfaces = {interfaces}
+
+# 节点标识。多台 VPS 汇总时用来区分来源，不参与鉴权。
+node_id = {node_id}
+
+# 本账期总流量额度，单位为字节。页面 JS 会显示为 K/M/G/T 两位小数。
+quota_bytes = {quota_bytes}
+
+# 计费口径，可选 total/rx/tx：total 表示下载+上传，rx 表示只算接收，tx 表示只算发送。
+billing_mode = {billing_mode}
+
+# 账单周期锚点，即购买/续费开始时间。仅用于记录账单周期，不参与流量累计。
+billing_cycle_anchor = {billing_cycle_anchor}
+
+# 账单周期月数。1 表示每月账单，3 表示每三个月账单。
+billing_cycle_months = {billing_cycle_months}
+
+# 流量充值周期锚点，即服务商重置流量的开始时间。流量用量按这个周期计算。
+cycle_anchor = {cycle_anchor}
+
+# 流量充值周期月数。1 表示每月重置，3 表示每三个月重置。
+cycle_months = {cycle_months}
+
+# 本机状态文件路径。保存网卡上次计数、账期累计和校准偏移；不会保存 auth_token。
+state_path = {state_path}
+"#,
+            listen_addr = toml_string(&self.listen_addr.to_string()),
+            auth_token = toml_string(&self.auth_token),
+            interfaces = toml_string_list(&self.interfaces),
+            node_id = toml_string(&self.node_id),
+            quota_bytes = self.quota_bytes,
+            billing_mode = toml_string(self.billing_mode.as_str()),
+            billing_cycle_anchor = toml_string(&billing_anchor.to_rfc3339()),
+            billing_cycle_months = billing_months,
+            cycle_anchor = toml_string(&self.cycle_anchor.to_rfc3339()),
+            cycle_months = self.cycle_months,
+            state_path = toml_string(&self.state_path.display().to_string()),
+        )
+    }
+}
+
+impl BillingMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Rx => "rx",
+            Self::Tx => "tx",
+            Self::Total => "total",
+        }
+    }
+}
+
+fn toml_string(value: &str) -> String {
+    let escaped = value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t");
+    format!("\"{escaped}\"")
+}
+
+fn toml_string_list(values: &[String]) -> String {
+    let items = values
+        .iter()
+        .map(|value| toml_string(value))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("[{items}]")
 }
 
 fn default_listen_addr() -> SocketAddr {

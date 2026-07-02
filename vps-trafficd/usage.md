@@ -48,8 +48,14 @@ sudo systemctl enable --now vps-trafficd
 
 ```bash
 curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:9733/api/v1/traffic
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:9733/api/v1/config
 curl http://127.0.0.1:9733/health
 ```
 
 `GET /api/v1/traffic` 必须携带 `Authorization: Bearer <token>`。鉴权失败返回
-`401`，且不会暴露节点、网卡、流量或账期数据。`GET /health` 公开访问，只返回最小健康信息。
+`401`，且不会暴露节点、网卡、流量或账期数据。`GET /api/v1/config` 和
+`PUT /api/v1/config` 用于读取和更新不含 token 的配置字段，包括账单周期、流量充值周期和流量限额。
+`GET /health` 公开访问，只返回最小健康信息。
+
+浏览器打开 `/` 会弹框输入 Bearer token，页面可查看流量，并保存账单周期、流量充值周期和流量限额到
+`/etc/vps-trafficd/config.toml`。

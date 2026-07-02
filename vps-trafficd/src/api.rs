@@ -1,4 +1,4 @@
-use crate::service::TrafficService;
+use crate::service::{ConfigUpdate, TrafficService};
 use axum::{
     extract::State,
     http::{header, HeaderMap, StatusCode},
@@ -14,6 +14,7 @@ pub fn router(service: Arc<TrafficService>) -> Router {
         .route("/", get(index))
         .route("/health", get(health))
         .route("/api/v1/traffic", get(traffic))
+        .route("/api/v1/config", get(config_get).put(config_update))
         .with_state(service)
 }
 
@@ -32,9 +33,33 @@ async fn traffic(
     State(service): State<Arc<TrafficService>>,
     headers: HeaderMap,
 ) -> Result<Json<impl Serialize>, ApiError> {
-    authorize(&headers, service_auth_token(&service))?;
+    let token = service.auth_token().map_err(ApiError::internal)?;
+    authorize(&headers, &token)?;
     let snapshot = service.snapshot().map_err(ApiError::internal)?;
     Ok(Json(snapshot))
+}
+
+async fn config_get(
+    State(service): State<Arc<TrafficService>>,
+    headers: HeaderMap,
+) -> Result<Json<impl Serialize>, ApiError> {
+    let token = service.auth_token().map_err(ApiError::internal)?;
+    authorize(&headers, &token)?;
+    let config = service.config_snapshot().map_err(ApiError::internal)?;
+    Ok(Json(config))
+}
+
+async fn config_update(
+    State(service): State<Arc<TrafficService>>,
+    headers: HeaderMap,
+    Json(update): Json<ConfigUpdate>,
+) -> Result<Json<impl Serialize>, ApiError> {
+    let token = service.auth_token().map_err(ApiError::internal)?;
+    authorize(&headers, &token)?;
+    let config = service
+        .update_config(update)
+        .map_err(ApiError::bad_request)?;
+    Ok(Json(config))
 }
 
 fn authorize(headers: &HeaderMap, token: &str) -> Result<(), ApiError> {
@@ -65,10 +90,6 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     diff == 0
 }
 
-fn service_auth_token(service: &TrafficService) -> &str {
-    service.auth_token()
-}
-
 #[derive(Serialize)]
 struct HealthResponse {
     status: &'static str,
@@ -89,6 +110,13 @@ impl ApiError {
         tracing::error!(%error, "request failed");
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+
+    fn bad_request(error: anyhow::Error) -> Self {
+        tracing::warn!(%error, "invalid request");
+        Self {
+            status: StatusCode::BAD_REQUEST,
         }
     }
 }
@@ -180,6 +208,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       border: 1px solid var(--line);
       border-radius: 8px;
       overflow: hidden;
+      margin-bottom: 16px;
     }
     .status {
       min-height: 42px;
@@ -228,6 +257,42 @@ const INDEX_HTML: &str = r#"<!doctype html>
       white-space: pre-wrap;
       overflow-wrap: anywhere;
     }
+    form {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      padding: 14px;
+    }
+    label {
+      display: grid;
+      gap: 5px;
+      color: var(--muted);
+      font-size: 12px;
+      min-width: 0;
+      text-transform: uppercase;
+    }
+    input,
+    select {
+      width: 100%;
+      min-height: 38px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--bg);
+      color: var(--text);
+      font: inherit;
+      padding: 7px 9px;
+    }
+    .quota-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 82px;
+      gap: 8px;
+    }
+    .form-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      grid-column: 1 / -1;
+    }
     @media (max-width: 640px) {
       header {
         align-items: stretch;
@@ -240,6 +305,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
         flex: 1 1 120px;
       }
       dl {
+        grid-template-columns: 1fr;
+      }
+      form {
         grid-template-columns: 1fr;
       }
       .metric {
@@ -262,12 +330,58 @@ const INDEX_HTML: &str = r#"<!doctype html>
       <dl id="metrics"></dl>
       <pre id="raw">{}</pre>
     </section>
+    <section>
+      <div id="config-status" class="status">Config is locked.</div>
+      <form id="config-form">
+        <label>
+          Billing start
+          <input id="billing-anchor" type="datetime-local" step="1" required>
+        </label>
+        <label>
+          Billing months
+          <input id="billing-months" type="number" min="1" step="1" required>
+        </label>
+        <label>
+          Traffic refill start
+          <input id="traffic-anchor" type="datetime-local" step="1" required>
+        </label>
+        <label>
+          Traffic refill months
+          <input id="traffic-months" type="number" min="1" step="1" required>
+        </label>
+        <label>
+          Traffic quota
+          <span class="quota-row">
+            <input id="quota-value" type="number" min="0.01" step="0.01" required>
+            <select id="quota-unit">
+              <option value="K">K</option>
+              <option value="M">M</option>
+              <option value="G">G</option>
+              <option value="T">T</option>
+            </select>
+          </span>
+        </label>
+        <div class="form-actions">
+          <button id="load-config" type="button">Load</button>
+          <button class="primary" type="submit">Save</button>
+        </div>
+      </form>
+    </section>
   </main>
   <script>
     let token = "";
     const statusEl = document.getElementById("status");
+    const configStatusEl = document.getElementById("config-status");
     const metricsEl = document.getElementById("metrics");
     const rawEl = document.getElementById("raw");
+    const configForm = document.getElementById("config-form");
+    const billingAnchorEl = document.getElementById("billing-anchor");
+    const billingMonthsEl = document.getElementById("billing-months");
+    const trafficAnchorEl = document.getElementById("traffic-anchor");
+    const trafficMonthsEl = document.getElementById("traffic-months");
+    const quotaValueEl = document.getElementById("quota-value");
+    const quotaUnitEl = document.getElementById("quota-unit");
+    const unitBytes = { B: 1, K: 1024, M: 1048576, G: 1073741824, T: 1099511627776, P: 1125899906842624 };
 
     function askToken() {
       const value = window.prompt("Enter Bearer token", token);
@@ -282,6 +396,11 @@ const INDEX_HTML: &str = r#"<!doctype html>
       statusEl.classList.toggle("error", Boolean(error));
     }
 
+    function setConfigStatus(message, error) {
+      configStatusEl.textContent = message;
+      configStatusEl.classList.toggle("error", Boolean(error));
+    }
+
     function formatBytes(value) {
       if (!Number.isFinite(value)) return "-";
       const units = ["B", "K", "M", "G", "T", "P"];
@@ -292,6 +411,45 @@ const INDEX_HTML: &str = r#"<!doctype html>
         unit += 1;
       }
       return `${size.toFixed(2)} ${units[unit]}`;
+    }
+
+    function splitBytes(bytes) {
+      const units = ["T", "G", "M", "K"];
+      for (const unit of units) {
+        if (bytes >= unitBytes[unit] && bytes % unitBytes[unit] === 0) {
+          return { value: bytes / unitBytes[unit], unit };
+        }
+      }
+      for (const unit of units) {
+        if (bytes >= unitBytes[unit]) {
+          return { value: bytes / unitBytes[unit], unit };
+        }
+      }
+      return { value: bytes, unit: "K" };
+    }
+
+    function toLocalInputValue(iso) {
+      const date = new Date(iso);
+      const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+      return local.toISOString().slice(0, 19);
+    }
+
+    function localInputToIso(value) {
+      const date = new Date(value);
+      const offsetMinutes = -date.getTimezoneOffset();
+      const sign = offsetMinutes >= 0 ? "+" : "-";
+      const abs = Math.abs(offsetMinutes);
+      const offset = `${sign}${String(Math.floor(abs / 60)).padStart(2, "0")}:${String(abs % 60).padStart(2, "0")}`;
+      return `${value}${offset}`;
+    }
+
+    function quotaBytesFromForm() {
+      const value = Number(quotaValueEl.value);
+      const unit = quotaUnitEl.value;
+      if (!Number.isFinite(value) || value <= 0 || !unitBytes[unit]) {
+        throw new Error("Invalid quota.");
+      }
+      return Math.round(value * unitBytes[unit]);
     }
 
     function metric(label, value) {
@@ -321,6 +479,36 @@ const INDEX_HTML: &str = r#"<!doctype html>
       rawEl.textContent = JSON.stringify(data, null, 2);
     }
 
+    function renderConfig(config) {
+      billingAnchorEl.value = toLocalInputValue(config.billing_cycle_anchor);
+      billingMonthsEl.value = config.billing_cycle_months || 1;
+      trafficAnchorEl.value = toLocalInputValue(config.traffic_cycle_anchor);
+      trafficMonthsEl.value = config.traffic_cycle_months || 1;
+      const quota = splitBytes(Number(config.quota_bytes || 0));
+      quotaValueEl.value = quota.value.toFixed(2);
+      quotaUnitEl.value = quota.unit;
+      setConfigStatus(`Config loaded for ${config.node_id || "-"}.`);
+    }
+
+    async function fetchAuthed(path, options) {
+      if (!token && !askToken()) {
+        throw new Error("Token is required.");
+      }
+      const response = await fetch(path, {
+        ...options,
+        headers: {
+          ...(options && options.headers ? options.headers : {}),
+          Authorization: `Bearer ${token}`
+        },
+        cache: "no-store"
+      });
+      if (response.status === 401) {
+        token = "";
+        throw new Error("Unauthorized.");
+      }
+      return response;
+    }
+
     async function loadTraffic() {
       if (!token && !askToken()) {
         setStatus("Token is required.", true);
@@ -329,16 +517,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
 
       setStatus("Loading...");
       try {
-        const response = await fetch("/api/v1/traffic", {
-          headers: { Authorization: `Bearer ${token}` },
-          cache: "no-store"
-        });
-        if (response.status === 401) {
-          token = "";
-          setStatus("Unauthorized. Enter the token again.", true);
-          askToken();
-          return loadTraffic();
-        }
+        const response = await fetchAuthed("/api/v1/traffic");
         if (!response.ok) {
           throw new Error(`HTTP ${response.status}`);
         }
@@ -347,6 +526,55 @@ const INDEX_HTML: &str = r#"<!doctype html>
         setStatus(`Updated at ${data.updated_at || new Date().toISOString()}`);
       } catch (error) {
         setStatus(error.message || "Request failed.", true);
+        if ((error.message || "").includes("Unauthorized")) {
+          askToken();
+        }
+      }
+    }
+
+    async function loadConfig() {
+      setConfigStatus("Loading config...");
+      try {
+        const response = await fetchAuthed("/api/v1/config");
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        renderConfig(await response.json());
+      } catch (error) {
+        setConfigStatus(error.message || "Config request failed.", true);
+        if ((error.message || "").includes("Unauthorized")) {
+          askToken();
+        }
+      }
+    }
+
+    async function saveConfig(event) {
+      event.preventDefault();
+      setConfigStatus("Saving config...");
+      try {
+        const payload = {
+          billing_cycle_anchor: localInputToIso(billingAnchorEl.value),
+          billing_cycle_months: Number(billingMonthsEl.value),
+          traffic_cycle_anchor: localInputToIso(trafficAnchorEl.value),
+          traffic_cycle_months: Number(trafficMonthsEl.value),
+          quota_bytes: quotaBytesFromForm()
+        };
+        const response = await fetchAuthed("/api/v1/config", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        renderConfig(await response.json());
+        setConfigStatus("Config saved.");
+        loadTraffic();
+      } catch (error) {
+        setConfigStatus(error.message || "Config save failed.", true);
+        if ((error.message || "").includes("Unauthorized")) {
+          askToken();
+        }
       }
     }
 
@@ -354,9 +582,13 @@ const INDEX_HTML: &str = r#"<!doctype html>
       token = "";
       askToken();
       loadTraffic();
+      loadConfig();
     });
     document.getElementById("refresh").addEventListener("click", loadTraffic);
+    document.getElementById("load-config").addEventListener("click", loadConfig);
+    configForm.addEventListener("submit", saveConfig);
     loadTraffic();
+    loadConfig();
   </script>
 </body>
 </html>
