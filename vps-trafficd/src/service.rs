@@ -94,14 +94,12 @@ impl TrafficService {
     pub fn snapshot(&self) -> Result<TrafficSnapshot> {
         let config = self.config()?;
         let state = self.update_state(&config)?;
-        let rx_bytes = apply_offset(state.cycle_rx_bytes, state.calibration_rx_offset);
-        let tx_bytes = apply_offset(state.cycle_tx_bytes, state.calibration_tx_offset);
-        let used_bytes = match config.billing_mode {
-            BillingMode::Rx => rx_bytes,
-            BillingMode::Tx => tx_bytes,
-            BillingMode::Total => rx_bytes.saturating_add(tx_bytes),
-            BillingMode::Max => rx_bytes.max(tx_bytes),
-        };
+        let rx_bytes = state.cycle_rx_bytes;
+        let tx_bytes = state.cycle_tx_bytes;
+        let adjusted_rx_bytes = apply_offset(rx_bytes, state.calibration_rx_offset);
+        let adjusted_tx_bytes = apply_offset(tx_bytes, state.calibration_tx_offset);
+        let used_bytes =
+            billed_used_bytes(config.billing_mode, adjusted_rx_bytes, adjusted_tx_bytes);
         let remaining_bytes = config.quota_bytes.saturating_sub(used_bytes);
 
         Ok(TrafficSnapshot {
@@ -264,6 +262,15 @@ fn apply_offset(value: u64, offset: i128) -> u64 {
 
 fn billing_mode_name(mode: BillingMode) -> &'static str {
     mode.as_str()
+}
+
+fn billed_used_bytes(mode: BillingMode, rx_bytes: u64, tx_bytes: u64) -> u64 {
+    match mode {
+        BillingMode::Rx => rx_bytes,
+        BillingMode::Tx => tx_bytes,
+        BillingMode::Total => rx_bytes.saturating_add(tx_bytes),
+        BillingMode::Max => rx_bytes.max(tx_bytes),
+    }
 }
 
 fn apply_used_calibration(config: &Config, state: &mut State, target_used: u64) {

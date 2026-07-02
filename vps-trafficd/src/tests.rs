@@ -2,7 +2,7 @@ use crate::{
     api,
     billing::current_cycle,
     config::{BillingMode, Config},
-    service::TrafficService,
+    service::{ConfigUpdate, TrafficService},
 };
 use axum::{
     body::{to_bytes, Body},
@@ -98,6 +98,39 @@ fn service_uses_larger_direction_for_max_billing_mode() {
     assert_eq!(grown.tx_bytes, 60);
     assert_eq!(grown.used_bytes, 80);
     assert_eq!(grown.remaining_bytes, 920);
+}
+
+#[test]
+fn used_calibration_does_not_change_reported_rx_or_tx_bytes() {
+    let temp = TempDir::new().unwrap();
+    let sysfs = temp.path().join("sys");
+    let config = base_config(&temp);
+    let service =
+        TrafficService::with_sysfs_root(config, temp.path().join("config.toml"), sysfs.clone());
+
+    write_iface(&sysfs, "eth0", 100, 200);
+    service.snapshot().unwrap();
+    write_iface(&sysfs, "eth0", 180, 260);
+    let before = service.snapshot().unwrap();
+    assert_eq!(before.rx_bytes, 80);
+    assert_eq!(before.tx_bytes, 60);
+    assert_eq!(before.used_bytes, 140);
+
+    service
+        .update_config(ConfigUpdate {
+            traffic_cycle_anchor: dt("2026-01-31T08:00:00+08:00"),
+            traffic_cycle_months: 1,
+            quota_bytes: 1_000,
+            billing_mode: BillingMode::Total,
+            current_cycle_used_bytes: Some(512),
+        })
+        .unwrap();
+
+    let calibrated = service.snapshot().unwrap();
+    assert_eq!(calibrated.rx_bytes, 80);
+    assert_eq!(calibrated.tx_bytes, 60);
+    assert_eq!(calibrated.used_bytes, 512);
+    assert_eq!(calibrated.remaining_bytes, 488);
 }
 
 #[tokio::test]
@@ -208,6 +241,8 @@ async fn config_endpoint_updates_config_file_runtime_quota_and_used_traffic() {
     let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(body["quota_bytes"], 2048);
     assert_eq!(body["billing_mode"], "max");
+    assert_eq!(body["rx_bytes"], 0);
+    assert_eq!(body["tx_bytes"], 0);
     assert_eq!(body["used_bytes"], 512);
     assert_eq!(body["remaining_bytes"], 1536);
     assert!(body.get("usage_ratio").is_none());
