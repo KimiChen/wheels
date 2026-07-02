@@ -5,7 +5,7 @@ use crate::{
     service::TrafficService,
 };
 use axum::{
-    body::Body,
+    body::{to_bytes, Body},
     http::{header, Request, StatusCode},
 };
 use chrono::{DateTime, FixedOffset};
@@ -75,6 +75,35 @@ fn service_accumulates_growth_and_ignores_counter_reset() {
     let after_reset = service.snapshot().unwrap();
     assert_eq!(after_reset.rx_bytes, 95);
     assert_eq!(after_reset.tx_bytes, 85);
+}
+
+#[tokio::test]
+async fn index_page_prompts_for_token() {
+    let temp = TempDir::new().unwrap();
+    let sysfs = temp.path().join("sys");
+    let config = base_config(&temp);
+    write_iface(&sysfs, "eth0", 100, 200);
+
+    let service = std::sync::Arc::new(TrafficService::with_sysfs_root(config, sysfs));
+    let app = api::router(service);
+
+    let response = app
+        .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let content_type = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap();
+    assert!(content_type.starts_with("text/html"));
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    assert!(body.contains("window.prompt"));
+    assert!(body.contains("/api/v1/traffic"));
 }
 
 #[tokio::test]
