@@ -30,6 +30,7 @@ impl IpList {
         Ok(Self { ips })
     }
 
+    #[cfg(test)]
     pub fn from_ips(ips: Vec<Ipv4Addr>) -> Self {
         Self { ips }
     }

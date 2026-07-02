@@ -15,6 +15,7 @@ clap = { version = "4.5", features = ["derive"] }
 dotenvy = "0.15"
 flate2 = "1.0"
 hex = "0.4"
+instant-acme = { version = "0.8.5", default-features = false, features = ["hyper-rustls", "rcgen", "ring"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -25,6 +26,7 @@ tokio = { version = "1.48", features = ["macros", "net", "rt-multi-thread", "sig
 toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+x509-parser = "0.18"
 
 [dev-dependencies]
 tempfile = "3.14"
