@@ -150,7 +150,7 @@ impl IpCertService {
             .acme
             .issue_or_renew(ip, hostname, source_ip)
             .await
-            .map_err(|error| ServiceError::NotImplemented(error.to_string()))?;
+            .map_err(ServiceError::Internal)?;
         self.store.write_material(ip, material)?;
         self.store
             .load(ip)?

@@ -2,20 +2,20 @@
 
 ## 1. 目标
 
-`ip-certd` 是一个受控的 IP 域名解析、Let's Encrypt 证书申请与证书打包下载服务。`ip.example.com` 是部署时使用的示例域名，项目中必须作为配置项存在，不能写死。
+`ip-certd` 是一个受控的 IP 域名解析、Let's Encrypt 证书申请与证书打包下载服务。`example.com` 是部署时使用的示例域名，项目中必须作为配置项存在，不能写死。
 
 示例目标：
 
 ```text
-https://52.0.56.137.ip.example.com
+https://52.0.56.137.example.com
 ```
 
 应满足：
 
-- `52.0.56.137.ip.example.com` 解析到 `52.0.56.137`。
+- `52.0.56.137.example.com` 解析到 `52.0.56.137`。
 - 只有写入 `iplist.toml` 白名单的 IP 才能发起证书请求。
 - API 必须校验客户端真实来源 IP，来源 IP 必须等于请求的 IP。
-- hostname 由程序根据 `{ip}.{domain}` 统一生成，例如 `52.0.56.137.ip.example.com`。
+- hostname 由程序根据 `{ip}.{domain}` 统一生成，例如 `52.0.56.137.example.com`。
 - 客户端使用 `curl POST` 请求证书包，不使用 agent。
 - 不设计 host token、pull token、enrollment，也不提供 token rotation/revoke。
 - DNS 托管只支持 Cloudflare，不考虑其他 DNS Provider。
@@ -93,19 +93,19 @@ IP 在 iplist.toml 白名单中
 普通 A 记录：
 
 ```text
-A 52.0.56.137.ip.example.com -> 52.0.56.137
+A 52.0.56.137.example.com -> 52.0.56.137
 ```
 
 ACME DNS-01 TXT 记录：
 
 ```text
-TXT _acme-challenge.52.0.56.137.ip.example.com -> <letsencrypt-token>
+TXT _acme-challenge.52.0.56.137.example.com -> <letsencrypt-token>
 ```
 
 CAA 记录建议：
 
 ```text
-CAA ip.example.com 0 issue "letsencrypt.org"
+CAA example.com 0 issue "letsencrypt.org"
 ```
 
 策略要求：
@@ -121,7 +121,7 @@ Cloudflare A 记录示例：
 ```json
 {
   "type": "A",
-  "name": "52.0.56.137.ip.example.com",
+  "name": "52.0.56.137.example.com",
   "content": "52.0.56.137",
   "ttl": 60,
   "proxied": false
@@ -132,14 +132,14 @@ Cloudflare API 权限建议限制为：
 
 - Zone:Read
 - DNS:Edit
-- 仅限 `ip.example.com` 所在 zone
+- 仅限 `example.com` 所在 zone
 
 ## 5. Let's Encrypt 证书策略
 
 本方案申请的是域名证书：
 
 ```text
-DNS:52.0.56.137.ip.example.com
+DNS:52.0.56.137.example.com
 ```
 
 不是裸 IP 证书：
@@ -151,10 +151,10 @@ IP Address:52.0.56.137
 因此浏览器访问：
 
 ```text
-https://52.0.56.137.ip.example.com
+https://52.0.56.137.example.com
 ```
 
-证书匹配的是 `52.0.56.137.ip.example.com` 这个域名。
+证书匹配的是 `52.0.56.137.example.com` 这个域名。
 
 推荐使用 DNS-01 challenge：
 
@@ -164,8 +164,8 @@ https://52.0.56.137.ip.example.com
 
 注意：
 
-- `52.0.56.137.ip.example.com` 是多级子域名。
-- `*.ip.example.com` 通配符证书不能覆盖它。
+- `52.0.56.137.example.com` 是多级子域名。
+- `*.example.com` 通配符证书不能覆盖它。
 - 因此建议每个白名单 IP 单独签发一张证书。
 
 ## 6. 配置文件
@@ -186,12 +186,12 @@ https://52.0.56.137.ip.example.com
 示例配置：
 
 ```toml
-domain = "ip.example.com"
+domain = "example.com"
 ttl = 60
 
 [server]
 listen = "127.0.0.1:9735"
-public_base_url = "https://api.ip.example.com"
+public_base_url = "https://example.com/api"
 storage = "/var/lib/ip-certd"
 real_ip_header = "x-real-ip"
 trusted_proxies = ["127.0.0.1", "::1"]
@@ -202,7 +202,7 @@ api_token_env = "CLOUDFLARE_API_TOKEN"
 
 [acme]
 enabled = true
-email = "admin@ip.example.com"
+email = "admin@example.com"
 directory = "https://acme-v02.api.letsencrypt.org/directory"
 staging_directory = "https://acme-staging-v02.api.letsencrypt.org/directory"
 use_staging = false
@@ -232,7 +232,7 @@ ips = [
 ]
 ```
 
-`iplist.toml` 只保存允许使用服务的 IP。程序会按 `{ip}.{domain}` 自动生成 hostname。例如 `ip = "52.0.56.137"` 且 `domain = "ip.example.com"` 时，生成的 hostname 是 `52.0.56.137.ip.example.com`。
+`iplist.toml` 只保存允许使用服务的 IP。程序会按 `{ip}.{domain}` 自动生成 hostname。例如 `ip = "52.0.56.137"` 且 `domain = "example.com"` 时，生成的 hostname 是 `52.0.56.137.example.com`。
 
 `iplist.toml` 变更后通过重启 `ip-certd` 生效。
 
@@ -244,7 +244,7 @@ ips = [
 
 ```bash
 curl -fsS -X POST \
-  "https://api.ip.example.com/api/v1/certificates/52.0.56.137/bundle" \
+  "https://example.com/api/v1/certificates/52.0.56.137/bundle" \
   -o /tmp/ip-certd-bundle.tar.gz
 ```
 
@@ -261,7 +261,7 @@ Accept: application/gzip
 HTTP/1.1 200 OK
 Content-Type: application/gzip
 Content-Disposition: attachment; filename="52.0.56.137.tar.gz"
-X-Certificate-Hostname: 52.0.56.137.ip.example.com
+X-Certificate-Hostname: 52.0.56.137.example.com
 X-Certificate-IP: 52.0.56.137
 X-Certificate-Not-After: 2026-09-30T00:00:00Z
 ```
@@ -317,18 +317,30 @@ metadata.json
 
 客户端不需要安装 agent，只需要用 `curl` 拉取证书包并安装。
 
+也可以直接使用仓库提供的客户端脚本。脚本只接收一个参数：公网 API 入口，例如 `https://example.com/api`。脚本会自动识别当前机器公网 IPv4，请求证书包，解包到 `/etc/nginx/ssl/{ip}.{domain}/`，并在本机存在 Nginx 时执行配置测试和 reload。
+
+```bash
+sudo ./client/pull-ip-certd-cert.sh https://example.com/api
+```
+
+如果自动识别公网 IPv4 失败，可以用环境变量覆盖；这不改变脚本的参数数量：
+
+```bash
+sudo IP_CERTD_IP="52.0.56.137" ./client/pull-ip-certd-cert.sh https://example.com/api
+```
+
 示例：
 
 ```bash
 IP="52.0.56.137"
-DOMAIN="ip.example.com"
+DOMAIN="example.com"
 HOST="$IP.$DOMAIN"
 INSTALL_DIR="/etc/nginx/ssl/$HOST"
 
 mkdir -p "$INSTALL_DIR"
 
 curl -fsS -X POST \
-  "https://api.ip.example.com/api/v1/certificates/$IP/bundle" \
+  "https://example.com/api/v1/certificates/$IP/bundle" \
   -o /tmp/ip-certd-bundle.tar.gz
 
 tar -xzf /tmp/ip-certd-bundle.tar.gz -C "$INSTALL_DIR"
@@ -342,10 +354,10 @@ nginx -t && systemctl reload nginx
 ```nginx
 server {
     listen 443 ssl;
-    server_name 52.0.56.137.ip.example.com;
+    server_name 52.0.56.137.example.com;
 
-    ssl_certificate     /etc/nginx/ssl/52.0.56.137.ip.example.com/fullchain.pem;
-    ssl_certificate_key /etc/nginx/ssl/52.0.56.137.ip.example.com/privkey.pem;
+    ssl_certificate     /etc/nginx/ssl/52.0.56.137.example.com/fullchain.pem;
+    ssl_certificate_key /etc/nginx/ssl/52.0.56.137.example.com/privkey.pem;
 
     location / {
         proxy_pass http://127.0.0.1:8080;
@@ -394,12 +406,12 @@ Nginx 反代示例：
 ```nginx
 server {
     listen 443 ssl http2;
-    server_name api.ip.example.com;
+    server_name example.com;
 
-    ssl_certificate     /etc/nginx/ssl/api.ip.example.com/fullchain.pem;
-    ssl_certificate_key /etc/nginx/ssl/api.ip.example.com/privkey.pem;
+    ssl_certificate     /etc/nginx/ssl/example.com/fullchain.pem;
+    ssl_certificate_key /etc/nginx/ssl/example.com/privkey.pem;
 
-    location / {
+    location /api/ {
         proxy_pass http://127.0.0.1:9735;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -409,7 +421,7 @@ server {
 }
 ```
 
-如果 API 域名放在 Cloudflare DNS 中，建议 API 记录也使用 DNS only，避免 Nginx 收到的是 Cloudflare 节点 IP。若必须开启 Cloudflare Proxy，则需要在 Nginx 中配置 Cloudflare IP 段的 real IP 还原。
+如果 API 入口所在域名放在 Cloudflare DNS 中，建议该记录使用 DNS only，避免 Nginx 收到的是 Cloudflare 节点 IP。若必须开启 Cloudflare Proxy，则需要在 Nginx 中配置 Cloudflare IP 段的 real IP 还原。
 
 ## 10. 证书存储结构
 
