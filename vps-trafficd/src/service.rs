@@ -52,6 +52,7 @@ pub struct ConfigUpdate {
     pub traffic_cycle_anchor: DateTime<FixedOffset>,
     pub traffic_cycle_months: u32,
     pub quota_bytes: u64,
+    pub billing_mode: BillingMode,
     #[serde(default)]
     pub current_cycle_used_bytes: Option<u64>,
 }
@@ -100,6 +101,7 @@ impl TrafficService {
             BillingMode::Rx => rx_bytes,
             BillingMode::Tx => tx_bytes,
             BillingMode::Total => rx_bytes.saturating_add(tx_bytes),
+            BillingMode::Max => rx_bytes.max(tx_bytes),
         };
         let remaining_bytes = config.quota_bytes.saturating_sub(used_bytes);
         let usage_ratio = used_bytes as f64 / config.quota_bytes as f64;
@@ -144,6 +146,7 @@ impl TrafficService {
         next.cycle_anchor = update.traffic_cycle_anchor;
         next.cycle_months = update.traffic_cycle_months;
         next.quota_bytes = update.quota_bytes;
+        next.billing_mode = update.billing_mode;
         let current_cycle_used_bytes = update.current_cycle_used_bytes;
         next.validate()?;
         self.read_interfaces(&next)?;
@@ -273,6 +276,7 @@ fn apply_used_calibration(config: &Config, state: &mut State, target_used: u64) 
         BillingMode::Rx => (target_used, current_tx),
         BillingMode::Tx => (current_rx, target_used),
         BillingMode::Total => split_total_target(target_used, current_rx, current_tx),
+        BillingMode::Max => align_max_target(target_used, current_rx, current_tx),
     };
 
     state.calibration_rx_offset = i128::from(target_rx) - i128::from(state.cycle_rx_bytes);
@@ -288,6 +292,14 @@ fn split_total_target(target_used: u64, current_rx: u64, current_tx: u64) -> (u6
     let target_rx = (u128::from(target_used) * u128::from(current_rx) / current_total)
         .min(u128::from(u64::MAX)) as u64;
     (target_rx, target_used.saturating_sub(target_rx))
+}
+
+fn align_max_target(target_used: u64, current_rx: u64, current_tx: u64) -> (u64, u64) {
+    if current_rx >= current_tx {
+        (target_used, current_tx.min(target_used))
+    } else {
+        (current_rx.min(target_used), target_used)
+    }
 }
 
 fn config_snapshot(config: &Config) -> ConfigSnapshot {
