@@ -10,6 +10,9 @@ rustup target add x86_64-unknown-linux-musl
 cargo build --release --target x86_64-unknown-linux-musl
 ```
 
+内置 HTTPS 依赖 Rustls/ring；交叉构建 musl 时需要 `x86_64-linux-musl-gcc` 或 Zig 等 C 交叉编译器。
+也可以在目标 Linux 机器上直接执行 `cargo build --release`。
+
 静态二进制输出位置：
 
 ```text
@@ -19,13 +22,15 @@ target/x86_64-unknown-linux-musl/release/vps-trafficd
 ## 配置
 
 ```bash
-sudo install -d -m 0755 /etc/vps-trafficd /var/lib/vps-trafficd
+sudo install -d -m 0755 /etc/vps-trafficd /etc/vps-trafficd/tls /var/lib/vps-trafficd
 sudo install -m 0600 config/config.example.toml /etc/vps-trafficd/config.toml
 sudo editor /etc/vps-trafficd/config.toml
 ```
 
 启动前必须修改 `auth_token`、`interfaces`、`quota_bytes` 和 `cycle_anchor`。
 如果 `auth_token` 为空或仍是示例值，服务会拒绝启动。
+如果 `/etc/vps-trafficd/tls/fullchain.pem` 和 `/etc/vps-trafficd/tls/privkey.pem`
+同时存在，服务会使用 HTTPS；两个文件都不存在时保持 HTTP。
 
 ## 运行
 
@@ -51,6 +56,8 @@ curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:9733/api/v1/traffic
 curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:9733/api/v1/config
 curl http://127.0.0.1:9733/health
 ```
+
+启用 TLS 后，把示例中的 `http://` 换成 `https://`。
 
 `GET /api/v1/traffic` 必须携带 `Authorization: Bearer <token>`。鉴权失败返回
 `401`，且不会暴露节点、网卡、流量或账期数据。`GET /api/v1/config` 和

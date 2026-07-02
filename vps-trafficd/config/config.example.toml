@@ -3,6 +3,12 @@
 # 服务监听地址。0.0.0.0 表示监听所有公网/内网地址，9733 是默认端口。
 listen_addr = "0.0.0.0:9733"
 
+# TLS 证书路径。把已有 PEM 证书放到这里，并同时提供 tls_key_path 后，服务会启用 HTTPS。
+tls_cert_path = "/etc/vps-trafficd/tls/fullchain.pem"
+
+# TLS 私钥路径。证书和私钥两个文件必须同时存在；都不存在时服务保持 HTTP。
+tls_key_path = "/etc/vps-trafficd/tls/privkey.pem"
+
 # API 鉴权 Token。必须改成足够长的随机字符串，不能留空或使用示例值。
 auth_token = "replace-with-a-long-random-token"
 

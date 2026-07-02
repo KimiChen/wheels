@@ -20,6 +20,10 @@ const EXAMPLE_TOKENS: &[&str] = &[
 pub struct Config {
     #[serde(default = "default_listen_addr")]
     pub listen_addr: SocketAddr,
+    #[serde(default = "default_tls_cert_path")]
+    pub tls_cert_path: PathBuf,
+    #[serde(default = "default_tls_key_path")]
+    pub tls_key_path: PathBuf,
     pub auth_token: String,
     #[serde(default = "default_interfaces")]
     pub interfaces: Vec<String>,
@@ -87,6 +91,31 @@ impl Config {
         if self.cycle_months == 0 {
             bail!("cycle_months must be greater than zero");
         }
+        self.validate_tls_paths()?;
+        Ok(())
+    }
+
+    pub fn tls_enabled(&self) -> bool {
+        self.tls_cert_path.exists() && self.tls_key_path.exists()
+    }
+
+    fn validate_tls_paths(&self) -> Result<()> {
+        if self.tls_cert_path.as_os_str().is_empty() {
+            bail!("tls_cert_path must not be empty");
+        }
+        if self.tls_key_path.as_os_str().is_empty() {
+            bail!("tls_key_path must not be empty");
+        }
+
+        let cert_exists = self.tls_cert_path.exists();
+        let key_exists = self.tls_key_path.exists();
+        if cert_exists != key_exists {
+            bail!(
+                "tls_cert_path and tls_key_path must either both exist or both be absent: {} and {}",
+                self.tls_cert_path.display(),
+                self.tls_key_path.display()
+            );
+        }
         Ok(())
     }
 
@@ -120,6 +149,12 @@ impl Config {
             r#"# 服务监听地址。0.0.0.0 表示监听所有公网/内网地址，9733 是默认端口。
 listen_addr = {listen_addr}
 
+# TLS 证书路径。把已有 PEM 证书放到这里，并同时提供 tls_key_path 后，服务会启用 HTTPS。
+tls_cert_path = {tls_cert_path}
+
+# TLS 私钥路径。证书和私钥两个文件必须同时存在；都不存在时服务保持 HTTP。
+tls_key_path = {tls_key_path}
+
 # API 鉴权 Token。必须是足够长的随机字符串；请勿公开或写入状态文件。
 auth_token = {auth_token}
 
@@ -145,6 +180,8 @@ cycle_months = {cycle_months}
 state_path = {state_path}
 "#,
             listen_addr = toml_string(&self.listen_addr.to_string()),
+            tls_cert_path = toml_string(&self.tls_cert_path.display().to_string()),
+            tls_key_path = toml_string(&self.tls_key_path.display().to_string()),
             auth_token = toml_string(&self.auth_token),
             interfaces = toml_string_list(&self.interfaces),
             node_id = toml_string(&self.node_id),
@@ -191,6 +228,14 @@ fn default_listen_addr() -> SocketAddr {
     "0.0.0.0:9733"
         .parse()
         .expect("valid default listen address")
+}
+
+fn default_tls_cert_path() -> PathBuf {
+    PathBuf::from("/etc/vps-trafficd/tls/fullchain.pem")
+}
+
+fn default_tls_key_path() -> PathBuf {
+    PathBuf::from("/etc/vps-trafficd/tls/privkey.pem")
 }
 
 fn default_interfaces() -> Vec<String> {
