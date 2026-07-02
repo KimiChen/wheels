@@ -2,6 +2,7 @@ use crate::{
     api,
     billing::current_cycle,
     config::{BillingMode, Config},
+    next_state_update_delay,
     service::{ConfigUpdate, TrafficService},
 };
 use axum::{
@@ -9,7 +10,7 @@ use axum::{
     http::{header, Request, StatusCode},
 };
 use chrono::{DateTime, FixedOffset};
-use std::{fs, path::Path};
+use std::{fs, path::Path, time::Duration};
 use tempfile::TempDir;
 use tower::ServiceExt;
 
@@ -47,6 +48,25 @@ fn traffic_cycle_uses_month_end_when_anchor_day_is_missing() {
 
     assert_eq!(cycle.start, dt("2026-02-28T08:00:00+08:00"));
     assert_eq!(cycle.end, dt("2026-03-31T08:00:00+08:00"));
+}
+
+#[test]
+fn background_state_update_uses_earlier_sample_interval_or_cycle_boundary() {
+    let now = dt("2026-07-02T13:00:00+08:00");
+    let sample_interval = Duration::from_secs(3600);
+
+    assert_eq!(
+        next_state_update_delay(dt("2026-07-02T15:00:00+08:00"), now, sample_interval),
+        Duration::from_secs(3600)
+    );
+    assert_eq!(
+        next_state_update_delay(dt("2026-07-02T13:10:00+08:00"), now, sample_interval),
+        Duration::from_secs(600)
+    );
+    assert_eq!(
+        next_state_update_delay(dt("2026-07-02T12:59:59+08:00"), now, sample_interval),
+        Duration::ZERO
+    );
 }
 
 #[test]
