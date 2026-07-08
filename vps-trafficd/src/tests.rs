@@ -23,6 +23,9 @@ fn base_config(temp: &TempDir) -> Config {
         listen_addr: "0.0.0.0:9733".parse().unwrap(),
         tls_cert_path: temp.path().join("tls/fullchain.pem"),
         tls_key_path: temp.path().join("tls/privkey.pem"),
+        tls_auto_restart: true,
+        tls_watch_interval_secs: 300,
+        tls_restart_settle_secs: 10,
         auth_token: "unit-test-secret".to_string(),
         interfaces: vec!["eth0".to_string()],
         node_id: "node-a".to_string(),
@@ -79,7 +82,11 @@ fn tls_is_disabled_when_default_certificate_pair_is_absent() {
     let rendered = config.to_commented_toml();
     assert!(rendered.contains("tls_cert_path"));
     assert!(rendered.contains("tls_key_path"));
+    assert!(rendered.contains("tls_auto_restart = true"));
+    assert!(rendered.contains("tls_watch_interval_secs = 300"));
+    assert!(rendered.contains("tls_restart_settle_secs = 10"));
     assert!(rendered.contains("服务会启用 HTTPS"));
+    assert!(rendered.contains("Nginx/Caddy/ip-certd"));
 }
 
 #[test]
@@ -91,6 +98,32 @@ fn tls_certificate_and_key_must_exist_together() {
 
     let error = config.validate().unwrap_err().to_string();
     assert!(error.contains("tls_cert_path and tls_key_path"));
+}
+
+#[test]
+fn tls_watch_interval_must_be_positive() {
+    let temp = TempDir::new().unwrap();
+    let mut config = base_config(&temp);
+    config.tls_watch_interval_secs = 0;
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("tls_watch_interval_secs"));
+}
+
+#[test]
+fn tls_pair_fingerprint_changes_when_certificate_bundle_is_replaced() {
+    let temp = TempDir::new().unwrap();
+    let config = base_config(&temp);
+    fs::create_dir_all(config.tls_cert_path.parent().unwrap()).unwrap();
+    fs::write(&config.tls_cert_path, "fullchain version 1").unwrap();
+    fs::write(&config.tls_key_path, "privkey version 1").unwrap();
+
+    let before = crate::tls_pair_fingerprint(&config).unwrap().unwrap();
+    fs::write(&config.tls_cert_path, "fullchain version 2").unwrap();
+    fs::write(&config.tls_key_path, "privkey version 2").unwrap();
+    let after = crate::tls_pair_fingerprint(&config).unwrap().unwrap();
+
+    assert_ne!(before, after);
 }
 
 #[test]

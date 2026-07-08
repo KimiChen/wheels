@@ -24,7 +24,7 @@
   - `tx`：只算发送
   - `max`：取接收/发送中的较大值
 - **鉴权 API**：流量和配置接口必须携带 `Authorization: Bearer <token>`。
-- **可选内置 HTTPS**：把已有证书放到 `/etc/vps-trafficd/tls/fullchain.pem`，私钥放到 `/etc/vps-trafficd/tls/privkey.pem`，服务重启后自动启用 HTTPS。
+- **可选内置 HTTPS**：把已有证书放到 `/etc/vps-trafficd/tls/fullchain.pem`，私钥放到 `/etc/vps-trafficd/tls/privkey.pem`，服务重启后自动启用 HTTPS；默认监控 PEM 变化并在 systemd 下自动重启加载新证书。
 - **内置网页**：浏览器打开 `/` 后输入 token，即可查看流量、更新周期/额度/计费口径，并录入本周期已用流量做校准。
 - **配置在线更新**：`PUT /api/v1/config` 会写回 `config.toml`；`current_cycle_used_bytes` 只用于校准状态，不写入配置。
 - **原始方向流量独立展示**：API 返回的 `rx_bytes` / `tx_bytes` 始终是网卡原始周期增量；校准只影响 `used_bytes` 和 `remaining_bytes`。
@@ -77,6 +77,10 @@ sudo systemctl restart vps-trafficd
 
 证书和私钥必须同时存在。两个文件都不存在时，服务会继续以 HTTP 方式运行；只存在其中一个时，`check` 和启动都会失败。
 
+默认配置会每 `300` 秒检查一次 `tls_cert_path` 和 `tls_key_path` 的内容变化。检测到 Nginx、Caddy、`ip-certd`
+或其他证书工具写入新 PEM 后，服务会等待 `10` 秒确认文件稳定，再优雅退出；仓库提供的 systemd unit 使用
+`Restart=on-failure`，会自动拉起新进程并加载新证书。如果不希望服务自行退出，可设置 `tls_auto_restart = false`。
+
 ### 检查并运行
 
 ```bash
@@ -101,6 +105,9 @@ sudo systemctl status vps-trafficd
 listen_addr = "0.0.0.0:9733"
 tls_cert_path = "/etc/vps-trafficd/tls/fullchain.pem"
 tls_key_path = "/etc/vps-trafficd/tls/privkey.pem"
+tls_auto_restart = true
+tls_watch_interval_secs = 300
+tls_restart_settle_secs = 10
 auth_token = "replace-with-a-long-random-token"
 interfaces = ["eth0"]
 node_id = "vps-trafficd-01"
@@ -116,6 +123,9 @@ state_path = "/var/lib/vps-trafficd/state.json"
 | `listen_addr` | HTTP/HTTPS 监听地址。默认 `0.0.0.0:9733`，协议由 TLS 证书是否存在决定。 |
 | `tls_cert_path` | PEM 证书路径。默认 `/etc/vps-trafficd/tls/fullchain.pem`。 |
 | `tls_key_path` | PEM 私钥路径。默认 `/etc/vps-trafficd/tls/privkey.pem`。 |
+| `tls_auto_restart` | 是否监控证书和私钥变化并退出等待 systemd 重启，默认 `true`。 |
+| `tls_watch_interval_secs` | 证书和私钥检查间隔，默认 `300` 秒。 |
+| `tls_restart_settle_secs` | 检测到变化后的稳定等待时间，默认 `10` 秒。 |
 | `auth_token` | API 和网页使用的 Bearer Token。必须替换示例值。 |
 | `interfaces` | 要统计的网卡名列表，多网卡会聚合 rx/tx。 |
 | `node_id` | 节点标识，用于多 VPS 汇总时区分来源。 |
@@ -124,6 +134,45 @@ state_path = "/var/lib/vps-trafficd/state.json"
 | `cycle_anchor` | 流量充值周期锚点，使用 RFC 3339 时间格式并携带时区。 |
 | `cycle_months` | 流量充值周期月数，`1` 表示每月重置，`3` 表示每三个月重置。 |
 | `state_path` | 本机状态文件路径。状态文件不保存 `auth_token`。 |
+
+### TLS 自动重启
+
+`vps-trafficd` 只在进程启动时把 PEM 证书加载进 Rustls。启用 `tls_auto_restart` 后，它会在后台轻量轮询证书和私钥文件：
+
+- 两个文件都不存在时保持 HTTP；之后两个文件同时出现，会重启并切换到 HTTPS。
+- 两个文件都存在时，任意一个文件内容变化都会触发稳定等待，然后退出让 systemd 重启。
+- 如果短暂出现“只有证书或只有私钥”的状态，服务会跳过本次重启，直到两个文件重新成对出现。
+
+如果证书已经由 Nginx、Caddy 或 Certbot 自动续期，可以直接把路径指向它们维护的 PEM 文件，例如：
+
+```toml
+tls_cert_path = "/etc/letsencrypt/live/example.com/fullchain.pem"
+tls_key_path = "/etc/letsencrypt/live/example.com/privkey.pem"
+```
+
+确保 `vps-trafficd` 运行用户能读取私钥文件即可。仓库自带的 unit 默认以 root 运行，并且 `Restart=on-failure` 已能配合自动重启逻辑。
+
+### 使用 ip-certd 证书
+
+如果用 [ip-certd](../ip-certd/README.md) 给 `https://{ip}.{domain}` 形式的主机名申请证书，可以把客户端脚本安装到
+`vps-trafficd` 的证书目录，关闭 Nginx reload：
+
+```bash
+sudo IP_CERTD_INSTALL_ROOT=/etc/vps-trafficd/ip-certd \
+  IP_CERTD_RELOAD_NGINX=0 \
+  /usr/local/bin/pull-ip-certd-cert.sh https://example.com/api
+```
+
+脚本会输出安装目录，例如 `/etc/vps-trafficd/ip-certd/52.0.56.137.example.com/`。把配置指向这个目录里的 PEM 文件：
+
+```toml
+tls_cert_path = "/etc/vps-trafficd/ip-certd/52.0.56.137.example.com/fullchain.pem"
+tls_key_path = "/etc/vps-trafficd/ip-certd/52.0.56.137.example.com/privkey.pem"
+tls_auto_restart = true
+```
+
+之后可用 cron 或 systemd timer 定期执行 `pull-ip-certd-cert.sh`。脚本覆盖 `fullchain.pem` / `privkey.pem` 后，
+`vps-trafficd` 会在下一次检查时自动退出并由 systemd 重启加载新证书。
 
 ## 网页
 

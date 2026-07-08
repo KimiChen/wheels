@@ -30,7 +30,19 @@ sudo editor /etc/vps-trafficd/config.toml
 启动前必须修改 `auth_token`、`interfaces`、`quota_bytes` 和 `cycle_anchor`。
 如果 `auth_token` 为空或仍是示例值，服务会拒绝启动。
 如果 `/etc/vps-trafficd/tls/fullchain.pem` 和 `/etc/vps-trafficd/tls/privkey.pem`
-同时存在，服务会使用 HTTPS；两个文件都不存在时保持 HTTP。
+同时存在，服务会使用 HTTPS；两个文件都不存在时保持 HTTP。默认 `tls_auto_restart = true`，
+服务会轮询证书和私钥内容变化，变化稳定后优雅退出并交给 systemd 重启加载新证书。
+
+如果证书由 Nginx、Caddy 或 Certbot 维护，把 `tls_cert_path` / `tls_key_path` 指向它们的 PEM 文件即可。
+使用 `ip-certd` 时可把证书拉到专用目录：
+
+```bash
+sudo IP_CERTD_INSTALL_ROOT=/etc/vps-trafficd/ip-certd \
+  IP_CERTD_RELOAD_NGINX=0 \
+  /usr/local/bin/pull-ip-certd-cert.sh https://example.com/api
+```
+
+然后把配置指向脚本输出目录中的 `fullchain.pem` 和 `privkey.pem`。
 
 ## 运行
 

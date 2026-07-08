@@ -9,6 +9,15 @@ tls_cert_path = "/etc/vps-trafficd/tls/fullchain.pem"
 # TLS 私钥路径。证书和私钥两个文件必须同时存在；都不存在时服务保持 HTTP。
 tls_key_path = "/etc/vps-trafficd/tls/privkey.pem"
 
+# 是否监控 TLS 证书/私钥文件变化。开启后，Nginx/Caddy/ip-certd 等工具更新 PEM 文件时，服务会优雅退出并交给 systemd 重启加载新证书。
+tls_auto_restart = true
+
+# TLS 证书/私钥文件检查间隔，单位秒。值越小越快发现续期，值越大文件读取越少。
+tls_watch_interval_secs = 300
+
+# 检测到证书变化后继续等待的稳定时间，单位秒。用于避开证书和私钥分步写入的短暂不一致窗口。
+tls_restart_settle_secs = 10
+
 # API 鉴权 Token。必须改成足够长的随机字符串，不能留空或使用示例值。
 auth_token = "replace-with-a-long-random-token"
 

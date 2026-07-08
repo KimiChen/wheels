@@ -24,6 +24,12 @@ pub struct Config {
     pub tls_cert_path: PathBuf,
     #[serde(default = "default_tls_key_path")]
     pub tls_key_path: PathBuf,
+    #[serde(default = "default_tls_auto_restart")]
+    pub tls_auto_restart: bool,
+    #[serde(default = "default_tls_watch_interval_secs")]
+    pub tls_watch_interval_secs: u64,
+    #[serde(default = "default_tls_restart_settle_secs")]
+    pub tls_restart_settle_secs: u64,
     pub auth_token: String,
     #[serde(default = "default_interfaces")]
     pub interfaces: Vec<String>,
@@ -91,6 +97,9 @@ impl Config {
         if self.cycle_months == 0 {
             bail!("cycle_months must be greater than zero");
         }
+        if self.tls_watch_interval_secs == 0 {
+            bail!("tls_watch_interval_secs must be greater than zero");
+        }
         self.validate_tls_paths()?;
         Ok(())
     }
@@ -155,6 +164,15 @@ tls_cert_path = {tls_cert_path}
 # TLS 私钥路径。证书和私钥两个文件必须同时存在；都不存在时服务保持 HTTP。
 tls_key_path = {tls_key_path}
 
+# 是否监控 TLS 证书/私钥文件变化。开启后，Nginx/Caddy/ip-certd 等工具更新 PEM 文件时，服务会优雅退出并交给 systemd 重启加载新证书。
+tls_auto_restart = {tls_auto_restart}
+
+# TLS 证书/私钥文件检查间隔，单位秒。值越小越快发现续期，值越大文件读取越少。
+tls_watch_interval_secs = {tls_watch_interval_secs}
+
+# 检测到证书变化后继续等待的稳定时间，单位秒。用于避开证书和私钥分步写入的短暂不一致窗口。
+tls_restart_settle_secs = {tls_restart_settle_secs}
+
 # API 鉴权 Token。必须是足够长的随机字符串；请勿公开或写入状态文件。
 auth_token = {auth_token}
 
@@ -182,6 +200,9 @@ state_path = {state_path}
             listen_addr = toml_string(&self.listen_addr.to_string()),
             tls_cert_path = toml_string(&self.tls_cert_path.display().to_string()),
             tls_key_path = toml_string(&self.tls_key_path.display().to_string()),
+            tls_auto_restart = self.tls_auto_restart,
+            tls_watch_interval_secs = self.tls_watch_interval_secs,
+            tls_restart_settle_secs = self.tls_restart_settle_secs,
             auth_token = toml_string(&self.auth_token),
             interfaces = toml_string_list(&self.interfaces),
             node_id = toml_string(&self.node_id),
@@ -236,6 +257,18 @@ fn default_tls_cert_path() -> PathBuf {
 
 fn default_tls_key_path() -> PathBuf {
     PathBuf::from("/etc/vps-trafficd/tls/privkey.pem")
+}
+
+fn default_tls_auto_restart() -> bool {
+    true
+}
+
+fn default_tls_watch_interval_secs() -> u64 {
+    300
+}
+
+fn default_tls_restart_settle_secs() -> u64 {
+    10
 }
 
 fn default_interfaces() -> Vec<String> {
