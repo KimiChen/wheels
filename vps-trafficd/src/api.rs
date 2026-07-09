@@ -459,12 +459,27 @@ const INDEX_HTML: &str = r#"<!doctype html>
     }
 
     function localInputToIso(value) {
-      const date = new Date(value);
+      const localValue = normalizeLocalDateTimeInput(value);
+      const date = new Date(localValue);
+      if (!Number.isFinite(date.getTime())) {
+        throw new Error("Invalid traffic refill start.");
+      }
       const offsetMinutes = -date.getTimezoneOffset();
       const sign = offsetMinutes >= 0 ? "+" : "-";
       const abs = Math.abs(offsetMinutes);
       const offset = `${sign}${String(Math.floor(abs / 60)).padStart(2, "0")}:${String(abs % 60).padStart(2, "0")}`;
-      return `${value}${offset}`;
+      return `${localValue}${offset}`;
+    }
+
+    function normalizeLocalDateTimeInput(value) {
+      const trimmed = value.trim();
+      if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(trimmed)) {
+        return `${trimmed}:00`;
+      }
+      if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(trimmed)) {
+        return trimmed;
+      }
+      throw new Error("Invalid traffic refill start.");
     }
 
     function bytesFromForm(valueEl, unitEl, message) {

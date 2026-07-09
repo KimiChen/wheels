@@ -252,6 +252,8 @@ async fn index_page_prompts_for_token() {
     assert!(body.contains("Max of RX/TX"));
     assert!(body.contains("Current cycle used"));
     assert!(body.contains("current_cycle_used_bytes"));
+    assert!(body.contains("normalizeLocalDateTimeInput"));
+    assert!(body.contains("return `${trimmed}:00`;"));
     assert!(body.contains("const units = [\"B\", \"K\", \"M\", \"G\", \"T\", \"P\"]"));
     assert!(body.contains("size.toFixed(2)"));
     assert!(!body.contains("data.usage_ratio"));
@@ -259,6 +261,47 @@ async fn index_page_prompts_for_token() {
     assert!(body.contains("setByteInput(config.quota_bytes, quotaValueEl, quotaUnitEl, \"G\")"));
     assert!(body
         .contains("setByteInput(data.used_bytes, currentUsedValueEl, currentUsedUnitEl, \"G\")"));
+}
+
+#[tokio::test]
+async fn config_endpoint_accepts_minute_precision_datetime_local_value() {
+    let temp = TempDir::new().unwrap();
+    let sysfs = temp.path().join("sys");
+    let config_path = temp.path().join("config.toml");
+    let config = base_config(&temp);
+    write_iface(&sysfs, "eth0", 100, 200);
+
+    let service = std::sync::Arc::new(TrafficService::with_sysfs_root(
+        config,
+        config_path.clone(),
+        sysfs,
+    ));
+    let app = api::router(service);
+
+    let payload = r#"{
+        "traffic_cycle_anchor":"2026-06-21T00:00+08:00",
+        "traffic_cycle_months":1,
+        "quota_bytes":6597069766656,
+        "billing_mode":"total",
+        "current_cycle_used_bytes":54567559496
+    }"#;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/v1/config")
+                .header(header::AUTHORIZATION, "Bearer unit-test-secret")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(payload))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let saved = fs::read_to_string(&config_path).unwrap();
+    assert!(saved.contains("cycle_anchor = \"2026-06-21T00:00:00+08:00\""));
+    assert!(saved.contains("quota_bytes = 6597069766656"));
 }
 
 #[tokio::test]
