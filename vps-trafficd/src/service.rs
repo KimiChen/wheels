@@ -50,6 +50,7 @@ pub struct ConfigSnapshot {
 
 #[derive(Debug, Deserialize)]
 pub struct ConfigUpdate {
+    #[serde(deserialize_with = "deserialize_fixed_offset_datetime")]
     pub traffic_cycle_anchor: DateTime<FixedOffset>,
     pub traffic_cycle_months: u32,
     pub quota_bytes: u64,
@@ -262,6 +263,18 @@ impl TrafficService {
             .map_err(|_| anyhow::anyhow!("config lock poisoned"))
             .map(|guard| guard.clone())
     }
+}
+
+fn deserialize_fixed_offset_datetime<'de, D>(
+    deserializer: D,
+) -> std::result::Result<DateTime<FixedOffset>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    DateTime::parse_from_rfc3339(&value)
+        .or_else(|_| DateTime::parse_from_str(&value, "%Y-%m-%dT%H:%M%:z"))
+        .map_err(serde::de::Error::custom)
 }
 
 fn apply_offset(value: u64, offset: i128) -> u64 {
