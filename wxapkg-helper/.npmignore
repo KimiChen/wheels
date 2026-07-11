@@ -1,0 +1,16 @@
+node_modules/
+decoded/
+logs/
+tmp/
+temp/
+.tmp/
+.cache/
+*.log
+*.tmp
+*.temp
+*.swp
+*.swo
+*.tgz
+.DS_Store
+.env
+.env.*

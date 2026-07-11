@@ -1,0 +1,34 @@
+# Dependencies
+node_modules/
+
+# Project tooling (the parent repository ignores generic scripts directories)
+!scripts/
+
+# Decoded output
+decoded/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+*.tgz
+
+# Temporary files
+tmp/
+temp/
+.tmp/
+.cache/
+*.tmp
+*.temp
+*.swp
+*.swo
+.DS_Store
+
+# Local environment
+.env
+.env.*
+!.env.example

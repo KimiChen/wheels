@@ -1,0 +1,64 @@
+{
+  "name": "wxapkg-helper",
+  "version": "0.2.0",
+  "description": "Scan, decrypt, unpack, and decompile cached WeChat Mini Program and Mini Game wxapkg files with an internal engine.",
+  "type": "module",
+  "license": "GPL-3.0-or-later",
+  "keywords": [
+    "wechat",
+    "mini-program",
+    "mini-game",
+    "wxapkg",
+    "decompiler"
+  ],
+  "homepage": "https://github.com/KimiChen/wheels/tree/main/wxapkg-helper#readme",
+  "bugs": {
+    "url": "https://github.com/KimiChen/wheels/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/KimiChen/wheels.git",
+    "directory": "wxapkg-helper"
+  },
+  "files": [
+    "bin/",
+    "scripts/",
+    "src/",
+    "CHANGELOG.md",
+    "DEVELOPMENT.md",
+    "LICENSES/",
+    "THIRD_PARTY_NOTICES.md"
+  ],
+  "bin": {
+    "wxapkg-helper": "./bin/wxapkg-helper.js"
+  },
+  "scripts": {
+    "start": "node ./bin/wxapkg-helper.js",
+    "scan": "node ./bin/wxapkg-helper.js scan",
+    "decode": "node ./bin/wxapkg-helper.js decode",
+    "test": "node --test",
+    "check": "node ./scripts/check-syntax.js && npm test",
+    "prepack": "npm run check"
+  },
+  "engines": {
+    "node": ">=25"
+  },
+  "dependencies": {
+    "@biggerstar/deepmerge": "^1.0.3",
+    "@inquirer/prompts": "^7.10.1",
+    "cheerio": "1.0.0-rc.12",
+    "commander": "^14.0.2",
+    "cssbeautify": "^0.3.1",
+    "escodegen": "^1.14.3",
+    "esprima": "^4.0.1",
+    "glob": "^13.0.6",
+    "js-beautify": "^1.15.1",
+    "jsdom": "^29.1.1",
+    "picocolors": "^1.0.1"
+  },
+  "overrides": {
+    "js-beautify": {
+      "glob": "^13.0.6"
+    }
+  }
+}
