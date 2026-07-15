@@ -1,0 +1,1407 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Web Standard Kit</title>
+    <script>
+      // Apply the theme before first paint to avoid a flash of the wrong theme.
+      let savedTheme = null;
+      try {
+        savedTheme = localStorage.getItem("web-standard-kit-theme");
+      } catch {}
+      document.documentElement.dataset.theme =
+        savedTheme === "light" || savedTheme === "dark"
+          ? savedTheme
+          : matchMedia("(prefers-color-scheme: dark)").matches
+            ? "dark"
+            : "light";
+    </script>
+    <link rel="stylesheet" href="style.css" />
+    <script src="script.js" defer></script>
+  </head>
+  <body>
+    <a class="wsk-skip-link" href="#main-content">跳到主要内容</a>
+    <svg class="wsk-icon-sprite" aria-hidden="true">
+      <defs>
+        <symbol id="sun" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="4" />
+          <path
+            d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.66 6.34l1.41-1.41"
+          />
+        </symbol>
+        <symbol id="moon" viewBox="0 0 24 24">
+          <path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8Z" />
+        </symbol>
+        <symbol id="check" viewBox="0 0 24 24">
+          <path d="m5 12 4 4L19 6" />
+        </symbol>
+        <symbol id="info" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="10" />
+          <path d="M12 16v-4M12 8h.01" />
+        </symbol>
+        <symbol id="warning" viewBox="0 0 24 24">
+          <path
+            d="m21.73 18-8-14a2 2 0 0 0-3.46 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"
+          />
+          <path d="M12 9v4M12 17h.01" />
+        </symbol>
+        <symbol id="eye" viewBox="0 0 24 24">
+          <path
+            d="M2.06 12.35a1 1 0 0 1 0-.7C3.7 7.6 7.58 5 12 5c4.42 0 8.3 2.6 9.94 6.65a1 1 0 0 1 0 .7C20.3 16.4 16.42 19 12 19c-4.42 0-8.3-2.6-9.94-6.65Z"
+          />
+          <circle cx="12" cy="12" r="3" />
+        </symbol>
+        <symbol id="eye-off" viewBox="0 0 24 24">
+          <path
+            d="M3 3l18 18M10.6 10.6a2 2 0 0 0 2.8 2.8M9.9 4.24A10.8 10.8 0 0 1 12 4c4.42 0 8.3 2.6 9.94 6.65a1 1 0 0 1 0 .7 11.8 11.8 0 0 1-2.1 3.3M6.23 6.23a11.7 11.7 0 0 0-4.17 5.42 1 1 0 0 0 0 .7C3.7 16.4 7.58 19 12 19c1.24 0 2.43-.2 3.53-.57"
+          />
+        </symbol>
+        <symbol id="chevron" viewBox="0 0 24 24">
+          <path d="m6 9 6 6 6-6" />
+        </symbol>
+        <symbol id="chevron-left" viewBox="0 0 24 24">
+          <path d="m15 18-6-6 6-6" />
+        </symbol>
+        <symbol id="chevron-right" viewBox="0 0 24 24">
+          <path d="m9 18 6-6-6-6" />
+        </symbol>
+        <symbol id="more" viewBox="0 0 24 24">
+          <circle cx="5" cy="12" r="1" />
+          <circle cx="12" cy="12" r="1" />
+          <circle cx="19" cy="12" r="1" />
+        </symbol>
+        <symbol id="upload" viewBox="0 0 24 24">
+          <path d="M12 16V4M7 9l5-5 5 5M4 20h16" />
+        </symbol>
+        <symbol id="sort" viewBox="0 0 24 24">
+          <path d="m8 9 4-4 4 4M16 15l-4 4-4-4" />
+        </symbol>
+        <symbol id="folder" viewBox="0 0 24 24">
+          <path d="M3 6h6l2 2h10v10H3z" />
+        </symbol>
+        <symbol id="x" viewBox="0 0 24 24">
+          <path d="M18 6 6 18M6 6l12 12" />
+        </symbol>
+      </defs>
+    </svg>
+
+    <header class="wsk-topbar">
+      <div class="wsk-brand">
+        <span class="wsk-brand-mark" aria-hidden="true">WS</span>
+        <span
+          ><strong>Web Standard Kit</strong
+          ><span>Minimal web baseline</span></span
+        >
+      </div>
+
+      <nav class="wsk-view-switch" aria-label="页面视图">
+        <button
+          class="wsk-is-active"
+          type="button"
+          data-view-target="kit"
+          aria-controls="kit-view"
+          aria-pressed="true"
+        >
+          标准组件
+        </button>
+        <button
+          type="button"
+          data-view-target="reference"
+          aria-controls="reference-view"
+          aria-pressed="false"
+        >
+          数据中台参考
+        </button>
+      </nav>
+
+      <button
+        class="wsk-icon-button"
+        type="button"
+        data-theme-toggle
+        aria-label="切换主题"
+        title="切换主题"
+      >
+        <svg class="wsk-icon wsk-theme-sun" aria-hidden="true">
+          <use href="#sun"></use>
+        </svg>
+        <svg class="wsk-icon wsk-theme-moon" aria-hidden="true">
+          <use href="#moon"></use>
+        </svg>
+      </button>
+    </header>
+
+    <main id="main-content">
+      <div class="wsk-page" id="kit-view" data-view="kit">
+        <div class="wsk-page-head">
+          <div>
+            <h1 tabindex="-1">网页基础标准</h1>
+            <p>原生 HTML、CSS 和 JavaScript 的最小组件基线。</p>
+          </div>
+          <span class="wsk-badge wsk-accent">v0.1</span>
+        </div>
+
+        <section class="wsk-section" aria-labelledby="actions-title">
+          <div class="wsk-section-head">
+            <h2 id="actions-title">操作</h2>
+            <span class="wsk-badge">Actions</span>
+          </div>
+          <div class="wsk-demo-grid">
+            <div class="wsk-panel">
+              <p class="wsk-panel-title">按钮层级</p>
+              <div class="wsk-button-row">
+                <button class="wsk-button" type="button">
+                  <svg class="wsk-icon" aria-hidden="true">
+                    <use href="#check"></use></svg
+                  >保存
+                </button>
+                <button class="wsk-button wsk-secondary" type="button">
+                  次要操作
+                </button>
+                <button class="wsk-button wsk-quiet" type="button">
+                  低强调
+                </button>
+                <button class="wsk-button wsk-danger" type="button">
+                  删除
+                </button>
+                <button class="wsk-button" type="button" disabled>
+                  不可用
+                </button>
+              </div>
+            </div>
+            <div class="wsk-panel">
+              <p class="wsk-panel-title">菜单与加载</p>
+              <div class="wsk-button-row">
+                <div class="wsk-menu-wrap">
+                  <button
+                    class="wsk-button wsk-secondary"
+                    type="button"
+                    data-menu-button
+                    aria-haspopup="menu"
+                    aria-expanded="false"
+                    aria-controls="action-menu"
+                  >
+                    更多操作<svg class="wsk-icon" aria-hidden="true">
+                      <use href="#chevron"></use>
+                    </svg>
+                  </button>
+                  <div class="wsk-menu" id="action-menu" role="menu" hidden>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      data-toast="已复制当前配置。"
+                    >
+                      复制配置
+                    </button>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      data-toast="已导出当前记录。"
+                    >
+                      导出记录
+                    </button>
+                    <button
+                      class="wsk-menu-danger"
+                      type="button"
+                      role="menuitem"
+                      data-toast="删除操作已取消。"
+                      data-toast-variant="info"
+                    >
+                      删除记录
+                    </button>
+                  </div>
+                </div>
+                <button
+                  class="wsk-button wsk-loading"
+                  type="button"
+                  disabled
+                  aria-busy="true"
+                >
+                  <span class="wsk-spinner" aria-hidden="true"></span>处理中
+                </button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="wsk-section" aria-labelledby="form-title">
+          <div class="wsk-section-head">
+            <h2 id="form-title">表单</h2>
+            <span class="wsk-badge">Forms</span>
+          </div>
+          <form class="wsk-panel" id="sample-form">
+            <div class="wsk-form-grid">
+              <div class="wsk-field">
+                <label class="wsk-label" for="email"
+                  >组织邮箱
+                  <span class="wsk-required" aria-hidden="true">*</span></label
+                >
+                <input
+                  class="wsk-control"
+                  id="email"
+                  name="email"
+                  type="email"
+                  autocomplete="email"
+                  placeholder="name@example.com"
+                  aria-describedby="email-help"
+                  required
+                />
+                <p class="wsk-help" id="email-help">用于统一身份认证。</p>
+              </div>
+
+              <div class="wsk-field">
+                <label class="wsk-label" for="role">访问角色</label>
+                <div class="wsk-select-wrap">
+                  <select class="wsk-select" id="role" name="role">
+                    <option>数据使用者</option>
+                    <option>数据管理员</option>
+                    <option>安全审计员</option>
+                  </select>
+                  <svg class="wsk-icon" aria-hidden="true">
+                    <use href="#chevron"></use>
+                  </svg>
+                </div>
+              </div>
+
+              <div class="wsk-field">
+                <label class="wsk-label" for="password">密码</label>
+                <div class="wsk-input-wrap">
+                  <input
+                    class="wsk-control"
+                    id="password"
+                    name="password"
+                    type="password"
+                    autocomplete="current-password"
+                    placeholder="请输入密码"
+                  />
+                  <button
+                    class="wsk-icon-button"
+                    type="button"
+                    data-password
+                    aria-label="显示密码"
+                    aria-controls="password"
+                    aria-pressed="false"
+                    title="显示密码"
+                  >
+                    <svg class="wsk-icon" aria-hidden="true">
+                      <use href="#eye"></use>
+                    </svg>
+                  </button>
+                </div>
+              </div>
+
+              <div class="wsk-field">
+                <label class="wsk-label" for="code"
+                  >校验码
+                  <span class="wsk-required" aria-hidden="true">*</span></label
+                >
+                <input
+                  class="wsk-control"
+                  id="code"
+                  name="code"
+                  value="WSK2026"
+                  pattern=".{6,}"
+                  required
+                  data-state="success"
+                  aria-invalid="false"
+                  aria-describedby="code-success code-error"
+                />
+                <p class="wsk-success-text" id="code-success">
+                  校验码格式正确。
+                </p>
+                <p class="wsk-error" id="code-error" hidden>
+                  校验码至少需要 6 个字符。
+                </p>
+              </div>
+
+              <div class="wsk-field">
+                <label class="wsk-label" for="retention">保留天数</label>
+                <input
+                  class="wsk-control"
+                  id="retention"
+                  name="retention"
+                  type="number"
+                  min="1"
+                  max="365"
+                  step="1"
+                  value="30"
+                />
+              </div>
+
+              <div class="wsk-field">
+                <label class="wsk-label" for="expiry">到期日期</label>
+                <input
+                  class="wsk-control"
+                  id="expiry"
+                  name="expiry"
+                  type="date"
+                  value="2026-08-15"
+                />
+              </div>
+
+              <div class="wsk-field">
+                <label class="wsk-label" for="endpoint">服务路径</label>
+                <div class="wsk-input-group">
+                  <span>https://</span
+                  ><input
+                    class="wsk-control"
+                    id="endpoint"
+                    name="endpoint"
+                    value="api.example.com/data"
+                  />
+                </div>
+              </div>
+
+              <div class="wsk-field">
+                <label class="wsk-label" for="readonly-field">只读字段</label>
+                <input
+                  class="wsk-control"
+                  id="readonly-field"
+                  value="系统自动生成"
+                  readonly
+                />
+              </div>
+
+              <div class="wsk-field">
+                <label class="wsk-label" for="disabled-field">不可用字段</label>
+                <input
+                  class="wsk-control"
+                  id="disabled-field"
+                  value="当前无权限编辑"
+                  disabled
+                />
+              </div>
+
+              <div class="wsk-field">
+                <label class="wsk-label" for="attachment">上传附件</label>
+                <input
+                  class="wsk-control wsk-file-control"
+                  id="attachment"
+                  name="attachment"
+                  type="file"
+                />
+              </div>
+
+              <div class="wsk-field wsk-wide">
+                <label class="wsk-label" for="note">申请说明</label>
+                <textarea
+                  class="wsk-textarea"
+                  id="note"
+                  name="note"
+                  placeholder="说明数据范围和使用周期"
+                ></textarea>
+              </div>
+
+              <fieldset class="wsk-field wsk-choice-group wsk-wide">
+                <legend>通知渠道</legend>
+                <div class="wsk-choice-row">
+                  <label class="wsk-choice"
+                    ><input
+                      type="checkbox"
+                      name="notice"
+                      value="email"
+                      checked
+                    />
+                    邮件通知</label
+                  >
+                  <label class="wsk-choice"
+                    ><input type="checkbox" name="notice" value="workbench" />
+                    工作台通知</label
+                  >
+                </div>
+              </fieldset>
+
+              <fieldset class="wsk-field wsk-choice-group wsk-wide">
+                <legend>访问范围</legend>
+                <div class="wsk-choice-row">
+                  <label class="wsk-choice"
+                    ><input type="radio" name="scope" checked /> 当前团队</label
+                  >
+                  <label class="wsk-choice"
+                    ><input type="radio" name="scope" /> 全部组织</label
+                  >
+                </div>
+              </fieldset>
+
+              <div class="wsk-field wsk-wide">
+                <label class="wsk-switch"
+                  ><input type="checkbox" name="expiry-notice" checked /><span
+                    class="wsk-switch-track"
+                    aria-hidden="true"
+                  ></span
+                  ><span
+                    ><strong>启用到期提醒</strong
+                    ><small>权限到期前 7 天发送通知。</small></span
+                  ></label
+                >
+              </div>
+            </div>
+
+            <div class="wsk-button-row wsk-mt-5">
+              <button class="wsk-button" type="submit">校验表单</button>
+              <button class="wsk-button wsk-secondary" type="reset">
+                重置
+              </button>
+            </div>
+          </form>
+        </section>
+
+        <section class="wsk-section" aria-labelledby="navigation-title">
+          <div class="wsk-section-head">
+            <h2 id="navigation-title">导航</h2>
+            <span class="wsk-badge">Navigation</span>
+          </div>
+          <div class="wsk-demo-grid">
+            <div class="wsk-panel">
+              <p class="wsk-panel-title">路径与分页</p>
+              <nav class="wsk-breadcrumb" aria-label="面包屑">
+                <ol>
+                  <li><a href="#main-content">网页基础标准</a></li>
+                  <li><a href="#table-title">数据资产</a></li>
+                  <li aria-current="page">客户主数据</li>
+                </ol>
+              </nav>
+              <nav
+                class="wsk-pagination wsk-mt-5"
+                aria-label="示例分页"
+                data-demo-pagination
+              >
+                <button
+                  type="button"
+                  data-page-action="previous"
+                  aria-label="上一页"
+                  disabled
+                >
+                  <svg class="wsk-icon" aria-hidden="true">
+                    <use href="#chevron-left"></use>
+                  </svg>
+                </button>
+                <button
+                  class="wsk-current"
+                  type="button"
+                  data-page="1"
+                  aria-current="page"
+                >
+                  1</button
+                ><button type="button" data-page="2">2</button
+                ><button type="button" data-page="3">3</button>
+                <button
+                  type="button"
+                  data-page-action="next"
+                  aria-label="下一页"
+                >
+                  <svg class="wsk-icon" aria-hidden="true">
+                    <use href="#chevron-right"></use>
+                  </svg>
+                </button>
+                <span class="wsk-sr-only" data-page-status aria-live="polite"
+                  >第 1 页，共 3 页</span
+                >
+              </nav>
+            </div>
+
+            <div class="wsk-panel wsk-tabs" data-tabs>
+              <p class="wsk-panel-title">页签</p>
+              <div class="wsk-tab-list" role="tablist" aria-label="资产视图">
+                <button
+                  id="tab-summary"
+                  type="button"
+                  role="tab"
+                  aria-controls="panel-summary"
+                  aria-selected="true"
+                >
+                  概览
+                </button>
+                <button
+                  id="tab-fields"
+                  type="button"
+                  role="tab"
+                  aria-controls="panel-fields"
+                  aria-selected="false"
+                  tabindex="-1"
+                >
+                  字段
+                </button>
+                <button
+                  id="tab-lineage"
+                  type="button"
+                  role="tab"
+                  aria-controls="panel-lineage"
+                  aria-selected="false"
+                  tabindex="-1"
+                >
+                  血缘
+                </button>
+              </div>
+              <div
+                class="wsk-tab-panel"
+                id="panel-summary"
+                role="tabpanel"
+                aria-labelledby="tab-summary"
+              >
+                当前资产包含 42 个标准字段，最近更新于 10 分钟前。
+              </div>
+              <div
+                class="wsk-tab-panel"
+                id="panel-fields"
+                role="tabpanel"
+                aria-labelledby="tab-fields"
+                hidden
+              >
+                主键字段、业务字段和审计字段均已完成登记。
+              </div>
+              <div
+                class="wsk-tab-panel"
+                id="panel-lineage"
+                role="tabpanel"
+                aria-labelledby="tab-lineage"
+                hidden
+              >
+                关联 12 条上游链路和 8 条下游链路。
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="wsk-section" aria-labelledby="feedback-title">
+          <div class="wsk-section-head">
+            <h2 id="feedback-title">反馈</h2>
+            <span class="wsk-badge">Feedback</span>
+          </div>
+          <div class="wsk-demo-grid">
+            <div class="wsk-alert-list">
+              <div class="wsk-alert">
+                <svg class="wsk-icon" aria-hidden="true">
+                  <use href="#info"></use>
+                </svg>
+                <div>
+                  <strong>同步任务已创建</strong>
+                  <p>首次执行将在配置校验后开始。</p>
+                </div>
+              </div>
+              <div class="wsk-alert wsk-success">
+                <svg class="wsk-icon" aria-hidden="true">
+                  <use href="#check"></use>
+                </svg>
+                <div>
+                  <strong>校验通过</strong>
+                  <p>字段映射符合发布要求。</p>
+                </div>
+              </div>
+              <div class="wsk-alert wsk-warning">
+                <svg class="wsk-icon" aria-hidden="true">
+                  <use href="#warning"></use>
+                </svg>
+                <div>
+                  <strong>即将到期</strong>
+                  <p>当前权限将在 7 天后失效。</p>
+                </div>
+              </div>
+              <div class="wsk-alert wsk-danger">
+                <svg class="wsk-icon" aria-hidden="true">
+                  <use href="#warning"></use>
+                </svg>
+                <div>
+                  <strong>发布失败</strong>
+                  <p>目标主题域缺少负责人配置。</p>
+                </div>
+              </div>
+            </div>
+            <div class="wsk-panel">
+              <p class="wsk-panel-title">浮层反馈</p>
+              <div class="wsk-button-row">
+                <button class="wsk-button" type="button" data-dialog-open>
+                  确认框
+                </button>
+                <button
+                  class="wsk-button wsk-secondary"
+                  type="button"
+                  data-toast="操作已保存，可继续编辑。"
+                >
+                  轻量消息
+                </button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="wsk-section" aria-labelledby="states-title">
+          <div class="wsk-section-head">
+            <h2 id="states-title">系统状态</h2>
+            <span class="wsk-badge">States</span>
+          </div>
+          <div class="wsk-demo-grid wsk-state-grid">
+            <div class="wsk-panel">
+              <p class="wsk-panel-title">进度</p>
+              <div class="wsk-progress-list">
+                <div>
+                  <span>字段映射</span><strong>72%</strong
+                  ><progress max="100" value="72" aria-label="字段映射">
+                    72%
+                  </progress>
+                </div>
+                <div>
+                  <span>质量检查</span><strong>41%</strong
+                  ><progress max="100" value="41" aria-label="质量检查">
+                    41%
+                  </progress>
+                </div>
+              </div>
+            </div>
+            <div class="wsk-panel" aria-busy="true" aria-label="内容加载中">
+              <p class="wsk-panel-title">加载占位</p>
+              <div class="wsk-skeleton-list">
+                <span class="wsk-skeleton wsk-title"></span
+                ><span class="wsk-skeleton"></span
+                ><span class="wsk-skeleton wsk-short"></span>
+              </div>
+            </div>
+            <div class="wsk-empty-state wsk-wide-panel">
+              <span class="wsk-empty-icon"
+                ><svg class="wsk-icon" aria-hidden="true">
+                  <use href="#folder"></use></svg
+              ></span>
+              <h3>暂无待处理申请</h3>
+              <p>新的访问申请会显示在当前列表。</p>
+              <button
+                class="wsk-button wsk-secondary"
+                type="button"
+                data-toast="列表已刷新。"
+              >
+                刷新列表
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <section class="wsk-section" aria-labelledby="table-title">
+          <div class="wsk-section-head">
+            <h2 id="table-title">数据表格</h2>
+            <span class="wsk-badge">Data</span>
+          </div>
+          <div class="wsk-toolbar wsk-mb-3">
+            <div class="wsk-filter">
+              <label class="wsk-sr-only" for="asset-filter">筛选数据资产</label
+              ><input
+                class="wsk-control"
+                id="asset-filter"
+                type="search"
+                placeholder="筛选数据资产"
+              />
+            </div>
+            <div class="wsk-button-row">
+              <span
+                class="wsk-filter-meta"
+                id="selection-result"
+                aria-live="polite"
+                >已选择 0 项</span
+              >
+              <span
+                class="wsk-filter-meta"
+                id="filter-result"
+                aria-live="polite"
+                >4 条记录 · 第 1/2 页</span
+              >
+              <fieldset class="wsk-segmented" data-density>
+                <legend class="wsk-sr-only">表格密度</legend>
+                <label
+                  ><input
+                    type="radio"
+                    name="density"
+                    value="default"
+                    checked
+                  /><span>标准</span></label
+                ><label
+                  ><input type="radio" name="density" value="compact" /><span
+                    >紧凑</span
+                  ></label
+                >
+              </fieldset>
+            </div>
+          </div>
+          <div class="wsk-table-wrap">
+            <table class="wsk-table" id="asset-table" data-density="default">
+              <caption class="wsk-sr-only">
+                数据资产登记状态
+              </caption>
+              <thead>
+                <tr>
+                  <th class="wsk-select-cell" scope="col">
+                    <label class="wsk-sr-only" for="select-all"
+                      >选择全部当前页记录</label
+                    ><input id="select-all" type="checkbox" />
+                  </th>
+                  <th scope="col" aria-sort="none">
+                    <button
+                      class="wsk-sort-button"
+                      type="button"
+                      data-sort="name"
+                    >
+                      资产名称<svg class="wsk-icon" aria-hidden="true">
+                        <use href="#sort"></use>
+                      </svg>
+                    </button>
+                  </th>
+                  <th scope="col" aria-sort="none">
+                    <button
+                      class="wsk-sort-button"
+                      type="button"
+                      data-sort="domain"
+                    >
+                      主题域<svg class="wsk-icon" aria-hidden="true">
+                        <use href="#sort"></use>
+                      </svg>
+                    </button>
+                  </th>
+                  <th scope="col">更新策略</th>
+                  <th scope="col" aria-sort="none">
+                    <button
+                      class="wsk-sort-button"
+                      type="button"
+                      data-sort="owner"
+                    >
+                      负责人<svg class="wsk-icon" aria-hidden="true">
+                        <use href="#sort"></use>
+                      </svg>
+                    </button>
+                  </th>
+                  <th scope="col">状态</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr
+                  data-row
+                  data-name="客户主数据"
+                  data-domain="客户"
+                  data-owner="陈晓"
+                >
+                  <td class="wsk-select-cell">
+                    <label class="wsk-sr-only" for="select-customer"
+                      >选择客户主数据</label
+                    ><input
+                      class="wsk-row-select"
+                      id="select-customer"
+                      type="checkbox"
+                    />
+                  </td>
+                  <th scope="row">客户主数据</th>
+                  <td>客户</td>
+                  <td>CDC 实时</td>
+                  <td>陈晓</td>
+                  <td>
+                    <span class="wsk-badge wsk-success"
+                      ><span class="wsk-dot"></span>已发布</span
+                    >
+                  </td>
+                </tr>
+                <tr
+                  data-row
+                  data-name="交易明细"
+                  data-domain="交易"
+                  data-owner="周明"
+                >
+                  <td class="wsk-select-cell">
+                    <label class="wsk-sr-only" for="select-trade"
+                      >选择交易明细</label
+                    ><input
+                      class="wsk-row-select"
+                      id="select-trade"
+                      type="checkbox"
+                    />
+                  </td>
+                  <th scope="row">交易明细</th>
+                  <td>交易</td>
+                  <td>5 分钟</td>
+                  <td>周明</td>
+                  <td><span class="wsk-badge wsk-accent">审核中</span></td>
+                </tr>
+                <tr
+                  data-row
+                  data-name="库存快照"
+                  data-domain="供应链"
+                  data-owner="林悦"
+                >
+                  <td class="wsk-select-cell">
+                    <label class="wsk-sr-only" for="select-stock"
+                      >选择库存快照</label
+                    ><input
+                      class="wsk-row-select"
+                      id="select-stock"
+                      type="checkbox"
+                    />
+                  </td>
+                  <th scope="row">库存快照</th>
+                  <td>供应链</td>
+                  <td>15 分钟</td>
+                  <td>林悦</td>
+                  <td>
+                    <span class="wsk-badge wsk-success"
+                      ><span class="wsk-dot"></span>已发布</span
+                    >
+                  </td>
+                </tr>
+                <tr
+                  data-row
+                  data-name="经营指标"
+                  data-domain="财务"
+                  data-owner="方程"
+                >
+                  <td class="wsk-select-cell">
+                    <label class="wsk-sr-only" for="select-metric"
+                      >选择经营指标</label
+                    ><input
+                      class="wsk-row-select"
+                      id="select-metric"
+                      type="checkbox"
+                    />
+                  </td>
+                  <th scope="row">经营指标</th>
+                  <td>财务</td>
+                  <td>每日</td>
+                  <td>方程</td>
+                  <td><span class="wsk-badge wsk-warning">待处理</span></td>
+                </tr>
+                <tr id="table-empty" hidden>
+                  <td class="wsk-table-empty" colspan="6">
+                    没有符合条件的数据资产。
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <nav
+            class="wsk-pagination wsk-table-pagination"
+            aria-label="数据表格分页"
+          >
+            <button id="page-prev" type="button" aria-label="上一页">
+              <svg class="wsk-icon" aria-hidden="true">
+                <use href="#chevron-left"></use>
+              </svg></button
+            ><span id="page-numbers"></span
+            ><button id="page-next" type="button" aria-label="下一页">
+              <svg class="wsk-icon" aria-hidden="true">
+                <use href="#chevron-right"></use>
+              </svg>
+            </button>
+          </nav>
+        </section>
+      </div>
+
+      <div class="wsk-page" id="reference-view" data-view="reference" hidden>
+        <div class="wsk-reference-shell">
+          <aside>
+            <nav class="wsk-reference-nav" aria-label="数据中台参考导航">
+              <div class="wsk-reference-brand">
+                <strong>企业数据中台</strong><span>DATA FABRIC</span>
+              </div>
+              <a
+                class="wsk-active"
+                href="#reference-overview"
+                aria-current="location"
+                >总览</a
+              >
+              <a href="#reference-assets">数据目录</a>
+              <a href="#reference-governance">数据治理</a>
+              <a href="#reference-exchange">交换任务</a>
+              <a href="#reference-orchestration">服务编排</a>
+              <a href="#reference-docs">接入规范</a>
+              <a href="#reference-auth">认证入口</a>
+            </nav>
+          </aside>
+
+          <div class="wsk-reference-content">
+            <div class="wsk-page-head" id="reference-overview">
+              <div>
+                <h1 tabindex="-1">企业数据中台</h1>
+                <p>统一沉淀数据资产、服务、规则与运行状态。</p>
+              </div>
+              <span class="wsk-badge wsk-success"
+                ><span class="wsk-dot"></span>统一认证已启用</span
+              >
+            </div>
+
+            <section class="wsk-section" aria-labelledby="reference-metrics">
+              <div class="wsk-section-head">
+                <h2 id="reference-metrics">平台总览</h2>
+                <span class="wsk-badge">近 30 天</span>
+              </div>
+              <div class="wsk-metric-grid">
+                <div class="wsk-metric">
+                  <span>已登记数据资产</span><strong>1,248</strong
+                  ><small>覆盖 18 个业务域</small>
+                </div>
+                <div class="wsk-metric">
+                  <span>数据服务</span><strong>86</strong
+                  ><small>统一目录与权限</small>
+                </div>
+                <div class="wsk-metric">
+                  <span>质量规则</span><strong>312</strong
+                  ><small>自动稽核与追溯</small>
+                </div>
+                <div class="wsk-metric">
+                  <span>服务调用</span><strong>18.6K</strong
+                  ><small>今日业务系统访问</small>
+                </div>
+              </div>
+              <div class="wsk-reference-split wsk-mt-5">
+                <div class="wsk-panel">
+                  <div class="wsk-section-head wsk-compact">
+                    <h3>数据资产概览</h3>
+                    <span class="wsk-badge wsk-success">今日异常 0 项</span>
+                  </div>
+                  <div class="wsk-mini-metric-grid">
+                    <div>
+                      <span>交换批次</span><strong>724</strong
+                      ><small>今日已完成</small>
+                    </div>
+                    <div>
+                      <span>实时通道</span><strong>36</strong
+                      ><small>CDC 运行中</small>
+                    </div>
+                    <div>
+                      <span>数据血缘</span><strong>1,904</strong
+                      ><small>字段级链路</small>
+                    </div>
+                  </div>
+                </div>
+                <div class="wsk-panel">
+                  <h3>平台运行态</h3>
+                  <div class="wsk-status-list wsk-mt-2">
+                    <div>
+                      <span>数据新鲜度<small>按 SLA 达标</small></span
+                      ><strong>96.8%</strong>
+                    </div>
+                    <div>
+                      <span>平均同步延迟<small>实时链路</small></span
+                      ><strong>2.4s</strong>
+                    </div>
+                    <div>
+                      <span>可用性<small>核心服务</small></span
+                      ><strong>99.95%</strong>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section
+              class="wsk-section"
+              id="reference-assets"
+              aria-labelledby="reference-assets-title"
+            >
+              <div class="wsk-section-head">
+                <h2 id="reference-assets-title">数据目录</h2>
+                <span class="wsk-badge wsk-accent">24 小时运行</span>
+              </div>
+              <div class="wsk-table-wrap">
+                <table class="wsk-table">
+                  <caption class="wsk-sr-only">
+                    数据中台资产目录
+                  </caption>
+                  <thead>
+                    <tr>
+                      <th scope="col">主题域</th>
+                      <th scope="col">数据源</th>
+                      <th scope="col">数据量</th>
+                      <th scope="col">同步策略</th>
+                      <th scope="col">状态</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <th scope="row">客户主数据</th>
+                      <td>CRM / 会员中心</td>
+                      <td>18.2M 行</td>
+                      <td>CDC 实时</td>
+                      <td><span class="wsk-badge wsk-success">正常</span></td>
+                    </tr>
+                    <tr>
+                      <th scope="row">交易明细</th>
+                      <td>交易库 / 明细库</td>
+                      <td>42.6M 行</td>
+                      <td>准实时</td>
+                      <td><span class="wsk-badge wsk-success">正常</span></td>
+                    </tr>
+                    <tr>
+                      <th scope="row">库存与供应链</th>
+                      <td>ERP / WMS</td>
+                      <td>7.4M 行</td>
+                      <td>15 分钟</td>
+                      <td><span class="wsk-badge wsk-success">正常</span></td>
+                    </tr>
+                    <tr>
+                      <th scope="row">经营指标</th>
+                      <td>财务 / BI</td>
+                      <td>864 张宽表</td>
+                      <td>小时级</td>
+                      <td><span class="wsk-badge wsk-accent">重要</span></td>
+                    </tr>
+                    <tr>
+                      <th scope="row">风控标签</th>
+                      <td>规则引擎 / 日志</td>
+                      <td>2,318 标签</td>
+                      <td>事件驱动</td>
+                      <td><span class="wsk-badge wsk-warning">敏感</span></td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+
+            <section
+              class="wsk-section"
+              id="reference-governance"
+              aria-labelledby="reference-governance-title"
+            >
+              <div class="wsk-section-head">
+                <h2 id="reference-governance-title">数据治理</h2>
+                <span class="wsk-badge wsk-success">通过率 99.6%</span>
+              </div>
+              <div class="wsk-reference-card-grid">
+                <div class="wsk-panel">
+                  <h3>质量规则</h3>
+                  <p class="wsk-help wsk-mt-2">
+                    完整性、唯一性、及时性和值域范围自动校验。
+                  </p>
+                  <strong class="wsk-card-foot">通过率 99.6%</strong>
+                </div>
+                <div class="wsk-panel">
+                  <h3>血缘追踪</h3>
+                  <p class="wsk-help wsk-mt-2">
+                    表级与字段级链路支持影响分析和变更评审。
+                  </p>
+                  <strong class="wsk-card-foot">1,904 条链路</strong>
+                </div>
+                <div class="wsk-panel">
+                  <h3>分级权限</h3>
+                  <p class="wsk-help wsk-mt-2">
+                    按主题域、敏感等级和组织角色配置访问策略。
+                  </p>
+                  <strong class="wsk-card-foot">18 个业务域覆盖</strong>
+                </div>
+              </div>
+              <div class="wsk-process-grid wsk-mt-5">
+                <div class="wsk-process-step">
+                  <span>01</span>
+                  <h3>规则定义</h3>
+                  <p>配置质量规则、敏感等级和负责人。</p>
+                </div>
+                <div class="wsk-process-step">
+                  <span>02</span>
+                  <h3>自动稽核</h3>
+                  <p>按调度周期执行校验并记录结果。</p>
+                </div>
+                <div class="wsk-process-step">
+                  <span>03</span>
+                  <h3>异常派发</h3>
+                  <p>异常进入责任人待办并保留轨迹。</p>
+                </div>
+                <div class="wsk-process-step">
+                  <span>04</span>
+                  <h3>复核发布</h3>
+                  <p>复核通过后同步目录与服务等级。</p>
+                </div>
+              </div>
+            </section>
+
+            <section
+              class="wsk-section"
+              id="reference-exchange"
+              aria-labelledby="reference-exchange-title"
+            >
+              <div class="wsk-section-head">
+                <h2 id="reference-exchange-title">交换任务</h2>
+                <span class="wsk-badge wsk-success">今日 724 批次</span>
+              </div>
+              <div class="wsk-table-wrap">
+                <table class="wsk-table">
+                  <caption class="wsk-sr-only">
+                    数据交换任务运行状态
+                  </caption>
+                  <thead>
+                    <tr>
+                      <th scope="col">任务名称</th>
+                      <th scope="col">类型</th>
+                      <th scope="col">周期</th>
+                      <th scope="col">最近执行</th>
+                      <th scope="col">处理量</th>
+                      <th scope="col">状态</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <th scope="row">客户画像实时同步</th>
+                      <td>CDC</td>
+                      <td>实时</td>
+                      <td>2 分钟前</td>
+                      <td>184K 行</td>
+                      <td>
+                        <span class="wsk-badge wsk-success"
+                          ><span class="wsk-dot"></span>正常</span
+                        >
+                      </td>
+                    </tr>
+                    <tr>
+                      <th scope="row">交易明细准实时汇聚</th>
+                      <td>流批一体</td>
+                      <td>5 分钟</td>
+                      <td>1 分钟前</td>
+                      <td>426K 行</td>
+                      <td>
+                        <span class="wsk-badge wsk-success"
+                          ><span class="wsk-dot"></span>正常</span
+                        >
+                      </td>
+                    </tr>
+                    <tr>
+                      <th scope="row">库存快照入仓</th>
+                      <td>批处理</td>
+                      <td>15 分钟</td>
+                      <td>8 分钟前</td>
+                      <td>76K 行</td>
+                      <td>
+                        <span class="wsk-badge wsk-success"
+                          ><span class="wsk-dot"></span>正常</span
+                        >
+                      </td>
+                    </tr>
+                    <tr>
+                      <th scope="row">经营指标日结</th>
+                      <td>调度任务</td>
+                      <td>每日</td>
+                      <td>06:10</td>
+                      <td>864 张表</td>
+                      <td>
+                        <span class="wsk-badge wsk-warning">等待下次执行</span>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <div class="wsk-mini-metric-grid wsk-mt-5">
+                <div class="wsk-metric">
+                  <span>实时通道</span><strong>36</strong
+                  ><small>CDC 运行中</small>
+                </div>
+                <div class="wsk-metric">
+                  <span>调度成功率</span><strong>99.8%</strong
+                  ><small>近 24 小时</small>
+                </div>
+                <div class="wsk-metric">
+                  <span>平均同步延迟</span><strong>2.4s</strong
+                  ><small>核心实时链路</small>
+                </div>
+              </div>
+            </section>
+
+            <section
+              class="wsk-section"
+              id="reference-orchestration"
+              aria-labelledby="reference-orchestration-title"
+            >
+              <div class="wsk-section-head">
+                <h2 id="reference-orchestration-title">服务编排</h2>
+                <span class="wsk-badge wsk-accent">86 个服务</span>
+              </div>
+              <div class="wsk-service-grid">
+                <article class="wsk-service-card">
+                  <span>01</span>
+                  <h3>统一查询服务</h3>
+                  <p>为多源异构数据提供统一访问入口，屏蔽底层存储差异。</p>
+                  <strong>面向经营分析</strong>
+                </article>
+                <article class="wsk-service-card">
+                  <span>02</span>
+                  <h3>指标口径服务</h3>
+                  <p>统一计算口径、版本和发布流程，支持指标复用。</p>
+                  <strong>面向管理驾驶舱</strong>
+                </article>
+                <article class="wsk-service-card">
+                  <span>03</span>
+                  <h3>主题数据服务</h3>
+                  <p>围绕客户、交易、库存等主题封装标准数据接口。</p>
+                  <strong>面向业务系统</strong>
+                </article>
+                <article class="wsk-service-card">
+                  <span>04</span>
+                  <h3>权限审计服务</h3>
+                  <p>记录访问申请、授权、调用和导出行为。</p>
+                  <strong>面向安全合规</strong>
+                </article>
+              </div>
+              <div class="wsk-panel wsk-mt-5">
+                <p class="wsk-panel-title">编排能力</p>
+                <div class="wsk-capability-list">
+                  <span>服务版本管理</span><span>访问策略配置</span
+                  ><span>流量与调用审计</span><span>跨域查询编排</span
+                  ><span>指标口径复用</span><span>数据产品发布</span>
+                </div>
+              </div>
+            </section>
+
+            <section
+              class="wsk-section"
+              id="reference-docs"
+              aria-labelledby="reference-docs-title"
+            >
+              <div class="wsk-section-head">
+                <h2 id="reference-docs-title">接入规范</h2>
+                <span class="wsk-badge">SQL / CDC / API</span>
+              </div>
+              <div class="wsk-reference-split wsk-docs-split">
+                <pre
+                  class="wsk-code-panel"
+                ><code>SELECT customer_id, risk_level, updated_at
+FROM fabric.customer_profile
+WHERE biz_date = CURRENT_DATE
+  AND data_quality_status = 'PASS';</code></pre>
+                <div class="wsk-panel">
+                  <p class="wsk-panel-title">最近任务</p>
+                  <h3>接入流程状态</h3>
+                  <p class="wsk-success-text wsk-mt-2">暂无异常任务</p>
+                  <p class="wsk-help wsk-mt-2">最近校验：10 分钟前</p>
+                </div>
+              </div>
+              <div class="wsk-process-grid wsk-mt-5">
+                <div class="wsk-process-step">
+                  <span>01</span>
+                  <h3>提交申请</h3>
+                  <p>说明业务场景、数据范围和使用周期。</p>
+                </div>
+                <div class="wsk-process-step">
+                  <span>02</span>
+                  <h3>权限评审</h3>
+                  <p>按主题域负责人和数据等级完成审批。</p>
+                </div>
+                <div class="wsk-process-step">
+                  <span>03</span>
+                  <h3>联调验证</h3>
+                  <p>验证字段映射、质量规则和同步策略。</p>
+                </div>
+                <div class="wsk-process-step">
+                  <span>04</span>
+                  <h3>上线运行</h3>
+                  <p>接入监控、审计和变更管理流程。</p>
+                </div>
+              </div>
+            </section>
+
+            <section
+              class="wsk-section"
+              id="reference-auth"
+              aria-labelledby="reference-auth-title"
+            >
+              <div class="wsk-section-head">
+                <h2 id="reference-auth-title">认证入口</h2>
+                <span class="wsk-badge wsk-success">统一身份认证</span>
+              </div>
+              <div class="wsk-auth-grid">
+                <form class="wsk-auth-card" id="reference-login">
+                  <p class="wsk-panel-title">DATA FABRIC</p>
+                  <h3>数据中台登录</h3>
+                  <p class="wsk-help wsk-mt-2">
+                    使用组织账号访问数据目录、逻辑数据仓库与数据服务。
+                  </p>
+                  <div class="wsk-field wsk-mt-5">
+                    <label class="wsk-label" for="reference-email">邮箱</label
+                    ><input
+                      class="wsk-control"
+                      id="reference-email"
+                      type="email"
+                      autocomplete="email"
+                      placeholder="name@example.com"
+                      required
+                    />
+                  </div>
+                  <div class="wsk-field wsk-mt-5">
+                    <label class="wsk-label" for="reference-password"
+                      >密码</label
+                    ><input
+                      class="wsk-control"
+                      id="reference-password"
+                      type="password"
+                      autocomplete="current-password"
+                      placeholder="请输入密码"
+                      required
+                    />
+                  </div>
+                  <button class="wsk-button wsk-auth-submit" type="submit">
+                    登录工作台
+                  </button>
+                </form>
+                <div class="wsk-auth-card wsk-register-card">
+                  <p class="wsk-panel-title">ACCOUNT REQUEST</p>
+                  <h3>申请数据中台账号</h3>
+                  <p class="wsk-help wsk-mt-2">
+                    提交组织邮箱后，可按权限访问数据目录、数据治理与服务编排。
+                  </p>
+                  <div class="wsk-alert wsk-warning wsk-mt-5">
+                    <svg class="wsk-icon" aria-hidden="true">
+                      <use href="#warning"></use>
+                    </svg>
+                    <div>
+                      <strong>当前暂未开放注册</strong>
+                      <p>请联系管理员开通账号。</p>
+                    </div>
+                  </div>
+                  <button
+                    class="wsk-button wsk-secondary wsk-auth-submit"
+                    type="button"
+                    data-toast="账号申请入口暂未开放。"
+                    data-toast-variant="warning"
+                  >
+                    提交账号申请
+                  </button>
+                </div>
+              </div>
+            </section>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <dialog
+      class="wsk-dialog"
+      id="confirm-dialog"
+      aria-labelledby="dialog-title"
+    >
+      <div class="wsk-dialog-head">
+        <h2 id="dialog-title">确认操作</h2>
+        <button
+          class="wsk-icon-button"
+          type="button"
+          data-dialog-close
+          aria-label="关闭"
+          title="关闭"
+        >
+          <svg class="wsk-icon" aria-hidden="true"><use href="#x"></use></svg>
+        </button>
+      </div>
+      <div class="wsk-dialog-body">确认后将进入下一处理状态。</div>
+      <div class="wsk-dialog-foot">
+        <button
+          class="wsk-button wsk-secondary"
+          type="button"
+          data-dialog-close
+        >
+          取消</button
+        ><button
+          class="wsk-button"
+          type="button"
+          data-dialog-close
+          data-toast="操作已确认。"
+        >
+          确认
+        </button>
+      </div>
+    </dialog>
+
+    <div
+      class="wsk-toast-region"
+      id="toast-region"
+      aria-live="polite"
+      aria-atomic="true"
+    ></div>
+  </body>
+</html>
