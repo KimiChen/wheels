@@ -12,6 +12,8 @@ use crate::domain::revision::{ArtifactMeta, ConfigRevision};
 use crate::error::{AppError, ErrorCode, Result};
 use crate::store::{now_unix, snapshot, topology};
 
+const COMPILER_SCHEMA_VERSION: u32 = 2;
+
 // ---------- revision ----------
 
 fn row_to_revision(r: &sqlx::sqlite::SqliteRow) -> ConfigRevision {
@@ -312,6 +314,7 @@ fn topology_descriptor(
         })
         .collect();
     let mut desc = json!({
+        "compiler_schema_version": COMPILER_SCHEMA_VERSION,
         "entry": {
             "id": snap.entry.id, "host": snap.entry.host_id, "addr": snap.entry.public_address,
             "inbound_kind": snap.entry.inbound_kind, "ss_method": snap.entry.ss_method,
