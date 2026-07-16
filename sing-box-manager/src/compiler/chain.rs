@@ -36,15 +36,18 @@ pub(crate) fn build_chain(
             let psk = secrets.node_psk.get(&node.id).ok_or_else(|| {
                 AppError::new(ErrorCode::Internal, format!("缺 node_psk: {}", node.id))
             })?;
-            outbounds.push(json!({
+            let mut outbound = json!({
                 "type": "shadowsocks",
                 "tag": t,
                 "server": node.data_address,
                 "server_port": NODE_PORT,
                 "method": NODE_SS_METHOD,
                 "password": psk,
-                "detour": prev_tag,
-            }));
+            });
+            if prev_tag != "direct" {
+                outbound["detour"] = json!(prev_tag);
+            }
+            outbounds.push(outbound);
             made.insert(key, t.clone());
             t
         };

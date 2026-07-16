@@ -195,9 +195,9 @@ mod tests {
             .insert("home".into(), ("u".into(), "p".into()));
         let cfg = compile_entry(&snap, &sec, &no_ids()).unwrap();
         let obs = cfg["outbounds"].as_array().unwrap();
-        // 链：out-n1-via-e1 (detour direct), out-n2-via-n1, out-socks-home-via-n2
+        // 链：第一跳直接拨号，后续出站通过前一跳 detour。
         let find = |tag: &str| obs.iter().find(|o| o["tag"] == tag).unwrap();
-        assert_eq!(find("out-n1-via-e1")["detour"], "direct");
+        assert!(find("out-n1-via-e1").get("detour").is_none());
         assert_eq!(find("out-n1-via-e1")["server"], "n1.example.com");
         assert_eq!(find("out-n2-via-n1")["detour"], "out-n1-via-e1");
         let socks = find("out-socks-home-via-n2");
