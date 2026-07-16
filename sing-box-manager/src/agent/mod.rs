@@ -22,6 +22,7 @@ use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
+use self::runtime::{Health, Runtime};
 use crate::pki::enrollment::EnrollmentPackage;
 use crate::store::now_unix;
 
@@ -42,8 +43,9 @@ pub async fn run() -> anyhow::Result<()> {
 
     let state_pool = state::open(&cfg.state_path).await?;
     let tls_config = Arc::new(tls::server_config(&pkg)?);
-    let runtime: Arc<dyn runtime::Runtime> =
-        Arc::new(runtime::ProcessRuntime::new(cfg.ssm_address.clone()));
+    let process_runtime = Arc::new(runtime::ProcessRuntime::new(cfg.ssm_address.clone()));
+    restore_active_runtime(&state_pool, process_runtime.as_ref(), &cfg.config_dir).await?;
+    let runtime: Arc<dyn runtime::Runtime> = process_runtime;
     let ssm: Arc<dyn ssm::SsmClient> = Arc::new(ssm::HttpSsmClient::new(&cfg.ssm_address));
     let gate: Arc<dyn gate::DrainWaitGate> = Arc::new(gate::SsmDrainGate::default());
     let router = api::router(api::AgentState {
@@ -91,6 +93,69 @@ pub async fn run() -> anyhow::Result<()> {
     state_pool.close().await;
     tracing::info!("agent 已停止");
     Ok(())
+}
+
+async fn restore_active_runtime(
+    pool: &sqlx::SqlitePool,
+    runtime: &dyn Runtime,
+    config_dir: &str,
+) -> anyhow::Result<()> {
+    let Some(revision) = state::active_revision(pool).await? else {
+        return Ok(());
+    };
+    let epoch = state::current_epoch(pool)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("active revision {revision} 缺少 runtime epoch"))?;
+    let live = format!("{config_dir}/config.json");
+    if !std::path::Path::new(&live).is_file() {
+        anyhow::bail!("active revision {revision} 的 live 配置不存在: {live}");
+    }
+
+    runtime.restart(&live, epoch).await?;
+    match runtime.health_check().await? {
+        Health::Ok => {
+            tracing::info!(revision, epoch, "已恢复 active sing-box 运行态");
+            Ok(())
+        }
+        Health::Down(detail) => {
+            anyhow::bail!("恢复 active revision {revision} 失败: {detail}")
+        }
+    }
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+    use crate::agent::runtime::MockRuntime;
+
+    #[tokio::test]
+    async fn restores_active_revision_before_serving() {
+        let dir = std::env::temp_dir().join(format!("sbm-agent-restore-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let live = dir.join("config.json");
+        std::fs::write(&live, b"{}").unwrap();
+        let db = dir.join("agent.db");
+        let pool = state::open(&db.to_string_lossy()).await.unwrap();
+        state::record_applied(&pool, 7, "sha", &live.to_string_lossy(), "entry", 11)
+            .await
+            .unwrap();
+
+        let runtime = MockRuntime::default();
+        runtime.push_health(Health::Ok);
+        restore_active_runtime(&pool, &runtime, &dir.to_string_lossy())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            runtime.call_log(),
+            vec![
+                format!("restart:epoch=11:{}", live.to_string_lossy()),
+                "health".into(),
+            ]
+        );
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
 
 #[cfg(test)]
