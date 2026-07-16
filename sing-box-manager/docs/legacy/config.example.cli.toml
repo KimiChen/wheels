@@ -1,0 +1,96 @@
+# sing-box-manager 配置示例。复制为 config.toml 后填入真实值。
+# 密钥（PSK/UUID/订阅令牌）由工具自动生成并持久化到 secrets.toml，不写在这里。
+# 配置结构已按 sing-box 1.13.14 验证。
+
+[service]
+listen        = "127.0.0.1:9736"       # 管理节点订阅 HTTP（前置 caddy/nginx 做 TLS）
+public_host   = "sub.example.com"       # 客户端连接的入口节点地址，写进 ss:// / vless://
+sub_base_url  = "https://sub.example.com/sub"
+poll_interval = "30s"
+reset_day     = 1                        # 月度：每月几号；年度：每年 1 月几号（UTC）
+db_path       = "/var/lib/sing-box-manager/state.db"
+
+[singbox]
+config_out      = "/etc/sing-box/config.json"
+entry_port      = 19736                  # 所有用户、所有出口共用的唯一客户端入口端口
+relay_port      = 9736                    # SS 终端节点监听端口；省略时默认为 9736
+relay_method    = "2022-blake3-aes-128-gcm"
+
+# 入口节点协议（客户端 → Entry）。二选一，决定用户管理路径：
+#   "shadowsocks"   : SS-2022 + SSM，权限/停用变化零 reload（推荐）
+#   "vless-reality" : 抗封锁最强，但身份变化必须 reload（先快照后重载）
+[singbox.inbound]
+type = "shadowsocks"
+# type = "shadowsocks" 时：
+method = "2022-blake3-aes-128-gcm"
+# type = "vless-reality" 时改用下面几项（并把 backend.mode 设为 "reload"）：
+# reality_handshake      = "www.microsoft.com"
+# reality_handshake_port = 443
+# utls_fingerprint       = "chrome"
+# reality 私钥/公钥/short_id 由工具生成托管
+
+[backend]
+mode       = "ssm"                       # Shadowsocks 使用 "ssm"；VLESS-Reality 改为 "reload"
+ssm_base   = "http://127.0.0.1:8081"     # 入口节点 ssm-api；同机部署时使用回环地址
+stats_grpc = "http://127.0.0.1:8082"     # reload 模式：须与 service.listen 使用不同端口
+# reload_cmd = "systemctl reload sing-box"   # reload 模式必须设置，并保证服务用户具备执行权限
+
+# ── 数据面节点：入口 Entry + 终端 Node（IP/域名；密钥由工具托管）──
+[nodes]
+entry      = "203.0.113.1"
+dmithk     = "203.0.113.2"
+dmitjp     = "203.0.113.3"
+dmitus     = "203.0.113.4"
+homehk1    = "203.0.113.5"
+homejp1    = "203.0.113.6"
+homejp2    = "203.0.113.7"
+homejp3    = "203.0.113.8"
+homeusOracle = "203.0.113.9"
+homeusVircs  = "203.0.113.10"
+homeus3    = "203.0.113.11"
+
+# 可选：把指定节点改为带认证的 SOCKS5 终端出口。
+# 未声明的终端节点仍按 SS-2022 配置生成；SOCKS5 终端不会生成 nodes/<节点>.json。
+# 实际 config.toml 已被 .gitignore 排除，但仍应 chmod 600，避免泄露外部代理凭据。
+[socks5_exits.homejp1]
+port     = 1080
+username = "CHANGE_ME"
+password = "CHANGE_ME"
+network  = "tcp"                       # 可省略（默认 TCP+UDP）；或明确为 tcp / udp
+
+# ── 显式链路（唯一权威，决定每个出口的 VPS 连接顺序）──────────────
+# <出口> = [上一跳, 上上跳, …, Entry]；空数组 = 出口在入口节点自身（direct）。
+# 例：homejp1 = ["dmitjp","dmithk","entry"] → 客户端→entry→dmithk→dmitjp→SOCKS5(homejp1)
+# 同一节点可在不同出口里走不同上游（如 dmitjp 作出口时直连、作家宽父级时经 dmithk），
+# 工具按 (节点,父节点) 去重，会为其生成两条独立 detour 链——这是预期行为。
+[exits]
+entry      = []
+dmithk     = ["entry"]
+dmitjp     = ["entry"]
+dmitus     = ["entry"]
+homehk1    = ["dmithk", "entry"]
+homejp1    = ["dmitjp", "dmithk", "entry"]
+homejp2    = ["dmitjp", "dmithk", "entry"]
+homejp3    = ["dmitjp", "dmithk", "entry"]
+homeusOracle = ["dmitus", "dmithk", "entry"]
+homeusVircs  = ["dmitus", "dmithk", "entry"]
+homeus3    = ["dmitus", "dmithk", "entry"]
+
+# ── 用户：流量配额 + 重置周期 + 有效期 + 授权出口(ACL)──────────
+[users.kimi]
+quota  = "100G"
+reset  = "monthly"                     # monthly | yearly | never；省略时为 monthly
+expire = "2027-12-11"
+exits  = ["entry", "dmithk", "dmitus", "dmitjp", "homejp1", "homeusOracle"]
+
+[users.cornor]
+quota  = "500G"
+reset  = "yearly"
+expire = "2027-02-21"
+exits  = ["homehk1", "homejp2", "homeusVircs"]
+
+[users.bruce]
+quota  = "200G"
+reset  = "never"
+expire = "2027-05-01"
+exits  = ["entry", "dmitus", "homejp3", "homeus3"]

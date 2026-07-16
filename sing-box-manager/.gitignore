@@ -1,0 +1,25 @@
+# 构建产物
+/target
+
+# 生成配置和运行状态（包含密钥与用量）
+/generated
+/config.toml
+**/secrets.toml
+*.db
+*.db-wal
+*.db-shm
+ssm-cache.json
+
+# 平台化：密钥、证书、Agent enrollment 包、本地状态（严禁提交公开 Git）
+.env
+*.pem
+*.key
+*.enroll.json
+**/enrollment/
+agent-state.db*
+
+# 编辑器与操作系统文件
+.DS_Store
+*.swp
+/.idea
+/.vscode

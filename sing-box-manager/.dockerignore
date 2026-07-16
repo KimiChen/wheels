@@ -1,0 +1,6 @@
+target
+generated
+*.db
+**/secrets.toml
+config.toml
+.git

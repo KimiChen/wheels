@@ -1,0 +1,68 @@
+[package]
+name = "sing-box-manager"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT"
+description = "面向 sing-box 多跳中继的轻量按用户计量与订阅服务"
+repository = "https://github.com/KimiChen/wheels/tree/main/sing-box-manager"
+readme = "README.md"
+keywords = ["sing-box", "shadowsocks", "vless", "subscription", "proxy"]
+categories = ["command-line-utilities", "network-programming"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"                                   # 生成 sing-box 配置
+toml = "0.8"                                        # 解析配置与密钥文件
+indexmap = { version = "2", features = ["serde"] } # 保持节点、出口和用户顺序，确保生成结果稳定
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+thiserror = "2"
+base64 = "0.22"                                     # PSK 编码
+rand = "0.8"                                        # PSK 与其他密钥材料
+uuid = { version = "1", features = ["v4"] }         # 预生成 VLESS UUID
+time = { version = "0.3", features = ["macros", "parsing"] }  # 用户有效期
+# SSM API 客户端
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "signal", "net", "fs", "process"] }
+# mTLS：把 pki 模块预构建的 ring ClientConfig 交给 reqwest（use_preconfigured_tls）；
+# 用 -no-provider 变体避免拉入 aws-lc-rs，全栈单一 ring provider。
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-manual-roots-no-provider"] }
+async-trait = "0.1"
+# 计量存储
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
+# 订阅接口
+axum = "0.8"
+percent-encoding = "2"
+qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
+# 配置重载与优雅停机
+arc-swap = "1"
+notify = "6"
+tokio-util = "0.7"
+# VLESS reload 后端：手写 prost 的 v2ray_api gRPC 统计客户端，无需 protoc/build.rs
+tonic = "0.14"
+tonic-prost = "0.14"
+prost = "0.14"
+# 平台化基础（Phase 0）：信封加密 + 结构化日志
+chacha20poly1305 = "0.10"                          # 密钥信封加密（XChaCha20-Poly1305）
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Phase 1：Host/Agent mTLS PKI（全栈单一 ring provider，无 aws-lc-rs/cmake/nasm）
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls-pemfile = "2"                               # PEM <-> DER（信封解密后的证书/私钥）
+rustls-pki-types = { version = "1", features = ["std"] }
+# 生成双 CA 与叶证书；x509-parser 特性用于从存库 PEM 重建签发者（from_ca_cert_pem）
+rcgen = { version = "0.13", default-features = false, features = ["ring", "pem", "crypto", "x509-parser"] }
+x509-parser = "0.16"                               # verifier 内做 EKU/SAN/有效期结构化断言
+sha2 = "0.10"                                      # SPKI 指纹、请求哈希
+hyper-util = { version = "0.1.20", features = ["server", "server-auto", "http1", "http2", "tokio", "service"] }
+zeroize = "1"                                      # 解封后的 PSK/明文尽早清零（defense-in-depth）
+# Phase 6：管理员密码哈希（Argon2id）
+argon2 = "0.5"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }   # 测试：Router::oneshot 直接打请求，无需 TLS
+
+[profile.release]
+lto = "thin"
+strip = true
