@@ -129,7 +129,7 @@ pub struct RustlsAgentClient {
     agent_ca_pem: String,
     manager_cert_pem: String,
     manager_key_pem: String,
-    timeout: Duration,
+    request_timeout: Duration,
     clients: tokio::sync::Mutex<HashMap<String, reqwest::Client>>,
 }
 
@@ -139,7 +139,7 @@ impl RustlsAgentClient {
             agent_ca_pem,
             manager_cert_pem,
             manager_key_pem,
-            timeout: Duration::from_secs(5),
+            request_timeout: Duration::from_secs(30),
             clients: tokio::sync::Mutex::new(HashMap::new()),
         }
     }
@@ -157,8 +157,8 @@ impl RustlsAgentClient {
         )?;
         let client = reqwest::Client::builder()
             .use_preconfigured_tls(cfg)
-            .timeout(self.timeout)
-            .connect_timeout(self.timeout)
+            .timeout(self.request_timeout)
+            .connect_timeout(Duration::from_secs(5))
             .build()
             .map_err(|e| AppError::new(ErrorCode::Agent, format!("构建 HTTP 客户端失败: {e}")))?;
         guard.insert(host_id.to_string(), client.clone());
