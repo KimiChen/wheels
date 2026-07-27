@@ -1,0 +1,19 @@
+# 用户可用线路独立于拓扑定义。凭据和订阅 token 首次 apply 时生成并加密入库。
+
+[[users]]
+name = "userA"
+enabled = true
+relays = [
+  "entry-a-hk",
+  "entry-a-jp",
+  "entry-a-us",
+]
+
+[[users]]
+name = "userB"
+enabled = true
+relays = [
+  "entry-a-hk",
+  "entry-a-jp",
+  "entry-a-us",
+]

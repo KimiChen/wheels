@@ -1,0 +1,15 @@
+target
+generated
+*.db
+*.db-wal
+*.db-shm
+**/secrets.toml
+config.toml
+config/*.toml
+!config/example.*.toml
+.env
+*.pem
+*.key
+*.enroll.json
+**/enrollment/
+.git

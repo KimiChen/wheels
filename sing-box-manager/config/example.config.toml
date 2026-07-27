@@ -1,0 +1,20 @@
+# 声明式配置入口。复制为 config.toml 后使用。
+formatVersion = 1
+
+includes = [
+  "servers.toml",
+  "protocols.toml",
+  "listeners.toml",
+  "relays.toml",
+  "users.toml",
+]
+
+# 可选：不填则使用 ssh-agent、~/.ssh/config 与默认密钥。
+sshKey = "~/.ssh/id_ed25519"
+knownHosts = "~/.ssh/known_hosts"
+
+# 节点之间的固定 Shadowsocks-2022 中继端口。
+nodePort = 29736
+
+# 编译和远端检查使用的 sing-box 版本；升级须先 plan/check。
+singboxVersion = "1.13.14"

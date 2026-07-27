@@ -1,0 +1,17 @@
+# SSH 端点用于装机；address 是 sing-box 数据面连接地址，两者可以不同。
+
+[servers.entryA]
+ssh = "ssh://root@entry-a.example.com"
+address = "entry-a.example.com"
+
+[servers.relayHk]
+ssh = "ssh://root@relay-hk.example.com"
+address = "relay-hk.example.com"
+
+[servers.exitJp]
+ssh = "ssh://root@exit-jp.example.com"
+address = "exit-jp.example.com"
+
+[servers.exitUs]
+ssh = "ssh://root@exit-us.example.com"
+address = "exit-us.example.com"

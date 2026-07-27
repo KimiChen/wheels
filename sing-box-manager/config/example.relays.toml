@@ -1,0 +1,16 @@
+# chain 只包含 Entry 之后的节点，最后一项是最终出口。
+
+[[relays]]
+name = "entry-a-hk"
+listener = "entry-a-ss"
+chain = ["relayHk"]
+
+[[relays]]
+name = "entry-a-jp"
+listener = "entry-a-ss"
+chain = ["relayHk", "exitJp"]
+
+[[relays]]
+name = "entry-a-us"
+listener = "entry-a-ss"
+chain = ["relayHk", "exitUs"]

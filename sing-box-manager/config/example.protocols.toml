@@ -1,0 +1,15 @@
+# Shadowsocks-2022 模板。auto 按 listener/Node 的逻辑资源分别生成稳定密钥。
+[protocols.shadowsocks]
+method = "2022-blake3-aes-128-gcm"
+serverKey = "auto"
+managed = true
+
+# VLESS-Reality 目标模板。当前 apply 只预生成独立用户 UUID；
+# privateKey/shortId 将在 VLESS 编译器接入后按 listener 生成。
+[protocols.vless]
+flow = "xtls-rprx-vision"
+privateKey = "auto"
+shortId = "auto"
+serverName = "itunes.apple.com"
+handshakeServer = "itunes.apple.com"
+handshakePort = 443

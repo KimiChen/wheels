@@ -1,0 +1,8 @@
+# 相同 server/protocol/port 只声明一个 listener，多线路通过身份路由。
+
+[[listeners]]
+name = "entry-a-ss"
+server = "entryA"
+protocol = "shadowsocks"
+bind = "::"
+port = 19736
