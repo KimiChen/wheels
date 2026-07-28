@@ -121,8 +121,6 @@ migrations/agent_0001.sql ...   Agent
 4. 增加迁移幂等、外键和新列测试。
 5. 更新故障恢复和升级文档。
 
-Docker 构建必须复制 `migrations/`，否则 `include_str!` 在构建阶段失败。
-
 ## 密钥相关修改
 
 任何新增秘密字段都需要回答：
@@ -178,7 +176,7 @@ git diff --cached | rg \
 4. 运行格式、check、完整测试和 ignored mTLS 测试。
 5. 使用目标 sing-box 版本跑真实 check。
 6. 用公开 `example.*.toml` 运行 plan 和两次 apply 幂等检查。
-7. 构建 release 二进制和 Docker 镜像。
+7. 构建 release 二进制。
 8. 扫描秘密、真实地址和未跟踪生成物。
 9. 从远端基线检查最终提交范围。
 10. 创建签名 tag 和发布说明；推送前再次人工复核。

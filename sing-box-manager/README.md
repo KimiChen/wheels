@@ -126,8 +126,8 @@ export ENCRYPTION_MASTER_KEY_VERSION=1
 export MANAGER_LISTEN=127.0.0.1:9736
 ```
 
-主密钥不能丢失，也不能写入 Git。项目不自动读取 `.env`；如使用 `.env`，请由 systemd、
-容器编排器或 shell 显式加载。可参考 [.env.example](.env.example)。
+主密钥不能丢失，也不能写入 Git。项目不自动读取 `.env`；如使用 `.env`，请由 systemd
+或 shell 显式加载。可参考 [.env.example](.env.example)。
 
 ### 4. 首次同步
 
@@ -228,17 +228,6 @@ http://127.0.0.1:9736/sub/<一次性保存的 token>
 
 订阅 token 等价于代理凭据。公网提供订阅时必须使用 TLS 反向代理，并限制日志、缓存和
 Referer 泄露。
-
-## 容器构建
-
-```bash
-docker build -t sing-box-manager:0.1.0 .
-docker run --rm sing-box-manager:0.1.0 --help
-```
-
-镜像只包含 `sing-box-manager`，不包含 sing-box。若在容器内执行 `apply --deploy` 或运行
-Agent，需要额外提供 sing-box 二进制、持久化状态目录、配置和证书。生产环境更推荐使用
-systemd 管理 Controller 和 Agent，并由 Agent 管理 sing-box 子进程。
 
 ## 文档
 
