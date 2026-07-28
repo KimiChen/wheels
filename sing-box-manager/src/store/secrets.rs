@@ -126,6 +126,8 @@ pub struct SecretBundle {
     pub entry_psk: HashMap<String, String>,
     pub node_psk: HashMap<String, String>,
     pub landing_auth: HashMap<String, (String, String)>,
+    pub reality: HashMap<String, crate::store::reality::RealitySecret>,
+    pub vless_uuid: HashMap<String, String>,
 }
 
 impl Drop for SecretBundle {
@@ -139,6 +141,9 @@ impl Drop for SecretBundle {
         for (u, p) in self.landing_auth.values_mut() {
             u.zeroize();
             p.zeroize();
+        }
+        for v in self.vless_uuid.values_mut() {
+            v.zeroize();
         }
     }
 }

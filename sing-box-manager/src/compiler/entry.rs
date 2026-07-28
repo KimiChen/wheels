@@ -1,5 +1,5 @@
-//! Entry 配置组装：单 managed SS-2022 inbound :19736 + 各 Route 的 detour 出站链 + auth_user 规则
-//! + block 兜底 + ssm-api service + DNS bootstrap（**不带 detour**）。忠实移植 legacy 结构。
+//! Entry 配置组装：managed SS-2022 或 VLESS-Reality inbound :19736 + Route 出站链 +
+//! auth_user 规则 + block 兜底 + DNS bootstrap。SS Entry 额外启用 ssm-api。
 
 use std::collections::HashMap;
 
@@ -17,20 +17,6 @@ pub fn compile_entry(
     secrets: &SecretBundle,
     identities: &HashMap<String, Vec<String>>,
 ) -> Result<Value> {
-    if snap.entry.inbound_kind == "vless-reality" {
-        return Err(AppError::new(
-            ErrorCode::Validation,
-            "Phase 2 不支持 vless-reality Entry（留 Phase 7）",
-        ));
-    }
-    let entry_psk = secrets.entry_psk.get(&snap.entry.id).ok_or_else(|| {
-        AppError::new(
-            ErrorCode::Internal,
-            format!("缺 entry_psk: {}", snap.entry.id),
-        )
-    })?;
-    let method = snap.entry.ss_method.as_deref().unwrap_or(NODE_SS_METHOD);
-
     // Route 按 label 升序，确保确定性与稳定 dedup。
     let mut routes: Vec<&crate::compiler::RouteSnapshot> = snap.routes.iter().collect();
     routes.sort_by(|a, b| a.route.label.cmp(&b.route.label));
@@ -44,15 +30,85 @@ pub fn compile_entry(
     }
     outbounds.push(json!({"type": "block", "tag": "block"})); // fail-closed 兜底
 
-    let inbound = json!({
-        "type": "shadowsocks",
-        "tag": "in-shared",
-        "listen": "::",
-        "listen_port": ENTRY_PORT,
-        "method": method,
-        "password": entry_psk,
-        "managed": true,
-    });
+    let (inbound, services) = if snap.entry.inbound_kind == "vless-reality" {
+        let reality = snap
+            .reality
+            .as_ref()
+            .ok_or_else(|| AppError::new(ErrorCode::Internal, "VLESS Entry 缺 Reality 公共配置"))?;
+        let reality_secret = secrets.reality.get(&snap.entry.id).ok_or_else(|| {
+            AppError::new(
+                ErrorCode::Internal,
+                format!("缺 Reality 密钥: {}", snap.entry.id),
+            )
+        })?;
+        let mut users = Vec::new();
+        for rs in &routes {
+            let mut names = identities.get(&rs.route.id).cloned().unwrap_or_default();
+            names.sort();
+            for name in names {
+                let uuid = secrets.vless_uuid.get(&name).ok_or_else(|| {
+                    AppError::new(ErrorCode::Internal, format!("缺 VLESS UUID: {name}"))
+                })?;
+                uuid::Uuid::parse_str(uuid).map_err(|_| {
+                    AppError::new(ErrorCode::Validation, format!("VLESS UUID 非法: {name}"))
+                })?;
+                users.push(json!({
+                    "name": name,
+                    "uuid": uuid,
+                    "flow": reality.flow,
+                }));
+            }
+        }
+        (
+            json!({
+                "type": "vless",
+                "tag": "in-shared",
+                "listen": "::",
+                "listen_port": ENTRY_PORT,
+                "users": users,
+                "tls": {
+                    "enabled": true,
+                    "server_name": reality.server_name,
+                    "reality": {
+                        "enabled": true,
+                        "handshake": {
+                            "server": reality.handshake_server,
+                            "server_port": reality.handshake_port,
+                        },
+                        "private_key": reality_secret.private_key,
+                        "short_id": [reality_secret.short_id],
+                    },
+                },
+            }),
+            None,
+        )
+    } else {
+        let entry_psk = secrets.entry_psk.get(&snap.entry.id).ok_or_else(|| {
+            AppError::new(
+                ErrorCode::Internal,
+                format!("缺 entry_psk: {}", snap.entry.id),
+            )
+        })?;
+        let method = snap.entry.ss_method.as_deref().unwrap_or(NODE_SS_METHOD);
+        (
+            json!({
+                "type": "shadowsocks",
+                "tag": "in-shared",
+                "listen": "::",
+                "listen_port": ENTRY_PORT,
+                "method": method,
+                "password": entry_psk,
+                "managed": true,
+            }),
+            Some(json!([{
+                "type": "ssm-api",
+                "listen": "127.0.0.1",
+                "listen_port": SSM_PORT,
+                "servers": {"/in-shared": "in-shared"},
+                "cache_path": SSM_CACHE_PATH,
+            }])),
+        )
+    };
 
     let mut rules: Vec<Value> = vec![json!({"action": "sniff"})];
     for rs in &routes {
@@ -70,7 +126,7 @@ pub fn compile_entry(
         }));
     }
 
-    Ok(json!({
+    let mut config = json!({
         "log": {"level": "info", "timestamp": true},
         // DNS bootstrap 绝不带 detour（带 detour:direct 运行期 FATAL；check 放行故靠此硬不变量 + 单测断言）。
         "dns": {
@@ -81,14 +137,11 @@ pub fn compile_entry(
         "inbounds": [inbound],
         "outbounds": outbounds,
         "route": {"rules": rules, "final": "block"},
-        "services": [{
-            "type": "ssm-api",
-            "listen": "127.0.0.1",
-            "listen_port": SSM_PORT,
-            "servers": {"/in-shared": "in-shared"},
-            "cache_path": SSM_CACHE_PATH,
-        }],
-    }))
+    });
+    if let Some(services) = services {
+        config["services"] = services;
+    }
+    Ok(config)
 }
 
 #[cfg(test)]
@@ -146,6 +199,7 @@ mod tests {
     fn manage_direct_golden() {
         let snap = EntrySnapshot {
             entry: entry("e1", true),
+            reality: None,
             routes: vec![RouteSnapshot {
                 route: route("r-direct", "manage-direct", "entry_direct"),
                 hops: vec![],
@@ -184,6 +238,7 @@ mod tests {
         r.exit_landing_id = Some("home".into());
         let snap = EntrySnapshot {
             entry: entry("e1", false),
+            reality: None,
             routes: vec![RouteSnapshot {
                 route: r,
                 hops: vec![node("n1"), node("n2")],
@@ -217,6 +272,7 @@ mod tests {
         r2.exit_node_id = Some("n2".into());
         let snap = EntrySnapshot {
             entry: entry("e1", false),
+            reality: None,
             routes: vec![
                 RouteSnapshot {
                     route: r1,
@@ -251,6 +307,7 @@ mod tests {
         r.exit_kind = "entry_direct".into();
         let snap = EntrySnapshot {
             entry: entry("e1", true),
+            reality: None,
             routes: vec![RouteSnapshot {
                 route: r,
                 hops: vec![],
@@ -274,13 +331,49 @@ mod tests {
     }
 
     #[test]
-    fn vless_entry_unsupported() {
+    fn vless_reality_golden() {
         let mut e = entry("e1", true);
         e.inbound_kind = "vless-reality".into();
         let snap = EntrySnapshot {
             entry: e,
-            routes: vec![],
+            reality: Some(crate::store::reality::RealityConfig {
+                flow: "xtls-rprx-vision".into(),
+                public_key: "PUBLIC".into(),
+                server_name: "www.example.com".into(),
+                handshake_server: "www.example.com".into(),
+                handshake_port: 443,
+                client_fingerprint: "chrome".into(),
+            }),
+            routes: vec![RouteSnapshot {
+                route: route("r1", "direct", "entry_direct"),
+                hops: vec![],
+                terminal: Terminal::Direct,
+            }],
         };
-        assert!(compile_entry(&snap, &secrets(&[]), &no_ids()).is_err());
+        let mut sec = SecretBundle::default();
+        sec.reality.insert(
+            "e1".into(),
+            crate::store::reality::RealitySecret {
+                private_key: "PRIVATE".into(),
+                short_id: "0123456789abcdef".into(),
+            },
+        );
+        sec.vless_uuid.insert(
+            "alice".into(),
+            "8f13c901-99e8-43e9-ad47-1e905a8e72a6".into(),
+        );
+        let ids = [("r1".into(), vec!["alice".into()])].into();
+        let cfg = compile_entry(&snap, &sec, &ids).unwrap();
+        let inbound = &cfg["inbounds"][0];
+        assert_eq!(inbound["type"], "vless");
+        assert_eq!(inbound["users"][0]["name"], "alice");
+        assert_eq!(inbound["users"][0]["flow"], "xtls-rprx-vision");
+        assert_eq!(inbound["tls"]["reality"]["private_key"], "PRIVATE");
+        assert_eq!(
+            inbound["tls"]["reality"]["short_id"],
+            json!(["0123456789abcdef"])
+        );
+        assert!(cfg.get("services").is_none());
+        assert_eq!(cfg["route"]["rules"][1]["auth_user"], json!(["alice"]));
     }
 }

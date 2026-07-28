@@ -45,6 +45,7 @@ pub struct RouteSnapshot {
 #[derive(Debug, Clone)]
 pub struct EntrySnapshot {
     pub entry: crate::domain::topology::Entry,
+    pub reality: Option<crate::store::reality::RealityConfig>,
     pub routes: Vec<RouteSnapshot>,
 }
 

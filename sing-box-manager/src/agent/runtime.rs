@@ -21,7 +21,7 @@ pub trait Runtime: Send + Sync {
     async fn restart(&self, config_path: &str, epoch: i64) -> Result<()>;
     /// 停止当前 Agent 持有的 sing-box 子进程。
     async fn stop(&self) -> Result<()>;
-    /// 本机健康探测：所有角色要求受管进程存活，Entry 额外要求 SSM 端口可达。
+    /// 本机健康探测：所有角色要求受管进程存活，SS Entry 额外要求 SSM 端口可达。
     async fn health_check(&self, role: &str) -> Result<Health>;
 }
 
@@ -94,7 +94,7 @@ impl Runtime for ProcessRuntime {
                     Ok(Health::Down("SSM 端口不可达".into()))
                 }
             }
-            "node" => Ok(Health::Ok),
+            "entry-vless" | "node" => Ok(Health::Ok),
             other => Ok(Health::Down(format!("未知数据面角色: {other}"))),
         }
     }

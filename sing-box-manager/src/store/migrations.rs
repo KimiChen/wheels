@@ -55,6 +55,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "key_rotation",
         sql: include_str!("../../migrations/0009_key_rotation.sql"),
     },
+    Migration {
+        version: 10,
+        name: "vless_reality",
+        sql: include_str!("../../migrations/0010_vless_reality.sql"),
+    },
 ];
 
 /// 应用 Manager 控制面迁移集。

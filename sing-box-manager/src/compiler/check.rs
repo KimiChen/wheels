@@ -1,6 +1,6 @@
 //! 真实 `sing-box check`：明文写 0700 临时目录内的 0600 文件（权限先于内容）→ 固定 argv 执行 →
 //! 退出码判定（0=通过；实测坏 detour 不失败故失败路径须用 unsupported method）。RAII 清理临时文件，
-//! stderr 入库前脱敏本次涉及的 PSK 明文。
+//! stderr 入库前脱敏本次涉及的凭据和私钥明文。
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -91,12 +91,25 @@ impl Drop for TempDir {
 
 /// 从配置 JSON 收集 password/username 值，供 check/日志脱敏（无需接触 SecretBundle）。
 pub fn secret_values_in(plaintext: &[u8]) -> Vec<String> {
+    fn collect_strings(v: &serde_json::Value, out: &mut Vec<String>) {
+        match v {
+            serde_json::Value::String(s) => out.push(s.clone()),
+            serde_json::Value::Array(a) => a.iter().for_each(|e| collect_strings(e, out)),
+            serde_json::Value::Object(m) => {
+                m.values().for_each(|e| collect_strings(e, out));
+            }
+            _ => {}
+        }
+    }
     fn collect(v: &serde_json::Value, out: &mut Vec<String>) {
         match v {
             serde_json::Value::Object(m) => {
                 for (k, val) in m {
-                    if (k == "password" || k == "username") && val.is_string() {
-                        out.push(val.as_str().unwrap().to_string());
+                    if matches!(
+                        k.as_str(),
+                        "password" | "username" | "uuid" | "private_key" | "short_id"
+                    ) {
+                        collect_strings(val, out);
                     } else {
                         collect(val, out);
                     }
@@ -176,5 +189,23 @@ mod tests {
             r.output
         );
         assert!(!r.output.contains("hunter2")); // 脱敏（此处虽不含，兜底断言）
+    }
+
+    #[test]
+    fn extracts_vless_secrets_but_not_public_key() {
+        let plaintext = serde_json::to_vec(&json!({
+            "users": [{"name": "alice", "uuid": "USER-UUID"}],
+            "reality": {
+                "private_key": "PRIVATE",
+                "public_key": "PUBLIC",
+                "short_id": ["SHORT"]
+            }
+        }))
+        .unwrap();
+        let values = secret_values_in(&plaintext);
+        assert!(values.iter().any(|v| v == "USER-UUID"));
+        assert!(values.iter().any(|v| v == "PRIVATE"));
+        assert!(values.iter().any(|v| v == "SHORT"));
+        assert!(!values.iter().any(|v| v == "PUBLIC"));
     }
 }

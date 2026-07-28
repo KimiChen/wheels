@@ -1,9 +1,10 @@
 //! 主密钥轮换 re-encrypt 扫描器。把库内全部信封密文逐条 open(旧版本)→seal(当前版本)，
-//! 覆盖三张含 `(alg,key_version,nonce,ciphertext)` 的表：credential_versions / ca_keypairs / config_artifacts。
+//! 覆盖四张含 `(alg,key_version,nonce,ciphertext)` 的表：credential_versions / ca_keypairs /
+//! config_artifacts / entry_reality。
 //!
 //! **幂等 + 可续跑**：过滤 `WHERE key_version<>current` 天然跳过已迁移行；每批小事务，崩溃后从剩余旧行续跑；
 //! `UPDATE ... WHERE <pk>=? AND key_version=<旧>` 守卫使并发/重复处理成为 no-op。明文只在内存 open→seal。
-//! **退休门禁**：三表 `pending_counts` 全 0 才允许从 env 删除旧 `ENCRYPTION_MASTER_KEY_V{old}`。
+//! **退休门禁**：四表 `pending_counts` 全 0 才允许从 env 删除旧 `ENCRYPTION_MASTER_KEY_V{old}`。
 
 use serde::Serialize;
 use sqlx::{Row, SqlitePool};
@@ -30,6 +31,10 @@ const TABLES: &[SealedTable] = &[
     SealedTable {
         name: "config_artifacts",
         pk_cols: &["id"],
+    },
+    SealedTable {
+        name: "entry_reality",
+        pk_cols: &["entry_id"],
     },
 ];
 
@@ -72,7 +77,7 @@ pub struct ReencryptReport {
     pub total: u64,
 }
 
-/// 把三张表全部旧密文 re-seal 到 `cipher.current_version()`。可重复调用（幂等）。
+/// 把四张表全部旧密文 re-seal 到 `cipher.current_version()`。可重复调用（幂等）。
 pub async fn reseal_all(
     pool: &SqlitePool,
     cipher: &Cipher,
@@ -263,6 +268,14 @@ mod tests {
             store::hosts::create_host(&pool, "h", None, &[crate::domain::host::Capability::Entry])
                 .await
                 .unwrap();
+        sqlx::query(
+            "INSERT INTO entries(id,host_id,public_address,port,inbound_kind,allow_direct,created_at,updated_at)
+             VALUES('e1',?,'entry.example.com',19736,'vless-reality',0,0,0)",
+        )
+        .bind(&hid)
+        .execute(&pool)
+        .await
+        .unwrap();
 
         // credentials 父行 + credential_versions v1 密文。
         sqlx::query("INSERT INTO credentials(id,kind,scope,created_at) VALUES('c1','user_route_upsk','s',0)")
@@ -291,14 +304,32 @@ mod tests {
             .bind(&hid).bind(s.alg).bind(s.key_version).bind(s.nonce.clone()).bind(s.ciphertext.clone())
             .execute(&pool).await.unwrap();
 
-        // 迁移前：三表各 1 待迁移。
+        // entry_reality v1。
+        crate::store::reality::ensure(
+            &pool,
+            &old,
+            "e1",
+            "xtls-rprx-vision",
+            "www.example.com",
+            "www.example.com",
+            443,
+            "chrome",
+        )
+        .await
+        .unwrap();
+        let reality_before = crate::store::reality::load(&pool, &old, "e1")
+            .await
+            .unwrap()
+            .unwrap();
+
+        // 迁移前：四表各 1 待迁移。
         let pc = pending_counts(&pool, 2).await.unwrap();
-        assert_eq!(pc.iter().map(|p| p.pending).sum::<i64>(), 3);
+        assert_eq!(pc.iter().map(|p| p.pending).sum::<i64>(), 4);
         assert!(!all_migrated(&pool, 2).await.unwrap());
 
         // reseal 全部。
         let rep = reseal_all(&pool, &ring, Some(10)).await.unwrap();
-        assert_eq!(rep.total, 3);
+        assert_eq!(rep.total, 4);
         assert!(all_migrated(&pool, 2).await.unwrap());
 
         // 明文未变、版本变 2、可用 ring 解。
@@ -312,6 +343,14 @@ mod tests {
         };
         assert_eq!(sealed.key_version, 2);
         assert_eq!(ring.open(&sealed).unwrap(), plains["cred"]);
+        let reality_after = crate::store::reality::load(&pool, &ring, "e1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            reality_before.secret.private_key.as_str(),
+            reality_after.secret.private_key.as_str()
+        );
 
         // 幂等：再跑 0 行。
         let rep2 = reseal_all(&pool, &ring, Some(10)).await.unwrap();

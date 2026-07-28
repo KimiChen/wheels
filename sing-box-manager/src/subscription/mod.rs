@@ -1,5 +1,5 @@
 //! 公开订阅端点（§11.2 独立边界，无 admin auth）。GET /sub/{token}：按 token hash 查用户 → 该用户
-//! 已授权且 active 的 Route → 每条一个 SS-2022 代理(password=serverPSK:userPSK) → Clash/raw/HTML。
+//! 已授权且 active 的 Route → SS-2022 或 VLESS-Reality 代理 → Clash/raw/HTML。
 //! 停用/过期用户返回空代理集。订阅内容是唯一合法出明文密钥处，靠 token 熵+hash+短路兜底。
 
 pub mod generate;
@@ -93,12 +93,14 @@ async fn handle_sub(
     )
 }
 
-/// 组装某用户的订阅代理（解封 serverPSK + userPSK；明文仅内存）。
+/// 组装某用户的订阅代理（解封 SS 凭据或 VLESS UUID/short ID；明文仅内存）。
 async fn user_proxies(pool: &SqlitePool, cipher: &Cipher, user_id: &str) -> Result<Vec<ProxyInfo>> {
     let rows = sqlx::query(
-        "SELECT r.label AS label, e.public_address AS server, e.ss_method AS ss_method, e.id AS entry_id, ur.upsk_credential_id AS upsk_cid
+        "SELECT r.label AS label,e.public_address AS server,e.ss_method AS ss_method,
+                e.inbound_kind AS inbound_kind,e.id AS entry_id,
+                ur.upsk_credential_id AS credential_id
          FROM user_routes ur JOIN routes r ON r.id=ur.route_id JOIN entries e ON e.id=r.entry_id
-         WHERE ur.user_id=? AND r.status='active' AND e.inbound_kind='shadowsocks'
+         WHERE ur.user_id=? AND r.status='active'
          ORDER BY r.label",
     )
     .bind(user_id)
@@ -107,28 +109,46 @@ async fn user_proxies(pool: &SqlitePool, cipher: &Cipher, user_id: &str) -> Resu
     let mut out = Vec::new();
     for row in &rows {
         let entry_id: String = row.get("entry_id");
-        let method: Option<String> = row.get("ss_method");
-        let method = method.unwrap_or_else(|| NODE_SS_METHOD.to_string());
-        let server_psk =
-            match secrets::open_psk_by_scope(pool, cipher, "entry_psk", &entry_id).await? {
-                Some(p) => p,
-                None => continue,
-            };
-        let cid: Option<String> = row.get("upsk_cid");
-        let user_psk = match cid {
+        let cid: Option<String> = row.get("credential_id");
+        let credential = match cid {
             Some(c) => match secrets::open_credential(pool, cipher, &c).await? {
                 Some(p) => p,
                 None => continue,
             },
             None => continue,
         };
-        out.push(ProxyInfo {
-            label: row.get("label"),
-            server: row.get("server"),
-            port: ENTRY_PORT,
-            method,
-            password: format!("{server_psk}:{user_psk}"),
-        });
+        let inbound_kind: String = row.get("inbound_kind");
+        if inbound_kind == "vless-reality" {
+            let Some(reality) = crate::store::reality::load(pool, cipher, &entry_id).await? else {
+                continue;
+            };
+            out.push(ProxyInfo::VlessReality {
+                label: row.get("label"),
+                server: row.get("server"),
+                port: ENTRY_PORT,
+                uuid: credential,
+                flow: reality.config.flow,
+                public_key: reality.config.public_key,
+                short_id: reality.secret.short_id.clone(),
+                server_name: reality.config.server_name,
+                client_fingerprint: reality.config.client_fingerprint,
+            });
+        } else {
+            let method: Option<String> = row.get("ss_method");
+            let method = method.unwrap_or_else(|| NODE_SS_METHOD.to_string());
+            let server_psk =
+                match secrets::open_psk_by_scope(pool, cipher, "entry_psk", &entry_id).await? {
+                    Some(p) => p,
+                    None => continue,
+                };
+            out.push(ProxyInfo::Shadowsocks {
+                label: row.get("label"),
+                server: row.get("server"),
+                port: ENTRY_PORT,
+                method,
+                password: format!("{server_psk}:{credential}"),
+            });
+        }
     }
     Ok(out)
 }
@@ -204,4 +224,97 @@ fn page_html(user: &User, proxy_count: usize, eligible: bool, used_bytes: i64) -
         name = escape_html(&user.name),
         status = status,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::host::Capability;
+    use crate::domain::topology::{ExitKind, InboundKind, RouteDraft};
+    use crate::store::topology::{self, NewEntry};
+
+    #[tokio::test]
+    async fn loads_active_vless_proxy_from_encrypted_store() {
+        let path = std::env::temp_dir().join(format!("sbm-sub-vless-{}.db", uuid::Uuid::new_v4()));
+        let pool = crate::store::open(&path.to_string_lossy()).await.unwrap();
+        let cipher = Cipher::from_raw(1, &[7u8; 32]).unwrap();
+        let entry_host =
+            crate::store::hosts::create_host(&pool, "entry", None, &[Capability::Entry])
+                .await
+                .unwrap();
+        let node_host = crate::store::hosts::create_host(&pool, "node", None, &[Capability::Node])
+            .await
+            .unwrap();
+        let entry = topology::create_entry(
+            &pool,
+            &cipher,
+            &NewEntry {
+                host_id: &entry_host,
+                public_address: "entry.example.com",
+                inbound_kind: InboundKind::VlessReality,
+                ss_method: None,
+                allow_direct: false,
+            },
+        )
+        .await
+        .unwrap();
+        crate::store::reality::ensure(
+            &pool,
+            &cipher,
+            &entry,
+            "xtls-rprx-vision",
+            "www.example.com",
+            "www.example.com",
+            443,
+            "chrome",
+        )
+        .await
+        .unwrap();
+        let node = topology::create_node(&pool, &cipher, &node_host, "node.example.com", true)
+            .await
+            .unwrap();
+        let route = topology::insert_route(
+            &pool,
+            &RouteDraft {
+                id: None,
+                label: "reality-route".into(),
+                entry_id: entry,
+                hops: vec![],
+                exit_kind: ExitKind::Node,
+                exit_node_id: Some(node),
+                exit_landing_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE routes SET status='active' WHERE id=?")
+            .bind(&route)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (user, _) = users::create_user(&pool, "alice", 0, "never", None)
+            .await
+            .unwrap();
+        users::grant_route(&pool, &cipher, &user, &route)
+            .await
+            .unwrap();
+
+        let proxies = user_proxies(&pool, &cipher, &user).await.unwrap();
+        assert_eq!(proxies.len(), 1);
+        match &proxies[0] {
+            ProxyInfo::VlessReality {
+                uuid,
+                public_key,
+                short_id,
+                ..
+            } => {
+                assert!(uuid::Uuid::parse_str(uuid).is_ok());
+                assert!(!public_key.is_empty());
+                assert_eq!(short_id.len(), 16);
+            }
+            ProxyInfo::Shadowsocks { .. } => panic!("应生成 VLESS 代理"),
+        }
+        pool.close().await;
+        let _ = std::fs::remove_file(path);
+    }
 }

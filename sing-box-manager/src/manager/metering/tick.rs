@@ -37,6 +37,12 @@ pub async fn meter_tick_entry(
     client: &dyn AgentClient,
     entry_id: &str,
 ) -> Result<Vec<String>> {
+    if topology::get_entry(pool, entry_id)
+        .await?
+        .is_some_and(|entry| entry.inbound_kind != "shadowsocks")
+    {
+        return Ok(Vec::new());
+    }
     let holder = uuid::Uuid::new_v4().to_string();
     if !depl::acquire_entry_lock(pool, entry_id, "metering", &holder, METER_LEASE_SECS).await? {
         return Ok(Vec::new()); // deploy/reconcile 持锁 → 本 tick 跳过（他 Entry 照常）

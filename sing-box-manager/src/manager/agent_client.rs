@@ -348,6 +348,7 @@ pub struct MockAgentClient {
     pub meter_batch: std::sync::Mutex<
         std::collections::VecDeque<std::result::Result<MeterBatchResponse, AgentError>>,
     >,
+    pub posted_bodies: std::sync::Mutex<Vec<String>>,
 }
 
 impl Default for MockAgentClient {
@@ -358,6 +359,7 @@ impl Default for MockAgentClient {
             deployment: std::sync::Mutex::new(std::collections::VecDeque::new()),
             stats: std::sync::Mutex::new(std::collections::VecDeque::new()),
             meter_batch: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            posted_bodies: std::sync::Mutex::new(Vec::new()),
         }
     }
 }
@@ -410,8 +412,12 @@ impl AgentClient for MockAgentClient {
         _mgmt_address: &str,
         _kind: CommandKind,
         _command_id: &str,
-        _body_json: &str,
+        body_json: &str,
     ) -> std::result::Result<AgentResponse, AgentError> {
+        self.posted_bodies
+            .lock()
+            .unwrap()
+            .push(body_json.to_string());
         self.post
             .lock()
             .unwrap()

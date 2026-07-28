@@ -242,6 +242,65 @@ pub async fn grant_route(
     Ok(name)
 }
 
+/// Entry 协议切换后，把既有授权凭据转换为当前协议需要的 UUID 或 SS uPSK。
+/// 新凭据封存、引用更新与旧凭据删除在同一事务内完成。
+pub async fn ensure_route_credential(
+    pool: &SqlitePool,
+    cipher: &Cipher,
+    user_id: &str,
+    route_id: &str,
+) -> Result<bool> {
+    let Some(row) = sqlx::query(
+        "SELECT ur.identity_name,ur.upsk_credential_id,c.kind,e.inbound_kind,e.ss_method
+         FROM user_routes ur
+         JOIN routes r ON r.id=ur.route_id
+         JOIN entries e ON e.id=r.entry_id
+         LEFT JOIN credentials c ON c.id=ur.upsk_credential_id
+         WHERE ur.user_id=? AND ur.route_id=?",
+    )
+    .bind(user_id)
+    .bind(route_id)
+    .fetch_optional(pool)
+    .await?
+    else {
+        return Err(AppError::new(ErrorCode::NotFound, "未授权该 Route"));
+    };
+    let name: String = row.get("identity_name");
+    let old_id: Option<String> = row.get("upsk_credential_id");
+    let old_kind: Option<String> = row.get("kind");
+    let inbound_kind: String = row.get("inbound_kind");
+    let expected_kind = if inbound_kind == "vless-reality" {
+        "user_route_uuid"
+    } else {
+        "user_route_upsk"
+    };
+    if old_kind.as_deref() == Some(expected_kind) {
+        return Ok(false);
+    }
+    let plaintext = if expected_kind == "user_route_uuid" {
+        uuid::Uuid::new_v4().to_string()
+    } else {
+        let method: Option<String> = row.get("ss_method");
+        generate_psk(method.as_deref().unwrap_or(NODE_SS_METHOD))
+    };
+    let mut tx = pool.begin().await?;
+    let new_id = secrets::put_psk_tx(&mut tx, cipher, expected_kind, &name, &plaintext).await?;
+    sqlx::query("UPDATE user_routes SET upsk_credential_id=? WHERE user_id=? AND route_id=?")
+        .bind(&new_id)
+        .bind(user_id)
+        .bind(route_id)
+        .execute(&mut *tx)
+        .await?;
+    if let Some(old_id) = old_id {
+        sqlx::query("DELETE FROM credentials WHERE id=?")
+            .bind(old_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(true)
+}
+
 /// 撤销授权：删 user_routes 行 + 清其 uPSK 凭据（同事务）。
 pub async fn revoke_route(pool: &SqlitePool, user_id: &str, route_id: &str) -> Result<()> {
     let name = identity_name(user_id, route_id);
@@ -334,6 +393,37 @@ pub async fn configured_identities(
         map.entry(r.get("route_id"))
             .or_default()
             .push(r.get("identity_name"));
+    }
+    Ok(map)
+}
+
+/// VLESS 静态配置投影：draft|active Route 上当前有资格的身份。
+pub async fn eligible_static_identities(
+    pool: &SqlitePool,
+    entry_id: &str,
+    now: i64,
+) -> Result<BTreeMap<String, Vec<String>>> {
+    let rows = sqlx::query(
+        "SELECT ur.route_id,ur.identity_name
+         FROM user_routes ur
+         JOIN routes r ON r.id=ur.route_id
+         JOIN users u ON u.id=ur.user_id
+         LEFT JOIN user_runtime_state urs ON urs.user_id=u.id
+         WHERE r.entry_id=? AND r.status IN ('draft','active')
+           AND ur.identity_name IS NOT NULL
+           AND u.disabled=0 AND (u.expire_at IS NULL OR u.expire_at>?)
+           AND COALESCE(urs.effective_disabled,0)=0
+         ORDER BY ur.route_id,ur.identity_name",
+    )
+    .bind(entry_id)
+    .bind(now)
+    .fetch_all(pool)
+    .await?;
+    let mut map: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for row in rows {
+        map.entry(row.get("route_id"))
+            .or_default()
+            .push(row.get("identity_name"));
     }
     Ok(map)
 }

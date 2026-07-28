@@ -17,17 +17,17 @@
 | Shadowsocks-2022 Entry | 可用 | 单端口 managed inbound，支持独立用户 uPSK |
 | 公网多跳 Node | 可用 | Node 固定 SS-2022 中继入站，支持共享链路前缀 |
 | 用户与线路授权 | 可用 | 每个“用户 × 转发链”生成独立身份和凭据 |
-| 订阅 | 可用 | raw `ss://`、Clash/mihomo YAML、浏览器状态页 |
+| 订阅 | 可用 | raw `ss://`/`vless://`、Clash/mihomo YAML、浏览器状态页 |
 | Agent mTLS | 可用 | 双 CA、主机身份校验、指纹带外授信、吊销 |
 | 配置发布 | 可用 | 编译、真实 `sing-box check`、Node→Entry、健康失败回滚 |
 | 流量与配额 | 可用 | 按用户增量计量、周期配额、重启前结算屏障 |
 | 主密钥轮换 | 可用 | 多版本解密、幂等 re-seal、旧密钥退休检查 |
-| VLESS-Reality | 未完成 | 清单结构和用户 UUID 已预留，尚不能编译或部署 |
+| VLESS-Reality | 可用 | 自动 Reality 密钥、Vision 用户 UUID、编译、部署、回滚和订阅 |
 | SSH 自动装机 | 未完成 | SSH 字段已进入清单，当前仍需人工或配置管理工具装机 |
 | 多 Controller | 不支持 | SQLite 为单写者状态库，只允许一个 Controller 写入 |
 
-已验证的数据面版本为 sing-box `1.13.14`。`plan` 会对包含 VLESS listener 的清单给出警告，
-`apply --deploy` 会在写数据库和连接 Agent 前拒绝这类清单，避免部分发布。
+已验证的数据面版本为 sing-box `1.13.14`。VLESS-Reality 当前没有 SSM 式的 per-user 流量
+统计，授权 VLESS relay 的用户必须设置 `quotaBytes = 0`；`plan` 会对非零配额失败关闭。
 
 ## 设计目标
 
@@ -67,7 +67,7 @@
 - `19736`：Entry 客户端入站。
 - `29736`：Node 中继入站。
 - `39736`：Agent mTLS。
-- `49736`：Entry 本机 sing-box SSM API，仅回环。
+- `49736`：Shadowsocks Entry 本机 sing-box SSM API，仅回环。
 - `9736`：Controller 的订阅、健康检查和指标。
 
 更完整的状态流、发布顺序和信任边界见
@@ -107,8 +107,7 @@ done
 chmod 600 config/*.toml
 ```
 
-示例清单默认只启用已支持的 Shadowsocks listener，可以直接通过 `--deploy` 的协议预检。
-`example.protocols.toml` 中保留了未启用的 VLESS 目标模板，方便后续迁移。
+示例清单默认只启用 Shadowsocks listener；也可按配置说明启用 VLESS-Reality listener。
 
 编辑真实服务器地址和转发链后先执行无副作用检查：
 

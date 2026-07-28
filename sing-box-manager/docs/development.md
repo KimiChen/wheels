@@ -55,9 +55,9 @@ docs/              中文设计、部署、运维和安全文档
 - Entry/Node/Agent/SSM 固定端口分别为 `19736/29736/39736/49736`。
 - 所有秘密在数据库中必须信封加密，不能进入 Debug、日志、审计和命令队列。
 - 部署必须先 check，Node 先于 Entry，失败可回滚。
-- Entry 重启前必须完成最终流量结算。
+- Shadowsocks Entry 重启前必须完成最终流量结算；VLESS Entry 不进入 SSM 结算屏障。
 - 配置生成必须确定性，避免无意义 revision。
-- VLESS 未完整实现前必须失败关闭，不能部分发布。
+- VLESS 的非零 per-user 配额必须失败关闭。
 - 一个 Controller SQLite 只允许一个后台 Controller。
 
 完整机制见 [架构与实现机制](architecture.md)。

@@ -86,7 +86,7 @@ ENCRYPTION_MASTER_KEY_V<历史版本>
 主密钥只存在于进程环境，不写入 SQLite。以下数据使用 XChaCha20-Poly1305 信封加密：
 
 - Entry/Node Shadowsocks PSK。
-- 每个用户 Route 的 uPSK 或预留 VLESS UUID。
+- 每个用户 Route 的 Shadowsocks uPSK 或 VLESS UUID。
 - CA 私钥和 Controller 客户端身份。
 - 编译后的 sing-box 配置 artifact。
 - Landing 认证信息。
@@ -181,7 +181,7 @@ Agent 应用单个 artifact：
   → 写 revision 快照
   → 同目录临时文件 + rename 原子替换 config.json
   → 启动新 sing-box epoch
-  → 健康检查（Entry 检查进程和 SSM，Node 检查进程）
+  → 健康检查（SS Entry 检查进程和 SSM；VLESS Entry、Node 检查进程）
   → 成功记账 / 失败自动回滚
 ```
 
@@ -204,7 +204,8 @@ AND 未超额
 然后把完整期望集合发送给 Agent。Agent 对比 SSM 当前用户并增删差异。每次 reconcile 使用新的
 command ID，确保 Agent 或 sing-box 重启导致内存用户集丢失后可以重新注入。
 
-VLESS listener 当前不会进入 SSM reconcile，避免把 UUID 误当 Shadowsocks uPSK。
+VLESS 用户 UUID 随 revision 静态编译进 inbound，不进入 SSM reconcile。用户停用、到期或
+授权变化后，需要重新执行 `apply --deploy` 发布新 revision。
 
 ## 流量计量与结算屏障
 
@@ -268,4 +269,6 @@ password = Entry server PSK : 用户 Route uPSK
 - 未完成 check、门禁或结算屏障时，不激活新 Route。
 - Node 先于 Entry 部署；失败时回滚已应用目标。
 - 一个 SQLite 只允许一个 Controller 写入。
-- 不支持的 VLESS 清单不能进入远端部署阶段。
+- VLESS Reality 私钥、short ID、用户 UUID 和含密钥 artifact 必须信封加密。
+- VLESS Entry 不进入 SSM 计量与重启结算屏障；其健康检查要求受管进程存活。
+- 授权 VLESS relay 的用户必须是无配额模式，避免产生无法执行的限额。

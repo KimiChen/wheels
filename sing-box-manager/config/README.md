@@ -23,8 +23,8 @@ done
 chmod 600 config/*.toml
 ```
 
-示例清单默认只启用 Shadowsocks listener，因此不会触发当前版本的 VLESS 部署保护。
-`example.protocols.toml` 中的 VLESS 段只是目标格式示例。
+示例清单默认只启用 Shadowsocks listener；`example.protocols.toml` 同时给出可启用的
+VLESS-Reality 模板。
 
 ## 入口配置
 
@@ -91,7 +91,7 @@ managed = true
 当前要求 `serverKey = "auto"`、`managed = true`。自动生成的 server PSK 和用户 uPSK
 只加密保存在 SQLite，不回写 TOML。
 
-VLESS-Reality 目标格式：
+VLESS-Reality：
 
 ```toml
 [protocols.vless]
@@ -101,11 +101,13 @@ shortId = "auto"
 serverName = "itunes.apple.com"
 handshakeServer = "itunes.apple.com"
 handshakePort = 443
+clientFingerprint = "chrome"
 ```
 
-当前版本只接受并校验该结构，同时为“用户 × relay”保存加密 UUID；Reality 私钥、short ID、
-配置编译、订阅和部署尚未完成。只要 `listeners.toml` 实际启用 VLESS，`apply --deploy`
-就会在写数据库前拒绝整个操作。
+`privateKey` 和 `shortId` 只接受 `auto`。首次 `apply` 为每个 VLESS Entry 生成 Reality
+X25519 密钥与 short ID，私钥和 short ID 信封加密保存并稳定复用；每个“用户 × relay”
+生成独立加密 UUID。`clientFingerprint` 默认 `chrome`，也接受 `firefox`、`edge`、`safari`、
+`360`、`qq`、`ios`、`android`、`random` 和 `randomized`。
 
 ## Listener
 
@@ -184,6 +186,9 @@ userB × entry-a-hk → 另一套独立身份与凭据
 Shadowsocks 授权生成独立 uPSK；VLESS 授权预生成独立 UUID。所有明文凭据使用主密钥信封加密。
 首次创建用户时，订阅 token 只输出一次。
 
+VLESS 当前不提供 SSM 式 per-user 流量计量。只要用户授权了任一 VLESS relay，
+`quotaBytes` 就必须为 `0`；非零值会在 `plan`/`apply` 阶段被拒绝。
+
 ## 合并、校验与应用
 
 ```bash
@@ -193,7 +198,7 @@ sing-box-manager plan --config config/config.toml
 # 幂等同步期望状态
 sing-box-manager apply --config config/config.toml
 
-# 已支持协议的完整发布
+# Shadowsocks 与 VLESS-Reality 的完整发布
 sing-box-manager apply --config config/config.toml --deploy
 ```
 

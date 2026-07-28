@@ -64,6 +64,8 @@ pub struct VlessSpec {
     pub server_name: String,
     pub handshake_server: String,
     pub handshake_port: u16,
+    #[serde(default = "default_client_fingerprint")]
+    pub client_fingerprint: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -104,6 +106,10 @@ fn default_true() -> bool {
 
 fn default_reset_cycle() -> String {
     "monthly".to_string()
+}
+
+fn default_client_fingerprint() -> String {
+    "chrome".to_string()
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -219,16 +225,36 @@ impl Manifest {
                     "VLESS Reality serverName/handshakeServer/handshakePort 非法".to_string(),
                 );
             }
+            if !matches!(
+                vless.client_fingerprint.as_str(),
+                "chrome"
+                    | "firefox"
+                    | "edge"
+                    | "safari"
+                    | "360"
+                    | "qq"
+                    | "ios"
+                    | "android"
+                    | "random"
+                    | "randomized"
+            ) {
+                issues.push(format!(
+                    "VLESS clientFingerprint 非法: {}",
+                    vless.client_fingerprint
+                ));
+            }
         }
 
         let mut listener_names = BTreeSet::new();
         let mut listener_servers = BTreeMap::new();
+        let mut listener_protocols = BTreeMap::new();
         let mut listener_sockets = BTreeSet::new();
         for listener in &self.listeners {
             if !listener_names.insert(listener.name.clone()) {
                 issues.push(format!("重复 listener name: {}", listener.name));
             }
             listener_servers.insert(listener.name.clone(), listener.server.clone());
+            listener_protocols.insert(listener.name.clone(), listener.protocol.clone());
             if !self.servers.contains_key(&listener.server) {
                 issues.push(format!(
                     "listener {} 引用不存在的 server {}",
@@ -268,6 +294,7 @@ impl Manifest {
         }
 
         let mut relay_names = BTreeSet::new();
+        let mut relay_protocols = BTreeMap::new();
         for relay in &self.relays {
             if !relay_names.insert(relay.name.clone()) {
                 issues.push(format!("重复 relay name: {}", relay.name));
@@ -277,6 +304,9 @@ impl Manifest {
                     "relay {} 引用不存在的 listener {}",
                     relay.name, relay.listener
                 ));
+            }
+            if let Some(protocol) = listener_protocols.get(&relay.listener) {
+                relay_protocols.insert(relay.name.clone(), protocol.clone());
             }
             if relay.chain.is_empty() {
                 issues.push(format!("relay {} 的 chain 不能为空", relay.name));
@@ -308,6 +338,17 @@ impl Manifest {
             }
             if user.quota_bytes < 0 {
                 issues.push(format!("user {} 的 quotaBytes 不能为负数", user.name));
+            }
+            if user.quota_bytes > 0
+                && user
+                    .relays
+                    .iter()
+                    .any(|relay| relay_protocols.get(relay).is_some_and(|p| p == "vless"))
+            {
+                issues.push(format!(
+                    "user {} 授权了 VLESS relay，当前不支持 per-user 计量，quotaBytes 必须为 0",
+                    user.name
+                ));
             }
             if !matches!(user.reset_cycle.as_str(), "monthly" | "yearly" | "never") {
                 issues.push(format!(
@@ -351,11 +392,6 @@ impl Manifest {
             .into_iter()
             .collect::<Vec<_>>();
         protocols.sort();
-        let mut warnings = Vec::new();
-        if self.listeners.iter().any(|l| l.protocol == "vless") {
-            warnings
-                .push("VLESS-Reality 已进入 manifest，但当前配置编译器尚未支持部署".to_string());
-        }
         Plan {
             config_path: config_path.as_ref().display().to_string(),
             servers: self.servers.len(),
@@ -365,7 +401,7 @@ impl Manifest {
             users: self.users.len(),
             grants: self.users.iter().map(|u| u.relays.len()).sum(),
             protocols,
-            warnings,
+            warnings: Vec::new(),
         }
     }
 }
@@ -519,5 +555,54 @@ nodePort=29736
         );
         assert!(Manifest::load(&path).is_err());
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn vless_defaults_fingerprint_and_rejects_nonzero_quota() {
+        let raw = r#"
+formatVersion=1
+includes=[]
+nodePort=29736
+[servers.entry]
+ssh="ssh://root@entry.example"
+address="entry.example"
+[servers.node]
+ssh="ssh://root@node.example"
+address="node.example"
+[protocols.vless]
+flow="xtls-rprx-vision"
+privateKey="auto"
+shortId="auto"
+serverName="www.example.com"
+handshakeServer="www.example.com"
+handshakePort=443
+[[listeners]]
+name="entry-vless"
+server="entry"
+protocol="vless"
+bind="::"
+port=19736
+[[relays]]
+name="relay"
+listener="entry-vless"
+chain=["node"]
+[[users]]
+name="alice"
+enabled=true
+relays=["relay"]
+quotaBytes=1
+"#;
+        let manifest: Manifest = toml::from_str(raw).unwrap();
+        assert_eq!(
+            manifest
+                .protocols
+                .vless
+                .as_ref()
+                .unwrap()
+                .client_fingerprint,
+            "chrome"
+        );
+        let err = manifest.validate().unwrap_err().to_string();
+        assert!(err.contains("quotaBytes 必须为 0"));
     }
 }

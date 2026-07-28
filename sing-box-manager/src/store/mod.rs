@@ -16,6 +16,7 @@ pub mod metering;
 pub mod migrations;
 pub mod observability;
 pub mod pki;
+pub mod reality;
 pub mod reencrypt;
 pub mod revisions;
 pub mod runtime_state;
@@ -76,7 +77,7 @@ mod tests {
             .await
             .unwrap()
             .get("v");
-        assert_eq!(v, 9);
+        assert_eq!(v, 10);
 
         // 再次运行迁移应幂等，不重复应用。
         migrations::run(&pool).await.unwrap();

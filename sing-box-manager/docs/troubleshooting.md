@@ -104,18 +104,16 @@ sing-box-manager apply --config config/config.toml
 sing-box-manager apply --config config/config.toml --deploy
 ```
 
-## apply --deploy 拒绝 VLESS
+## VLESS 用户的 quotaBytes 被拒绝
 
-当前版本不能编译 VLESS-Reality。只要存在：
+VLESS 当前没有 SSM 式 per-user 计量，因此授权 VLESS relay 的用户只能使用：
 
 ```toml
-protocol = "vless"
+quotaBytes = 0
 ```
 
-整个 `--deploy` 会在写数据库和连接 Agent 前拒绝。普通 `plan` 和 `apply` 可以用于预先保存
-目标拓扑和加密 UUID，但不会产生可用的 VLESS 数据面。
-
-要部署当前支持的配置，请移除 VLESS listener、相关 relay 和用户授权，只保留 Shadowsocks。
+若同一用户同时授权 Shadowsocks 与 VLESS relay，也必须保持 `0`。需要配额时，将 VLESS
+线路授权给独立的无配额用户，或只保留 Shadowsocks relay。
 
 ## 找不到 sing-box
 
@@ -253,8 +251,8 @@ journalctl -u sing-box-manager-agent -b
 - 用户是否 disabled、过期或超额。
 - Route 是否已经 active。
 - 授权是否属于该用户。
-- Entry 是否为 Shadowsocks；当前订阅会过滤 VLESS。
-- 部署后 reconcile 是否成功。
+- SS Entry 部署后 reconcile 是否成功。
+- VLESS Entry 是否已经重新 `apply --deploy`，使 UUID 进入当前 revision。
 
 ## /readyz 返回 503
 

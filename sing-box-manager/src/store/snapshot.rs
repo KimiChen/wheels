@@ -46,7 +46,20 @@ pub async fn load_entry_snapshot(pool: &SqlitePool, entry_id: &str) -> Result<En
             terminal,
         });
     }
-    Ok(EntrySnapshot { entry, routes })
+    let reality = if entry.inbound_kind == "vless-reality" {
+        Some(
+            crate::store::reality::load_config(pool, entry_id)
+                .await?
+                .ok_or_else(|| AppError::new(ErrorCode::NotFound, "缺 VLESS Reality 配置"))?,
+        )
+    } else {
+        None
+    };
+    Ok(EntrySnapshot {
+        entry,
+        reality,
+        routes,
+    })
 }
 
 async fn resolve_terminal(
@@ -97,10 +110,38 @@ pub async fn load_secrets(
     snap: &EntrySnapshot,
 ) -> Result<secrets::SecretBundle> {
     let mut bundle = secrets::SecretBundle::default();
-    let psk = secrets::open_psk_by_scope(pool, cipher, "entry_psk", &snap.entry.id)
-        .await?
-        .ok_or_else(|| AppError::new(ErrorCode::NotFound, "缺 entry_psk"))?;
-    bundle.entry_psk.insert(snap.entry.id.clone(), psk);
+    if snap.entry.inbound_kind == "vless-reality" {
+        let material = crate::store::reality::load(pool, cipher, &snap.entry.id)
+            .await?
+            .ok_or_else(|| AppError::new(ErrorCode::NotFound, "缺 VLESS Reality 密钥"))?;
+        bundle
+            .reality
+            .insert(snap.entry.id.clone(), material.secret);
+        let rows = sqlx::query(
+            "SELECT ur.identity_name,ur.upsk_credential_id
+             FROM user_routes ur JOIN routes r ON r.id=ur.route_id
+             WHERE r.entry_id=? AND r.status IN ('draft','active')
+               AND ur.identity_name IS NOT NULL AND ur.upsk_credential_id IS NOT NULL",
+        )
+        .bind(&snap.entry.id)
+        .fetch_all(pool)
+        .await?;
+        for row in rows {
+            let name: String = row.get("identity_name");
+            let cid: String = row.get("upsk_credential_id");
+            let credential = secrets::open_credential(pool, cipher, &cid)
+                .await?
+                .ok_or_else(|| {
+                    AppError::new(ErrorCode::NotFound, format!("缺 VLESS 用户 UUID: {name}"))
+                })?;
+            bundle.vless_uuid.insert(name, credential);
+        }
+    } else {
+        let psk = secrets::open_psk_by_scope(pool, cipher, "entry_psk", &snap.entry.id)
+            .await?
+            .ok_or_else(|| AppError::new(ErrorCode::NotFound, "缺 entry_psk"))?;
+        bundle.entry_psk.insert(snap.entry.id.clone(), psk);
+    }
 
     for rs in &snap.routes {
         let mut node_ids: Vec<&str> = rs.hops.iter().map(|n| n.id.as_str()).collect();

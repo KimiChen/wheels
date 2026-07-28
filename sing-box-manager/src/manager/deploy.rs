@@ -219,18 +219,29 @@ async fn dispatch_target(
         Ok(Some(a)) => a.mgmt_address,
         _ => return fail(format!("Host {} 无 Agent", t.host_id)),
     };
-    // barrier：Manager 据角色判定，绝不由调用方 bool 豁免（D8）。entry 目标每次都重启计量进程 → 需结算屏障；
-    // entry_id 随之下发（Agent outbox 键，D11）。node 无 per-user 计量 → 无需屏障。
-    let (barrier_required, entry_id) = if t.role == "entry" {
-        (true, Some(t.scope_ref.clone()))
+    // SS Entry 重启前必须结算 SSM；VLESS 没有 SSM 统计，使用进程型健康检查且不进入结算屏障。
+    let (role, barrier_required, entry_id) = if t.role == "entry" {
+        let inbound_kind =
+            sqlx::query_scalar::<_, String>("SELECT inbound_kind FROM entries WHERE id=?")
+                .bind(&t.scope_ref)
+                .fetch_optional(pool)
+                .await;
+        match inbound_kind {
+            Ok(Some(kind)) if kind == "vless-reality" => {
+                ("entry-vless".to_string(), false, Some(t.scope_ref.clone()))
+            }
+            Ok(Some(_)) => ("entry".to_string(), true, Some(t.scope_ref.clone())),
+            Ok(None) => return fail(format!("Entry {} 不存在", t.scope_ref)),
+            Err(e) => return fail(format!("读取 Entry 协议失败: {e}")),
+        }
     } else {
-        (false, None)
+        (t.role.clone(), false, None)
     };
     let push = DeployPush {
         revision: rev_seq,
         content_sha256: t.content_sha256.clone(),
         config,
-        role: t.role.clone(),
+        role,
         barrier_required,
         entry_id,
     };
@@ -476,6 +487,67 @@ mod tests {
         assert!(create_deployment(&pool, &rev_id, "normal", None)
             .await
             .is_err());
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn vless_entry_uses_process_health_without_meter_barrier() {
+        let pool = pool().await;
+        let c = cipher();
+        let (_old_revision, entry) = setup(&pool, &c).await;
+        sqlx::query("UPDATE entries SET inbound_kind='vless-reality',ss_method=NULL WHERE id=?")
+            .bind(&entry)
+            .execute(&pool)
+            .await
+            .unwrap();
+        store::reality::ensure(
+            &pool,
+            &c,
+            &entry,
+            "xtls-rprx-vision",
+            "www.example.com",
+            "www.example.com",
+            443,
+            "chrome",
+        )
+        .await
+        .unwrap();
+        let revision = revisions::compile_and_persist(&pool, &c, &entry, Some("1.13.14"), None)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE config_revisions SET status='checked' WHERE id=?")
+            .bind(&revision.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let mock = MockAgentClient::default();
+        mock.push_post(deployed(revision.seq));
+        mock.push_post(deployed(revision.seq));
+        let deployment = create_deployment(&pool, &revision.id, "normal", None)
+            .await
+            .unwrap();
+        drive(&pool, &c, &mock, &deployment).await.unwrap();
+
+        let (entry_role, barrier_required) = {
+            let bodies = mock.posted_bodies.lock().unwrap();
+            let entry_push = bodies
+                .iter()
+                .filter_map(|body| serde_json::from_str::<DeployPush>(body).ok())
+                .find(|push| push.entry_id.as_deref() == Some(entry.as_str()))
+                .unwrap();
+            (entry_push.role, entry_push.barrier_required)
+        };
+        assert_eq!(entry_role, "entry-vless");
+        assert!(!barrier_required);
+        assert_eq!(
+            depl::get_deployment(&pool, &deployment)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            "succeeded"
+        );
         pool.close().await;
     }
 }

@@ -2,6 +2,18 @@
 
 本项目遵循语义化版本。由于当前仍是 `0.x` 预览阶段，小版本可能包含需要运维介入的变更。
 
+## 未发布
+
+### 新增
+
+- VLESS-Reality Entry 全链路：自动 X25519/short ID、用户 UUID、编译、真实 check、Agent
+  部署/回滚、进程健康检查，以及 raw 与 Clash/mihomo 混合订阅。
+- Reality 私钥与 short ID 信封加密，并纳入主密钥 re-seal。
+
+### 限制
+
+- VLESS 暂无 SSM 式 per-user 流量计量；授权 VLESS relay 的用户必须 `quotaBytes = 0`。
+
 ## 0.1.0 - 2026-07-27
 
 首个公开预览版本。

@@ -12,18 +12,10 @@
 - 用户授权、订阅、SSM reconcile。
 - 流量计量、配额和重启结算屏障。
 - 信封加密和主密钥轮换。
+- VLESS-Reality 密钥、编译、部署、回滚和混合订阅。
 - 中文开源文档与 systemd 部署指南。
 
 ## 近期优先级
-
-### VLESS-Reality 完整支持
-
-- 为每个 VLESS listener 生成并加密保存 Reality 私钥和 short ID。
-- 编译 VLESS Reality inbound 和用户 UUID。
-- 生成 VLESS 订阅 URI 与 Clash/mihomo 配置。
-- 实现不依赖 Shadowsocks SSM 的用户变更策略。
-- 增加真实 `sing-box check`、连接和多 Route 回归测试。
-- 取消当前 `apply --deploy` 的 VLESS 失败保护。
 
 ### 运维闭环
 
@@ -33,6 +25,7 @@
 - 部署重驱动、显式回滚和失败 target 诊断 CLI。
 - settings 的受控 CLI，避免直接操作 SQLite。
 - 状态输出增加 readiness 原因和部署摘要。
+- 调研 VLESS 可审计 per-user 计量方案；在此之前保持非零配额失败关闭。
 
 ### SSH bootstrap
 
@@ -68,7 +61,7 @@ SQLite。
 
 优先欢迎：
 
-- VLESS 编译器和订阅的失败关闭实现。
+- VLESS 客户端兼容性和真实连接回归测试。
 - 备份/恢复与证书轮换。
 - 部署和结算屏障的故障注入测试。
 - 不同 Linux 发行版和 sing-box 版本的兼容报告。

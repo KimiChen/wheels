@@ -219,7 +219,7 @@ mod tests {
             .unwrap();
         let snap = metrics_snapshot(&pool, 90).await.unwrap();
         assert_eq!(snap.hosts_total, 2);
-        assert_eq!(snap.schema_version, 9);
+        assert_eq!(snap.schema_version, 10);
         assert_eq!(snap.agents_total, 0);
         assert_eq!(snap.alerts_firing, 0);
 

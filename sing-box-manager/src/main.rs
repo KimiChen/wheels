@@ -173,11 +173,6 @@ async fn plan_main(path: PathBuf, json: bool) -> anyhow::Result<()> {
 
 async fn apply_main(path: PathBuf, json: bool, deploy: bool) -> anyhow::Result<()> {
     let manifest = manifest::Manifest::load(&path)?;
-    if deploy && manifest.listeners.iter().any(|l| l.protocol == "vless") {
-        anyhow::bail!(
-            "--deploy 当前不支持 VLESS-Reality；未写数据库、未连接 Agent。请先不带 --deploy 同步期望状态"
-        );
-    }
     let cfg = config::StartupConfig::from_env()?;
     let cipher = crypto::Cipher::from_env_ring()?;
     let pool = store::open(&cfg.database_path).await?;

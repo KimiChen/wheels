@@ -147,6 +147,24 @@ pub async fn apply(pool: &SqlitePool, cipher: &Cipher, manifest: &Manifest) -> R
                 .await?
             }
         };
+        if kind == InboundKind::VlessReality {
+            let vless = manifest
+                .protocols
+                .vless
+                .as_ref()
+                .expect("manifest.validate 已要求 VLESS 模板");
+            store::reality::ensure(
+                pool,
+                cipher,
+                &entry_id,
+                &vless.flow,
+                &vless.server_name,
+                &vless.handshake_server,
+                i64::from(vless.handshake_port),
+                &vless.client_fingerprint,
+            )
+            .await?;
+        }
         listener_entries.insert(listener.name.clone(), entry_id.clone());
         report.entry_ids.push(entry_id);
     }
@@ -310,6 +328,9 @@ pub async fn apply(pool: &SqlitePool, cipher: &Cipher, manifest: &Manifest) -> R
         for route_id in desired_routes.difference(&current_routes) {
             store::users::grant_route(pool, cipher, &user_id, route_id).await?;
             report.grants_created += 1;
+        }
+        for route_id in &desired_routes {
+            store::users::ensure_route_credential(pool, cipher, &user_id, route_id).await?;
         }
         for route_id in current_routes.difference(&desired_routes) {
             let route = topology::get_route(pool, route_id)
@@ -512,6 +533,27 @@ relays=["to-node"]
             .unwrap()
             .unwrap();
         assert!(uuid::Uuid::parse_str(&uuid).is_ok());
+        let entry_id: String = sqlx::query_scalar("SELECT id FROM entries")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let first = store::reality::load(&pool, &cipher(), &entry_id)
+            .await
+            .unwrap()
+            .unwrap();
+        apply(&pool, &cipher(), &vless_manifest()).await.unwrap();
+        let second = store::reality::load(&pool, &cipher(), &entry_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            first.secret.private_key.as_str(),
+            second.secret.private_key.as_str()
+        );
+        assert_eq!(
+            first.secret.short_id.as_str(),
+            second.secret.short_id.as_str()
+        );
         pool.close().await;
         let _ = std::fs::remove_file(path);
     }

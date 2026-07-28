@@ -22,6 +22,7 @@ thiserror = "2"
 base64 = "0.22"                                     # PSK 编码
 rand = "0.8"                                        # PSK 与其他密钥材料
 uuid = { version = "1", features = ["v4"] }         # 预生成 VLESS UUID
+x25519-dalek = { version = "2", features = ["static_secrets"] } # Reality X25519 密钥对
 time = { version = "0.3", features = ["macros", "parsing"] }  # 用户有效期
 # 异步运行时与 SSM API 客户端
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "signal", "net", "fs", "process"] }

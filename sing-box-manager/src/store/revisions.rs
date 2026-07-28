@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use sqlx::{Row, SqlitePool};
 
 use crate::compiler::canonical::{canonical_bytes, content_sha256};
-use crate::compiler::check::check_config;
+use crate::compiler::check::{check_config, secret_values_in};
 use crate::compiler::{self, EntrySnapshot, Terminal};
 use crate::crypto::{Cipher, Sealed};
 use crate::domain::revision::{ArtifactMeta, ConfigRevision};
@@ -199,8 +199,11 @@ pub async fn compile_and_persist(
 ) -> Result<ConfigRevision> {
     let snap = snapshot::load_entry_snapshot(pool, entry_id).await?;
     let secrets = snapshot::load_secrets(pool, cipher, &snap).await?;
-    // Phase 4：注入每 Route 已授权身份（结构态；空集时不折入 hash 以保 Phase 2/3 向后兼容）。
-    let identities = crate::store::users::configured_identities(pool, entry_id).await?;
+    let identities = if snap.entry.inbound_kind == "vless-reality" {
+        crate::store::users::eligible_static_identities(pool, entry_id, now_unix()).await?
+    } else {
+        crate::store::users::configured_identities(pool, entry_id).await?
+    };
     let topo_hash = content_sha256(&topology_descriptor(&snap, &identities));
     let summary = format!(
         "entry={} routes={} identities={}",
@@ -259,7 +262,7 @@ pub async fn run_check(
     let mut all_passed = true;
     for m in &metas {
         let plaintext = load_artifact_plaintext(pool, cipher, &m.id).await?;
-        let redact = extract_secret_values(&plaintext);
+        let redact = secret_values_in(&plaintext);
         let result = check_config(&plaintext, &redact)?;
         all_passed &= result.passed;
         let now = now_unix();
@@ -317,36 +320,20 @@ fn topology_descriptor(
             "inbound_kind": snap.entry.inbound_kind, "ss_method": snap.entry.ss_method,
             "allow_direct": snap.entry.allow_direct,
         },
+        "reality": snap.reality.as_ref().map(|r| json!({
+            "flow": r.flow,
+            "public_key": r.public_key,
+            "server_name": r.server_name,
+            "handshake_server": r.handshake_server,
+            "handshake_port": r.handshake_port,
+            "client_fingerprint": r.client_fingerprint,
+        })),
         "routes": routes,
     });
     if !identities.is_empty() {
         desc["identities"] = json!(identities);
     }
     desc
-}
-
-/// 从配置 JSON 收集 password/username 值，供 check stderr 脱敏（无需接触 SecretBundle）。
-fn extract_secret_values(plaintext: &[u8]) -> Vec<String> {
-    let mut out = Vec::new();
-    if let Ok(v) = serde_json::from_slice::<Value>(plaintext) {
-        collect(&v, &mut out);
-    }
-    out
-}
-fn collect(v: &Value, out: &mut Vec<String>) {
-    match v {
-        Value::Object(m) => {
-            for (k, val) in m {
-                if (k == "password" || k == "username") && val.is_string() {
-                    out.push(val.as_str().unwrap().to_string());
-                } else {
-                    collect(val, out);
-                }
-            }
-        }
-        Value::Array(a) => a.iter().for_each(|e| collect(e, out)),
-        _ => {}
-    }
 }
 
 #[cfg(test)]
@@ -499,6 +486,123 @@ mod tests {
                 get_revision(&pool, &rev.id).await.unwrap().unwrap().status,
                 "checked"
             );
+        }
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn vless_reality_compile_persist_and_check() {
+        let pool = pool().await;
+        let c = cipher();
+        let eh = store::hosts::create_host(&pool, "vless-entry", None, &[Capability::Entry])
+            .await
+            .unwrap();
+        let nh = store::hosts::create_host(&pool, "vless-node", None, &[Capability::Node])
+            .await
+            .unwrap();
+        let entry = topo::create_entry(
+            &pool,
+            &c,
+            &NewEntry {
+                host_id: &eh,
+                public_address: "entry.example.com",
+                inbound_kind: InboundKind::VlessReality,
+                ss_method: None,
+                allow_direct: false,
+            },
+        )
+        .await
+        .unwrap();
+        store::reality::ensure(
+            &pool,
+            &c,
+            &entry,
+            "xtls-rprx-vision",
+            "www.example.com",
+            "www.example.com",
+            443,
+            "chrome",
+        )
+        .await
+        .unwrap();
+        let node = topo::create_node(&pool, &c, &nh, "node.example.com", true)
+            .await
+            .unwrap();
+        let route = topo::insert_route(
+            &pool,
+            &RouteDraft {
+                id: None,
+                label: "vless-route".into(),
+                entry_id: entry.clone(),
+                hops: vec![],
+                exit_kind: ExitKind::Node,
+                exit_node_id: Some(node),
+                exit_landing_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        let (user, _) = store::users::create_user(&pool, "alice", 0, "never", None)
+            .await
+            .unwrap();
+        let identity = store::users::grant_route(&pool, &c, &user, &route)
+            .await
+            .unwrap();
+        let credential_id: String = sqlx::query_scalar(
+            "SELECT upsk_credential_id FROM user_routes WHERE user_id=? AND route_id=?",
+        )
+        .bind(&user)
+        .bind(&route)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let uuid = store::secrets::open_credential(&pool, &c, &credential_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let reality = store::reality::load(&pool, &c, &entry)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let revision = compile_and_persist(&pool, &c, &entry, Some("1.13.14"), Some("tester"))
+            .await
+            .unwrap();
+        let metas = list_artifact_meta(&pool, &revision.id).await.unwrap();
+        assert_eq!(metas.len(), 2);
+        let entry_meta = metas.iter().find(|m| m.role == "entry").unwrap();
+        let plaintext = load_artifact_plaintext(&pool, &c, &entry_meta.id)
+            .await
+            .unwrap();
+        let config: Value = serde_json::from_slice(&plaintext).unwrap();
+        assert_eq!(config["inbounds"][0]["type"], "vless");
+        assert_eq!(config["inbounds"][0]["users"][0]["name"], identity);
+        assert_eq!(config["inbounds"][0]["users"][0]["uuid"], uuid);
+        assert_eq!(
+            config["inbounds"][0]["tls"]["reality"]["private_key"],
+            reality.secret.private_key
+        );
+        assert_eq!(
+            config["inbounds"][0]["tls"]["reality"]["short_id"],
+            json!([reality.secret.short_id.as_str()])
+        );
+        assert!(config.get("services").is_none());
+
+        let ciphertext: Vec<u8> =
+            sqlx::query_scalar("SELECT ciphertext FROM config_artifacts WHERE id=?")
+                .bind(&entry_meta.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(!contains(&ciphertext, uuid.as_bytes()));
+        assert!(!contains(
+            &ciphertext,
+            reality.secret.private_key.as_bytes()
+        ));
+
+        if check::available() {
+            let checked = run_check(&pool, &c, &revision.id).await.unwrap();
+            assert!(checked.iter().all(|m| m.check_status == "passed"));
         }
         pool.close().await;
     }

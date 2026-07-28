@@ -74,13 +74,12 @@ sing-box-manager apply \
 
 带 `--deploy`：
 
-1. 拒绝任何实际启用的 VLESS listener。
-2. 拒绝首次创建用户，要求先普通 `apply` 保存 token。
-3. 同步期望状态。
-4. 为全部 Entry 编译 revision 和 artifact。
-5. 在 Controller 本机逐个执行真实 `sing-box check`。
-6. 检查全部目标 Agent 门禁。
-7. 按 Node→Entry 驱动 mTLS 部署。
+1. 拒绝首次创建用户，要求先普通 `apply` 保存 token。
+2. 同步期望状态和加密凭据。
+3. 为全部 Shadowsocks/VLESS Entry 编译 revision 和 artifact。
+4. 在 Controller 本机逐个执行真实 `sing-box check`。
+5. 检查全部目标 Agent 门禁。
+6. 按 Node→Entry 驱动 mTLS 部署。
 
 `--json` 返回各类 created/updated/revoked 计数、首次 token、Entry ID、checked revision 和
 succeeded deployment ID。该输出可能包含首次 token，不要写入公开 CI 日志。
@@ -255,6 +254,7 @@ Controller 数据库中的密文主要位于：
 - `credential_versions`
 - `ca_keypairs`
 - `config_artifacts`
+- `entry_reality`
 
 主密钥、真实配置、数据库、证书、enrollment、生成配置和 SSM cache 都不得提交公开 Git。
 
@@ -269,4 +269,4 @@ Controller 数据库中的密文主要位于：
 - 单 SQLite 单 Controller
 - Node 先于 Entry 部署
 - 未通过 check、门禁或结算屏障时不激活 Route
-- VLESS listener 当前不可部署
+- VLESS 授权用户必须 `quotaBytes = 0`
