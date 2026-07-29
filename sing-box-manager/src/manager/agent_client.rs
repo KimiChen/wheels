@@ -13,6 +13,9 @@ use crate::error::{AppError, ErrorCode, Result};
 use crate::pki::verify::PinnedServerVerifier;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const COMMAND_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Agent 调用失败分类。`Timeout`/`Connect` 视为不可达（→offline）；其余视为错误（→error）。
 #[derive(Debug, Clone)]
 pub enum AgentError {
@@ -139,7 +142,7 @@ impl RustlsAgentClient {
             agent_ca_pem,
             manager_cert_pem,
             manager_key_pem,
-            timeout: Duration::from_secs(5),
+            timeout: DEFAULT_REQUEST_TIMEOUT,
             clients: tokio::sync::Mutex::new(HashMap::new()),
         }
     }
@@ -233,6 +236,9 @@ impl AgentClient for RustlsAgentClient {
         let url = format!("https://{mgmt_address}{}", command_path(kind, command_id));
         let resp = client
             .post(&url)
+            // 部署命令可能先等待 Agent 的 5 秒 SSM 排空窗口；写命令必须拥有更长的
+            // 整体预算，避免 Manager 在 Agent 写入幂等终态前取消请求。
+            .timeout(COMMAND_REQUEST_TIMEOUT)
             .header("x-sbm-command-id", command_id)
             .header("content-type", "application/json")
             .body(body_json.to_string())
@@ -456,7 +462,14 @@ impl AgentClient for MockAgentClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::gate::SsmDrainGate;
     use crate::pki::{generate_ca, install_ring_default, issue_manager_client_cert, Ca, CaRole};
+
+    #[test]
+    fn command_timeout_covers_agent_drain_window() {
+        assert!(COMMAND_REQUEST_TIMEOUT > SsmDrainGate::default().timeout);
+        assert_eq!(DEFAULT_REQUEST_TIMEOUT, Duration::from_secs(5));
+    }
 
     #[test]
     fn build_client_config_and_reqwest_client_from_generated_material() {
