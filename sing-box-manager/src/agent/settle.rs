@@ -3,8 +3,9 @@
 //! （[`complete_barrier`]）：收到 Manager meter-ack（序号需匹配暂存 = 已 ingest 的证明）后，才停旧 →
 //! 原子替换 → 复用预分配 new_epoch 重启 → 健康。
 //!
-//! 幂等（审查 D2/D3）：new_epoch 于 phase A 预分配并持久化，phase B 重放以 `active_revision==revision`
-//! 为幂等门，绝不二次切换或膨胀 epoch；outbox/pending 于单事务原子登记，命令级去重。
+//! 幂等（审查 D2/D3）：new_epoch 于 phase A 预分配并持久化，phase B 重放以
+//! `active_revision==revision && active_sha==sha` 为幂等门，绝不二次切换或膨胀 epoch；
+//! outbox/pending 于单事务原子登记，命令级去重。
 
 use sqlx::SqlitePool;
 
@@ -131,9 +132,14 @@ pub async fn complete_barrier(
     // 确认最终统计已被 Manager 收妥（幂等；停旧前置）。
     bstore::mark_outbox_acked(pool, &pb.entry_id, old, pb.sequence).await?;
 
-    // D2 幂等门：若已切换（active_revision 已是新 revision）→ 不重复 swap/restart，清理并回放。
-    if state::active_revision(pool).await? == Some(pb.revision) {
-        let ep = state::current_epoch(pool).await?;
+    // D2 幂等门：revision 与内容 SHA 都一致才代表已切换。仅 revision 相同但 SHA 不同，
+    // 说明编译产物发生变化，仍必须执行 swap/restart。
+    let active = state::active(pool).await?;
+    if active
+        .as_ref()
+        .is_some_and(|current| current.revision == pb.revision && current.sha256 == pb.sha256)
+    {
+        let ep = active.and_then(|current| current.runtime_epoch);
         bstore::delete_pending(pool, command_id).await?;
         return Ok(Some(report(
             "deployed",
@@ -397,6 +403,57 @@ mod tests {
                 .is_none(),
             "幂等门清理 pending"
         );
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn phase_b_same_revision_with_new_sha_still_switches() {
+        if !check::available() {
+            eprintln!("skip");
+            return;
+        }
+        let (pool, dir) = setup().await;
+        let rt = MockRuntime::default();
+        let ssm = MockSsmClient::default();
+        let gate = MockDrainGate { clean: true };
+
+        rt.push_health(Health::Ok);
+        let old_config = valid_config("2022-blake3-aes-128-gcm");
+        let first = barrier_push(&old_config, 5);
+        crate::agent::deploy::execute_deploy(&pool, &rt, &ssm, &gate, &dir, &first, "c5")
+            .await
+            .unwrap();
+        let old_epoch = state::current_epoch(&pool).await.unwrap().unwrap();
+
+        let new_config = valid_config("2022-blake3-chacha20-poly1305");
+        let changed = barrier_push(&new_config, 5);
+        let prepared = crate::agent::deploy::execute_deploy(
+            &pool,
+            &rt,
+            &ssm,
+            &gate,
+            &dir,
+            &changed,
+            "c5-new-content",
+        )
+        .await
+        .unwrap();
+        assert_eq!(prepared.status, "awaiting_meter_ack");
+
+        let calls_before = rt.call_log().len();
+        rt.push_health(Health::Ok);
+        let done = complete_barrier(&pool, &rt, &dir, "c5-new-content", old_epoch, 0)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(done.status, "deployed");
+        assert!(
+            rt.call_log().len() > calls_before,
+            "相同 revision 但新 SHA 必须重启切换",
+        );
+        let active = state::active(&pool).await.unwrap().unwrap();
+        assert_eq!(active.revision, 5);
+        assert_eq!(active.sha256, content_sha256(&new_config));
         pool.close().await;
     }
 

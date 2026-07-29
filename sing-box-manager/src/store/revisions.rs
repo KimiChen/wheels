@@ -42,7 +42,7 @@ pub async fn list_revisions(pool: &SqlitePool) -> Result<Vec<ConfigRevision>> {
     Ok(rows.iter().map(row_to_revision).collect())
 }
 
-/// 幂等：同 topology_hash 复用最新一条，否则新建（seq=MAX+1）。
+/// 幂等：同编译产物指纹复用最新一条，否则新建（seq=MAX+1）。
 async fn put_revision(
     pool: &SqlitePool,
     topology_hash: &str,
@@ -204,17 +204,21 @@ pub async fn compile_and_persist(
     } else {
         crate::store::users::configured_identities(pool, entry_id).await?
     };
-    let topo_hash = content_sha256(&topology_descriptor(&snap, &identities));
+    let topology = topology_descriptor(&snap, &identities);
+    let identity_count = identities.values().map(Vec::len).sum::<usize>();
+    let id_map: std::collections::HashMap<String, Vec<String>> = identities.into_iter().collect();
+    let compiled = compiler::compile(&snap, &secrets, &id_map)?;
+    // revision 必须标识实际下发内容，而不只是拓扑。否则编译器修复或密钥轮换后会复用旧
+    // seq，Agent 可能把内容已变化的部署误判成旧 revision 的幂等重放。
+    let topo_hash = revision_fingerprint(topology, &compiled);
     let summary = format!(
         "entry={} routes={} identities={}",
         snap.entry.id,
         snap.routes.len(),
-        identities.values().map(|v| v.len()).sum::<usize>(),
+        identity_count,
     );
     let rev = put_revision(pool, &topo_hash, &summary, created_by).await?;
 
-    let id_map: std::collections::HashMap<String, Vec<String>> = identities.into_iter().collect();
-    let compiled = compiler::compile(&snap, &secrets, &id_map)?;
     put_artifact(
         pool,
         cipher,
@@ -247,6 +251,21 @@ pub async fn compile_and_persist(
         .await?;
     }
     Ok(rev)
+}
+
+fn revision_fingerprint(topology: Value, compiled: &compiler::Compiled) -> String {
+    let node_hashes = compiled
+        .nodes
+        .iter()
+        .map(|(node_id, config)| (node_id.clone(), content_sha256(config)))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    content_sha256(&json!({
+        "topology": topology,
+        "artifacts": {
+            "entry": content_sha256(&compiled.entry),
+            "nodes": node_hashes,
+        },
+    }))
 }
 
 /// 对某 revision 全部 artifact 跑真实 sing-box check；更新每 artifact 与 revision 状态。
@@ -356,6 +375,23 @@ mod tests {
     }
     fn contains(hay: &[u8], needle: &[u8]) -> bool {
         !needle.is_empty() && hay.windows(needle.len()).any(|w| w == needle)
+    }
+
+    #[test]
+    fn revision_fingerprint_tracks_compiled_content() {
+        let topology = json!({"entry": "same"});
+        let original = compiler::Compiled {
+            entry: json!({"outbounds": [{"tag": "direct", "type": "direct"}]}),
+            nodes: vec![("n1".into(), json!({"route": {"final": "direct"}}))],
+        };
+        let changed = compiler::Compiled {
+            entry: json!({"outbounds": [{"tag": "relay", "type": "shadowsocks"}]}),
+            nodes: vec![("n1".into(), json!({"route": {"final": "direct"}}))],
+        };
+        assert_ne!(
+            revision_fingerprint(topology.clone(), &original),
+            revision_fingerprint(topology, &changed),
+        );
     }
 
     #[tokio::test]
