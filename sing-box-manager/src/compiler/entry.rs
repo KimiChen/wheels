@@ -250,9 +250,9 @@ mod tests {
             .insert("home".into(), ("u".into(), "p".into()));
         let cfg = compile_entry(&snap, &sec, &no_ids()).unwrap();
         let obs = cfg["outbounds"].as_array().unwrap();
-        // 链：out-n1-via-e1 (detour direct), out-n2-via-n1, out-socks-home-via-n2
+        // 链：out-n1-via-e1（首跳无 detour）、out-n2-via-n1、out-socks-home-via-n2。
         let find = |tag: &str| obs.iter().find(|o| o["tag"] == tag).unwrap();
-        assert_eq!(find("out-n1-via-e1")["detour"], "direct");
+        assert!(find("out-n1-via-e1").get("detour").is_none());
         assert_eq!(find("out-n1-via-e1")["server"], "n1.example.com");
         assert_eq!(find("out-n2-via-n1")["detour"], "out-n1-via-e1");
         let socks = find("out-socks-home-via-n2");
@@ -261,6 +261,38 @@ mod tests {
         assert_eq!(socks["detour"], "out-n2-via-n1");
         assert_eq!(socks["username"], "u");
         assert_eq!(socks["network"], "tcp"); // 受限网络透传
+    }
+
+    #[test]
+    fn direct_socks5_landing_omits_detour() {
+        let landing = Landing {
+            id: "home".into(),
+            kind: "socks5".into(),
+            node_id: None,
+            socks5_address: Some("home.example.com".into()),
+            socks5_port: Some(1080),
+            network: "both".into(),
+            auth_credential_id: None,
+        };
+        let mut r = route("r1", "home-direct", "landing");
+        r.exit_landing_id = Some("home".into());
+        let snap = EntrySnapshot {
+            entry: entry("e1", false),
+            reality: None,
+            routes: vec![RouteSnapshot {
+                route: r,
+                hops: vec![],
+                terminal: Terminal::Socks5(landing),
+            }],
+        };
+        let cfg = compile_entry(&snap, &secrets(&[]), &no_ids()).unwrap();
+        let socks = cfg["outbounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["tag"] == "out-socks-home-via-e1")
+            .unwrap();
+        assert!(socks.get("detour").is_none());
     }
 
     #[test]

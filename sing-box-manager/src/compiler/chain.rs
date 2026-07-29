@@ -1,5 +1,6 @@
-//! detour 出站链构建（忠实移植 legacy build_chain）。沿 [hops by position] ++ 终端 逐跳建 SS-2022 中继，
+//! detour 出站链构建。沿 [hops by position] ++ 终端 逐跳建 SS-2022 中继，
 //! dedup 键 (node_id, prev_id)，tag = `out-{node}-via-{prev}`（稳定 id）；socks5 终端建 socks 出站。
+//! 首跳使用默认拨号器，不能写 `detour: "direct"`；后续跳才 detour 到前一跳。
 //! 返回该 Route 的路由目标 outbound tag（entry_direct → "direct"）。
 
 use std::collections::HashMap;
@@ -36,15 +37,18 @@ pub(crate) fn build_chain(
             let psk = secrets.node_psk.get(&node.id).ok_or_else(|| {
                 AppError::new(ErrorCode::Internal, format!("缺 node_psk: {}", node.id))
             })?;
-            outbounds.push(json!({
+            let mut outbound = json!({
                 "type": "shadowsocks",
                 "tag": t,
                 "server": node.data_address,
                 "server_port": NODE_PORT,
                 "method": NODE_SS_METHOD,
                 "password": psk,
-                "detour": prev_tag,
-            }));
+            });
+            if prev_tag != "direct" {
+                outbound["detour"] = json!(prev_tag);
+            }
+            outbounds.push(outbound);
             made.insert(key, t.clone());
             t
         };
@@ -67,8 +71,10 @@ pub(crate) fn build_chain(
                 "server": landing.socks5_address,
                 "server_port": landing.socks5_port,
                 "version": "5",
-                "detour": prev_tag,
             });
+            if prev_tag != "direct" {
+                ob["detour"] = json!(prev_tag);
+            }
             if let Some((user, pass)) = secrets.landing_auth.get(&landing.id) {
                 ob["username"] = json!(user);
                 ob["password"] = json!(pass);

@@ -1,6 +1,6 @@
 //! Route 校验引擎（§4.5 的 11 条）。纯函数，**收集全部错误**（服务 Web 编辑器一次回显）；
 //! 前置对象缺失则跳过依赖它的规则、继续收集其余。环检测严格 **intra-route**（单遍访问集）——
-//! detour 图按 (node,prev) 键、via-前缀相异、均根于 direct，天然无环，故 Route entry→A→B 与
+//! detour 图按 (node,prev) 键、via-前缀相异，首跳使用默认拨号器且后续跳指向前驱，天然无环，故 Route entry→A→B 与
 //! entry→B→A 合法共存，绝不跨 Route 判环。R9（同 Host 端口占用）在 create_entry/create_node 处强制。
 
 use std::collections::{HashMap, HashSet};
