@@ -69,7 +69,7 @@ async fn handle_sub(
     if generate::wants_html(target, ua) {
         return sub_response(
             "text/html; charset=utf-8",
-            page_html(&user, proxies.len(), eligible, up + down),
+            page_html(&user, &proxies, eligible, up + down),
             &user,
             up,
             down,
@@ -200,9 +200,9 @@ fn escape_html(s: &str) -> String {
         .replace('\'', "&#39;")
 }
 
-fn page_html(user: &User, proxy_count: usize, eligible: bool, used_bytes: i64) -> String {
+fn page_html(user: &User, proxies: &[ProxyInfo], eligible: bool, used_bytes: i64) -> String {
     let status = if eligible {
-        format!("<span>可用 · {proxy_count} 条线路</span>")
+        format!("<span>可用 · {} 条线路</span>", proxies.len())
     } else {
         "<span style=\"color:#c00\">已停用或过期</span>".to_string()
     };
@@ -214,12 +214,50 @@ fn page_html(user: &User, proxy_count: usize, eligible: bool, used_bytes: i64) -
     } else {
         format!("<p>本周期用量：{used_gib:.2} GiB（无配额上限）</p>")
     };
+    let route_list = if proxies.is_empty() {
+        "<h2>全部线路</h2><p>暂无可用线路。</p>".to_string()
+    } else {
+        let items = proxies
+            .iter()
+            .map(|proxy| {
+                let (label, protocol, server, port) = match proxy {
+                    ProxyInfo::Shadowsocks {
+                        label,
+                        server,
+                        port,
+                        ..
+                    } => (label, "Shadowsocks", server, port),
+                    ProxyInfo::VlessReality {
+                        label,
+                        server,
+                        port,
+                        ..
+                    } => (label, "VLESS-Reality", server, port),
+                };
+                let host = if server.contains(':') && !server.starts_with('[') {
+                    format!("[{server}]")
+                } else {
+                    server.to_string()
+                };
+                format!(
+                    "<li><strong>{}</strong> · {} · <code>{}:{}</code></li>",
+                    escape_html(label),
+                    protocol,
+                    escape_html(&host),
+                    port,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        format!("<h2>全部线路</h2><ol>{items}</ol>")
+    };
     format!(
         "<!doctype html><html lang=\"zh\"><head><meta charset=\"utf-8\">\
 <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
 <title>订阅 · {name}</title></head><body style=\"font-family:system-ui;max-width:640px;margin:2rem auto;padding:0 1rem\">\
 <h1>订阅 · {name}</h1><p>状态：{status}</p>\
 {usage_line}\
+{route_list}\
 <p>用客户端（Clash/mihomo/sing-box）打开本链接以导入。</p></body></html>",
         name = escape_html(&user.name),
         status = status,
@@ -232,6 +270,52 @@ mod tests {
     use crate::domain::host::Capability;
     use crate::domain::topology::{ExitKind, InboundKind, RouteDraft};
     use crate::store::topology::{self, NewEntry};
+
+    #[test]
+    fn html_lists_all_routes_without_embedding_credentials() {
+        let user = User {
+            id: "u1".into(),
+            name: "alice".into(),
+            quota_bytes: 0,
+            reset_cycle: "never".into(),
+            expire_at: None,
+            disabled: false,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let proxies = vec![
+            ProxyInfo::Shadowsocks {
+                label: "hk-direct".into(),
+                server: "entry.example.com".into(),
+                port: 19736,
+                method: "2022-blake3-aes-128-gcm".into(),
+                password: "server-secret:user-secret".into(),
+            },
+            ProxyInfo::VlessReality {
+                label: "jp-reality".into(),
+                server: "2001:db8::1".into(),
+                port: 19736,
+                uuid: "8f13c901-99e8-43e9-ad47-1e905a8e72a6".into(),
+                flow: "xtls-rprx-vision".into(),
+                public_key: "public-key".into(),
+                short_id: "0123456789abcdef".into(),
+                server_name: "example.com".into(),
+                client_fingerprint: "chrome".into(),
+            },
+        ];
+
+        let html = page_html(&user, &proxies, true, 0);
+        assert!(html.contains("可用 · 2 条线路"));
+        assert!(html.contains("<h2>全部线路</h2>"));
+        assert!(html.contains("hk-direct"));
+        assert!(html.contains("Shadowsocks"));
+        assert!(html.contains("entry.example.com:19736"));
+        assert!(html.contains("jp-reality"));
+        assert!(html.contains("VLESS-Reality"));
+        assert!(html.contains("[2001:db8::1]:19736"));
+        assert!(!html.contains("server-secret"));
+        assert!(!html.contains("8f13c901-99e8-43e9-ad47-1e905a8e72a6"));
+    }
 
     #[tokio::test]
     async fn loads_active_vless_proxy_from_encrypted_store() {
