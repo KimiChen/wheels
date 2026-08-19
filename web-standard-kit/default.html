@@ -90,9 +90,9 @@
     <header class="wsk-topbar">
       <div class="wsk-brand">
         <span class="wsk-brand-mark" aria-hidden="true">WS</span>
-        <span
+        <span class="wsk-brand-copy"
           ><strong>Web Standard Kit</strong
-          ><span>Minimal web baseline</span></span
+          ><span class="wsk-brand-subtitle">Minimal web baseline</span></span
         >
       </div>
 
@@ -141,6 +141,18 @@
           </div>
           <span class="wsk-badge wsk-accent">v0.1</span>
         </div>
+
+        <nav class="wsk-kit-index" aria-label="组件目录">
+          <strong>组件目录</strong>
+          <div class="wsk-kit-index-links">
+            <a href="#actions-title">操作</a>
+            <a href="#form-title">表单</a>
+            <a href="#navigation-title">导航</a>
+            <a href="#feedback-title">反馈</a>
+            <a href="#states-title">系统状态</a>
+            <a href="#table-title">数据表格</a>
+          </div>
+        </nav>
 
         <section class="wsk-section" aria-labelledby="actions-title">
           <div class="wsk-section-head">
@@ -895,18 +907,20 @@
               <div class="wsk-reference-brand">
                 <strong>企业数据中台</strong><span>DATA FABRIC</span>
               </div>
-              <a
-                class="wsk-active"
-                href="#reference-overview"
-                aria-current="location"
-                >总览</a
-              >
-              <a href="#reference-assets">数据目录</a>
-              <a href="#reference-governance">数据治理</a>
-              <a href="#reference-exchange">交换任务</a>
-              <a href="#reference-orchestration">服务编排</a>
-              <a href="#reference-docs">接入规范</a>
-              <a href="#reference-auth">认证入口</a>
+              <div class="wsk-reference-links">
+                <a
+                  class="wsk-active"
+                  href="#reference-overview"
+                  aria-current="location"
+                  >总览</a
+                >
+                <a href="#reference-assets">数据目录</a>
+                <a href="#reference-governance">数据治理</a>
+                <a href="#reference-exchange">交换任务</a>
+                <a href="#reference-orchestration">服务编排</a>
+                <a href="#reference-docs">接入规范</a>
+                <a href="#reference-auth">认证入口</a>
+              </div>
             </nav>
           </aside>
 

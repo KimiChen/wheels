@@ -500,6 +500,51 @@ function initDialog() {
   });
 }
 
+function initPressFeedback() {
+  const targetSelector = [
+    ".wsk-metric",
+    ".wsk-panel:not(form)",
+    ".wsk-service-card",
+    ".wsk-auth-card:not(form)",
+    ".wsk-empty-state",
+    ".wsk-process-step",
+    ".wsk-mini-metric-grid > div:not(.wsk-metric)",
+    ".wsk-table-wrap",
+  ].join(",");
+  const targets = document.querySelectorAll(targetSelector);
+
+  targets.forEach((target) => {
+    const release = () => target.classList.remove("wsk-is-pressed");
+
+    target.addEventListener(
+      "pointerdown",
+      (event) => {
+        const closestTarget =
+          event.target instanceof Element
+            ? event.target.closest(targetSelector)
+            : null;
+        const interactiveTarget =
+          event.target instanceof Element
+            ? event.target.closest(
+                "button, input, select, textarea, a, [role='button'], [role='link']",
+              )
+            : null;
+        if (
+          event.pointerType !== "mouse" &&
+          closestTarget === target &&
+          !interactiveTarget
+        ) {
+          target.classList.add("wsk-is-pressed");
+        }
+      },
+      { passive: true },
+    );
+    target.addEventListener("pointerup", release, { passive: true });
+    target.addEventListener("pointercancel", release, { passive: true });
+    target.addEventListener("pointerleave", release, { passive: true });
+  });
+}
+
 function initToasts() {
   document.querySelectorAll("[data-toast]").forEach((button) => {
     button.addEventListener("click", () =>
@@ -517,4 +562,5 @@ initForms();
 initDemoPagination();
 initDataTable();
 initDialog();
+initPressFeedback();
 initToasts();

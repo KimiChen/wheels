@@ -4,27 +4,39 @@
   /* Tokens and themes */
   :root {
     color-scheme: light;
-    --canvas: #f6f7f9;
+    --canvas: #f7f8fb;
     --surface: #ffffff;
-    --surface-soft: #f0f2f5;
-    --border: #d7dce4;
-    --border-strong: #7a8494;
-    --text: #172033;
-    --muted: #5f6b7a;
+    --surface-raised: #ffffff;
+    --surface-soft: #f1f3f7;
+    --surface-strong: #e9edf3;
+    --border: #e0e4eb;
+    --border-strong: #98a2b1;
+    --text: #151b2b;
+    --muted: #626d7f;
+    --muted-soft: #8791a1;
     --accent: #4f46e5;
     --accent-hover: #4338ca;
     --accent-soft: #eef2ff;
     --on-accent: #ffffff;
+    --brand: #4f46e5;
+    --on-brand: #ffffff;
     --success: #047857;
     --success-soft: #ecfdf5;
     --warning: #a16207;
     --warning-soft: #fffbeb;
     --danger: #b91c1c;
     --danger-soft: #fef2f2;
+    --on-danger: #ffffff;
+    --disabled-bg: #e8ebf0;
+    --disabled-text: #929baa;
     --focus: #2563eb;
     --overlay: rgb(15 23 42 / 48%);
-    --radius: 6px;
-    --shadow: 0 8px 24px rgb(15 23 42 / 12%);
+    --radius-sm: 7px;
+    --radius: 10px;
+    --radius-lg: 14px;
+    --shadow-sm: 0 1px 2px rgb(15 23 42 / 5%);
+    --shadow-hover: 0 8px 24px rgb(15 23 42 / 8%);
+    --shadow: 0 12px 32px rgb(15 23 42 / 12%);
     --code-bg: #111827;
     --code-border: #334155;
     --code-text: #e5e7eb;
@@ -32,26 +44,36 @@
 
   [data-theme="dark"] {
     color-scheme: dark;
-    --canvas: #0b1020;
-    --surface: #121a2b;
-    --surface-soft: #1a2437;
-    --border: #334158;
-    --border-strong: #617089;
+    --canvas: #0a0f1d;
+    --surface: #121827;
+    --surface-raised: #151d2f;
+    --surface-soft: #1b2335;
+    --surface-strong: #222d42;
+    --border: #2d374b;
+    --border-strong: #5b677c;
     --text: #f1f5f9;
     --muted: #b4bfce;
+    --muted-soft: #8490a3;
     --accent: #818cf8;
     --accent-hover: #a5b4fc;
     --accent-soft: #252b52;
     --on-accent: #0b1020;
+    --brand: #6366f1;
+    --on-brand: #ffffff;
     --success: #6ee7b7;
     --success-soft: #10352b;
     --warning: #fcd34d;
     --warning-soft: #3a2c0c;
     --danger: #fca5a5;
     --danger-soft: #421b24;
+    --on-danger: #24090d;
+    --disabled-bg: #252d3d;
+    --disabled-text: #737f92;
     --focus: #93c5fd;
     --overlay: rgb(2 6 23 / 68%);
-    --shadow: 0 8px 24px rgb(0 0 0 / 55%);
+    --shadow-sm: 0 1px 2px rgb(0 0 0 / 18%);
+    --shadow-hover: 0 10px 26px rgb(0 0 0 / 28%);
+    --shadow: 0 14px 36px rgb(0 0 0 / 46%);
   }
 
   /* Base elements */
@@ -79,7 +101,6 @@
     background: var(--canvas);
     color: var(--text);
     font-family:
-      Inter,
       ui-sans-serif,
       system-ui,
       -apple-system,
@@ -88,9 +109,11 @@
       "PingFang SC",
       "Microsoft YaHei",
       sans-serif;
+    font-synthesis: none;
     line-height: 1.5;
     min-height: 100vh;
     min-height: 100dvh;
+    text-rendering: optimizeLegibility;
   }
 
   button,
@@ -117,20 +140,32 @@
   h1,
   h2,
   h3 {
-    letter-spacing: 0;
-    line-height: 1.25;
+    letter-spacing: -0.02em;
+    line-height: 1.2;
   }
 
   h1 {
-    font-size: 2rem;
+    font-size: clamp(2rem, 3vw, 2.375rem);
+    font-weight: 750;
   }
 
   h2 {
-    font-size: 1.5rem;
+    font-size: 1.375rem;
+    font-weight: 720;
   }
 
   h3 {
     font-size: 1rem;
+    font-weight: 700;
+  }
+
+  h1[tabindex="-1"] {
+    width: fit-content;
+  }
+
+  h1[tabindex="-1"]:focus-visible {
+    border-radius: var(--radius-sm);
+    outline-width: 2px;
   }
 
   svg {
@@ -198,12 +233,12 @@
     align-items: center;
     -webkit-backdrop-filter: blur(14px);
     backdrop-filter: blur(14px);
-    background: color-mix(in srgb, var(--surface) 92%, transparent);
+    background: color-mix(in srgb, var(--surface) 90%, transparent);
     border-bottom: 1px solid var(--border);
     display: grid;
     gap: 1rem;
     grid-template-columns: minmax(0, 1fr) auto auto;
-    min-height: 4rem;
+    min-height: 4.25rem;
     padding: 0 1.5rem;
     position: sticky;
     top: 0;
@@ -211,7 +246,7 @@
   }
 
   [data-active-view="reference"] .wsk-topbar {
-    position: static;
+    position: sticky;
   }
 
   .wsk-brand {
@@ -223,36 +258,43 @@
 
   .wsk-brand-mark {
     align-items: center;
-    background: var(--text);
-    border-radius: var(--radius);
-    color: var(--surface);
+    background: var(--brand);
+    border-radius: 9px;
+    box-shadow:
+      inset 0 0 0 1px rgb(255 255 255 / 14%),
+      0 5px 14px color-mix(in srgb, var(--brand) 22%, transparent);
+    color: var(--on-brand);
     display: flex;
     font-size: 0.75rem;
     font-weight: 800;
     height: 2rem;
     justify-content: center;
+    letter-spacing: 0.04em;
     width: 2rem;
   }
 
-  .wsk-brand strong,
-  .wsk-brand span {
+  .wsk-brand-copy,
+  .wsk-brand-copy strong,
+  .wsk-brand-subtitle {
     display: block;
   }
 
-  .wsk-brand strong {
+  .wsk-brand-copy strong {
     font-size: 0.875rem;
+    letter-spacing: -0.01em;
   }
 
-  .wsk-brand span {
+  .wsk-brand-subtitle {
     color: var(--muted);
     font-size: 0.75rem;
+    margin-top: 0.0625rem;
   }
 
   .wsk-view-switch,
   .wsk-segmented {
     background: var(--surface-soft);
     border: 1px solid var(--border);
-    border-radius: var(--radius);
+    border-radius: calc(var(--radius-sm) + 1px);
     display: inline-flex;
     padding: 2px;
   }
@@ -262,19 +304,23 @@
     align-items: center;
     background: transparent;
     border: 0;
-    border-radius: 4px;
+    border-radius: 5px;
     color: var(--muted);
     display: inline-flex;
     font-size: 0.75rem;
     font-weight: 650;
     min-height: 1.875rem;
     padding: 0 0.75rem;
+    transition:
+      background-color 140ms ease,
+      color 140ms ease,
+      box-shadow 140ms ease;
   }
 
   .wsk-view-switch button.wsk-is-active,
   .wsk-segmented input:checked + span {
-    background: var(--surface);
-    box-shadow: 0 1px 2px rgb(15 23 42 / 8%);
+    background: var(--surface-raised);
+    box-shadow: var(--shadow-sm);
     color: var(--text);
   }
 
@@ -297,13 +343,18 @@
     align-items: center;
     background: transparent;
     border: 1px solid transparent;
-    border-radius: var(--radius);
+    border-radius: var(--radius-sm);
     color: var(--muted);
     display: inline-flex;
     height: 2.5rem;
     justify-content: center;
     padding: 0;
     width: 2.5rem;
+    transition:
+      background-color 140ms ease,
+      border-color 140ms ease,
+      color 140ms ease,
+      transform 100ms ease;
   }
 
   .wsk-icon-button:hover {
@@ -323,12 +374,12 @@
 
   .wsk-page {
     margin: 0 auto;
-    max-width: 76rem;
-    padding: 2.5rem 2rem 4rem;
+    max-width: 78rem;
+    padding: 3rem 2rem 5rem;
   }
 
   .wsk-page-head {
-    align-items: end;
+    align-items: center;
     display: flex;
     gap: 1.5rem;
     justify-content: space-between;
@@ -336,14 +387,20 @@
 
   .wsk-page-head p {
     color: var(--muted);
-    margin-top: 0.5rem;
+    font-size: 1rem;
+    margin-top: 0.625rem;
     max-width: 44rem;
   }
 
   .wsk-section {
-    border-top: 1px solid var(--border);
-    margin-top: 2.5rem;
-    padding-top: 2rem;
+    border-top: 0;
+    margin-top: 3.5rem;
+    padding-top: 0;
+    scroll-margin-top: 8rem;
+  }
+
+  .wsk-section h2[id] {
+    scroll-margin-top: 8rem;
   }
 
   .wsk-section-head {
@@ -351,7 +408,7 @@
     display: flex;
     gap: 1rem;
     justify-content: space-between;
-    margin-bottom: 1.25rem;
+    margin-bottom: 1.125rem;
   }
 
   .wsk-badge {
@@ -364,8 +421,8 @@
     font-size: 0.75rem;
     font-weight: 650;
     gap: 0.375rem;
-    min-height: 1.5rem;
-    padding: 0 0.5rem;
+    min-height: 1.625rem;
+    padding: 0 0.625rem;
     white-space: nowrap;
   }
 
@@ -399,7 +456,7 @@
   .wsk-metric-grid {
     align-items: start;
     display: grid;
-    gap: 1.25rem;
+    gap: 1.5rem;
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -409,17 +466,71 @@
 
   .wsk-panel,
   .wsk-metric {
-    background: var(--surface);
+    background: var(--surface-raised);
     border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 1.25rem;
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-sm);
+    padding: 1.375rem;
   }
 
   .wsk-panel-title {
-    color: var(--muted);
-    font-size: 0.75rem;
-    font-weight: 700;
+    color: var(--text);
+    font-size: 0.8125rem;
+    font-weight: 650;
+    letter-spacing: 0.01em;
     margin-bottom: 1rem;
+  }
+
+  .wsk-kit-index {
+    align-items: center;
+    background: color-mix(in srgb, var(--surface-raised) 94%, transparent);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-sm);
+    display: flex;
+    gap: 1.25rem;
+    margin-top: 2rem;
+    padding: 0.625rem 0.75rem 0.625rem 1rem;
+    position: sticky;
+    top: 5rem;
+    z-index: 10;
+  }
+
+  .wsk-kit-index > strong {
+    color: var(--muted);
+    flex: 0 0 auto;
+    font-size: 0.75rem;
+    letter-spacing: 0.04em;
+  }
+
+  .wsk-kit-index-links {
+    display: flex;
+    gap: 0.25rem;
+    min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .wsk-kit-index-links::-webkit-scrollbar {
+    display: none;
+  }
+
+  .wsk-kit-index a {
+    border-radius: var(--radius-sm);
+    color: var(--muted);
+    flex: 0 0 auto;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    padding: 0.375rem 0.625rem;
+    text-decoration: none;
+    transition:
+      background-color 140ms ease,
+      color 140ms ease;
+  }
+
+  .wsk-kit-index a:hover {
+    background: var(--accent-soft);
+    color: var(--accent);
   }
 
   .wsk-button-row,
@@ -448,7 +559,7 @@
     align-items: center;
     background: var(--accent);
     border: 1px solid var(--accent);
-    border-radius: var(--radius);
+    border-radius: var(--radius-sm);
     color: var(--on-accent);
     display: inline-flex;
     font-size: 0.875rem;
@@ -458,6 +569,12 @@
     min-height: 2.5rem;
     padding: 0 1rem;
     text-decoration: none;
+    transition:
+      background-color 140ms ease,
+      border-color 140ms ease,
+      box-shadow 140ms ease,
+      color 140ms ease,
+      transform 100ms ease;
   }
 
   .wsk-button:hover {
@@ -467,7 +584,7 @@
   }
 
   .wsk-button.wsk-secondary {
-    background: var(--surface);
+    background: var(--surface-raised);
     border-color: var(--border-strong);
     color: var(--text);
   }
@@ -485,12 +602,33 @@
   }
 
   .wsk-button.wsk-danger {
+    background: transparent;
+    border-color: var(--danger);
+    color: var(--danger);
+  }
+
+  .wsk-button.wsk-danger:hover {
     background: var(--danger);
     border-color: var(--danger);
+    color: var(--on-danger);
   }
 
   .wsk-button:disabled {
-    opacity: 0.48;
+    background: var(--disabled-bg);
+    border-color: var(--disabled-bg);
+    color: var(--disabled-text);
+    opacity: 1;
+  }
+
+  .wsk-button.wsk-loading:disabled {
+    background: var(--accent-soft);
+    border-color: color-mix(in srgb, var(--accent) 24%, var(--border));
+    color: var(--accent);
+  }
+
+  .wsk-button:active:not(:disabled),
+  .wsk-icon-button:active {
+    transform: scale(0.98);
   }
 
   .wsk-spinner {
@@ -507,7 +645,7 @@
   }
 
   .wsk-menu {
-    background: var(--surface);
+    background: var(--surface-raised);
     border: 1px solid var(--border);
     border-radius: var(--radius);
     box-shadow: var(--shadow);
@@ -523,7 +661,7 @@
   .wsk-menu button {
     background: transparent;
     border: 0;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     color: var(--text);
     font-size: 0.875rem;
     min-height: 2.25rem;
@@ -554,6 +692,12 @@
   legend {
     font-size: 0.875rem;
     font-weight: 650;
+    transition: color 140ms ease;
+  }
+
+  .wsk-field:focus-within > .wsk-label,
+  .wsk-choice-group:focus-within > legend {
+    color: var(--accent);
   }
 
   .wsk-required,
@@ -565,14 +709,17 @@
   .wsk-select,
   .wsk-textarea {
     appearance: none;
-    background: var(--surface);
+    background: var(--surface-raised);
     border: 1px solid var(--border-strong);
-    border-radius: var(--radius);
+    border-radius: var(--radius-sm);
     color: var(--text);
     font-size: 0.875rem;
     min-height: 2.5rem;
     outline: 0;
     padding: 0 0.75rem;
+    transition:
+      border-color 140ms ease,
+      box-shadow 140ms ease;
     width: 100%;
   }
 
@@ -657,7 +804,7 @@
     align-items: center;
     background: var(--surface-soft);
     border: 1px solid var(--border-strong);
-    border-radius: var(--radius) 0 0 var(--radius);
+    border-radius: var(--radius-sm) 0 0 var(--radius-sm);
     color: var(--muted);
     display: flex;
     font-size: 0.875rem;
@@ -666,7 +813,7 @@
 
   .wsk-input-group .wsk-control {
     border-left: 0;
-    border-radius: 0 var(--radius) var(--radius) 0;
+    border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
     min-width: 0;
   }
 
@@ -677,7 +824,7 @@
   .wsk-file-control::file-selector-button {
     background: var(--surface-soft);
     border: 0;
-    border-radius: 4px;
+    border-radius: calc(var(--radius-sm) - 2px);
     color: var(--text);
     font-weight: 650;
     height: 2rem;
@@ -887,7 +1034,7 @@
     align-items: center;
     background: transparent;
     border: 1px solid transparent;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     color: var(--muted);
     display: inline-flex;
     font-size: 0.875rem;
@@ -946,7 +1093,7 @@
   .wsk-skeleton {
     animation: pulse 1.4s ease-in-out infinite;
     background: var(--surface-soft);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     height: 0.75rem;
     width: 92%;
   }
@@ -963,7 +1110,7 @@
   .wsk-empty-state {
     align-items: center;
     border: 1px dashed var(--border-strong);
-    border-radius: var(--radius);
+    border-radius: var(--radius-lg);
     display: flex;
     flex-direction: column;
     justify-content: center;
@@ -995,12 +1142,14 @@
 
   .wsk-table-wrap {
     border: 1px solid var(--border);
-    border-radius: var(--radius);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-sm);
     overflow-x: auto;
   }
 
   .wsk-table {
     font-size: 0.875rem;
+    font-variant-numeric: tabular-nums;
     min-width: 44rem;
     width: 100%;
   }
@@ -1010,6 +1159,7 @@
     border-bottom: 1px solid var(--border);
     padding: 0.75rem 1rem;
     text-align: left;
+    transition: background-color 140ms ease;
   }
 
   .wsk-table th[scope="col"] {
@@ -1104,22 +1254,21 @@
   /* Reference application */
   .wsk-reference-shell {
     display: grid;
-    gap: 1.5rem;
-    grid-template-columns: 13rem minmax(0, 1fr);
+    gap: 2rem;
+    grid-template-columns: 13.5rem minmax(0, 1fr);
   }
 
   .wsk-reference-nav {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 0.75rem;
-    position: static;
+    border-right: 1px solid var(--border);
+    padding: 0 1.25rem 1rem 0;
+    position: sticky;
+    top: 5.75rem;
   }
 
   .wsk-reference-brand {
     border-bottom: 1px solid var(--border);
     margin-bottom: 0.75rem;
-    padding: 0.5rem 0.5rem 1rem;
+    padding: 0.25rem 0.75rem 1.125rem;
   }
 
   .wsk-reference-brand strong,
@@ -1130,20 +1279,30 @@
   .wsk-reference-brand span {
     color: var(--muted);
     font-size: 0.75rem;
+    letter-spacing: 0.08em;
     margin-top: 0.25rem;
   }
 
-  .wsk-reference-nav a {
+  .wsk-reference-links {
+    display: grid;
+    gap: 0.1875rem;
+  }
+
+  .wsk-reference-links a {
     border-radius: var(--radius);
     color: var(--muted);
     display: block;
     font-size: 0.875rem;
+    font-weight: 600;
     padding: 0.5rem 0.75rem;
     text-decoration: none;
+    transition:
+      background-color 140ms ease,
+      color 140ms ease;
   }
 
-  .wsk-reference-nav a:hover,
-  .wsk-reference-nav a.wsk-active {
+  .wsk-reference-links a:hover,
+  .wsk-reference-links a.wsk-active {
     background: var(--accent-soft);
     color: var(--accent);
   }
@@ -1154,7 +1313,7 @@
 
   .wsk-reference-content section,
   .wsk-reference-content .wsk-page-head {
-    scroll-margin-top: 5rem;
+    scroll-margin-top: 6.5rem;
   }
 
   .wsk-section-head.wsk-compact {
@@ -1185,6 +1344,7 @@
 
   .wsk-mini-metric-grid > div:not(.wsk-metric) {
     background: var(--surface-soft);
+    border: 1px solid transparent;
     border-radius: var(--radius);
     padding: 1rem;
   }
@@ -1203,6 +1363,8 @@
 
   .wsk-mini-metric-grid strong {
     font-size: 1.25rem;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.025em;
     margin: 0.375rem 0 0.125rem;
   }
 
@@ -1258,6 +1420,7 @@
 
   .wsk-process-step {
     background: var(--surface-soft);
+    border: 1px solid transparent;
     border-radius: var(--radius);
     padding: 1rem;
   }
@@ -1288,10 +1451,11 @@
 
   .wsk-service-card,
   .wsk-auth-card {
-    background: var(--surface);
+    background: var(--surface-raised);
     border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 1.25rem;
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-sm);
+    padding: 1.375rem;
   }
 
   .wsk-service-card > strong {
@@ -1316,7 +1480,7 @@
   .wsk-code-panel {
     background: var(--code-bg);
     border: 1px solid var(--code-border);
-    border-radius: var(--radius);
+    border-radius: var(--radius-lg);
     color: var(--code-text);
     font-family:
       ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
@@ -1354,14 +1518,91 @@
   }
 
   .wsk-metric strong {
-    font-size: 1.5rem;
+    font-size: 1.625rem;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.035em;
     margin: 0.5rem 0 0.25rem;
   }
 
+  .wsk-metric {
+    border-top: 2px solid color-mix(in srgb, var(--accent) 42%, var(--border));
+  }
+
+  :where(
+    .wsk-panel,
+    .wsk-metric,
+    .wsk-service-card,
+    .wsk-auth-card,
+    .wsk-table-wrap,
+    .wsk-empty-state,
+    .wsk-process-step,
+    .wsk-mini-metric-grid > div:not(.wsk-metric)
+  ) {
+    transition:
+      background-color 160ms ease,
+      border-color 160ms ease,
+      box-shadow 160ms ease,
+      transform 160ms ease;
+  }
+
+  @media (hover: hover) and (pointer: fine) {
+    :where(
+      .wsk-panel,
+      .wsk-metric,
+      .wsk-service-card,
+      .wsk-auth-card,
+      .wsk-table-wrap,
+      .wsk-empty-state,
+      .wsk-process-step,
+      .wsk-mini-metric-grid > div:not(.wsk-metric)
+    ):hover {
+      border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
+      box-shadow: var(--shadow-hover);
+      transform: translateY(-1px);
+    }
+
+    :where(
+      .wsk-process-step,
+      .wsk-mini-metric-grid > div:not(.wsk-metric)
+    ):hover {
+      background: color-mix(in srgb, var(--accent-soft) 52%, var(--surface-soft));
+    }
+
+    .wsk-table tbody tr:not(:has(.wsk-row-select:checked)):hover
+      :is(td, th[scope="row"]) {
+      background: var(--surface-soft);
+    }
+  }
+
+  :where(form.wsk-panel, form.wsk-auth-card):focus-within {
+    border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
+    box-shadow:
+      0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent),
+      var(--shadow-hover);
+  }
+
+  @media (hover: none) {
+    :where(
+      .wsk-metric,
+      .wsk-panel:not(form),
+      .wsk-service-card,
+      .wsk-auth-card:not(form),
+      .wsk-empty-state,
+      .wsk-process-step,
+      .wsk-mini-metric-grid > div:not(.wsk-metric),
+      .wsk-table-wrap
+    ).wsk-is-pressed {
+      background: color-mix(in srgb, var(--accent-soft) 38%, var(--surface-raised));
+      border-color: color-mix(in srgb, var(--accent) 34%, var(--border));
+      box-shadow: 0 2px 8px color-mix(in srgb, var(--accent) 10%, transparent);
+      transform: scale(0.992);
+    }
+  }
+
   .wsk-dialog {
-    background: var(--surface);
+    background: var(--surface-raised);
     border: 1px solid var(--border);
-    border-radius: var(--radius);
+    border-radius: var(--radius-lg);
     box-shadow: var(--shadow);
     color: var(--text);
     max-width: min(30rem, calc(100vw - 2rem));
@@ -1409,7 +1650,7 @@
 
   .wsk-toast {
     align-items: flex-start;
-    background: var(--surface);
+    background: var(--surface-raised);
     border: 1px solid var(--border);
     border-left: 3px solid var(--success);
     border-radius: var(--radius);
@@ -1460,9 +1701,13 @@
     }
 
     .wsk-reference-nav {
-      overflow-x: auto;
+      background: var(--surface-raised);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      box-shadow: var(--shadow-sm);
+      overflow: hidden;
+      padding: 0.625rem;
       position: static;
-      white-space: nowrap;
     }
 
     .wsk-reference-content {
@@ -1478,45 +1723,93 @@
     }
 
     .wsk-reference-brand {
-      border-bottom: 0;
-      display: inline-block;
-      margin: 0;
-      padding: 0.5rem 0.75rem;
+      align-items: center;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      margin: 0 0 0.5rem;
+      padding: 0.5rem 0.75rem 0.75rem;
     }
 
-    .wsk-reference-nav a {
-      display: inline-block;
+    .wsk-reference-brand span {
+      margin-top: 0;
+    }
+
+    .wsk-reference-links {
+      display: flex;
+      gap: 0.25rem;
+      overflow-x: auto;
+      overscroll-behavior-inline: contain;
+      scroll-snap-type: inline proximity;
+      scrollbar-width: none;
+    }
+
+    .wsk-reference-links::-webkit-scrollbar {
+      display: none;
+    }
+
+    .wsk-reference-links a {
+      flex: 0 0 auto;
+      scroll-snap-align: start;
     }
   }
 
   @media (max-width: 680px) {
     .wsk-topbar {
       grid-template-columns: minmax(0, 1fr) auto;
-      padding-inline: 1rem;
+      min-height: 0;
+      padding: 0.75rem 1rem 0.625rem;
+      row-gap: 0.625rem;
     }
 
     .wsk-view-switch {
       grid-column: 1 / -1;
       grid-row: 2;
-      margin-bottom: 0.75rem;
+      margin-bottom: 0;
+      width: 100%;
     }
 
     .wsk-view-switch button {
       flex: 1;
     }
 
-    .wsk-brand span {
+    .wsk-brand-copy {
       display: none;
     }
 
     .wsk-page {
-      padding: 2rem 1rem 3rem;
+      padding: 2.25rem 1rem 3.5rem;
     }
 
     .wsk-page-head,
     .wsk-toolbar {
       align-items: stretch;
       flex-direction: column;
+    }
+
+    .wsk-page-head > .wsk-badge {
+      align-self: flex-start;
+    }
+
+    .wsk-page-head p {
+      font-size: 0.9375rem;
+    }
+
+    .wsk-kit-index {
+      align-items: stretch;
+      display: block;
+      margin-top: 1.5rem;
+      padding: 0.75rem;
+      position: static;
+    }
+
+    .wsk-kit-index-links {
+      margin-top: 0.5rem;
+    }
+
+    .wsk-section {
+      margin-top: 3rem;
+      scroll-margin-top: 8rem;
     }
 
     .wsk-demo-grid,
@@ -1559,6 +1852,22 @@
       animation-iteration-count: 1 !important;
       scroll-behavior: auto !important;
       transition-duration: 0.01ms !important;
+    }
+
+    :where(
+      .wsk-panel,
+      .wsk-metric,
+      .wsk-service-card,
+      .wsk-auth-card,
+      .wsk-table-wrap,
+      .wsk-empty-state,
+      .wsk-process-step,
+      .wsk-mini-metric-grid > div:not(.wsk-metric)
+    ):hover,
+    .wsk-is-pressed,
+    .wsk-button:active:not(:disabled),
+    .wsk-icon-button:active {
+      transform: none !important;
     }
   }
 }
