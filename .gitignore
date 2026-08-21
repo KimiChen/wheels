@@ -127,10 +127,8 @@ docs/fpvps/**/.env
 # ===================
 # 其他
 # ===================
-tests
 CLAUDE.md
 .claude
-scripts
 .code-review-state
 #openspec/
 code-reviews/

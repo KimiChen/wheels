@@ -1,0 +1,6 @@
+schema_version = 1
+repository = "https://github.com/fatedier/frp.git"
+tag = "v0.71.0"
+tag_object = "40adeed73b51e7ee1766d7cfb15d02ba9431ba2b"
+commit = "4a23aa181c1d7e28eecaa8216024ed753b9d27c8"
+license = "Apache-2.0"
