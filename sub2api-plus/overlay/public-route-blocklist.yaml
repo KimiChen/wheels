@@ -1,0 +1,58 @@
+enabled: true  # 是否启用公开路径伪装规则；false 表示除安装完成后的 /setup 外完全不拦截
+
+not_found:  # 无条件返回纯文本 404 的路径
+  rules:
+    - match: prefix
+      path: /auth/
+    - match: exact
+      path: /home
+    - match: exact
+      path: /forgot-password
+    - match: exact
+      path: /reset-password
+    - match: exact
+      path: /key-usage
+    - match: prefix
+      path: /legal/
+    - match: prefix
+      path: /payment/
+    - match: exact
+      path: /api/event_logging/batch
+    - match: exact
+      path: /api/v1/settings/public
+    - match: exact
+      path: /api/v1/auth/send-verify-code
+    - match: exact
+      path: /api/v1/auth/validate-promo-code
+    - match: exact
+      path: /api/v1/auth/validate-invitation-code
+    - match: exact
+      path: /api/v1/auth/forgot-password
+    - match: exact
+      path: /api/v1/auth/reset-password
+    - match: prefix
+      path: /api/v1/auth/oauth/
+    - match: prefix
+      path: /api/v1/payment/public/
+    - match: prefix
+      path: /api/v1/payment/webhook/
+    - match: exact
+      path: /api/v1/settings/email-unsubscribe
+    - match: prefix
+      path: /api/v1/pages/
+
+allow:  # 无条件放行的模型网关主链路
+  rules:
+    - match: exact
+      path: /responses
+    - match: exact
+      path: /v1/responses
+    - match: exact
+      path: /v1/usage
+    - match: exact
+      path: /v1/chat/completions
+
+unauthorized:  # 未带登录/管理认证头时返回 {"code":"UNAUTHORIZED","message":"ERROR"}，已带认证头则交给原路由
+  rules:
+    - match: prefix
+      path: /api/v1/

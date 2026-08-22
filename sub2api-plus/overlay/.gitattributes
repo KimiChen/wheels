@@ -1,0 +1,29 @@
+# 确保所有 SQL 迁移文件使用 LF 换行符
+backend/migrations/*.sql text eol=lf
+
+# Go 源代码文件
+*.go text eol=lf
+
+# 前端 源代码文件
+*.ts text eol=lf
+*.tsx text eol=lf
+*.js text eol=lf
+*.jsx text eol=lf
+*.vue text eol=lf
+
+# Shell 脚本
+*.sh text eol=lf
+
+# YAML/YML 配置文件
+*.yaml text eol=lf
+*.yml text eol=lf
+
+# Dockerfile
+Dockerfile text eol=lf
+
+# fork 接管文件：与上游合并时始终保留 fork 版本（需本地配置 merge.ours.driver，见 backend/scripts/sync_upstream.sh）
+# 上游若改进这些文件，同步时需人工评审移植
+backend/internal/web/embed_on.go merge=ours
+backend/internal/web/embed_test.go merge=ours
+backend/internal/web/static_cache.go merge=ours
+backend/internal/web/static_cache_test.go merge=ours

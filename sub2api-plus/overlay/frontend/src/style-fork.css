@@ -1,0 +1,9 @@
+/**
+ * fork 样式覆盖（在 style.css 之后引入；未分层样式在层叠中优先于 @layer 规则，
+ * 可稳定覆盖上游 style.css 中的同名规则，且避免直接修改上游文件）。
+ */
+.sidebar-link-active {
+  @apply bg-primary-50 dark:bg-primary-800/20;
+  @apply text-primary-600 dark:text-primary-300;
+  @apply hover:bg-primary-100 dark:hover:bg-primary-800/30;
+}
