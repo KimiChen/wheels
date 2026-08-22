@@ -176,22 +176,166 @@ IMAGE_NAME=sub2api-plus:local ./scripts/build-image.sh ../../aiapi
 
 ## 上游升级
 
-升级不是简单修改 `upstream.lock` 后继续覆盖。使用两阶段流程：
+升级不是直接修改 `upstream.lock`，也不是把新版上游文件复制进 `overlay/`。更新脚本会先
+基于旧锁定提交还原完整定制源码，在临时 Git 仓库中合并新上游，最后相对新基线重新计算
+Overlay。这样，上游已经吸收的相同修改会自动退出 Overlay，仍有差异的文件继续以完整
+文件形式保存。
+
+除“提交更新”一节会明确切回 `wheels` 根目录外，以下命令均在 `sub2api-plus/` 目录执行。
+
+### 1. 更新前准备
+
+开始前确认：
+
+1. `wheels` 当前分支中没有未提交的 `sub2api-plus` 改动；已有定制应先提交。
+2. 当前 Overlay 能通过 `./scripts/verify-overlay.sh`，并记录 `upstream.lock` 中的旧提交。
+3. `.cache/update` 不存在；该目录是被忽略的完整临时源码，绝不能提交。
+4. 已检查本次上游更新范围，尤其是 `backend/migrations/`、配置默认值、启动参数和依赖版本。
+
+先验证当前基线：
+
+```bash
+./scripts/verify-overlay.sh ../../aiapi
+```
+
+### 2. 获取并合并最新上游
+
+更新到上游 `main` 在执行时的最新提交：
 
 ```bash
 ./scripts/update-upstream.sh prepare main .cache/update
 ```
 
-脚本会基于旧上游重建完整定制源码，并 merge 新上游。如果发生冲突，在输出的更新
-工作树中解决、暂存并提交，然后执行：
+`prepare` 会自动完成：
+
+1. 从 `upstream.lock` 的远程仓库克隆并检出旧的固定提交。
+2. 应用现有 `overlay/` 和 `deleted-files.txt`，重建完整定制树并创建临时提交。
+3. 获取指定的上游 ref，将它解析为精确 commit，并确认它是旧基线的后代。
+4. 把新上游合并进完整定制树，将精确 commit 记录在临时仓库配置中。
+
+这里的 `main` 只用于发现最新提交。`finalize` 后，构建仍以写入 `upstream.lock` 的精确
+commit 为准，不会直接构建浮动分支。需要升级到指定版本时，也可以把 `main` 换成上游
+tag 或 commit。
+
+正式更新建议直接使用 `upstream.lock` 中的远程地址。第三个参数只用于本地仓库加速；
+只有确认该本地仓库已经获取了目标 ref 和 commit 时才使用：
+
+```bash
+./scripts/update-upstream.sh prepare main .cache/update /path/to/upstream-mirror
+```
+
+### 3. 处理并审查合并结果
+
+没有冲突时，`prepare` 会直接完成 merge。先查看新基线和相对新上游仍保留的定制差异：
+
+```bash
+new_upstream="$(git -C .cache/update config --get sub2api-plus.newUpstream)"
+git -C .cache/update log --oneline --decorate -5
+git -C .cache/update diff --stat "$new_upstream"..HEAD
+git -C .cache/update diff "$new_upstream"..HEAD
+```
+
+如果脚本以退出码 `3` 报告冲突，先列出未解决文件：
+
+```bash
+git -C .cache/update status
+git -C .cache/update diff --name-only --diff-filter=U
+```
+
+冲突中的 `HEAD` 是重建后的现有定制，另一侧是新上游。逐个文件理解新上游意图后再合并：
+
+- 应继续跟随上游的文件，采用新版上游内容。
+- 仍需要的公司定制，应基于新版结构重新放入，不能不审查就整文件保留旧版。
+- 上游重命名、删除文件或修改数据库迁移时，要同时检查 `deleted-files.txt` 和回滚兼容性。
+- 不得把 `.env`、真实域名、IP、凭据或私有运维文档带入更新工作树。
+
+解决后暂存并完成 merge 提交：
+
+```bash
+git -C .cache/update add -A
+git -C .cache/update \
+  -c user.name=sub2api-plus-overlay \
+  -c user.email=sub2api-plus-overlay@localhost \
+  commit -m "merge: update sub2api upstream"
+git -C .cache/update status --short
+```
+
+最后一条命令必须没有输出。不要在 merge 尚未完成或工作树仍有未提交修改时执行
+`finalize`。
+
+### 4. 重新导出 Overlay
+
+确认 `.cache/update` 中的合并结果正确后执行：
 
 ```bash
 ./scripts/update-upstream.sh finalize .cache/update
 ```
 
-`finalize` 会相对新上游重新导出完整 Overlay、更新锁文件并做树级校验。随后仍须运行
-完整测试和 systemd 发布二进制构建；如仍维护 Docker 兼容性，再额外构建镜像。最后把
-锁文件、Overlay 和文档放在同一个提交中。
+`finalize` 会拒绝未完成的 merge 或不干净的临时工作树，然后相对新上游重新生成：
+
+- `upstream.lock` 中的固定上游 commit；
+- `overlay/` 中相对新上游修改或新增后的完整文件；
+- `deleted-files.txt`；
+- `overlay-manifest.tsv` 中的基线、目标 tree 和文件对象清单。
+
+脚本最后会自动执行树级校验。`export-exclude.txt` 中的私有运维文件仍会被排除。
+
+### 5. 完整验证
+
+使用远程上游重新组装、测试并构建，确认公司仓库不依赖本地 `aiapi` 工作区：
+
+```bash
+./scripts/verify-overlay.sh
+./scripts/test-source.sh
+./scripts/build-binary.sh
+```
+
+其中 `test-source.sh` 负责 Go 测试、前端 lint、类型检查、关键测试和构建；
+`build-binary.sh` 生成最终 systemd Linux 发布包并校验其元数据。仍维护 Docker 兼容性时，
+再额外执行：
+
+```bash
+IMAGE_NAME=sub2api-plus:upgrade-check ./scripts/build-image.sh
+```
+
+如果测试失败，应回到 `.cache/update` 修复并提交，然后再次执行 `finalize` 和全部验证，
+不要直接修改导出后的 `overlay/`，否则临时完整树与 Overlay 会失去一致性。
+
+发布前还要人工检查：
+
+- 新增或变化的数据库迁移是否可前向执行，旧二进制能否在必要时回滚。
+- 新增配置项是否有安全默认值，私有配置系统是否需要同步更新。
+- `git diff --stat` 中 Overlay 文件数量是否合理，是否出现意外的大文件或完整上游目录。
+- `aipick.md`、`racknerd.md`、`.env` 和任何真实基础设施信息均未进入暂存区。
+
+### 6. 提交更新
+
+只暂存本次升级生成的 `sub2api-plus` 文件；`overlay/` 受目标项目自身 `.gitignore` 影响，
+需要保留 `-f`。先回到 `wheels` 根目录：
+
+```bash
+cd ..
+git add sub2api-plus/upstream.lock \
+  sub2api-plus/overlay-manifest.tsv \
+  sub2api-plus/deleted-files.txt
+git add -f sub2api-plus/overlay
+git status --short
+git commit -m "升级：更新 sub2api-plus 上游基线"
+```
+
+如果升级时同时修改了 README、排除清单或许可证说明，再逐个显式加入；不要使用
+`git add .`，避免把 `wheels` 中其他项目的改动混入提交。
+
+提交后可以保留 `.cache/update` 到发布验证完成。确认新版本稳定后再删除该精确目录；
+构建产物位于被忽略的 `dist/`，同样不应提交。
+
+### 7. 放弃或重新开始
+
+更新目录是独立的临时 Git 仓库。发生无法接受的冲突时，不要修改当前 Overlay 或强行
+`finalize`。可以把 `.cache/update` 重命名留作分析，再用一个不存在的新目录重新执行
+`prepare`。只要尚未执行 `finalize`，`wheels/sub2api-plus` 中的锁文件和 Overlay 就不会
+被更新；执行过 `finalize` 但尚未提交时，则根据 Git diff 逐个恢复本轮生成文件，不能
+影响仓库中其他项目或之前的提交。
 
 ## 安全与许可证
 

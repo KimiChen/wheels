@@ -76,7 +76,7 @@ case "$command_name" in
     "$SUB2API_PLUS_ROOT/scripts/export-overlay.sh" \
       "$update_dir" HEAD "$new_commit" --update-lock
     "$SUB2API_PLUS_ROOT/scripts/verify-overlay.sh" "$update_dir"
-    printf '上游升级 Overlay 已重新导出并验证。提交前仍须运行完整测试和镜像构建。\n'
+    printf '上游升级 Overlay 已重新导出并验证。提交前仍须运行完整测试和 systemd 二进制构建。\n'
     ;;
 
   *)
