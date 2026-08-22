@@ -55,3 +55,35 @@ temporary_directory() {
   local purpose="$1"
   mktemp -d "${TMPDIR:-/tmp}/sub2api-plus-${purpose}.XXXXXX"
 }
+
+sha256_file() {
+  local path="$1"
+
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$path" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$path" | awk '{print $1}'
+  else
+    die "缺少 SHA-256 工具（sha256sum 或 shasum）"
+  fi
+}
+
+validate_safe_name() {
+  local label="$1"
+  local value="$2"
+
+  [[ -n "$value" ]] || die "$label 不能为空"
+  [[ "$value" =~ ^[A-Za-z0-9._+-]+$ ]] || die "$label 包含不安全字符: $value"
+  [[ "$value" != "." && "$value" != ".." ]] || die "$label 不能是路径特殊段"
+}
+
+validate_absolute_directory() {
+  local label="$1"
+  local value="$2"
+
+  [[ "$value" == /* && "$value" != "/" ]] || die "$label 必须是非根目录的绝对路径"
+  [[ "$value" != *$'\n'* && "$value" != *$'\t'* ]] || die "$label 包含不安全字符"
+  case "/${value#/}/" in
+    */../*|*/./*) die "$label 包含不安全路径段: $value" ;;
+  esac
+}
