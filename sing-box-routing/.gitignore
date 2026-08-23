@@ -1,0 +1,11 @@
+.env
+.env.*
+!.env.example
+.DS_Store
+dist/
+staging/
+release/
+config/config.json
+config/config.local.json
+config/config.rendered.json
+inventory/*.local.json

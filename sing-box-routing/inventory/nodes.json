@@ -1,0 +1,68 @@
+{
+  "version": 1,
+  "nodes": [
+    {
+      "tag": "node-mo-akile",
+      "type": "shadowsocks",
+      "server_env": "PROXY_MO_AKILE_SERVER",
+      "server_port_env": "PROXY_MO_AKILE_PORT",
+      "method_env": "PROXY_MO_AKILE_METHOD",
+      "password_env": "PROXY_MO_AKILE_PASSWORD",
+      "connect_timeout": "5s"
+    },
+    {
+      "tag": "node-us-vircs",
+      "type": "shadowsocks",
+      "server_env": "PROXY_US_VIRCS_SERVER",
+      "server_port_env": "PROXY_US_VIRCS_PORT",
+      "method_env": "PROXY_US_VIRCS_METHOD",
+      "password_env": "PROXY_US_VIRCS_PASSWORD",
+      "connect_timeout": "5s"
+    },
+    {
+      "tag": "node-tw-akile",
+      "type": "shadowsocks",
+      "server_env": "PROXY_TW_AKILE_SERVER",
+      "server_port_env": "PROXY_TW_AKILE_PORT",
+      "method_env": "PROXY_TW_AKILE_METHOD",
+      "password_env": "PROXY_TW_AKILE_PASSWORD",
+      "connect_timeout": "5s"
+    },
+    {
+      "tag": "node-tw-datawave",
+      "type": "shadowsocks",
+      "server_env": "PROXY_TW_DATAWAVE_SERVER",
+      "server_port_env": "PROXY_TW_DATAWAVE_PORT",
+      "method_env": "PROXY_TW_DATAWAVE_METHOD",
+      "password_env": "PROXY_TW_DATAWAVE_PASSWORD",
+      "connect_timeout": "5s"
+    },
+    {
+      "tag": "node-jp-dmit",
+      "type": "shadowsocks",
+      "server_env": "PROXY_JP_DMIT_SERVER",
+      "server_port_env": "PROXY_JP_DMIT_PORT",
+      "method_env": "PROXY_JP_DMIT_METHOD",
+      "password_env": "PROXY_JP_DMIT_PASSWORD",
+      "connect_timeout": "5s"
+    },
+    {
+      "tag": "node-jp-akile",
+      "type": "shadowsocks",
+      "server_env": "PROXY_JP_AKILE_SERVER",
+      "server_port_env": "PROXY_JP_AKILE_PORT",
+      "method_env": "PROXY_JP_AKILE_METHOD",
+      "password_env": "PROXY_JP_AKILE_PASSWORD",
+      "connect_timeout": "5s"
+    },
+    {
+      "tag": "node-jp-zouter",
+      "type": "shadowsocks",
+      "server_env": "PROXY_JP_ZOUTER_SERVER",
+      "server_port_env": "PROXY_JP_ZOUTER_PORT",
+      "method_env": "PROXY_JP_ZOUTER_METHOD",
+      "password_env": "PROXY_JP_ZOUTER_PASSWORD",
+      "connect_timeout": "5s"
+    }
+  ]
+}

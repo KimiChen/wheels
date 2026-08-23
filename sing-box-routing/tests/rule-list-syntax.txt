@@ -1,0 +1,10 @@
+# 转换器覆盖：注释、重复项、带逗号正则、IPv4/IPv6、进程名和忽略的 ASN。
+DOMAIN,exact.example
+DOMAIN,exact.example
+DOMAIN-SUFFIX,suffix.example
+DOMAIN-KEYWORD,keyword-example
+DOMAIN-REGEX,^edge-[a-z]{1,3},region\.example$
+IP-CIDR,192.0.2.0/24,no-resolve
+IP-CIDR6,2001:db8::/32,no-resolve
+PROCESS-NAME,com.example.app
+IP-ASN,64500,no-resolve

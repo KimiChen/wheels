@@ -1,0 +1,51 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "domain": "byteoversea.com",
+      "ruleset": "tiktok",
+      "outbound": "egress-us",
+      "dns": "dns-direct"
+    },
+    {
+      "domain": "gemini.google.com",
+      "ruleset": "gemini",
+      "outbound": "egress-tw",
+      "dns": "dns-direct"
+    },
+    {
+      "domain": "chatgpt.com",
+      "ruleset": "ai",
+      "outbound": "egress-jp",
+      "dns": "dns-direct"
+    },
+    {
+      "domain": "tiktok.com",
+      "ruleset": "tiktok",
+      "outbound": "egress-us",
+      "dns": "dns-direct"
+    },
+    {
+      "domain": "coinbase.com",
+      "ruleset": "special",
+      "outbound": "egress-mo",
+      "dns": "dns-direct"
+    },
+    {
+      "ip": "160.79.104.1",
+      "ruleset": "ai",
+      "outbound": "egress-jp"
+    },
+    {
+      "ip": "2607:6bc0::1",
+      "ruleset": "ai",
+      "outbound": "egress-jp"
+    },
+    {
+      "domain": "example.com",
+      "ruleset": null,
+      "outbound": "direct",
+      "dns": "dns-direct"
+    }
+  ]
+}

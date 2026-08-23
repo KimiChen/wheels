@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "routes": [
+    {
+      "tag": "special",
+      "source": "rules/special.txt",
+      "priority": 10,
+      "outbound": "egress-mo"
+    },
+    {
+      "tag": "tiktok",
+      "source": "rules/tiktok.txt",
+      "priority": 100,
+      "outbound": "egress-us"
+    },
+    {
+      "tag": "gemini",
+      "source": "rules/gemini.txt",
+      "priority": 200,
+      "outbound": "egress-tw"
+    },
+    {
+      "tag": "ai",
+      "source": "rules/ai.txt",
+      "priority": 300,
+      "outbound": "egress-jp"
+    }
+  ]
+}

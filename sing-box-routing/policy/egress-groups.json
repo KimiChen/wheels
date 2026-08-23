@@ -1,0 +1,64 @@
+{
+  "version": 1,
+  "groups": [
+    {
+      "tag": "egress-mo",
+      "members": [
+        "node-mo-akile"
+      ],
+      "urltest": {
+        "tag": "auto-mo",
+        "url": "https://www.gstatic.com/generate_204",
+        "interval": "5m",
+        "tolerance": 100,
+        "idle_timeout": "30m"
+      },
+      "default": "auto-mo"
+    },
+    {
+      "tag": "egress-tw",
+      "members": [
+        "node-tw-akile",
+        "node-tw-datawave"
+      ],
+      "urltest": {
+        "tag": "auto-tw",
+        "url": "https://www.gstatic.com/generate_204",
+        "interval": "5m",
+        "tolerance": 100,
+        "idle_timeout": "30m"
+      },
+      "default": "auto-tw"
+    },
+    {
+      "tag": "egress-us",
+      "members": [
+        "node-us-vircs"
+      ],
+      "urltest": {
+        "tag": "auto-us",
+        "url": "https://www.gstatic.com/generate_204",
+        "interval": "5m",
+        "tolerance": 100,
+        "idle_timeout": "30m"
+      },
+      "default": "auto-us"
+    },
+    {
+      "tag": "egress-jp",
+      "members": [
+        "node-jp-dmit",
+        "node-jp-akile",
+        "node-jp-zouter"
+      ],
+      "urltest": {
+        "tag": "auto-jp",
+        "url": "https://www.gstatic.com/generate_204",
+        "interval": "5m",
+        "tolerance": 100,
+        "idle_timeout": "30m"
+      },
+      "default": "auto-jp"
+    }
+  ]
+}
