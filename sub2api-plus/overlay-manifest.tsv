@@ -1,7 +1,7 @@
 # schema_version=1
 # upstream_commit=e2d9b823f63dc4e8f4014be3fd24a0a73e339867
-# source_commit=ec8f6ae8d9401a7331f536bb5d0148d2c16ca1c8
-# source_tree=bdc7b26daee238a49ab5f0c221b0c11af3138e6e
+# source_commit=bb3db4eef51bccb051da16b69dc697eaa2a8b377
+# source_tree=83a9cfd2a8de00274818db98dbab247166efeabf
 # columns=status<TAB>mode<TAB>object<TAB>path
 M	100644	095a1f2b848d4b773b6cff7732f69576b73777d6	.gitattributes
 M	100644	83308befc36f6f2295d39ce2f90507fbe11291e0	.gitignore
@@ -123,8 +123,20 @@ M	100644	951417c4dca7a1175e3b311416974f1fca6a8801	frontend/src/composables/__tes
 A	100644	34db13dd373b72535a16e5477731da9932a91512	frontend/src/composables/useGuestToast.ts
 M	100644	c9deef5112cfec9ddfec0cded08c691c53efb9c8	frontend/src/composables/usePersistedPageSize.ts
 M	100644	de1edc6a9193e51ae9dc5fbb39027204b425af96	frontend/src/i18n/index.ts
-M	100644	0b274002d49bbbc5ec672482536b6d99bac35af8	frontend/src/i18n/locales/en/dashboard.ts
-M	100644	3dd0c046ae10c0db985b40775ad7a84e42efee1b	frontend/src/i18n/locales/zh/dashboard.ts
+M	100644	9e77265f123757ad30804cd8431a43e3e0b6b905	frontend/src/i18n/locales/en/admin/accounts.ts
+M	100644	4a5340f9a2d416c3e9b708f2f99df746ec1f6587	frontend/src/i18n/locales/en/admin/channels.ts
+M	100644	46cd922b6bfefd6e17a0da103156c8ce686f888c	frontend/src/i18n/locales/en/admin/ops.ts
+M	100644	9667bb2b2ea89d61369f3e6510732a6f233cfd95	frontend/src/i18n/locales/en/admin/overview.ts
+M	100644	e7344b69209d8742b6be2252a63341bd3edfbaa7	frontend/src/i18n/locales/en/common.ts
+M	100644	173255cafd6538abd6e1ee77cef4a291a68521c1	frontend/src/i18n/locales/en/dashboard.ts
+M	100644	67d433910c9189af23ec1edd36cac3ebf7ffe786	frontend/src/i18n/locales/en/misc.ts
+M	100644	7fbecedd36e26a045d52d0c57e30ea24a05b4bda	frontend/src/i18n/locales/zh/admin/accounts.ts
+M	100644	880e3b31fcaf86bbbf28ec094a359d151376aded	frontend/src/i18n/locales/zh/admin/channels.ts
+M	100644	1a923662bb7d3c6b45de9b62c236cc6196ed0970	frontend/src/i18n/locales/zh/admin/ops.ts
+M	100644	7063b6ea1500ca9a1dc7b12a9650c6197233a9af	frontend/src/i18n/locales/zh/admin/overview.ts
+M	100644	313a948adcc2a1f016ba62c9f9f7193475f7bb20	frontend/src/i18n/locales/zh/common.ts
+M	100644	76d7a236d830e31e2ac85440fb684125fffe1c30	frontend/src/i18n/locales/zh/dashboard.ts
+M	100644	00f07bfc22c241e21b1e186e5c18a2160a8aa7ab	frontend/src/i18n/locales/zh/misc.ts
 A	100644	19866ba035c6efe90373b65d577bedc4c760bf05	frontend/src/i18n/publicMessages.ts
 A	100644	b6e51a6129b2e82170528cbc53b4dbb3dc8ff0ee	frontend/src/index-main.spec.ts
 A	100644	1f0a0c1adffd6a5bca4a64d8c3689dc33a4eb1a5	frontend/src/index-main.ts

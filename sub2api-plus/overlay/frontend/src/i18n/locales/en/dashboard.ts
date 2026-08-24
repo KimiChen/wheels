@@ -72,6 +72,7 @@ export default {
     endpoints: {
       title: 'API Endpoints',
       default: 'Default',
+      defaultIndexed: 'Default #{n}',
       copied: 'Copied',
       copiedHint: 'Copied to clipboard',
       clickToCopy: 'Click to copy this endpoint',

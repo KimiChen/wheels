@@ -72,6 +72,7 @@ export default {
     endpoints: {
       title: 'API 端点',
       default: '默认',
+      defaultIndexed: '默认 #{n}',
       copied: '已复制',
       copiedHint: '已复制到剪贴板',
       clickToCopy: '点击可复制此端点',
