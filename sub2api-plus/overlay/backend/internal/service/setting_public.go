@@ -235,6 +235,7 @@ func (s *SettingService) GetPublicSettings(ctx context.Context) (*PublicSettings
 		SettingKeyAvailableChannelsEnabled,
 		SettingKeyModelPlazaEnabled,
 		SettingKeyModelPlazaRequireAuth,
+		SettingKeyPluginManagementEnabled,
 		SettingKeyAffiliateEnabled,
 		SettingKeyRiskControlEnabled,
 		SettingKeyAllowUserViewErrorRequests,
@@ -360,8 +361,9 @@ func (s *SettingService) GetPublicSettings(ctx context.Context) (*PublicSettings
 
 		AvailableChannelsEnabled: settings[SettingKeyAvailableChannelsEnabled] == "true",
 
-		ModelPlazaEnabled:     settings[SettingKeyModelPlazaEnabled] == "true",
-		ModelPlazaRequireAuth: settings[SettingKeyModelPlazaRequireAuth] == "true",
+		ModelPlazaEnabled:       settings[SettingKeyModelPlazaEnabled] == "true",
+		ModelPlazaRequireAuth:   settings[SettingKeyModelPlazaRequireAuth] == "true",
+		PluginManagementEnabled: settings[SettingKeyPluginManagementEnabled] == "true",
 
 		AffiliateEnabled: settings[SettingKeyAffiliateEnabled] == "true",
 
@@ -604,6 +606,7 @@ func (s *SettingService) GetPublicSettingsForInjection(ctx context.Context) (any
 		payload["model_plaza_enabled"] = true
 		addTrueSetting(payload, "model_plaza_require_auth", settings.ModelPlazaRequireAuth)
 	}
+	addTrueSetting(payload, "plugin_management_enabled", settings.PluginManagementEnabled)
 	addTrueSetting(payload, "affiliate_enabled", settings.AffiliateEnabled)
 	addTrueSetting(payload, "risk_control_enabled", settings.RiskControlEnabled)
 	addTrueSetting(payload, "allow_user_view_error_requests", settings.AllowUserViewErrorRequests)

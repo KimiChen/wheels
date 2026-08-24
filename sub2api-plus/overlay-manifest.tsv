@@ -1,18 +1,18 @@
 # schema_version=1
-# upstream_commit=67380eafd5ae2eaa8db910ae738199c3dac62e37
-# source_commit=94381186a23b2c988c31007457f70011fefe4484
-# source_tree=2f8cbb24fd5b370f59fd5c0616c6b7bf5259b3a2
+# upstream_commit=2307aa5ca70263012360f798948adaaafef69362
+# source_commit=8b21b9380fe34f65a78a80cd2d90daf57cba6ca3
+# source_tree=a5d7b0835820bd4becdc3dc74435544a5785069d
 # columns=status<TAB>mode<TAB>object<TAB>path
 M	100644	095a1f2b848d4b773b6cff7732f69576b73777d6	.gitattributes
-M	100644	674afb91602bf24ce049a173863ecfbb07ebe137	.gitignore
-M	100644	c4e2047df889b5080a53f570274db284d33b0b4c	Dockerfile
+M	100644	83308befc36f6f2295d39ce2f90507fbe11291e0	.gitignore
+M	100644	64453cd2e2a4ffcaea0d107b4892e98d796bd6be	Dockerfile
 M	100644	7290b6a8980f7a10fae0145161e2f5c0bf9b86ae	Dockerfile.goreleaser
 A	100644	cd7b1f026d2cbaefd1da3f0837bae7b08955e7f6	FORK_MAINTENANCE.md
 A	100644	d09ac85c4305cedf977db35e507f23f5a4e0356c	backend/cmd/server/SUB_VERSION
-M	100644	5dc2d15f505bd0262bea36744e0731c7188df7cb	backend/cmd/server/main.go
+M	100644	233178c78b52ce0a08893297f5a6bae07a297269	backend/cmd/server/main.go
 A	100644	d857244a7ad93d915433fcbbc3543b7871f80006	backend/cmd/server/main_test.go
 M	100644	4ccafafb801eb84367c739b5d88be3e8fe416f85	backend/ent/migrate/schema.go
-M	100644	9432af69c51c1c0655002b41323f136c1070e388	backend/ent/mutation.go
+M	100644	0ae6d7ff6b0e9a9947071fefa86e085b1a53b057	backend/ent/mutation.go
 M	100644	22d4bf6f468aa878570bcee620a997c92020482d	backend/ent/runtime/runtime.go
 M	100644	9fd58614e86f6b1a6b0e2d876d181d05d6fe38cb	backend/ent/schema/usage_log.go
 M	100644	c56a9cf35f832b7b333b747675b0cdb878315942	backend/ent/usagelog.go
@@ -20,16 +20,16 @@ M	100644	61e3d56b90c086888c19732f35bd9a7c63e4aee9	backend/ent/usagelog/usagelog.
 M	100644	4bb2719dd536ed7eaa5fa9983815cf8b373cc35b	backend/ent/usagelog/where.go
 M	100644	60226db808c24626e46d781f1769a58922efe573	backend/ent/usagelog_create.go
 M	100644	c9fdf99db1b0b5ced2773672d1303bb21650b7de	backend/ent/usagelog_update.go
-M	100644	814ce7bd23fe44420ef6187603e498d1d02a001a	backend/internal/config/config.go
+M	100644	2357b07dbe4bc7849c336883bc4886b47fb1da94	backend/internal/config/config.go
 A	100644	3d6f1c0a324da38fce8c4406e928b7278154b24c	backend/internal/config/config_fork.go
 M	100644	2624490d8f4abfc3d622fc30ac15d1fdbe3847a8	backend/internal/handler/admin/dashboard_handler.go
 M	100644	2386a45e238053c09599565f308ef7c4846403a3	backend/internal/handler/auth_handler.go
 M	100644	5a69cd28ea1345d5407827ee8e897a35abc1e17e	backend/internal/handler/dto/mappers.go
 M	100644	85717005cc251aad7ed8331c3b9ace1f4067dcb0	backend/internal/handler/dto/public_settings_injection_schema_test.go
-M	100644	df3e651ce76d42b973a4f8bfa0c3c0669ca57587	backend/internal/handler/dto/settings.go
+M	100644	47f9f6bd49762d0a26431e9bbd98e75f21b7ff5e	backend/internal/handler/dto/settings.go
 M	100644	15f87d18e878027e1eb4b8671e7a84b34754c4b3	backend/internal/handler/dto/types.go
-M	100644	1bb663b24bceb47b956deec97bc786bc2e3ba4d4	backend/internal/handler/openai_gateway_handler.go
-M	100644	8c47c1d6fa0c04844b0509ae2f2f9c49fb6a45f9	backend/internal/handler/setting_handler.go
+M	100644	665431e7f374db035bbf146f6eaf6306355d8d86	backend/internal/handler/openai_gateway_handler.go
+M	100644	858e47f08a5c70e30b0e76f5ab2cf98246886d16	backend/internal/handler/setting_handler.go
 M	100644	1d1ad22abb67e8b62c9ae90b1b249fecb7dbda0e	backend/internal/handler/setting_handler_public_test.go
 M	100644	586a50b08b505d3bdbbd05d01b5d5156988bad56	backend/internal/pkg/ctxkey/ctxkey.go
 A	100644	124e9fcc53643ed5b76b740c1f22a90b5bc1f2a2	backend/internal/pkg/trafficstats/trafficstats.go
@@ -40,18 +40,18 @@ A	100644	a31e0503fc2693dbeb2ffd0d405d0c7002398c8e	backend/internal/repository/ht
 M	100644	78a5734ffaf91f92308ae08ee7b4eb858b73682d	backend/internal/repository/usage_log_repo_dashboard.go
 M	100644	24312fb71f82b4cc1bb095fed9a6511a024b2b02	backend/internal/repository/usage_log_repo_insert.go
 M	100644	ac1b6464070834d507a7d093b2e8b92deda1d7aa	backend/internal/repository/usage_log_repo_query.go
-M	100644	4b1a8c5144ba77810e4fb66032e5b4413ebc2c31	backend/internal/repository/usage_log_repo_request_type_test.go
+M	100644	ba846deeb91e9e0732047f2155c922b347507d2f	backend/internal/repository/usage_log_repo_request_type_test.go
 M	100644	4310dde4ba82d12b2c4f3ead3e40cc01aafd3f17	backend/internal/repository/usage_log_repo_trend.go
 M	100644	435536d120145fa97d7bdd9699805f4c5b76160e	backend/internal/repository/usage_log_session_id_unit_test.go
-M	100644	bc24d3a4c91b1cddb534caa9f0865c8a718f3026	backend/internal/server/api_contract_test.go
+M	100644	17df56fa590f7a7ebd0d60ffa159820b38a42aa0	backend/internal/server/api_contract_test.go
 M	100644	fd32a71bd340691eb9f2a6ed5076d6a68ab5f9c5	backend/internal/server/middleware/backend_mode_guard.go
 M	100644	1778ff74309e5f508c9931e82f7338ae38e69b7f	backend/internal/server/middleware/backend_mode_guard_test.go
 M	100644	4fc51aec62f52d2b414c6a0ffd83d73cdb8b07e8	backend/internal/server/middleware/logger.go
 A	100644	32c8ef3eb80a69ccf073cca1b5a5e0af2728ab73	backend/internal/server/middleware/public_route_blocklist.go
 A	100644	e14cff453ac6b7c426530c73b672343a7155402b	backend/internal/server/middleware/public_route_blocklist_test.go
 M	100644	5d81239bfe1e465dc7abac255e5d582325169478	backend/internal/server/middleware/request_access_logger_test.go
-M	100644	52dde99b6fda32b0da1820f7f01e0be160f19478	backend/internal/server/middleware/security_headers.go
-M	100644	a5bcb84bbf1080cea028779b8fb09b9b80cc04e0	backend/internal/server/middleware/security_headers_test.go
+M	100644	7b8e73f4b1d71aa19ba47118e84b5626827aeaec	backend/internal/server/middleware/security_headers.go
+M	100644	d96e0caa67b8e648579657febffebcfbb3480d28	backend/internal/server/middleware/security_headers_test.go
 A	100644	918f6fcce5344ff375dd1c96d2ff2daa4d7f1a48	backend/internal/server/middleware/traffic_stats.go
 M	100644	ebf8da912e4d3c833e0b5a056b3abde67523db6b	backend/internal/server/router.go
 M	100644	f776b673113a9d1a86222a27b88ea74a44e679a0	backend/internal/server/routes/auth.go
@@ -60,9 +60,9 @@ M	100644	a94f2ba67462ae472ddaf7a804d3bb7b8e686922	backend/internal/server/routes
 M	100644	9e0101d5c490023941c126c03c65f99586a38077	backend/internal/server/routes/common.go
 A	100644	3c9533652d98497f6c4013f22ffbdc419362d3b2	backend/internal/server/routes/common_test.go
 M	100644	35c5b494258bcf1dfd9abc4cc983b917f4e39a45	backend/internal/server/routes/gateway.go
-M	100644	c359f56dbfdd7b25dc7047919bc6f4c63fd85451	backend/internal/service/gateway_usage_billing.go
-M	100644	542785ce78dd1e69c55e6e5412e0782832f441eb	backend/internal/service/setting_public.go
-M	100644	16f2c03aabaaca607ed4badc52c0baa70d022255	backend/internal/service/setting_service_public_test.go
+M	100644	961ffe498dced906babf1803b5ba97f4a7a72650	backend/internal/service/gateway_usage_billing.go
+M	100644	6467111d6a5db3bc307d7fc413ec3208ab81860e	backend/internal/service/setting_public.go
+M	100644	06b9463830969492c3ff97a469540942d75b44af	backend/internal/service/setting_service_public_test.go
 M	100644	667ada5782d6ac9f47108a345e2cb90aca1b9e49	backend/internal/service/update_service.go
 A	100644	1af9a35c09e1cf16d83f958c8469756e4b5a05c7	backend/internal/service/update_service_fork.go
 M	100644	17e078b8e24b7e93f085df3fb3bee904b994f46f	backend/internal/service/update_service_test.go
@@ -75,15 +75,15 @@ A	100644	9678ac2967f8b473db082428bd9a1419ad6341f7	backend/migrations/154_add_usa
 A	100644	c9c421689edbd8ec0ad104abb8368867317c04fb	backend/migrations/155_add_usage_log_upstream_traffic_bytes.sql
 A	100755	7b0aecce023e6f2fae6cc8c8f00c255d5d15e16a	backend/scripts/sync_upstream.sh
 M	100644	32fb761a6e498efc053bf91572d6d7070dbba6f1	deploy/Caddyfile
-M	100644	a7f32b2991109bc4ef7cdfe220815d84396792c5	deploy/Dockerfile
-M	100644	d0cf159a6c5700717d174305aa8e5394c85efe71	deploy/config.example.yaml
-M	100644	bc564b99baf68ef96d3efe62d7a4dcb00e3fc993	deploy/docker-compose.dev.yml
-M	100644	36084c9facdc65475a7cf67ff4d3a679897865d1	deploy/docker-compose.local.yml
-M	100644	ccddda5a5b8d603f947c71ac3f946c51b93367ac	deploy/docker-compose.standalone.yml
-M	100644	0e6977e6f54cfc7fd4972fec9145ab7889a65bc6	deploy/docker-compose.yml
+M	100644	085978503b3f2f8abca98997f330659c0e519935	deploy/Dockerfile
+M	100644	b8d87c4443d41785826a293edeca7238498f84f5	deploy/config.example.yaml
+M	100644	c22900e7d9c932febb728f5f025b608317bb0162	deploy/docker-compose.dev.yml
+M	100644	b097a45076111e08278f1e437b1e7991cee7f123	deploy/docker-compose.local.yml
+M	100644	bbd0851f41947868b3fb89f392650daf8c4dcd27	deploy/docker-compose.standalone.yml
+M	100644	34cabe27e5bef452a793fc9f2340af369a7ed3aa	deploy/docker-compose.yml
 M	100644	81fe9f5f917d8d4a94eb6a189db248d9baa69eca	docs/channel-monitor-v2-safe-defaults.md
 M	100644	ffab749f93857b3bee730750e8bdb1ac3cfff4bd	frontend/index.html
-M	100644	46fac52e9b0327a0ea1829d728d742901f264115	frontend/package.json
+M	100644	d8b0238719aa604289ae049562b220b925a51977	frontend/package.json
 A	100644	f0566a42431a784f3b4e63a84269c6fd39df8682	frontend/public/favicon.ico
 A	100644	3ff07366b3acdb35f3e18ea2aa21050eb2f59117	frontend/src/PublicApp.vue
 A	100644	02463716db9d6e0a493605bbdcf4801c2d6ced79	frontend/src/__tests__/viteFork.spec.ts
@@ -123,8 +123,8 @@ M	100644	951417c4dca7a1175e3b311416974f1fca6a8801	frontend/src/composables/__tes
 A	100644	34db13dd373b72535a16e5477731da9932a91512	frontend/src/composables/useGuestToast.ts
 M	100644	c9deef5112cfec9ddfec0cded08c691c53efb9c8	frontend/src/composables/usePersistedPageSize.ts
 M	100644	de1edc6a9193e51ae9dc5fbb39027204b425af96	frontend/src/i18n/index.ts
-M	100644	f447757c97c7dc59d96317b6dfaf95bfda37190d	frontend/src/i18n/locales/en/dashboard.ts
-M	100644	8343b012322dfb69865a3b5cd8e1995dae4327b7	frontend/src/i18n/locales/zh/dashboard.ts
+M	100644	0b274002d49bbbc5ec672482536b6d99bac35af8	frontend/src/i18n/locales/en/dashboard.ts
+M	100644	3dd0c046ae10c0db985b40775ad7a84e42efee1b	frontend/src/i18n/locales/zh/dashboard.ts
 A	100644	19866ba035c6efe90373b65d577bedc4c760bf05	frontend/src/i18n/publicMessages.ts
 A	100644	b6e51a6129b2e82170528cbc53b4dbb3dc8ff0ee	frontend/src/index-main.spec.ts
 A	100644	1f0a0c1adffd6a5bca4a64d8c3689dc33a4eb1a5	frontend/src/index-main.ts
@@ -132,7 +132,7 @@ A	100644	4a2b164c2089c97dfdc779e6fda2f0babba00262	frontend/src/public/fullAppBri
 M	100644	d0db12e12ba63d5610ad80d7b1d9b699b9c52b5b	frontend/src/router/__tests__/title.spec.ts
 A	100644	d45f193ce5cfc1b1db4b2e35934e911a0ec9420e	frontend/src/router/backendMode.ts
 A	100644	05526f5192b9b0a1079891efcaf1d506ed0291ac	frontend/src/router/guest.ts
-M	100644	65bcbbb1d464d1a19e37a11a468b4857346e73e2	frontend/src/router/index.ts
+M	100644	0162bd134b1298f7cb9090694989c40334a9e679	frontend/src/router/index.ts
 M	100644	a998346991630ac2c6dedbf4b7fad83083195ab3	frontend/src/router/title.ts
 M	100644	5c6a174379cd5e9377442a1d514ec93250d33641	frontend/src/stores/__tests__/app.spec.ts
 M	100644	1aa72eb5c5d913b0d258a7d9d523335d8790ce18	frontend/src/stores/__tests__/auth.spec.ts
@@ -142,25 +142,25 @@ A	100644	111756383ebe189568cd292d167d7d8dfa193f43	frontend/src/style-fork.css
 M	100644	c02ec329a498e4d7fd4c0054466ee61159013aa3	frontend/src/styles/onboarding.css
 A	100644	7fd463e7033f2bbc0074839e2234a644d34f98f9	frontend/src/types/fork.ts
 M	100644	67b373281eae93d6dd25eaa863158cb3a9b40f36	frontend/src/types/global.d.ts
-M	100644	8faecb1cd62549f0ca591bcbafab674b74dffcfd	frontend/src/types/index.ts
+M	100644	bff67a14dceb1f118c8b0d52490992825973a08e	frontend/src/types/index.ts
 A	100644	cca10f0fe3f156dade5765c8e47f960953ed1791	frontend/src/utils/__tests__/apiBaseUrl.spec.ts
 M	100644	debb6a3327447eae235755baf6e388cf5143d631	frontend/src/utils/__tests__/tablePreferences.spec.ts
 A	100644	de74deec090628a4773cdeb05c15c40da8861a3c	frontend/src/utils/apiBaseUrl.ts
-M	100644	74c1ce681df570f4458d0691624ec5c2124ed047	frontend/src/utils/featureFlags.ts
-A	100644	d26686b8f54f61b3204647b4bcbf7cdb5d080cac	frontend/src/utils/publicSettings.ts
+M	100644	82cea9b206ef9476ec13efc5a3c28f43021b475d	frontend/src/utils/featureFlags.ts
+A	100644	5c260783f15f28ae635f4177bceaf332b656ca81	frontend/src/utils/publicSettings.ts
 M	100644	f66041683600fab2b1caa3de62a425ca59760e7d	frontend/src/utils/tablePreferences.ts
 M	100644	454706ad31e4ac73e57ffdf91974faa7cd3e9822	frontend/src/views/HomeView.vue
 M	100644	68405baad2d4f002d597b316c1178e27e2bc7bcb	frontend/src/views/KeyUsageView.vue
 M	100644	928834276b84c3ef08d724604ec4097e933b7be4	frontend/src/views/__tests__/KeyUsageView.spec.ts
-M	100644	14ae22c44d911990444f9964e899269296d8c4ec	frontend/src/views/admin/AccountsView.vue
+M	100644	791c43638765ad06c94c8864a9f2bcd2d138ecea	frontend/src/views/admin/AccountsView.vue
 M	100644	604fcf1b08a8df4675ed5072478494b990ce0794	frontend/src/views/admin/ChannelMonitorView.vue
 M	100644	46e2f5f379262fb5b8ddb411c19f3adda45dccc5	frontend/src/views/admin/ChannelsView.vue
 M	100644	81b4112792cca7d24e2370825b3a260179f794a1	frontend/src/views/admin/DashboardView.vue
 M	100644	b0ba9675e686c1f90bc85229ec1363b19e0bfd9c	frontend/src/views/admin/GroupsView.vue
 M	100644	8ff8105700045722b978f01cef02181296adee89	frontend/src/views/admin/PromoCodesView.vue
-M	100644	74b4db3754d502ab06efdae3901e65648a37e3e3	frontend/src/views/admin/ProxiesView.vue
+M	100644	1888c273cd2dfd24a25b6bab02ecb7f4cbf55713	frontend/src/views/admin/ProxiesView.vue
 M	100644	3f6ba10bfccb05da1197a7edd37f070b41a66491	frontend/src/views/admin/RedeemView.vue
-M	100644	264383d2a388a968a3546b7f795a0c21b50fbb4a	frontend/src/views/admin/SettingsView.vue
+M	100644	dae9147aa02c5a6618dc353cb1ae5b8d9c054f39	frontend/src/views/admin/SettingsView.vue
 M	100644	2f4dbf804ebe6a9f1642ff3e44bef9b71774394b	frontend/src/views/admin/SubscriptionsView.vue
 M	100644	02fc0ee69e95825e5a26221b604d876c3fecf0d6	frontend/src/views/admin/UsageView.vue
 M	100644	6d8ea93593af3137dad49f560be4140da5d0b2bd	frontend/src/views/admin/UsersView.vue

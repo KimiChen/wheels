@@ -78,6 +78,7 @@ export const createDefaultPublicSettings = (): PublicSettings => ({
   available_channels_enabled: false,
   model_plaza_enabled: false,
   model_plaza_require_auth: false,
+  plugin_management_enabled: false,
   service_quota_enabled: false,
   affiliate_enabled: false,
   allow_user_view_error_requests: false,
@@ -217,6 +218,7 @@ export const compactPublicSettingsConfig = (
     out.model_plaza_enabled = true
     addTrueSetting(out, 'model_plaza_require_auth', normalized.model_plaza_require_auth)
   }
+  addTrueSetting(out, 'plugin_management_enabled', normalized.plugin_management_enabled)
   addTrueSetting(out, 'affiliate_enabled', normalized.affiliate_enabled)
   addTrueSetting(out, 'risk_control_enabled', normalized.risk_control_enabled)
 

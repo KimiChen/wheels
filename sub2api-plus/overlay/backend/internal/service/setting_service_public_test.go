@@ -70,6 +70,7 @@ func TestSettingService_GetPublicSettingsForInjection_IncludesClientEndpointFiel
 			SettingKeyChannelMonitorEnabled:                "false",
 			SettingKeyChannelMonitorDefaultIntervalSeconds: "60",
 			SettingKeyAvailableChannelsEnabled:             "false",
+			SettingKeyPluginManagementEnabled:              "false",
 			SettingKeyAffiliateEnabled:                     "false",
 			SettingKeyRiskControlEnabled:                   "false",
 			SettingKeyAllowUserViewErrorRequests:           "false",
@@ -100,6 +101,7 @@ func TestSettingService_GetPublicSettingsForInjection_IncludesClientEndpointFiel
 	require.NotContains(t, out, "custom_endpoints")
 	require.NotContains(t, out, "channel_monitor_enabled")
 	require.NotContains(t, out, "available_channels_enabled")
+	require.NotContains(t, out, "plugin_management_enabled")
 	require.NotContains(t, out, "affiliate_enabled")
 	require.NotContains(t, out, "risk_control_enabled")
 	require.NotContains(t, out, "allow_user_view_error_requests")
@@ -118,6 +120,7 @@ func TestSettingService_GetPublicSettingsForInjection_IncludesEnabledNavigationF
 			SettingKeyAvailableChannelsEnabled:             "true",
 			SettingKeyModelPlazaEnabled:                    "true",
 			SettingKeyModelPlazaRequireAuth:                "true",
+			SettingKeyPluginManagementEnabled:              "true",
 			SettingKeyAffiliateEnabled:                     "true",
 			SettingKeyRiskControlEnabled:                   "true",
 		},
@@ -141,6 +144,7 @@ func TestSettingService_GetPublicSettingsForInjection_IncludesEnabledNavigationF
 	require.Equal(t, true, out["available_channels_enabled"])
 	require.Equal(t, true, out["model_plaza_enabled"])
 	require.Equal(t, true, out["model_plaza_require_auth"])
+	require.Equal(t, true, out["plugin_management_enabled"])
 	require.Equal(t, true, out["affiliate_enabled"])
 	require.Equal(t, true, out["risk_control_enabled"])
 }
