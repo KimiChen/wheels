@@ -78,6 +78,17 @@
         <symbol id="sort" viewBox="0 0 24 24">
           <path d="m8 9 4-4 4 4M16 15l-4 4-4-4" />
         </symbol>
+        <symbol id="sort-asc" viewBox="0 0 24 24">
+          <path d="m6 14 6-6 6 6" />
+        </symbol>
+        <symbol id="sort-desc" viewBox="0 0 24 24">
+          <path d="m6 10 6 6 6-6" />
+        </symbol>
+        <symbol id="external" viewBox="0 0 24 24">
+          <path
+            d="M14 4h6v6M20 4l-8.5 8.5M18 13.5V19a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5.5"
+          />
+        </symbol>
         <symbol id="folder" viewBox="0 0 24 24">
           <path d="M3 6h6l2 2h10v10H3z" />
         </symbol>
@@ -90,10 +101,7 @@
     <header class="wsk-topbar">
       <div class="wsk-brand">
         <span class="wsk-brand-mark" aria-hidden="true">WS</span>
-        <span class="wsk-brand-copy"
-          ><strong>Web Standard Kit</strong
-          ><span class="wsk-brand-subtitle">Minimal web baseline</span></span
-        >
+        <span class="wsk-brand-copy"><strong>Web Standard Kit</strong></span>
       </div>
 
       <nav class="wsk-view-switch" aria-label="页面视图">
@@ -132,14 +140,14 @@
       </button>
     </header>
 
-    <main id="main-content">
+    <main id="main-content" tabindex="-1">
       <div class="wsk-page" id="kit-view" data-view="kit">
         <div class="wsk-page-head">
           <div>
             <h1 tabindex="-1">网页基础标准</h1>
             <p>原生 HTML、CSS 和 JavaScript 的最小组件基线。</p>
           </div>
-          <span class="wsk-badge wsk-accent">v0.1</span>
+          <span class="wsk-badge wsk-accent">v1.0</span>
         </div>
 
         <nav class="wsk-kit-index" aria-label="组件目录">
@@ -848,8 +856,8 @@
                   <td>15 分钟</td>
                   <td>林悦</td>
                   <td>
-                    <span class="wsk-badge wsk-success"
-                      ><span class="wsk-dot"></span>已发布</span
+                    <span class="wsk-badge wsk-danger"
+                      ><span class="wsk-dot"></span>同步失败</span
                     >
                   </td>
                 </tr>
@@ -1375,6 +1383,28 @@
       </div>
     </main>
 
+    <footer class="wsk-footer">
+      <div class="wsk-footer-inner">
+        <div class="wsk-footer-legal">
+          <span>© 2026 Web Standard Kit</span>
+          <a
+            href="https://beian.miit.gov.cn/"
+            target="_blank"
+            rel="noopener noreferrer"
+            >京ICP备00000000号-1</a
+          >
+        </div>
+        <a
+          class="wsk-footer-link"
+          href="https://github.com/KimiChen/wheels/tree/main/web-standard-kit"
+          target="_blank"
+          rel="noopener noreferrer"
+          >项目地址<svg class="wsk-icon" aria-hidden="true">
+            <use href="#external"></use></svg
+        ></a>
+      </div>
+    </footer>
+
     <dialog
       class="wsk-dialog"
       id="confirm-dialog"
@@ -1411,11 +1441,6 @@
       </div>
     </dialog>
 
-    <div
-      class="wsk-toast-region"
-      id="toast-region"
-      aria-live="polite"
-      aria-atomic="true"
-    ></div>
+    <div class="wsk-toast-region" id="toast-region" aria-live="polite"></div>
   </body>
 </html>

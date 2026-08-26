@@ -25,7 +25,8 @@ function showToast(message, variant = "success") {
   const toast = document.createElement("div");
   toast.className = "wsk-toast";
   if (variant !== "success") toast.classList.add(`wsk-${variant}`);
-  toast.setAttribute("role", "status");
+  // No role here: the region itself is the live region, and nesting one
+  // inside another makes some screen readers announce the toast twice.
 
   const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   icon.classList.add("wsk-icon");
@@ -47,6 +48,15 @@ function initTheme() {
 
   const storageKey = "web-standard-kit-theme";
 
+  function storedTheme() {
+    try {
+      const value = localStorage.getItem(storageKey);
+      return value === "light" || value === "dark" ? value : null;
+    } catch {
+      return null;
+    }
+  }
+
   function applyTheme(nextTheme) {
     root.dataset.theme = nextTheme;
     const nextLabel = nextTheme === "dark" ? "浅色" : "深色";
@@ -65,6 +75,14 @@ function initTheme() {
       // The selected theme still applies to the current page.
     }
   });
+  // Keep following the system until the reader picks a theme themselves.
+  matchMedia("(prefers-color-scheme: dark)").addEventListener(
+    "change",
+    (event) => {
+      if (storedTheme()) return;
+      applyTheme(event.matches ? "dark" : "light");
+    },
+  );
 }
 
 function initViews() {
@@ -96,7 +114,13 @@ function initViews() {
 
   function applyHash(allowFocus) {
     const target = getHashTarget();
-    const name = viewOf(target) ?? "kit";
+    // No hash is the default view, so Back out of #reference-overview still
+    // lands on the kit. But a hash whose target belongs to no view — the skip
+    // link's #main-content, which is the shared <main> — must leave the
+    // current view alone instead of yanking the reader out of the reference app.
+    const name = location.hash
+      ? (viewOf(target) ?? currentView ?? "kit")
+      : "kit";
     const changed = name !== currentView;
     showView(name, {
       moveFocus: allowFocus && changed,
@@ -112,7 +136,11 @@ function initViews() {
         // Reflect the view in the URL so it is addressable and bookmarkable.
         location.hash = "reference-overview";
       } else {
-        history.pushState(null, "", location.pathname + location.search);
+        // Only worth a history entry when there is a hash to drop; otherwise
+        // repeat clicks stack identical entries that Back cannot escape.
+        if (location.hash) {
+          history.pushState(null, "", location.pathname + location.search);
+        }
         showView("kit", { moveFocus: true });
       }
     });
@@ -440,7 +468,8 @@ function initDataTable() {
     currentPage = 1;
     renderTable();
   });
-  document.querySelectorAll("[data-sort]").forEach((button) => {
+  const sortButtons = [...document.querySelectorAll("[data-sort]")];
+  sortButtons.forEach((button) => {
     button.addEventListener("click", () => {
       const key = button.dataset.sort;
       sortDirection =
@@ -458,6 +487,17 @@ function initDataTable() {
         .querySelectorAll("th[aria-sort]")
         .forEach((header) => header.setAttribute("aria-sort", "none"));
       button.closest("th")?.setAttribute("aria-sort", sortDirection);
+      // aria-sort carries the direction for screen readers; the icon has to
+      // carry it for everyone else, so swap in a one-way chevron.
+      sortButtons.forEach((other) => {
+        const icon =
+          other === button
+            ? sortDirection === "ascending"
+              ? "#sort-asc"
+              : "#sort-desc"
+            : "#sort";
+        other.querySelector("use")?.setAttribute("href", icon);
+      });
       currentPage = 1;
       renderTable();
     });
