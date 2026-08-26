@@ -1,0 +1,15 @@
+diff --git a/src/lib.rs b/src/lib.rs
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -14,7 +14,10 @@ pub mod sys;
+ pub mod vparser;
+ 
+ /// Build timestamp in UTC
+-pub const BUILD_TIME: &str = build_time::build_time_utc!();
++pub const BUILD_TIME: &str = match option_env!("SHADOWSOCKS_BUILD_TIME_UTC") {
++    Some(value) => value,
++    None => "unknown",
++};
+ 
+ /// shadowsocks version
+ pub const VERSION: &str = env!("CARGO_PKG_VERSION");

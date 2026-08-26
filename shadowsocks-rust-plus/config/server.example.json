@@ -14,18 +14,18 @@
     {
       "id": "ss-entry-01",
       "server": "0.0.0.0",
-      "server_port": 8388,
-      "method": "2022-blake3-aes-256-gcm",
-      "password": "<BASE64_IPSK_32_BYTES>",
+      "server_port": 19999,
+      "method": "2022-blake3-aes-128-gcm",
+      "password": "<BASE64_IPSK_16_BYTES>",
       "mode": "tcp_and_udp",
       "users": [
         {
           "name": "u_000123",
-          "password": "<BASE64_UPSK_32_BYTES_USER_000123>"
+          "password": "<BASE64_UPSK_16_BYTES_USER_000123>"
         },
         {
           "name": "u_000124",
-          "password": "<BASE64_UPSK_32_BYTES_USER_000124>"
+          "password": "<BASE64_UPSK_16_BYTES_USER_000124>"
         }
       ]
     }

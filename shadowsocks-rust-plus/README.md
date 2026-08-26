@@ -58,14 +58,15 @@ overlay。它已经实现 AEAD-2022 EIH 多用户服务端的用户级 TCP/UDP �
 
 环境要求：Unix domain socket、Git、Rust/Cargo、Bash、Python 3、`patch`、`tar`、
 `ripgrep`（命令名 `rg`），以及获取固定上游源码所需的网络访问；发布构建校验还需要
-`shasum`。`rg` 是完整验证的必需依赖，缺失时 `verify.sh` 必须失败，不能把敏感扫描跳过后
-视为全绿。
+`cargo-zigbuild`、Zig、`shasum` 和 OpenSSL，且版本必须与
+[`packaging/release-toolchain.lock`](packaging/release-toolchain.lock) 一致。`rg` 是完整验证的
+必需依赖，缺失时 `verify.sh` 必须失败，不能把敏感扫描跳过后视为全绿。
 
 可选环境变量见 [`.env.example`](.env.example)。需要覆盖上游仓库或 Cargo 缓存路径时，将它
 复制为项目根目录下的 `.env` 并填写本机值；项目脚本会自动加载该文件。`.env` 已被忽略，真实
 路径、凭据和密钥不得提交。
 
-### 1. 验证和构建
+### 1. 本地验证和开发构建
 
 ```bash
 ./scripts/verify.sh
@@ -76,10 +77,94 @@ overlay。它已经实现 AEAD-2022 EIH 多用户服务端的用户级 TCP/UDP �
 `verify.sh` 会核对远端 tag 与锁定 commit、在临时目录重放补丁、运行 Rust/结算/真实
 TCP+UDP 集成测试，并对未被 ignore 规则排除的文件扫描常见私钥、`AKIA` access key ID 以及
 `PrivateKey`/`Passphrase` 赋值。该检查用于提交前卫生检查，不是通用的 `secret`/`token`
-扫描器，也不会检查被忽略的部署 `.env`。`build.sh` 只构建启用 `user-stats` feature 的 release
-`ssserver`。生成的源码、Cargo target 和 `dist/` 不应提交。
+扫描器，也不会检查被忽略的部署 `.env`。`build.sh` 只构建当前宿主平台、启用 `user-stats`
+feature 的开发用 release `ssserver`，其 macOS 产物不得部署到 Linux。生成的源码、Cargo target
+和 `dist/` 不应提交。
 
-### 2. 配置
+### 2. Linux x86_64 可复现发布包与验签
+
+生产候选包使用锁定的 Rust、Cargo、cargo-zigbuild、Zig、Python 与 zlib 版本，两次在不同
+源码/target 路径独立构建 `x86_64-unknown-linux-musl`，二进制逐字节相同才生成固定 mtime、
+属主、权限和成员顺序的 `tar.gz`：
+
+```bash
+./scripts/build-linux-release.sh --repository /absolute/path/to/upstream-mirror
+
+release_stem=dist/shadowsocks-rust-plus-v1.24.0-x86_64-unknown-linux-musl
+./scripts/sign-release.sh \
+  --archive "$release_stem.tar.gz" \
+  --manifest "$release_stem.manifest.json" \
+  --checksum "$release_stem.tar.gz.sha256" \
+  --private-key /secure/offline/release-private.pem \
+  --output "$release_stem.manifest.json.sig"
+./scripts/verify-release.sh \
+  --archive "$release_stem.tar.gz" \
+  --manifest "$release_stem.manifest.json" \
+  --checksum "$release_stem.tar.gz.sha256" \
+  --signature "$release_stem.manifest.json.sig" \
+  --public-key /secure/release-public.pem
+```
+
+`--repository` 可省略并使用 `upstream.lock` 的地址，也可指向本地镜像；两种路径都会由
+`prepare-source.sh` 校验精确 tag/commit 并零 fuzz 应用 overlay。发布构建要求当前 overlay
+工作树干净。固定版本见 [`packaging/release-toolchain.lock`](packaging/release-toolchain.lock)。
+manifest 包含版本、上游 commit、overlay commit、目标、`SOURCE_DATE_EPOCH`、两次独立构建记录、
+完整工具链和 `ssserver` SHA-256；验签工具还会验证外部 detached 签名、归档 SHA-256、包内外
+manifest、ELF64/x86_64 头和确定性归档元数据。发布私钥必须离线保管，不能放入仓库或构建主机。
+overlay 还把上游默认的实时时钟 build timestamp 改为从 `SOURCE_DATE_EPOCH` 派生的固定 UTC 值；
+未经过发布脚本显式设置时显示 `unknown`，避免伪造可复现结果。
+
+### 3. 五节点凭据源和配置
+
+当前五节点部署 profile 固定使用 `2022-blake3-aes-128-gcm`。全集群只有一个共享 iPSK，每个
+用户只有一个独立 uPSK；两者都必须是 16 字节安全随机值的带 padding 标准 Base64。同一用户的
+完整客户端密码为 `shared-iPSK:uPSK`，五个节点只改变地址和节点名称。
+
+仓库工具默认生成 200 个正式账号和 4 个可辨识的测试账号（正式账号也支持 200+）：
+
+```bash
+install -d -m 0700 .artifacts/credentials
+./scripts/cluster-users.py generate \
+  --formal-count 200 \
+  --test-count 4 \
+  --test-prefix test_ \
+  --output .artifacts/credentials/cluster-users.json
+
+# 导入已有受控源时，校验后按 name 排序到一个新的、未存在的文件。
+./scripts/cluster-users.py normalize \
+  --input /secure/import/cluster-users.json \
+  --output .artifacts/credentials/cluster-users.normalized.json
+
+# 渲染 ssserver 可直接注入的 users[]；输出仍含密钥并保持 0600。
+./scripts/cluster-users.py render-users \
+  --source .artifacts/credentials/cluster-users.json \
+  --output .artifacts/credentials/ssserver-users.json
+```
+
+生成和规范化命令绝不向 stdout/stderr 输出 iPSK/uPSK，只写入显式目标；目标以 `0600` 创建并
+禁止覆盖，父目录不得允许 group/other 写入。仓库内目标还必须已经被 Git ignore，推荐使用
+`.artifacts/`；真实凭据产物不得执行 `git add -f`。部署系统应从这一份源原样注入五份配置，禁止
+人工分别维护 `users[]`。私有源 schema v2 的每项另含 `kind: formal|test`，规范顺序是正式账号
+按 name 排序后接测试账号按 name 排序；注入 ssserver 时必须剥离 `kind`，运行配置的用户项仍然
+严格只有 `name`/`password`。`render-users` 已实现这一投影，不应另写临时文本处理命令。
+
+配置注入完成后，在启动服务前执行跨五配置校验：
+
+```bash
+./scripts/cluster-users.py verify-five \
+  --source .artifacts/credentials/cluster-users.json \
+  --expected-formal-users 200 \
+  --expected-test-users 4 \
+  --config /secure/staging/node-1.json \
+  --config /secure/staging/node-2.json \
+  --config /secure/staging/node-3.json \
+  --config /secure/staging/node-4.json \
+  --config /secure/staging/node-5.json
+```
+
+校验会失败关闭地确认：五份文件互不相同且各含一个服务、node/service ID 全集群唯一、method
+固定为 AES-128-GCM、共享 iPSK 相同、正式/测试账号数量分别正确，以及剥离 `kind` 后规范化的
+`users[]` 名称、顺序和 uPSK 与受控源逐项完全一致；成功输出不含密钥或密钥摘要。
 
 以 [`config/server.example.json`](config/server.example.json) 为结构模板，在部署系统中生成
 并注入新的 iPSK/uPSK。不要把替换后的配置提交到公开仓库。最小结构如下：
@@ -94,14 +179,14 @@ TCP+UDP 集成测试，并对未被 ignore 规则排除的文件扫描常见私�
     {
       "id": "ss-entry-01",
       "server": "127.0.0.1",
-      "server_port": 8388,
-      "method": "2022-blake3-aes-256-gcm",
-      "password": "<运行时注入的 iPSK>",
+      "server_port": 19999,
+      "method": "2022-blake3-aes-128-gcm",
+      "password": "<运行时注入的 16 字节 Base64 iPSK>",
       "mode": "tcp_and_udp",
       "users": [
         {
           "name": "u_000123",
-          "password": "<运行时注入的 uPSK>"
+          "password": "<运行时注入的 16 字节 Base64 uPSK>"
         }
       ]
     }
@@ -109,11 +194,11 @@ TCP+UDP 集成测试，并对未被 ignore 规则排除的文件扫描常见私�
 }
 ```
 
-启用统计时采用失败关闭策略，每个 `servers[]` 都必须满足：
+底层 overlay 仍兼容上游两种 EIH AES method，但当前五节点部署采用失败关闭策略并固定选择
+AES-128-GCM。每个 `servers[]` 都必须满足：
 
 - 显式提供节点内唯一的 `id`；
-- method 只能是支持 EIH 的 `2022-blake3-aes-128-gcm` 或
-  `2022-blake3-aes-256-gcm`；
+- 本部署 method 必须是 `2022-blake3-aes-128-gcm`，iPSK/uPSK 均为 16 字节标准 Base64；
 - 至少配置一个 `users[]`，不接受仅用主身份凭据产生的无归属流量；
 - `id`、`user_stats.node_id` 和 `users[].name` 均为非空、最多 128 字节的 ASCII 可显示非空白字符；
   `users[].name` 在服务内唯一。
@@ -125,7 +210,7 @@ TCP+UDP 集成测试，并对未被 ignore 规则排除的文件扫描常见私�
 全部配置字段、默认值和硬上限见 [`docs/API.md`](docs/API.md) 与示例配置；部署权限和 systemd
 步骤见 [`docs/OPERATIONS.md`](docs/OPERATIONS.md)。
 
-### 3. 读取快照
+### 4. 读取快照
 
 ```bash
 curl --fail-with-body --silent --show-error \

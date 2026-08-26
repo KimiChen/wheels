@@ -6,6 +6,7 @@ source "$(dirname "$0")/lib.sh"
 require_command bash
 require_command cargo
 require_command git
+require_command openssl
 require_command patch
 require_command python3
 require_command rg
@@ -34,7 +35,7 @@ for patch_path in "$SHADOWSOCKS_RUST_PLUS_ROOT"/patches/*.patch; do
 done
 
 python3 -m py_compile \
-  "$SHADOWSOCKS_RUST_PLUS_ROOT/scripts/user-stats-client.py" \
+  "$SHADOWSOCKS_RUST_PLUS_ROOT"/scripts/*.py \
   "$SHADOWSOCKS_RUST_PLUS_ROOT"/tests/*.py
 
 temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/shadowsocks-rust-plus.XXXXXX")"

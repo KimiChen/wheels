@@ -16,8 +16,7 @@
 私钥、`AKIA` access key ID 和 `PrivateKey`/`Passphrase` 赋值。扫描只用于提交前卫生检查，不覆盖
 通用 `password`/`secret`/`token` 赋值，也不扫描被忽略的部署 `.env`。它需要访问锁定的上游
 仓库，并要求预先安装 `ripgrep`（命令名 `rg`）。这是正式验证门禁而不是可选测试依赖：缺少
-`rg` 时 `verify.sh` 和 `SensitiveScanTest` 保持失败，不以 skip 制造全绿；全绿结果只适用于依赖
-完整的环境。
+`rg` 或 OpenSSL 时 `verify.sh` 保持失败，不以 skip 制造全绿；全绿结果只适用于依赖完整的环境。
 
 已经准备好补丁后源码时，可直接运行：
 
@@ -39,7 +38,23 @@
    feature 合并掩盖 gating 错误；
 4. HTTP response framing 与 snapshot schema 的 Python 单元测试；
 5. 结算模型契约测试；
-6. 真实 `ssserver`/`sslocal` TCP+UDP 集成测试。
+6. 私有凭据源生成、规范化和五配置一致性工具测试；
+7. 确定性 Linux 发布归档、manifest、SHA-256 和 detached 签名验签测试；
+8. 真实 `ssserver`/`sslocal` TCP+UDP 集成测试。
+
+不准备上游源码、也不访问网络时，可单独运行新增的纯本地工具测试：
+
+```bash
+python3 tests/test_cluster_users.py
+python3 tests/test_release_artifact.py
+```
+
+凭据工具测试会实际生成 205 个正式账号和 4 个测试账号，确认 kind 区分及剥离、每个 iPSK/uPSK
+都是 16 字节标准 Base64、用户名和 uPSK 唯一、输出精确 `0600`、禁止覆盖、拒绝仓库内未 ignore 目标，并覆盖规范排序、五配置完全
+一致、顺序漂移与 ID 冲突。随机凭据只存在于权限受限的临时目录，测试输出和失败消息不得包含
+它们。发布测试使用无密钥的最小 ELF x86_64 fixture 两次打包并比较全部字节，校验 manifest 与
+归档防篡改；本机有 OpenSSL 时还会临时生成测试专用密钥，覆盖 detached 签名成功、拒绝覆盖和
+篡改验签失败。临时密钥与产物不会写入仓库。
 
 ## 覆盖范围
 
@@ -51,7 +66,8 @@ Rust 配置测试覆盖默认值和 JSON round-trip、未知 `user_stats` 字段
 符号链接/属主/权限、
 所有软上限与硬上限。启用统计时还验证：
 
-- 只允许 `2022-blake3-aes-128-gcm` 与 `2022-blake3-aes-256-gcm`；
+- 数据面兼容性只允许 `2022-blake3-aes-128-gcm` 与 `2022-blake3-aes-256-gcm`；五节点部署工具
+  进一步固定 AES-128-GCM 与 16 字节 Base64 iPSK/uPSK；
 - 每个服务至少有一个 EIH 用户；
 - 非 EIH method、无用户服务和仅主身份服务均失败关闭。
 

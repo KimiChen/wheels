@@ -28,7 +28,9 @@ group/other 写入；更高层级只有 root 持有且带 sticky bit 的目录�
 `2022-blake3-aes-128-gcm` 或 `2022-blake3-aes-256-gcm`，并至少有一个用户；同一服务内
 `users[].name` 和用户密码都必须唯一。非 EIH、空用户列表或仅主身份服务会失败关闭，不会生成
 归属不完整的快照。`servers[].id` 和 `users[].name` 使用与 `node_id` 相同的 ASCII 可显示非空白字符
-规则。完整示例见 [`../config/server.example.json`](../config/server.example.json)。
+规则。当前五节点部署 profile 在上述兼容范围内进一步固定为
+`2022-blake3-aes-128-gcm`，iPSK/uPSK 均为 16 字节安全随机值的标准 Base64；完整示例见
+[`../config/server.example.json`](../config/server.example.json)。
 
 启用 `user_stats` 时，`ConfigType::Manager` 的 builtin 和 standalone 模式都会在绑定 manager
 socket 前被明确拒绝；运行时入口还有独立的失败关闭检查。因此统计模式不支持 manager 动态

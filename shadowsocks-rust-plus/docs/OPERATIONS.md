@@ -4,18 +4,52 @@
 
 ## 构建与安装
 
-在支持 Unix domain socket 的主机上执行：
+先完成本地测试；`scripts/build.sh` 产生的是当前宿主平台开发产物，macOS 二进制不得进入 Linux
+部署。Linux x86_64 生产候选必须使用专用发布构建：
 
 ```bash
 ./scripts/verify.sh
-./scripts/build.sh
-(cd dist && shasum -a 256 -c ssserver.sha256)
+./scripts/build-linux-release.sh --repository /absolute/path/to/upstream-mirror
 ```
 
-`build.sh` 从 `upstream.lock` 固定的 `v1.24.0` 提交
+`build-linux-release.sh` 复用 `prepare-source.sh`，从 `upstream.lock` 固定的 `v1.24.0` 提交
 `7ee1aa9223ed8f4d34734aac919036c8ad4502c2` 重新准备源码、按 `patches/series` 应用补丁，
-并只构建启用 `user-stats` feature 的 `ssserver`。把二进制、校验值和构建来源 Git commit 一起
-记录到发布清单。不要复制 `.cache/` 中的源码或构建目录。
+并只构建启用 `user-stats` feature 的 `x86_64-unknown-linux-musl` `ssserver`。`--repository`
+既可指向本地镜像也可省略后使用锁定地址，但两者都必须解析到精确上游 commit。发布构建要求
+overlay 工作树完全干净，并按 [`../packaging/release-toolchain.lock`](../packaging/release-toolchain.lock)
+核对 rustc commit、Cargo、cargo-zigbuild、Zig、Python 和 zlib 版本。
+
+脚本把同一准备源码复制到不同绝对路径，使用两个独立 Cargo target 构建；通过
+`SOURCE_DATE_EPOCH`、路径 remap、关闭 incremental/build-id 和剥离符号消除已知不稳定输入。
+上游 `build-time` 宏原本读取实时时钟，overlay 已将其替换为发布脚本从 commit epoch 派生的固定
+UTC 字符串；其他构建若未显式提供该值则显示 `unknown`。
+只有两个 ELF64 x86_64 二进制逐字节相同才会生成固定 gzip/tar mtime、属主、权限和成员顺序的
+发布包。外部规范 manifest 和包内 manifest 完全相同，包含版本、上游 commit、overlay commit、
+目标、构建时间基准、两次独立构建记录、完整工具链、二进制大小和 SHA-256；另有归档 SHA-256
+文件。不要复制 `.cache/` 或临时构建目录作为发布物。
+
+构建后由离线 RSA/ECDSA 私钥产生 detached SHA-256 签名，再用独立分发的公钥验签：
+
+```bash
+release_stem=dist/shadowsocks-rust-plus-v1.24.0-x86_64-unknown-linux-musl
+./scripts/sign-release.sh \
+  --archive "$release_stem.tar.gz" \
+  --manifest "$release_stem.manifest.json" \
+  --checksum "$release_stem.tar.gz.sha256" \
+  --private-key /secure/offline/release-private.pem \
+  --output "$release_stem.manifest.json.sig"
+./scripts/verify-release.sh \
+  --archive "$release_stem.tar.gz" \
+  --manifest "$release_stem.manifest.json" \
+  --checksum "$release_stem.tar.gz.sha256" \
+  --signature "$release_stem.manifest.json.sig" \
+  --public-key /secure/release-public.pem
+```
+
+验签会同时锁定 `upstream.lock` 版本/commit 和期望 overlay HEAD，校验 detached 签名、归档
+SHA-256、规范 manifest、包内外 manifest、ELF 架构、二进制 SHA-256 及确定性归档元数据。私钥
+不得进入仓库、构建目录或发布包；公钥应通过与发布包不同的可信渠道分发。`dist/`、Cargo target
+和签名中间产物均已 ignore，仍不得使用 `git add -f` 提交。
 
 推荐安装布局：
 
@@ -44,8 +78,54 @@ NetBSD 及其他非 Linux Unix 构建使用 `fchmodat(..., AT_SYMLINK_NOFOLLOW)`
 
 示例见 [`../config/server.example.json`](../config/server.example.json)，服务模板见
 [`../packaging/shadowsocks-rust-plus.service`](../packaging/shadowsocks-rust-plus.service)。
-所有 iPSK/uPSK 都必须在部署时从密钥系统生成或注入；
-不要把替换后的示例配置提交到 Git。
+当前五节点部署固定使用 `2022-blake3-aes-128-gcm`：全集群共用一个 16 字节随机 iPSK，每个
+用户使用一个独立 16 字节随机 uPSK，全部采用带标准 padding 的 Base64。不得把替换后的示例
+配置或受控凭据源提交到 Git。
+
+首次生成 200 个正式账号和 4 个测试账号的受控源时，先准备权限 `0700` 且已 ignore 的目录；工具只会创建显式目标，模式
+固定为 `0600`，已存在时拒绝覆盖，也不会把任何密钥写到终端：
+
+```bash
+install -d -m 0700 .artifacts/credentials
+./scripts/cluster-users.py generate \
+  --formal-count 200 \
+  --test-count 4 \
+  --test-prefix test_ \
+  --output .artifacts/credentials/cluster-users.json
+```
+
+从旧受控源导入时，先确保输入文件 group/other 无权限，再使用 `normalize --input ... --output ...`
+写到新的目标。部署系统必须从唯一规范源把同一个 `shared_i_psk` 和按 name 排序的同一份
+`users[]` 原样注入 5 个最终配置，不得由人员或五份模板分别生成。凭据源 schema v2 使用
+`kind: formal|test` 区分账号，并按 formal/name、test/name 排序；写入 ssserver 配置时剥离
+`kind`，最终每个用户对象仍只能包含 `name` 和 `password`。使用下列安全投影，不要用临时
+`jq`/文本脚本重新实现：
+
+```bash
+./scripts/cluster-users.py render-users \
+  --source .artifacts/credentials/cluster-users.json \
+  --output .artifacts/credentials/ssserver-users.json
+```
+
+投影文件仍含真实 uPSK，因此同样只会以 `0600` 写入显式、未存在且已 ignore 的目标。
+
+注入后、启动前必须校验恰好五份单服务配置；下列路径仅为私有 staging 示例：
+
+```bash
+./scripts/cluster-users.py verify-five \
+  --source .artifacts/credentials/cluster-users.json \
+  --expected-formal-users 200 \
+  --expected-test-users 4 \
+  --config /secure/staging/node-1.json \
+  --config /secure/staging/node-2.json \
+  --config /secure/staging/node-3.json \
+  --config /secure/staging/node-4.json \
+  --config /secure/staging/node-5.json
+```
+
+该命令要求受控源和五份最终配置都不授予 group/other 任何权限，并验证 node/service ID 全集群唯一、AES-128-GCM、16 字节 Base64 iPSK/uPSK、共享 iPSK
+一致，以及 200 个正式/4 个测试账号在剥离 `kind` 后的 `users[]` 名称、顺序和 uPSK 逐项一致；
+错误信息和成功摘要都不包含密钥。
 
 ## 启动前检查
 
@@ -54,15 +134,18 @@ NetBSD 及其他非 Linux Unix 构建使用 `fchmodat(..., AT_SYMLINK_NOFOLLOW)`
 1. `scripts/verify.sh` 从固定上游重放全部补丁并通过测试。
 2. 配置中的 `user_stats.node_id`、每个 `servers[].id` 和 `users[].name` 均为非空、最多 128 字节的
    ASCII 可显示非空白字符；server ID 在节点内唯一，用户名和用户密码在服务内各自唯一。
-3. 启用统计的每个服务都使用支持 EIH 的 `2022-blake3-aes-128-gcm` 或
-   `2022-blake3-aes-256-gcm`，并至少有一个 `users[]`。非 EIH method、空用户列表和仅主身份
-   服务都会使配置完整性检查失败。
+3. 当前五节点的每个服务都使用 `2022-blake3-aes-128-gcm`，共享 iPSK 与每个 uPSK 都能规范
+   Base64 解码为恰好 16 字节，并至少有一个 `users[]`。底层虽兼容 AES-256 EIH，但不属于本次
+   五节点配置 profile；非 EIH method、空用户列表和仅主身份服务都会使配置完整性检查失败。
 4. `user_stats` 中没有拼错或未支持字段，`socket_mode` 只写精确的 `"0600"` 或 `"0660"`。
 5. `user_stats.node_id` 与控制面节点 ID 一致，socket 路径按上文逐级检查其规范路径、属主和权限。
    统计模式不能使用 builtin/standalone `ssmanager` 或运行时 manager `add`；要统计的服务必须全部写在
    静态 `servers[]` 中。
-6. 监听地址、端口、ACL 和用户数量符合变更单，配置中没有示例占位值。新逻辑用户记录（`server_id + name`）数量不得
-   超过 `max_identities`，不同逻辑 server ID 数量也不得超过相同数值的独立上限。
+6. `cluster-users.py verify-five` 对最终 5 份配置通过；共享 iPSK、规范化后的 200 个正式账号与
+   4 个测试账号 `users[]` 内容和顺序完全一致，5 个 node ID 和 service ID 各自唯一。监听地址、固定生产端口
+   `19999`、ACL 和用户数量符合变更单，配置中没有示例占位值。新逻辑用户记录
+   （`server_id + name`）数量不得超过 `max_identities`，不同逻辑 server ID 数量也不得超过相同
+   数值的独立上限。
 7. 部署系统和控制面必须把同一 runtime 中已经出现的 `(server_id, name)` 视为不可转让的计费
    身份；不得通过修改 route、密码或业务用户关系把它重新归给另一计费主体。改变归属必须使用
    新名称，或在最终快照屏障后启动新 runtime。当前静态数据面没有热转让入口，该约束仍须由
@@ -254,6 +337,7 @@ lockfile。
 ## 灰度和发布记录
 
 单节点灰度、分批上线和上游提案属于生产或外部发布变更，必须在实际环境取得明确授权后执行。
-每批至少记录：构建 commit、
-上游 commit、二进制 SHA-256、节点范围、配置版本、启动时刻、runtime ID、首末快照序号、TCP/UDP
-测试增量、性能观测、回滚演练结果和审批人。本仓库只提供模板和可复现验证，不包含真实节点记录。
+每批至少归档：已验签的规范 manifest、detached 签名、发布包 SHA-256、签名公钥标识、节点范围、
+配置版本、启动时刻、runtime ID、首末快照序号、TCP/UDP 测试增量、性能观测、回滚演练结果和
+审批人。manifest 已记录构建版本、上游/overlay commit、工具链及二进制 SHA-256；不得人工另抄
+一份可能漂移的来源字段。本仓库只提供模板和可复现验证，不包含真实节点记录。

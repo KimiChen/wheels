@@ -57,7 +57,9 @@ CARGO_TARGET_DIR="$target_dir" cargo check \
 
 if [[ "$run_integration" -eq 1 ]]; then
   require_command python3
+  python3 "$SHADOWSOCKS_RUST_PLUS_ROOT/tests/test_cluster_users.py"
   python3 "$SHADOWSOCKS_RUST_PLUS_ROOT/tests/test_http_unix.py"
+  python3 "$SHADOWSOCKS_RUST_PLUS_ROOT/tests/test_release_artifact.py"
   python3 "$SHADOWSOCKS_RUST_PLUS_ROOT/tests/test_settlement.py"
   [[ -f "$SHADOWSOCKS_RUST_PLUS_ROOT/tests/integration_user_stats.py" ]] || \
     die "缺少真实数据面集成测试：tests/integration_user_stats.py"

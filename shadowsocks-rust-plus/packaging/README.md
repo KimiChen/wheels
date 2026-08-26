@@ -1,10 +1,19 @@
 # 安装模板
 
-1. 使用 `scripts/build.sh` 生成 `dist/ssserver` 与 SHA-256 文件。
-2. 校验后把二进制安装为 `/usr/local/bin/ssserver`。
+1. 使用 `scripts/build-linux-release.sh` 完成两次独立的固定工具链
+   `x86_64-unknown-linux-musl` 构建，生成确定性 `tar.gz`、规范 manifest 和归档 SHA-256。
+2. 使用离线私钥运行 `scripts/sign-release.sh`，再用独立分发的公钥运行
+   `scripts/verify-release.sh`；只有 detached 签名、版本/commit、ELF 架构、包内外 manifest、
+   二进制及归档 SHA-256 全部通过后，才从包中取出 `ssserver` 安装为
+   `/usr/local/bin/ssserver`。`scripts/build.sh` 的宿主平台开发产物不得用于 Linux 部署。
 3. 创建不可登录的 `shadowsocks` 用户和组。
-4. 把实际配置写入 `/etc/shadowsocks-rust-plus/server.json`，目录 `0750`、文件
-   `0640`，所有 iPSK/uPSK 只存在于该私有配置或部署密钥系统中。
+4. 从 `scripts/cluster-users.py` 生成并规范化的唯一私有源注入配置；五节点 profile 固定
+   `2022-blake3-aes-128-gcm`，共享 iPSK 与每用户 uPSK 都是 16 字节随机值的标准 Base64。
+   受控源用 `kind: formal|test` 区分默认 200 个正式账号和 4 个测试账号；注入配置时剥离
+   `kind`。对最终五份配置执行 `verify-five --expected-formal-users 200
+   --expected-test-users 4` 并通过后，把实际配置写入
+   `/etc/shadowsocks-rust-plus/server.json`，目录 `0750`、文件 `0640`。受控源和实际配置不得
+   加入 Git，密钥只存在于部署密钥系统及批准的私有文件中。
 5. 安装 `shadowsocks-rust-plus.service` 并执行 `systemctl daemon-reload`；只有取得明确的
    生产变更授权后，才可在批准范围内的非关键节点启动。
 
