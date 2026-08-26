@@ -1,79 +1,152 @@
 @layer wsk;
 
 @layer wsk {
-  /* Tokens and themes */
+  /* Tokens and themes — "deep-sea petrol" instrument palette.
+     Contrast pairs are WCAG-checked; keep text/surface pairs ≥ 4.5:1
+     (AA) and non-text indicators ≥ 3:1 when adjusting. */
   :root {
     color-scheme: light;
-    --canvas: #f7f8fb;
+    --canvas: #f4f7f8;
     --surface: #ffffff;
     --surface-raised: #ffffff;
-    --surface-soft: #f1f3f7;
-    --surface-strong: #e9edf3;
-    --border: #e0e4eb;
-    --border-strong: #98a2b1;
-    --text: #151b2b;
-    --muted: #626d7f;
-    --muted-soft: #8791a1;
-    --accent: #4f46e5;
-    --accent-hover: #4338ca;
-    --accent-soft: #eef2ff;
+    --surface-soft: #edf2f4;
+    --surface-strong: #e3ebee;
+    --border: #dde5e9;
+    --border-strong: #7d929d;
+    --text: #0f2430;
+    --muted: #51646f;
+    --muted-soft: #5d7078;
+    --accent: #0e6e8c;
+    --accent-hover: #0a5872;
+    --accent-soft: #e2f1f6;
     --on-accent: #ffffff;
-    --brand: #4f46e5;
+    --brand: #0e6e8c;
     --on-brand: #ffffff;
-    --success: #047857;
-    --success-soft: #ecfdf5;
-    --warning: #a16207;
-    --warning-soft: #fffbeb;
-    --danger: #b91c1c;
-    --danger-soft: #fef2f2;
+    --success: #15784a;
+    --success-soft: #e3f4ea;
+    --warning: #8f5a0a;
+    --warning-soft: #faf1dc;
+    --danger: #b42d3e;
+    --danger-soft: #fbecee;
     --on-danger: #ffffff;
-    --disabled-bg: #e8ebf0;
-    --disabled-text: #929baa;
-    --focus: #2563eb;
-    --overlay: rgb(15 23 42 / 48%);
+    --disabled-bg: #e6ecef;
+    --disabled-text: #8c99a3;
+    --focus: #0c82b5;
+    --overlay: rgb(9 32 44 / 50%);
     --radius-sm: 7px;
     --radius: 10px;
     --radius-lg: 14px;
-    --shadow-sm: 0 1px 2px rgb(15 23 42 / 5%);
-    --shadow-hover: 0 8px 24px rgb(15 23 42 / 8%);
-    --shadow: 0 12px 32px rgb(15 23 42 / 12%);
-    --code-bg: #111827;
-    --code-border: #334155;
-    --code-text: #e5e7eb;
+    --shadow-sm:
+      0 1px 2px rgb(9 32 44 / 5%),
+      0 2px 8px -2px rgb(9 32 44 / 5%);
+    --shadow-hover:
+      0 2px 4px rgb(9 32 44 / 4%),
+      0 10px 24px -8px rgb(9 32 44 / 10%),
+      0 24px 48px -20px rgb(9 32 44 / 8%);
+    --shadow:
+      0 4px 10px rgb(9 32 44 / 7%),
+      0 16px 40px -12px rgb(9 32 44 / 14%),
+      0 32px 72px -24px rgb(9 32 44 / 16%);
+    --shadow-accent:
+      0 1px 2px rgb(9 32 44 / 10%),
+      0 6px 16px -6px color-mix(in srgb, var(--accent) 35%, transparent);
+    --card-highlight: inset 0 1px 0 rgb(255 255 255 / 75%);
+    --card-sheen: linear-gradient(
+      180deg,
+      rgb(255 255 255 / 0%),
+      rgb(9 32 44 / 2%)
+    );
+    --overlay-ring: 0 0 0 1px rgb(9 32 44 / 4%);
+    --grid-dot: rgb(15 36 48 / 5%);
+    --canvas-glow-1: color-mix(in srgb, var(--accent) 6%, transparent);
+    --canvas-glow-2: rgb(12 130 181 / 5%);
+    --hero-glow: color-mix(in srgb, var(--accent) 7%, transparent);
+    --metric-wash: color-mix(in srgb, var(--accent) 6%, transparent);
+    --metric-glow: color-mix(in srgb, var(--accent) 28%, transparent);
+    --input-bg: #ffffff;
+    --input-inset: rgb(9 32 44 / 5%);
+    --skeleton-base: #e9eef1;
+    --skeleton-hi: #f8fafb;
+    --brand-glow: color-mix(in srgb, var(--brand) 40%, transparent);
+    --topbar-glint: rgb(255 255 255 / 65%);
+    --auth-halo: color-mix(in srgb, var(--accent) 5%, transparent);
+    --auth-depth: rgb(9 32 44 / 22%);
+    --code-bg: #0b1b23;
+    --code-bg-deep: #081319;
+    --code-border: #1e3641;
+    --code-text: #d6e9f0;
+    --code-accent: #6fd3ec;
+    --code-string: #f5c26b;
+    --code-glow: rgb(111 211 236 / 8%);
   }
 
   [data-theme="dark"] {
     color-scheme: dark;
-    --canvas: #0a0f1d;
-    --surface: #121827;
-    --surface-raised: #151d2f;
-    --surface-soft: #1b2335;
-    --surface-strong: #222d42;
-    --border: #2d374b;
-    --border-strong: #5b677c;
-    --text: #f1f5f9;
-    --muted: #b4bfce;
-    --muted-soft: #8490a3;
-    --accent: #818cf8;
-    --accent-hover: #a5b4fc;
-    --accent-soft: #252b52;
-    --on-accent: #0b1020;
-    --brand: #6366f1;
+    --canvas: #070d15;
+    --surface: #0d1720;
+    --surface-raised: #13202b;
+    --surface-soft: #192935;
+    --surface-strong: #223543;
+    --border: rgb(166 198 214 / 16%);
+    --border-strong: rgb(166 198 214 / 50%);
+    --text: #eaf2f5;
+    --muted: #a6b8c0;
+    --muted-soft: #8299a4;
+    --accent: #55c6e4;
+    --accent-hover: #83d7ec;
+    --accent-soft: rgb(85 198 228 / 15%);
+    --on-accent: #052430;
+    --brand: #1489ad;
     --on-brand: #ffffff;
-    --success: #6ee7b7;
-    --success-soft: #10352b;
-    --warning: #fcd34d;
-    --warning-soft: #3a2c0c;
-    --danger: #fca5a5;
-    --danger-soft: #421b24;
-    --on-danger: #24090d;
-    --disabled-bg: #252d3d;
-    --disabled-text: #737f92;
-    --focus: #93c5fd;
-    --overlay: rgb(2 6 23 / 68%);
-    --shadow-sm: 0 1px 2px rgb(0 0 0 / 18%);
-    --shadow-hover: 0 10px 26px rgb(0 0 0 / 28%);
-    --shadow: 0 14px 36px rgb(0 0 0 / 46%);
+    --success: #4cc38a;
+    --success-soft: rgb(76 195 138 / 14%);
+    --warning: #e3b341;
+    --warning-soft: rgb(227 179 65 / 14%);
+    --danger: #f0808a;
+    --danger-soft: rgb(240 128 138 / 14%);
+    --on-danger: #2a070b;
+    --disabled-bg: #1b2833;
+    --disabled-text: #6e8290;
+    --focus: #63d2ef;
+    --overlay: rgb(3 10 17 / 72%);
+    --shadow-sm:
+      0 1px 2px rgb(0 0 0 / 30%),
+      0 2px 8px -2px rgb(0 0 0 / 26%);
+    --shadow-hover:
+      0 2px 4px rgb(0 0 0 / 30%),
+      0 12px 28px -10px rgb(0 0 0 / 45%);
+    --shadow:
+      0 6px 16px rgb(0 0 0 / 45%),
+      0 20px 48px -16px rgb(0 0 0 / 55%);
+    --shadow-accent:
+      0 0 0 1px color-mix(in srgb, var(--accent) 28%, transparent),
+      0 2px 14px color-mix(in srgb, var(--accent) 26%, transparent);
+    --card-highlight: inset 0 1px 0 rgb(255 255 255 / 6%);
+    --card-sheen: linear-gradient(
+      180deg,
+      rgb(255 255 255 / 3%),
+      rgb(255 255 255 / 0%) 38%
+    );
+    --overlay-ring: 0 0 0 1px rgb(255 255 255 / 7%);
+    --grid-dot: rgb(214 233 240 / 4%);
+    --canvas-glow-1: rgb(85 198 228 / 9%);
+    --canvas-glow-2: rgb(20 137 173 / 7%);
+    --hero-glow: color-mix(in srgb, var(--accent) 12%, transparent);
+    --metric-wash: color-mix(in srgb, var(--accent) 10%, transparent);
+    --metric-glow: color-mix(in srgb, var(--accent) 35%, transparent);
+    --input-bg: #0e1a24;
+    --input-inset: rgb(0 0 0 / 32%);
+    --skeleton-base: #192935;
+    --skeleton-hi: #24384a;
+    --brand-glow: color-mix(in srgb, var(--brand) 55%, transparent);
+    --topbar-glint: rgb(255 255 255 / 6%);
+    --auth-halo: color-mix(in srgb, var(--accent) 9%, transparent);
+    --auth-depth: rgb(0 0 0 / 55%);
+    --code-bg: #0a141c;
+    --code-bg-deep: #071016;
+    --code-border: rgb(166 198 214 / 18%);
+    --code-text: #cfe6ee;
+    --code-glow: rgb(111 211 236 / 10%);
   }
 
   /* Base elements */
@@ -98,7 +171,20 @@
   }
 
   body {
-    background: var(--canvas);
+    /* Two soft radial washes give the first screen a light source; the
+       opaque base color lives on <html> so the fixed dot grid below can
+       sit between the two layers. */
+    background:
+      radial-gradient(
+        52rem 30rem at 12% -6%,
+        var(--canvas-glow-1),
+        transparent 68%
+      ),
+      radial-gradient(
+        40rem 24rem at 100% 0%,
+        var(--canvas-glow-2),
+        transparent 70%
+      );
     color: var(--text);
     font-family:
       ui-sans-serif,
@@ -106,7 +192,14 @@
       -apple-system,
       BlinkMacSystemFont,
       "Segoe UI",
+      Roboto,
+      "Helvetica Neue",
+      Arial,
       "PingFang SC",
+      "Hiragino Sans GB",
+      "Noto Sans SC",
+      "Source Han Sans SC",
+      "Microsoft YaHei UI",
       "Microsoft YaHei",
       sans-serif;
     font-synthesis: none;
@@ -114,6 +207,30 @@
     min-height: 100vh;
     min-height: 100dvh;
     text-rendering: optimizeLegibility;
+  }
+
+  /* Fixed micro dot grid — the "graph paper" texture of the kit. It fades
+     out toward the lower viewport so long content stays quiet. */
+  body::before {
+    background-image: radial-gradient(var(--grid-dot) 1px, transparent 1.2px);
+    background-size: 24px 24px;
+    content: "";
+    inset: 0;
+    -webkit-mask-image: linear-gradient(
+      to bottom,
+      #000 0%,
+      rgb(0 0 0 / 35%) 45%,
+      transparent 78%
+    );
+    mask-image: linear-gradient(
+      to bottom,
+      #000 0%,
+      rgb(0 0 0 / 35%) 45%,
+      transparent 78%
+    );
+    pointer-events: none;
+    position: fixed;
+    z-index: -1;
   }
 
   button,
@@ -140,8 +257,11 @@
   h1,
   h2,
   h3 {
-    letter-spacing: -0.02em;
-    line-height: 1.2;
+    /* CJK glyphs fill the em box; negative tracking is reserved for
+       numeric displays only. */
+    letter-spacing: 0;
+    line-height: 1.25;
+    text-wrap: balance;
   }
 
   h1 {
@@ -151,12 +271,12 @@
 
   h2 {
     font-size: 1.375rem;
-    font-weight: 720;
+    font-weight: 700;
   }
 
   h3 {
-    font-size: 1rem;
-    font-weight: 700;
+    font-size: 1.0625rem;
+    font-weight: 600;
   }
 
   h1[tabindex="-1"] {
@@ -181,7 +301,7 @@
   }
 
   :focus-visible {
-    outline: 3px solid color-mix(in srgb, var(--focus) 70%, transparent);
+    outline: 3px solid var(--focus);
     outline-offset: 2px;
   }
 
@@ -231,10 +351,17 @@
   /* Standard components */
   .wsk-topbar {
     align-items: center;
-    -webkit-backdrop-filter: blur(14px);
-    backdrop-filter: blur(14px);
-    background: color-mix(in srgb, var(--surface) 90%, transparent);
-    border-bottom: 1px solid var(--border);
+    -webkit-backdrop-filter: blur(16px) saturate(160%);
+    backdrop-filter: blur(16px) saturate(160%);
+    background: linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--surface) 96%, transparent) 0%,
+      color-mix(in srgb, var(--surface) 84%, transparent) 100%
+    );
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+    box-shadow:
+      inset 0 1px 0 var(--topbar-glint),
+      0 12px 32px -24px rgb(9 32 44 / 30%);
     display: grid;
     gap: 1rem;
     grid-template-columns: minmax(0, 1fr) auto auto;
@@ -243,6 +370,17 @@
     position: sticky;
     top: 0;
     z-index: 20;
+  }
+
+  [data-theme="dark"] .wsk-topbar {
+    background: linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--canvas) 88%, transparent) 0%,
+      color-mix(in srgb, var(--canvas) 72%, transparent) 100%
+    );
+    box-shadow:
+      inset 0 1px 0 var(--topbar-glint),
+      0 12px 32px -24px rgb(0 0 0 / 60%);
   }
 
   [data-active-view="reference"] .wsk-topbar {
@@ -258,11 +396,23 @@
 
   .wsk-brand-mark {
     align-items: center;
-    background: var(--brand);
+    background:
+      radial-gradient(
+        130% 100% at 25% 0%,
+        rgb(255 255 255 / 30%),
+        transparent 42%
+      ),
+      linear-gradient(
+        145deg,
+        color-mix(in srgb, var(--brand) 78%, #fff) 0%,
+        var(--brand) 52%,
+        color-mix(in srgb, var(--brand) 80%, #000) 100%
+      );
     border-radius: 9px;
     box-shadow:
-      inset 0 0 0 1px rgb(255 255 255 / 14%),
-      0 5px 14px color-mix(in srgb, var(--brand) 22%, transparent);
+      inset 0 1px 0 rgb(255 255 255 / 35%),
+      inset 0 -1px 1px rgb(0 0 0 / 20%),
+      0 6px 16px -6px var(--brand-glow);
     color: var(--on-brand);
     display: flex;
     font-size: 0.75rem;
@@ -285,9 +435,12 @@
   }
 
   .wsk-brand-subtitle {
-    color: var(--muted);
-    font-size: 0.75rem;
-    margin-top: 0.0625rem;
+    color: var(--muted-soft);
+    font-size: 0.6875rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    margin-top: 0.125rem;
+    text-transform: uppercase;
   }
 
   .wsk-view-switch,
@@ -308,7 +461,7 @@
     color: var(--muted);
     display: inline-flex;
     font-size: 0.75rem;
-    font-weight: 650;
+    font-weight: 600;
     min-height: 1.875rem;
     padding: 0 0.75rem;
     transition:
@@ -320,7 +473,7 @@
   .wsk-view-switch button.wsk-is-active,
   .wsk-segmented input:checked + span {
     background: var(--surface-raised);
-    box-shadow: var(--shadow-sm);
+    box-shadow: var(--card-highlight), var(--shadow-sm);
     color: var(--text);
   }
 
@@ -336,7 +489,7 @@
   }
 
   .wsk-segmented input:focus-visible + span {
-    outline: 3px solid color-mix(in srgb, var(--focus) 70%, transparent);
+    outline: 3px solid var(--focus);
   }
 
   .wsk-icon-button {
@@ -383,6 +536,23 @@
     display: flex;
     gap: 1.5rem;
     justify-content: space-between;
+    position: relative;
+  }
+
+  /* Ambient glow anchored to the page title — "light comes from the
+     brand". Sits behind the content, clipped by nothing. */
+  .wsk-page-head::before {
+    background: radial-gradient(
+      58% 100% at 10% 0%,
+      var(--hero-glow),
+      transparent 72%
+    );
+    content: "";
+    height: 10rem;
+    inset: -2.5rem -2rem auto;
+    pointer-events: none;
+    position: absolute;
+    z-index: -1;
   }
 
   .wsk-page-head p {
@@ -390,6 +560,7 @@
     font-size: 1rem;
     margin-top: 0.625rem;
     max-width: 44rem;
+    text-wrap: pretty;
   }
 
   .wsk-section {
@@ -411,6 +582,26 @@
     margin-bottom: 1.125rem;
   }
 
+  .wsk-section-head h2 {
+    align-items: center;
+    display: flex;
+    gap: 0.625rem;
+  }
+
+  /* Accent tick — the scanning anchor for every section title. */
+  .wsk-section-head h2::before {
+    background: linear-gradient(
+      180deg,
+      var(--accent) 0%,
+      color-mix(in srgb, var(--accent) 45%, transparent) 100%
+    );
+    border-radius: 999px;
+    content: "";
+    flex: 0 0 auto;
+    height: 1.05em;
+    width: 0.25rem;
+  }
+
   .wsk-badge {
     align-items: center;
     background: var(--surface-soft);
@@ -419,28 +610,34 @@
     color: var(--muted);
     display: inline-flex;
     font-size: 0.75rem;
-    font-weight: 650;
+    font-weight: 600;
     gap: 0.375rem;
     min-height: 1.625rem;
     padding: 0 0.625rem;
     white-space: nowrap;
   }
 
+  .wsk-section-head > .wsk-badge {
+    font-size: 0.6875rem;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+
   .wsk-badge.wsk-accent {
     background: var(--accent-soft);
-    border-color: color-mix(in srgb, var(--accent) 25%, var(--border));
+    border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
     color: var(--accent);
   }
 
   .wsk-badge.wsk-success {
     background: var(--success-soft);
-    border-color: color-mix(in srgb, var(--success) 25%, var(--border));
+    border-color: color-mix(in srgb, var(--success) 35%, var(--border));
     color: var(--success);
   }
 
   .wsk-badge.wsk-warning {
     background: var(--warning-soft);
-    border-color: color-mix(in srgb, var(--warning) 25%, var(--border));
+    border-color: color-mix(in srgb, var(--warning) 35%, var(--border));
     color: var(--warning);
   }
 
@@ -448,7 +645,20 @@
     background: currentColor;
     border-radius: 50%;
     height: 0.375rem;
+    position: relative;
     width: 0.375rem;
+  }
+
+  /* Live-status heartbeat: a ring that expands from the dot. Inherits the
+     badge's semantic color via currentColor. */
+  .wsk-dot::after {
+    animation: wsk-ping 2.4s cubic-bezier(0, 0, 0.2, 1) infinite;
+    background: currentColor;
+    border-radius: 50%;
+    content: "";
+    inset: 0;
+    opacity: 0;
+    position: absolute;
   }
 
   .wsk-demo-grid,
@@ -464,29 +674,36 @@
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 
+  /* Cards carry a faint top-lit sheen (--card-sheen): in dark mode it
+     reads as the card's lit edge, in light mode as a soft vertical
+     gradient. It rides in the background shorthand because later
+     `background:` declarations would reset a separate background-image. */
   .wsk-panel,
   .wsk-metric {
-    background: var(--surface-raised);
+    background: var(--card-sheen) var(--surface-raised);
     border: 1px solid var(--border);
     border-radius: var(--radius-lg);
-    box-shadow: var(--shadow-sm);
+    box-shadow: var(--card-highlight), var(--shadow-sm);
     padding: 1.375rem;
   }
 
   .wsk-panel-title {
-    color: var(--text);
-    font-size: 0.8125rem;
-    font-weight: 650;
-    letter-spacing: 0.01em;
+    color: var(--muted-soft);
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.06em;
     margin-bottom: 1rem;
+    text-transform: uppercase;
   }
 
   .wsk-kit-index {
     align-items: center;
-    background: color-mix(in srgb, var(--surface-raised) 94%, transparent);
+    -webkit-backdrop-filter: blur(12px);
+    backdrop-filter: blur(12px);
+    background: color-mix(in srgb, var(--surface-raised) 88%, transparent);
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    box-shadow: var(--shadow-sm);
+    box-shadow: var(--card-highlight), var(--shadow-sm);
     display: flex;
     gap: 1.25rem;
     margin-top: 2rem;
@@ -497,10 +714,12 @@
   }
 
   .wsk-kit-index > strong {
-    color: var(--muted);
+    color: var(--muted-soft);
     flex: 0 0 auto;
-    font-size: 0.75rem;
-    letter-spacing: 0.04em;
+    font-size: 0.6875rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
   }
 
   .wsk-kit-index-links {
@@ -557,13 +776,20 @@
 
   .wsk-button {
     align-items: center;
-    background: var(--accent);
+    background: linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--accent) 88%, #fff) 0%,
+      var(--accent) 100%
+    );
     border: 1px solid var(--accent);
     border-radius: var(--radius-sm);
+    box-shadow:
+      inset 0 1px 0 rgb(255 255 255 / 22%),
+      var(--shadow-accent);
     color: var(--on-accent);
     display: inline-flex;
     font-size: 0.875rem;
-    font-weight: 650;
+    font-weight: 600;
     gap: 0.5rem;
     justify-content: center;
     min-height: 2.5rem;
@@ -577,15 +803,35 @@
       transform 100ms ease;
   }
 
-  .wsk-button:hover {
-    background: var(--accent-hover);
+  .wsk-button:hover:not(:disabled) {
+    transform: translateY(-1px);
+  }
+
+  .wsk-button:not(.wsk-secondary, .wsk-quiet, .wsk-danger):hover:not(
+      :disabled
+    ) {
+    background: linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--accent-hover) 88%, #fff) 0%,
+      var(--accent-hover) 100%
+    );
     border-color: var(--accent-hover);
+    box-shadow:
+      inset 0 1px 0 rgb(255 255 255 / 22%),
+      0 6px 20px -6px color-mix(in srgb, var(--accent) 45%, transparent);
     color: var(--on-accent);
+  }
+
+  .wsk-button:not(.wsk-secondary, .wsk-quiet, .wsk-danger):active:not(
+      :disabled
+    ) {
+    box-shadow: inset 0 2px 4px rgb(9 32 44 / 18%);
   }
 
   .wsk-button.wsk-secondary {
     background: var(--surface-raised);
     border-color: var(--border-strong);
+    box-shadow: var(--card-highlight), var(--shadow-sm);
     color: var(--text);
   }
 
@@ -598,12 +844,14 @@
   .wsk-button.wsk-quiet {
     background: transparent;
     border-color: transparent;
+    box-shadow: none;
     color: var(--muted);
   }
 
   .wsk-button.wsk-danger {
     background: transparent;
     border-color: var(--danger);
+    box-shadow: none;
     color: var(--danger);
   }
 
@@ -616,6 +864,7 @@
   .wsk-button:disabled {
     background: var(--disabled-bg);
     border-color: var(--disabled-bg);
+    box-shadow: none;
     color: var(--disabled-text);
     opacity: 1;
   }
@@ -645,16 +894,18 @@
   }
 
   .wsk-menu {
+    animation: wsk-pop 160ms cubic-bezier(0.2, 0.9, 0.3, 1);
     background: var(--surface-raised);
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    box-shadow: var(--shadow);
+    box-shadow: var(--overlay-ring), var(--shadow);
     display: grid;
     min-width: 11rem;
     padding: 0.375rem;
     position: absolute;
     right: 0;
     top: calc(100% + 0.375rem);
+    transform-origin: top right;
     z-index: 30;
   }
 
@@ -671,10 +922,17 @@
 
   .wsk-menu button:hover,
   .wsk-menu button:focus-visible {
-    background: var(--surface-soft);
+    background: var(--accent-soft);
+    color: var(--accent);
   }
 
   .wsk-menu .wsk-menu-danger {
+    color: var(--danger);
+  }
+
+  .wsk-menu .wsk-menu-danger:hover,
+  .wsk-menu .wsk-menu-danger:focus-visible {
+    background: var(--danger-soft);
     color: var(--danger);
   }
 
@@ -691,7 +949,7 @@
   .wsk-label,
   legend {
     font-size: 0.875rem;
-    font-weight: 650;
+    font-weight: 600;
     transition: color 140ms ease;
   }
 
@@ -709,9 +967,10 @@
   .wsk-select,
   .wsk-textarea {
     appearance: none;
-    background: var(--surface-raised);
+    background: var(--input-bg);
     border: 1px solid var(--border-strong);
     border-radius: var(--radius-sm);
+    box-shadow: inset 0 1px 2px var(--input-inset);
     color: var(--text);
     font-size: 0.875rem;
     min-height: 2.5rem;
@@ -726,20 +985,38 @@
   .wsk-control:focus,
   .wsk-select:focus,
   .wsk-textarea:focus {
-    border-color: var(--focus);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 18%, transparent);
+    border-color: var(--accent);
+    box-shadow:
+      inset 0 1px 2px transparent,
+      0 0 0 1px var(--accent),
+      0 0 0 4px color-mix(in srgb, var(--accent) 15%, transparent);
   }
 
   .wsk-control[aria-invalid="true"] {
     border-color: var(--danger);
   }
 
+  .wsk-control[aria-invalid="true"]:focus {
+    box-shadow:
+      inset 0 1px 2px transparent,
+      0 0 0 1px var(--danger),
+      0 0 0 4px color-mix(in srgb, var(--danger) 15%, transparent);
+  }
+
   .wsk-control[data-state="success"] {
     border-color: var(--success);
   }
 
+  .wsk-control[data-state="success"]:focus {
+    box-shadow:
+      inset 0 1px 2px transparent,
+      0 0 0 1px var(--success),
+      0 0 0 4px color-mix(in srgb, var(--success) 15%, transparent);
+  }
+
   .wsk-control:disabled {
-    background: var(--surface-soft);
+    background: var(--disabled-bg);
+    box-shadow: none;
     color: var(--muted);
     cursor: not-allowed;
     opacity: 0.78;
@@ -747,6 +1024,7 @@
 
   .wsk-control[readonly] {
     background: var(--surface-soft);
+    box-shadow: none;
   }
 
   .wsk-textarea {
@@ -762,7 +1040,8 @@
   }
 
   .wsk-help {
-    color: var(--muted);
+    color: var(--muted-soft);
+    line-height: 1.6;
   }
 
   .wsk-success-text {
@@ -778,17 +1057,23 @@
     padding-right: 3rem;
   }
 
-  .wsk-input-wrap .wsk-icon-button,
-  .wsk-select-wrap .wsk-icon {
+  /* Centered with auto margins, not translateY: the button's :active
+     scale transform (and the reduced-motion transform reset) must not be
+     able to knock it out of position. */
+  .wsk-input-wrap .wsk-icon-button {
+    bottom: 0;
+    margin-block: auto;
     position: absolute;
     right: 0.25rem;
-    top: 50%;
-    transform: translateY(-50%);
+    top: 0;
   }
 
   .wsk-select-wrap .wsk-icon {
     pointer-events: none;
+    position: absolute;
     right: 0.75rem;
+    top: 50%;
+    transform: translateY(-50%);
   }
 
   .wsk-select {
@@ -826,7 +1111,7 @@
     border: 0;
     border-radius: calc(var(--radius-sm) - 2px);
     color: var(--text);
-    font-weight: 650;
+    font-weight: 600;
     height: 2rem;
     margin-right: 0.75rem;
     padding: 0 0.75rem;
@@ -850,26 +1135,41 @@
   .wsk-switch-track {
     background: var(--border-strong);
     border-radius: 999px;
+    box-shadow: inset 0 1px 3px rgb(9 32 44 / 12%);
     display: inline-flex;
     flex: 0 0 auto;
     height: 1.5rem;
     padding: 0.1875rem;
-    transition: background 120ms ease;
+    transition:
+      background 120ms ease,
+      box-shadow 180ms ease;
     width: 2.75rem;
   }
 
   .wsk-switch-track::after {
-    background: var(--surface);
+    background: linear-gradient(180deg, #ffffff 0%, #eef1f6 100%);
     border-radius: 50%;
-    box-shadow: 0 1px 2px rgb(15 23 42 / 18%);
+    box-shadow:
+      0 1px 2px rgb(9 32 44 / 28%),
+      0 0 0 0.5px rgb(9 32 44 / 6%);
     content: "";
     height: 1rem;
-    transition: transform 120ms ease;
+    transition: transform 220ms cubic-bezier(0.22, 1.1, 0.35, 1);
     width: 1rem;
+  }
+
+  [data-theme="dark"] .wsk-switch-track {
+    box-shadow: inset 0 1px 3px rgb(0 0 0 / 35%);
+  }
+
+  [data-theme="dark"] .wsk-switch-track::after {
+    background: linear-gradient(180deg, #f1f5f9 0%, #cbd5e1 100%);
+    box-shadow: 0 1px 2px rgb(0 0 0 / 45%);
   }
 
   .wsk-switch input:checked + .wsk-switch-track {
     background: var(--accent);
+    box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 30%, transparent);
   }
 
   .wsk-switch input:checked + .wsk-switch-track::after {
@@ -877,7 +1177,7 @@
   }
 
   .wsk-switch input:focus-visible + .wsk-switch-track {
-    outline: 3px solid color-mix(in srgb, var(--focus) 70%, transparent);
+    outline: 3px solid var(--focus);
     outline-offset: 2px;
   }
 
@@ -891,7 +1191,7 @@
   }
 
   .wsk-switch small {
-    color: var(--muted);
+    color: var(--muted-soft);
     font-size: 0.75rem;
     font-weight: 400;
     margin-top: 0.125rem;
@@ -931,7 +1231,7 @@
   .wsk-alert {
     align-items: flex-start;
     background: var(--accent-soft);
-    border: 1px solid color-mix(in srgb, var(--accent) 25%, var(--border));
+    border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
     border-left: 3px solid var(--accent);
     border-radius: var(--radius);
     display: flex;
@@ -939,28 +1239,47 @@
     padding: 0.75rem 1rem;
   }
 
+  .wsk-alert > .wsk-icon {
+    color: var(--accent);
+    margin-top: 0.1875rem;
+  }
+
   .wsk-alert.wsk-success {
     background: var(--success-soft);
-    border-color: color-mix(in srgb, var(--success) 25%, var(--border));
+    border-color: color-mix(in srgb, var(--success) 35%, var(--border));
     border-left-color: var(--success);
+  }
+
+  .wsk-alert.wsk-success > .wsk-icon {
+    color: var(--success);
   }
 
   .wsk-alert.wsk-warning {
     background: var(--warning-soft);
-    border-color: color-mix(in srgb, var(--warning) 25%, var(--border));
+    border-color: color-mix(in srgb, var(--warning) 35%, var(--border));
     border-left-color: var(--warning);
+  }
+
+  .wsk-alert.wsk-warning > .wsk-icon {
+    color: var(--warning);
   }
 
   .wsk-alert.wsk-danger {
     background: var(--danger-soft);
-    border-color: color-mix(in srgb, var(--danger) 25%, var(--border));
+    border-color: color-mix(in srgb, var(--danger) 35%, var(--border));
     border-left-color: var(--danger);
+  }
+
+  .wsk-alert.wsk-danger > .wsk-icon {
+    color: var(--danger);
   }
 
   .wsk-alert p {
     color: var(--muted);
     font-size: 0.875rem;
+    line-height: 1.6;
     margin-top: 0.125rem;
+    text-wrap: pretty;
   }
 
   .wsk-breadcrumb ol {
@@ -991,7 +1310,7 @@
 
   .wsk-breadcrumb [aria-current="page"] {
     color: var(--text);
-    font-weight: 650;
+    font-weight: 600;
   }
 
   .wsk-tab-list {
@@ -1007,19 +1326,44 @@
     border-bottom: 2px solid transparent;
     color: var(--muted);
     font-size: 0.875rem;
-    font-weight: 650;
+    font-weight: 600;
     min-height: 2.5rem;
     padding: 0;
+    position: relative;
+    transition: color 140ms ease;
+  }
+
+  /* The underline grows from the center instead of snapping in. */
+  .wsk-tab-list button::after {
+    background: var(--accent);
+    border-radius: 999px 999px 0 0;
+    bottom: -2px;
+    content: "";
+    height: 2px;
+    left: 0;
+    position: absolute;
+    right: 0;
+    transform: scaleX(0);
+    transform-origin: center;
+    transition: transform 200ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+
+  .wsk-tab-list button:hover:not([aria-selected="true"]) {
+    color: var(--text);
   }
 
   .wsk-tab-list button[aria-selected="true"] {
-    border-bottom-color: var(--accent);
     color: var(--accent);
+  }
+
+  .wsk-tab-list button[aria-selected="true"]::after {
+    transform: scaleX(1);
   }
 
   .wsk-tab-panel {
     color: var(--muted);
     font-size: 0.875rem;
+    line-height: 1.6;
     padding-top: 1rem;
   }
 
@@ -1038,20 +1382,33 @@
     color: var(--muted);
     display: inline-flex;
     font-size: 0.875rem;
+    font-variant-numeric: tabular-nums;
     height: 2rem;
     justify-content: center;
     min-width: 2rem;
     padding: 0 0.5rem;
+    transition:
+      background-color 140ms ease,
+      box-shadow 140ms ease,
+      color 140ms ease;
   }
 
-  .wsk-pagination button:hover:not(:disabled) {
+  .wsk-pagination button:hover:not(:disabled):not(.wsk-current) {
     background: var(--surface-soft);
     color: var(--text);
   }
 
   .wsk-pagination button.wsk-current {
-    background: var(--accent);
+    background: linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--accent) 88%, #fff),
+      var(--accent)
+    );
+    box-shadow:
+      inset 0 1px 0 rgb(255 255 255 / 20%),
+      var(--shadow-accent);
     color: var(--on-accent);
+    font-weight: 700;
   }
 
   .wsk-pagination button:disabled {
@@ -1078,11 +1435,46 @@
     font-size: 0.875rem;
   }
 
+  .wsk-progress-list strong {
+    color: var(--accent);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Custom-drawn progress: soft inset track, brand gradient fill. */
   .wsk-progress-list progress {
-    accent-color: var(--accent);
+    -webkit-appearance: none;
+    appearance: none;
+    background: var(--surface-strong);
+    border: 0;
+    border-radius: 999px;
+    box-shadow: inset 0 1px 2px var(--input-inset);
     grid-column: 1 / -1;
     height: 0.5rem;
+    overflow: hidden;
     width: 100%;
+  }
+
+  .wsk-progress-list progress::-webkit-progress-bar {
+    background: transparent;
+  }
+
+  .wsk-progress-list progress::-webkit-progress-value {
+    background: linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--accent) 62%, var(--accent-soft)),
+      var(--accent)
+    );
+    border-radius: 999px;
+    transition: width 300ms ease;
+  }
+
+  .wsk-progress-list progress::-moz-progress-bar {
+    background: linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--accent) 62%, var(--accent-soft)),
+      var(--accent)
+    );
+    border-radius: 999px;
   }
 
   .wsk-skeleton-list {
@@ -1091,8 +1483,14 @@
   }
 
   .wsk-skeleton {
-    animation: pulse 1.4s ease-in-out infinite;
-    background: var(--surface-soft);
+    animation: wsk-shimmer 1.6s linear infinite;
+    background: linear-gradient(
+      100deg,
+      var(--skeleton-base) 36%,
+      var(--skeleton-hi) 50%,
+      var(--skeleton-base) 64%
+    );
+    background-size: 320% 100%;
     border-radius: var(--radius-sm);
     height: 0.75rem;
     width: 92%;
@@ -1109,7 +1507,14 @@
 
   .wsk-empty-state {
     align-items: center;
-    border: 1px dashed var(--border-strong);
+    background:
+      radial-gradient(
+        30rem 15rem at 50% -4rem,
+        color-mix(in srgb, var(--accent) 6%, transparent),
+        transparent 70%
+      ),
+      radial-gradient(var(--grid-dot) 1px, transparent 1.2px) 0 0 / 14px 14px;
+    border: 1px dashed color-mix(in srgb, var(--border-strong) 70%, transparent);
     border-radius: var(--radius-lg);
     display: flex;
     flex-direction: column;
@@ -1121,17 +1526,23 @@
 
   .wsk-empty-icon {
     align-items: center;
-    background: var(--surface-soft);
-    border-radius: var(--radius);
-    color: var(--muted);
+    background: var(--accent-soft);
+    border-radius: 50%;
+    box-shadow: 0 0 0 7px color-mix(in srgb, var(--accent-soft) 45%, transparent);
+    color: var(--accent);
     display: flex;
-    height: 2.75rem;
+    height: 3rem;
     justify-content: center;
-    width: 2.75rem;
+    width: 3rem;
+  }
+
+  .wsk-empty-icon .wsk-icon {
+    height: 1.25rem;
+    width: 1.25rem;
   }
 
   .wsk-empty-state h3 {
-    margin-top: 1rem;
+    margin-top: 1.125rem;
   }
 
   .wsk-empty-state p {
@@ -1143,7 +1554,7 @@
   .wsk-table-wrap {
     border: 1px solid var(--border);
     border-radius: var(--radius-lg);
-    box-shadow: var(--shadow-sm);
+    box-shadow: var(--card-highlight), var(--shadow-sm);
     overflow-x: auto;
   }
 
@@ -1164,13 +1575,17 @@
 
   .wsk-table th[scope="col"] {
     background: var(--surface-soft);
+    border-bottom: 1px solid
+      color-mix(in srgb, var(--border-strong) 55%, var(--border));
     color: var(--muted);
     font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
   }
 
   .wsk-table th[scope="row"] {
     background: var(--surface);
-    font-weight: 650;
+    font-weight: 600;
   }
 
   .wsk-select-cell {
@@ -1193,16 +1608,40 @@
     font-size: inherit;
     font-weight: inherit;
     gap: 0.375rem;
+    letter-spacing: inherit;
     padding: 0;
+    transition: color 140ms ease;
   }
 
   .wsk-sort-button .wsk-icon {
     height: 0.875rem;
+    opacity: 0.45;
+    transition: opacity 140ms ease;
     width: 0.875rem;
+  }
+
+  .wsk-sort-button:hover {
+    color: var(--text);
+  }
+
+  .wsk-sort-button:hover .wsk-icon,
+  th[aria-sort="ascending"] .wsk-sort-button .wsk-icon,
+  th[aria-sort="descending"] .wsk-sort-button .wsk-icon {
+    opacity: 1;
+  }
+
+  th[aria-sort="ascending"] .wsk-sort-button,
+  th[aria-sort="descending"] .wsk-sort-button {
+    color: var(--accent);
   }
 
   .wsk-table tbody tr:has(.wsk-row-select:checked) :is(td, th[scope="row"]) {
     background: var(--accent-soft);
+  }
+
+  /* Selected rows carry a brand tick on the leading edge. */
+  .wsk-table tbody tr:has(.wsk-row-select:checked) .wsk-select-cell {
+    box-shadow: inset 2px 0 0 var(--accent);
   }
 
   .wsk-table-empty {
@@ -1230,8 +1669,9 @@
   }
 
   .wsk-filter-meta {
-    color: var(--muted);
+    color: var(--muted-soft);
     font-size: 0.75rem;
+    font-variant-numeric: tabular-nums;
   }
 
   .wsk-table-pagination {
@@ -1245,9 +1685,51 @@
     }
   }
 
-  @keyframes pulse {
-    50% {
-      opacity: 0.45;
+  @keyframes wsk-shimmer {
+    0% {
+      background-position: 100% 0;
+    }
+    100% {
+      background-position: 0% 0;
+    }
+  }
+
+  @keyframes wsk-ping {
+    0% {
+      opacity: 0.7;
+      transform: scale(1);
+    }
+    70%,
+    100% {
+      opacity: 0;
+      transform: scale(2.6);
+    }
+  }
+
+  @keyframes wsk-pop {
+    from {
+      opacity: 0;
+      transform: translateY(-4px) scale(0.97);
+    }
+  }
+
+  @keyframes wsk-rise {
+    from {
+      opacity: 0;
+      transform: translateY(10px) scale(0.97);
+    }
+  }
+
+  @keyframes wsk-fade {
+    from {
+      opacity: 0;
+    }
+  }
+
+  @keyframes wsk-toast-in {
+    from {
+      opacity: 0;
+      transform: translateY(0.5rem) scale(0.97);
     }
   }
 
@@ -1277,10 +1759,12 @@
   }
 
   .wsk-reference-brand span {
-    color: var(--muted);
-    font-size: 0.75rem;
+    color: var(--muted-soft);
+    font-size: 0.6875rem;
+    font-weight: 600;
     letter-spacing: 0.08em;
     margin-top: 0.25rem;
+    text-transform: uppercase;
   }
 
   .wsk-reference-links {
@@ -1342,7 +1826,9 @@
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
-  .wsk-mini-metric-grid > div:not(.wsk-metric) {
+  /* Zero specificity so the shared :where() hover / pressed rules can
+     recolor these blocks like they do the process steps. */
+  :where(.wsk-mini-metric-grid > div:not(.wsk-metric)) {
     background: var(--surface-soft);
     border: 1px solid transparent;
     border-radius: var(--radius);
@@ -1355,16 +1841,25 @@
     display: block;
   }
 
-  .wsk-mini-metric-grid span,
-  .wsk-mini-metric-grid small {
+  .wsk-mini-metric-grid > div > span {
     color: var(--muted);
     font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+  }
+
+  .wsk-mini-metric-grid small {
+    color: var(--muted-soft);
+    font-size: 0.75rem;
+    font-weight: 400;
   }
 
   .wsk-mini-metric-grid strong {
-    font-size: 1.25rem;
-    font-variant-numeric: tabular-nums;
-    letter-spacing: -0.025em;
+    font-size: 1.5rem;
+    font-variant-numeric: tabular-nums lining-nums;
+    font-weight: 650;
+    letter-spacing: -0.02em;
+    line-height: 1.15;
     margin: 0.375rem 0 0.125rem;
   }
 
@@ -1392,11 +1887,11 @@
 
   .wsk-status-list span {
     font-size: 0.875rem;
-    font-weight: 650;
+    font-weight: 600;
   }
 
   .wsk-status-list small {
-    color: var(--muted);
+    color: var(--muted-soft);
     font-size: 0.75rem;
     font-weight: 400;
     margin-top: 0.125rem;
@@ -1407,6 +1902,13 @@
   .wsk-service-card > strong {
     color: var(--accent);
     font-size: 0.875rem;
+  }
+
+  .wsk-status-list strong {
+    font-size: 1rem;
+    font-variant-numeric: tabular-nums;
+    font-weight: 650;
+    letter-spacing: -0.01em;
   }
 
   .wsk-card-foot {
@@ -1425,11 +1927,25 @@
     padding: 1rem;
   }
 
+  /* "01 ——" numbering stamp: tabular digits plus an accent hairline. */
   .wsk-process-step > span,
   .wsk-service-card > span {
+    align-items: center;
     color: var(--accent);
+    display: inline-flex;
     font-size: 0.75rem;
+    font-variant-numeric: tabular-nums;
     font-weight: 750;
+    gap: 0.5rem;
+    letter-spacing: 0.08em;
+  }
+
+  .wsk-process-step > span::after,
+  .wsk-service-card > span::after {
+    background: color-mix(in srgb, var(--accent) 35%, transparent);
+    content: "";
+    height: 1px;
+    width: 1.75rem;
   }
 
   .wsk-process-step h3,
@@ -1441,7 +1957,9 @@
   .wsk-service-card p {
     color: var(--muted);
     font-size: 0.875rem;
+    line-height: 1.6;
     margin-top: 0.5rem;
+    text-wrap: pretty;
   }
 
   .wsk-service-grid,
@@ -1451,10 +1969,10 @@
 
   .wsk-service-card,
   .wsk-auth-card {
-    background: var(--surface-raised);
+    background: var(--card-sheen) var(--surface-raised);
     border: 1px solid var(--border);
     border-radius: var(--radius-lg);
-    box-shadow: var(--shadow-sm);
+    box-shadow: var(--card-highlight), var(--shadow-sm);
     padding: 1.375rem;
   }
 
@@ -1471,6 +1989,7 @@
 
   .wsk-capability-list span {
     background: var(--surface-soft);
+    border: 1px solid var(--border);
     border-radius: 999px;
     color: var(--muted);
     font-size: 0.75rem;
@@ -1478,9 +1997,15 @@
   }
 
   .wsk-code-panel {
-    background: var(--code-bg);
+    background:
+      radial-gradient(120% 90% at 85% -20%, var(--code-glow), transparent 55%),
+      linear-gradient(180deg, var(--code-bg) 0%, var(--code-bg-deep) 100%);
     border: 1px solid var(--code-border);
     border-radius: var(--radius-lg);
+    border-top: 2px solid color-mix(in srgb, var(--accent) 45%, var(--code-border));
+    box-shadow:
+      inset 0 1px 0 rgb(255 255 255 / 7%),
+      var(--shadow-sm);
     color: var(--code-text);
     font-family:
       ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
@@ -1491,9 +2016,40 @@
     padding: 1.25rem;
   }
 
+  .wsk-code-kw {
+    color: var(--code-accent);
+    font-weight: 650;
+  }
+
+  .wsk-code-str {
+    color: var(--code-string);
+  }
+
   .wsk-auth-card {
     align-content: start;
     display: grid;
+  }
+
+  /* The login card is the reference app's conversion point: it gets a
+     halo, a brand-tinted border, and the deepest resting shadow. */
+  form.wsk-auth-card {
+    background:
+      radial-gradient(90% 55% at 50% 0%, var(--auth-halo), transparent 65%),
+      var(--surface-raised);
+    border-color: color-mix(in srgb, var(--accent) 16%, var(--border));
+    box-shadow:
+      var(--card-highlight),
+      var(--shadow-sm),
+      0 24px 48px -24px var(--auth-depth);
+  }
+
+  form.wsk-auth-card:focus-within {
+    border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
+    box-shadow:
+      var(--card-highlight),
+      0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent),
+      var(--shadow-hover),
+      0 24px 48px -24px var(--auth-depth);
   }
 
   .wsk-auth-submit {
@@ -1503,6 +2059,7 @@
 
   .wsk-register-card {
     background: color-mix(in srgb, var(--surface-soft) 55%, var(--surface));
+    box-shadow: none;
   }
 
   .wsk-metric span,
@@ -1511,21 +2068,45 @@
     display: block;
   }
 
-  .wsk-metric span,
-  .wsk-metric small {
+  .wsk-metric > span {
     color: var(--muted);
     font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+  }
+
+  .wsk-metric small {
+    color: var(--muted-soft);
+    font-size: 0.75rem;
+    font-weight: 400;
   }
 
   .wsk-metric strong {
-    font-size: 1.625rem;
-    font-variant-numeric: tabular-nums;
-    letter-spacing: -0.035em;
-    margin: 0.5rem 0 0.25rem;
+    font-size: clamp(1.75rem, 2.2vw, 2.25rem);
+    font-variant-numeric: tabular-nums lining-nums;
+    font-weight: 650;
+    letter-spacing: -0.02em;
+    line-height: 1.1;
+    margin: 0.625rem 0 0.25rem;
   }
 
+  /* Metric signature: an accent bar fading rightward, a brand wash from
+     the top, and a faint brand-tinted drop shadow. */
   .wsk-metric {
-    border-top: 2px solid color-mix(in srgb, var(--accent) 42%, var(--border));
+    background:
+      linear-gradient(
+          90deg,
+          var(--accent) 0%,
+          color-mix(in srgb, var(--accent) 55%, transparent) 55%,
+          transparent 92%
+        )
+        left top / 100% 2px no-repeat,
+      radial-gradient(140% 80% at 20% 0%, var(--metric-wash), transparent 55%),
+      var(--surface-raised);
+    box-shadow:
+      var(--card-highlight),
+      var(--shadow-sm),
+      0 10px 24px -16px var(--metric-glow);
   }
 
   :where(
@@ -1557,8 +2138,25 @@
       .wsk-mini-metric-grid > div:not(.wsk-metric)
     ):hover {
       border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
-      box-shadow: var(--shadow-hover);
+      box-shadow: var(--card-highlight), var(--shadow-hover);
       transform: translateY(-1px);
+    }
+
+    :where(.wsk-metric):hover {
+      box-shadow:
+        var(--card-highlight),
+        var(--shadow-hover),
+        0 12px 28px -14px var(--metric-glow);
+    }
+
+    /* The elevated login card outranks the :where() list above, so its
+       hover feedback is restated at matching specificity. */
+    form.wsk-auth-card:hover {
+      border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
+      box-shadow:
+        var(--card-highlight),
+        var(--shadow-hover),
+        0 24px 48px -24px var(--auth-depth);
     }
 
     :where(
@@ -1574,9 +2172,10 @@
     }
   }
 
-  :where(form.wsk-panel, form.wsk-auth-card):focus-within {
+  :where(form.wsk-panel):focus-within {
     border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
     box-shadow:
+      var(--card-highlight),
       0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent),
       var(--shadow-hover);
   }
@@ -1603,15 +2202,29 @@
     background: var(--surface-raised);
     border: 1px solid var(--border);
     border-radius: var(--radius-lg);
-    box-shadow: var(--shadow);
+    box-shadow:
+      var(--overlay-ring),
+      var(--card-highlight),
+      var(--shadow),
+      0 40px 96px -24px var(--auth-depth);
     color: var(--text);
     max-width: min(30rem, calc(100vw - 2rem));
     padding: 0;
     width: 100%;
   }
 
+  .wsk-dialog[open] {
+    animation: wsk-rise 220ms cubic-bezier(0.2, 0.9, 0.3, 1);
+  }
+
   .wsk-dialog::backdrop {
+    -webkit-backdrop-filter: blur(3px) saturate(80%);
+    backdrop-filter: blur(3px) saturate(80%);
     background: var(--overlay);
+  }
+
+  .wsk-dialog[open]::backdrop {
+    animation: wsk-fade 220ms ease;
   }
 
   .wsk-dialog-head,
@@ -1629,6 +2242,7 @@
 
   .wsk-dialog-body {
     color: var(--muted);
+    line-height: 1.6;
     padding: 1.25rem;
   }
 
@@ -1650,11 +2264,12 @@
 
   .wsk-toast {
     align-items: flex-start;
+    animation: wsk-toast-in 240ms cubic-bezier(0.2, 0.9, 0.3, 1.1);
     background: var(--surface-raised);
     border: 1px solid var(--border);
     border-left: 3px solid var(--success);
     border-radius: var(--radius);
-    box-shadow: var(--shadow);
+    box-shadow: var(--overlay-ring), var(--shadow);
     display: flex;
     font-size: 0.875rem;
     gap: 0.75rem;
@@ -1704,7 +2319,7 @@
       background: var(--surface-raised);
       border: 1px solid var(--border);
       border-radius: var(--radius-lg);
-      box-shadow: var(--shadow-sm);
+      box-shadow: var(--card-highlight), var(--shadow-sm);
       overflow: hidden;
       padding: 0.625rem;
       position: static;
@@ -1844,6 +2459,12 @@
     }
   }
 
+  @media print {
+    body::before {
+      display: none;
+    }
+  }
+
   @media (prefers-reduced-motion: reduce) {
     *,
     *::before,
@@ -1852,6 +2473,11 @@
       animation-iteration-count: 1 !important;
       scroll-behavior: auto !important;
       transition-duration: 0.01ms !important;
+    }
+
+    .wsk-skeleton {
+      animation: none;
+      background: var(--skeleton-base);
     }
 
     :where(
@@ -1865,6 +2491,7 @@
       .wsk-mini-metric-grid > div:not(.wsk-metric)
     ):hover,
     .wsk-is-pressed,
+    .wsk-button:hover:not(:disabled),
     .wsk-button:active:not(:disabled),
     .wsk-icon-button:active {
       transform: none !important;
