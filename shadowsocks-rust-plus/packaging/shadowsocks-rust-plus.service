@@ -1,0 +1,34 @@
+[Unit]
+Description=shadowsocks-rust-plus server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=shadowsocks
+Group=shadowsocks
+RuntimeDirectory=shadowsocks-rust-plus
+RuntimeDirectoryMode=0750
+UMask=0077
+ExecStart=/usr/local/bin/ssserver -c /etc/shadowsocks-rust-plus/server.json
+Restart=on-failure
+RestartSec=3s
+TimeoutStopSec=90s
+LimitNOFILE=1048576
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+ReadWritePaths=/run/shadowsocks-rust-plus
+
+[Install]
+WantedBy=multi-user.target

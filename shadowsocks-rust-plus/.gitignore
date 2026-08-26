@@ -1,0 +1,12 @@
+.env
+.cache/
+.artifacts/
+dist/
+target/
+*.sock
+*.pid
+*.log
+*.profraw
+*.pyc
+__pycache__/
+tests/runtime/
