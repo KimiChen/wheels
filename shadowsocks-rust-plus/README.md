@@ -38,9 +38,10 @@ overlay。它已经实现 AEAD-2022 EIH 多用户服务端的用户级 TCP/UDP �
   `GET /healthz`，具备请求/响应大小、读写超时、身份数和并发数上限。
 - socket 默认 `0600`，支持受控 `0660`；绑定前使用严格 umask，逐级检查路径祖先的属主、权限
   与符号链接，使用同路径 lockfile 的非阻塞独占锁串行化清理与绑定。加锁后会重验
-  lockfile 的路径/inode；Linux/Android 以 `O_PATH|O_NOFOLLOW` 固定 socket inode，再通过
-  `/proc/self/fd` 修改权限，其他 Unix 使用不跟随符号链接的 `fchmodat`，两者都会重验设备号、
-  inode 和 mode。清理也按绑定后记录的设备号/inode 执行。
+  lockfile 的路径/inode；Linux/Android 以原生 `open(2)` 精确传入 `O_PATH|O_NOFOLLOW` 固定
+  socket inode，再通过 `/proc/self/fd` 修改权限，避免标准库访问模式在 musl 发布目标上把
+  path-only 打开降为会对 Unix socket 返回 `ENXIO` 的只读打开。其他 Unix 使用不跟随符号链接的
+  `fchmodat`，两者都会重验设备号、inode 和 mode。清理也按绑定后记录的设备号/inode 执行。
 - 单个非法或超时的 exporter 请求在连接仍可写时只返回固定错误对象；客户端主动断开、响应
   写超时或截断也只影响该连接，不影响代理转发。
 - 已启动的快照序列化即使遇到连接写超时也会继续持有该客户端的并发许可，直到后台工作及其

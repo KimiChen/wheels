@@ -29,7 +29,7 @@ Content-Transfer-Encoding: 8bit
  .../shadowsocks-service/src/server/server.rs  |    8 +
  .../src/server/tcprelay.rs                    |  320 +-
  .../src/server/udprelay.rs                    |  620 +++-
- .../src/server/user_stats.rs                  | 2652 +++++++++++++++++
+ .../src/server/user_stats.rs                  | 2683 +++++++++++++++++
  crates/shadowsocks/Cargo.toml                 |    3 +
  crates/shadowsocks/src/config.rs              |  102 +-
  crates/shadowsocks/src/manager/protocol.rs    |   65 +-
@@ -40,7 +40,7 @@ Content-Transfer-Encoding: 8bit
  .../src/relay/udprelay/proxy_socket.rs        |   70 +-
  crates/shadowsocks/tests/tcp_eih_user.rs      |  261 ++
  src/service/server.rs                         |   39 +
- 30 files changed, 5335 insertions(+), 321 deletions(-)
+ 30 files changed, 5366 insertions(+), 321 deletions(-)
  create mode 100644 crates/shadowsocks-service/src/http_tokio.rs
  delete mode 100644 crates/shadowsocks-service/src/local/http/tokio_rt.rs
  create mode 100644 crates/shadowsocks-service/src/server/user_stats.rs
@@ -3026,10 +3026,10 @@ index 4ee0bee9d2be1a87d3f005fafea23ce5c2d3201c..1cb2c024c48aa567ee0c9aea75b4216f
 +}
 diff --git a/crates/shadowsocks-service/src/server/user_stats.rs b/crates/shadowsocks-service/src/server/user_stats.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..29c59b709bdba1771049e9bb96ef9f6e4f4a0850
+index 0000000000000000000000000000000000000000..ec4619695cdfd7a0dc7dce68a7ee7b9656759fee
 --- /dev/null
 +++ b/crates/shadowsocks-service/src/server/user_stats.rs
-@@ -0,0 +1,2652 @@
+@@ -0,0 +1,2683 @@
 +//! EIH per-user traffic statistics and local read-only exporter.
 +
 +use std::{
@@ -3735,8 +3735,10 @@ index 0000000000000000000000000000000000000000..29c59b709bdba1771049e9bb96ef9f6e
 +mod exporter {
 +    use std::{
 +        convert::Infallible,
++        ffi::CString,
 +        fs, io,
 +        os::unix::{
++            ffi::OsStrExt,
 +            fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
 +            io::AsRawFd,
 +        },
@@ -3747,8 +3749,8 @@ index 0000000000000000000000000000000000000000..29c59b709bdba1771049e9bb96ef9f6e
 +        time::Duration,
 +    };
 +
-+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
-+    use std::{ffi::CString, os::unix::ffi::OsStrExt};
++    #[cfg(any(target_os = "linux", target_os = "android"))]
++    use std::os::fd::FromRawFd;
 +
 +    use bytes::Bytes;
 +    use http::{
@@ -3871,10 +3873,24 @@ index 0000000000000000000000000000000000000000..29c59b709bdba1771049e9bb96ef9f6e
 +        // not emulate fchmodat(..., AT_SYMLINK_NOFOLLOW) until 2.32. Open the
 +        // already-bound socket with O_PATH instead, verify the fixed inode,
 +        // and deliberately follow only its procfs descriptor link for chmod.
-+        let socket = fs::OpenOptions::new()
-+            .read(true)
-+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_PATH)
-+            .open(path)?;
++        // `OpenOptions` derives an access mode and can discard O_PATH for the
++        // x86_64-musl release target, turning this into O_RDONLY and making
++        // opening a bound Unix socket fail with ENXIO. Call open(2) directly
++        // so the kernel receives the exact path-only flags.
++        let path_bytes = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
++            io::Error::new(
++                io::ErrorKind::InvalidInput,
++                "user statistics socket path contains a NUL byte",
++            )
++        })?;
++        // SAFETY: `path_bytes` is NUL-terminated and remains alive for the call;
++        // O_PATH neither reads the socket nor requires a variadic mode argument.
++        let raw_fd = unsafe { libc::open(path_bytes.as_ptr(), libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_PATH) };
++        if raw_fd < 0 {
++            return Err(io::Error::last_os_error());
++        }
++        // SAFETY: open(2) returned one owned descriptor, transferred exactly once.
++        let socket = unsafe { fs::File::from_raw_fd(raw_fd) };
 +        let opened = socket.metadata()?;
 +        verify_socket_metadata(&opened, expected)?;
 +
@@ -4619,6 +4635,21 @@ index 0000000000000000000000000000000000000000..29c59b709bdba1771049e9bb96ef9f6e
 +        pub(crate) const BUSY_RESPONSE_WORKERS: usize = super::MAX_BUSY_RESPONSE_WORKERS;
 +        pub(crate) const SNAPSHOT_REQUEST: &[u8] = b"GET /v1/snapshot HTTP/1.1\r\nHost: localhost\r\n\r\n";
 +        pub(crate) const HEALTH_REQUEST: &[u8] = b"GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n";
++
++        #[test]
++        fn socket_permission_update_changes_bound_socket_mode() {
++            let directory = tempfile::tempdir().unwrap();
++            let socket_path = directory.path().join("user-stats.sock");
++            let socket = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
++            let expected = fs::symlink_metadata(&socket_path).unwrap();
++
++            set_socket_permissions_nofollow(&socket_path, &expected, 0o660).unwrap();
++            assert_eq!(
++                fs::symlink_metadata(&socket_path).unwrap().permissions().mode() & 0o777,
++                0o660
++            );
++            drop(socket);
++        }
 +
 +        #[test]
 +        fn socket_permission_update_does_not_follow_a_replacement_symlink() {
@@ -6753,4 +6784,3 @@ index eef03d8167ab8bbc7ecc8fe110ca94aec7f52704..f010ed5c1bcfa62e70b7ed7e4e856ef1
 +        );
 +    }
  }
-
