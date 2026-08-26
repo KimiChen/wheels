@@ -21,10 +21,10 @@ python3 -m http.server 8000 --bind 127.0.0.1
 ## 主题与设计令牌
 
 - 颜色、表面层级、圆角、阴影等均以 CSS 自定义属性集中定义在 `style.css` 顶部，浅色在 `:root`、深色在 `[data-theme="dark"]`；关键文本 / 表面配对均按 WCAG AA（≥ 4.5:1）校准。
-- 品牌主色为自有的「深海青」（浅色 `#0e6e8c`、深色 `#55c6e4`），中性色整体偏冷青灰；深色主题的 `--border` 与 `--*-soft` 采用带透明度的同色光染，叠加在不同表面上自动分层。
+- 品牌主色为靛蓝（浅色 `#4f46e5`、深色 `#818cf8`），中性色为冷灰蓝 slate 系；深色主题的 `--border` 与 `--*-soft` 采用带透明度的同色光染，叠加在不同表面上自动分层。
 - 圆角按控件、普通容器和重点容器分为 `--radius-sm`、`--radius`、`--radius-lg`；阴影按「接触光 + 环境光」拆为多层（`--shadow-sm` / `--shadow-hover` / `--shadow`），并有 `--shadow-accent` 品牌辉光与 `--card-highlight` 顶缘高光两类点睛令牌。
 - 主题在首帧前由 `default.html` `<head>` 内联脚本按 `localStorage` 与 `prefers-color-scheme` 设定，避免深色首屏闪烁；顶栏按钮可切换并持久化。
-- 代码面板固定为品牌墨青底，走 `--code-*` 令牌（含 `--code-accent` / `--code-string` 语法着色），便于统一调整。
+- 代码面板固定为深色墨蓝底，走 `--code-*` 令牌（含 `--code-accent` / `--code-string` 语法着色），便于统一调整。
 
 ## 视觉原则
 
