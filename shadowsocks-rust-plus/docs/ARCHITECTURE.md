@@ -114,6 +114,65 @@ UDP 解密结果已经在 `UdpSocketControlData.user` 中携带认证后的 `Arc
 - 固定上游 manager 的原命令和数据报协议只在统计关闭时保留；统计启用时 manager 模式整体被拒绝，
   不把 exporter 权限并入 manager，也不允许动态 `add` 绕过统计接线。
 
+## ADR-0005：共享审计 producer 与 AuditSupervisor
+
+状态：已接受。
+
+`user-audit` 是 Linux-only、非默认 Cargo feature，且显式依赖 `user-stats` 的 EIH 身份路径。
+配置层在 feature-off 时仍反序列化 `user_audit`，遇到该字段明确返回 unsupported-feature；只有
+feature-on 且配置通过范围、路径和静态 server 校验后，才创建审计元数据。审计配置错误阻止启动，
+auditd 运行故障只使 producer 进入 degraded/retry，不得影响 relay。
+
+进程内只创建一个 `Arc<AuditEmitter>` 和一个 `AuditSupervisor`。`AuditEmitter` 统一拥有全进程
+`AtomicU64` audit sequence、`ArrayQueue<EventDraft>`、`Notify`、诊断 accumulator、固定 64-shard
+UDP cooldown cache 以及 close/active-observation 状态；所有静态 server 通过 `ServiceContext`
+clone 同一 emitter。server、TCP tracker 和 UDP association 不得各自创建 queue、sequence、cache 或
+supervisor，避免第二个 producer hello 被 auditd 拒绝。
+
+registry 注册路径一次构造不可变的 `AuditRuntimeMetadata`、`AuditServerMetadata`、
+`AuditIdentityMetadata` 和计数器组成的 `AuditIdentityHandle`。relay 只保存/clone typed `Arc`，不在
+hot path 查询 snapshot、重新读配置或从 transport peer 推断身份。TCP tracker 在双向应用载荷首次
+同时成功时取得 observation guard；UDP 在完整 outbound send 成功后取得 guard，guard 覆盖 cooldown
+判断、sequence/draft、诊断更新和 `force_push()`，任何关闭竞态都只能漏记，不能阻断转发。
+
+relay hook 只允许立即返回的原子操作、一次 `try_lock`、有界 draft 构造和 `try_emit`。queue 满时
+淘汰最老未发送 access event 并聚合 `producer_gap/queue_overflow`；序列化、auditd 连接、ACK、
+fsync、重连和 drain 全部位于后台 supervisor。`force_push()` 返回的旧 draft、永久 NACK 的 event
+以及诊断快照分别按既定 bucket 处理，禁止递归产生 gap。单一 AuditClient session 失败只在同一
+supervisor 内指数退避重建，并保留原始 in-flight bytes；supervisor 不加入数据面 fatal child 集合。
+
+关闭顺序固定为：停止新数据连接、`close_emitter()`、最多 2 秒等待 active guards/queue/in-flight
+排空、终止并 join relay、原子读取最终 shutdown-skipped counter、再停止 supervisor。审计 task
+异常不会单独重启数据面；生产 `panic=abort` 下审计路径必须 panic-free。
+
+## ADR-0006：协议、spool 与导出耐久性
+
+状态：已接受。
+
+`crates/shadowsocks-audit-protocol` 只承载强类型 DTO、严格 schema、唯一 compact canonical JSON、
+4-byte big-endian ingest framing、export header/response DTO、HMAC canonicalization 和 golden
+vectors，不执行 I/O。`crates/shadowsocks-auditd` 是 Linux-only binary，独占 UDS、spool、HMAC key
+读取和 HTTP export；根 `ssserver` 不依赖这些 I/O 实现。
+
+ingest 连接第一帧必须是 hello，最多 4 个连接但同一 daemon lifetime 只允许一个完成 hello 的
+producer。auditd 先校验 `SO_PEERCRED`、node/runtime 和严格 JSON，再把原始 event bytes 嵌入 wrapper；
+完成 open segment 写入、group `fdatasync` 与 sequence state 持久化后才回 ACK。重复 event ID 的内存
+LRU（65536 条）返回原 ACK；payload 冲突永久 NACK 并断开。producer 在 retryable 错误、超时或未知
+ACK 时保留 bytes，不能把“尚未放弃”计作 gap。
+
+spool 采用 `open/`、`sealed/`、`leased/`、`acked/`、`quarantine/`、`state.json`、`tombstones.json`
+布局。每个 wrapper 一行 NDJSON，保存原始 event canonical bytes 和 payload digest；segment 封口后
+以 batch ID 导出，lease/ACK 通过跨目录原子 rename、双侧 fsync 和 durable receipt 保证崩溃可恢复。
+容量达到 5 GiB 或文件系统低于 1 GiB 时按固定顺序回收；删除未 ACK 数据必须在后续可写 segment 生成
+`spool_gap`，无法证明的数据字段使用 null。acked 副本正常保留 86400 秒，receipt ledger 最多 4096
+项、最长 7 天。
+
+export 只监听 `AF_UNIX`，精确提供 health、lease、ack 三条 HTTP/1.1 路由。每连接一个请求、严格
+origin-form、有限 header/body、5 秒读写截止、`Cache-Control: no-store` 和节点 HMAC；Host 不进入
+签名，nonce 仅在 timestamp/body digest/HMAC 全部验证后写入有界 replay cache。响应签名覆盖 raw body
+digest 与 lease metadata，collector 必须先验签再解析并按 `(node_id,event_id)`、`(node_id,batch_id)`
+幂等；auditd 错误或 health 不得输出 identity、target、event body 或 key。
+
 ## 安全边界
 
 - `ServerConfig` 和 `ServerUser` 的 `Debug` 输出经过脱敏。

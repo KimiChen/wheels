@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import struct
@@ -87,6 +88,85 @@ class ReleaseArtifactTest(unittest.TestCase):
                 "--python-version",
                 "3.14.6",
                 "--zlib-version",
+                "1.2.12",
+            ],
+            success=success,
+        )
+
+    def package_multi(
+        self,
+        server_binary: Path,
+        auditd_binary: Path,
+        output: Path,
+        *,
+        success: bool = True,
+    ) -> subprocess.CompletedProcess[str]:
+        return self.run_command(
+            [
+                sys.executable,
+                str(ARTIFACT_TOOL),
+                "package-multi",
+                "--binary",
+                str(server_binary),
+                "--auditd-binary",
+                str(auditd_binary),
+                "--output-dir",
+                str(output),
+                "--version",
+                VERSION,
+                "--upstream-commit",
+                UPSTREAM_COMMIT,
+                "--overlay-commit",
+                OVERLAY_COMMIT,
+                "--source-date-epoch",
+                str(EPOCH),
+                "--rustc-version",
+                "1.97.0",
+                "--rustc-commit",
+                "2d8144b7880597b6e6d3dfd63a9a9efae3f533d3",
+                "--cargo-version",
+                "1.97.0",
+                "--cargo-zigbuild-version",
+                "0.23.0",
+                "--zig-version",
+                "0.16.0",
+                "--python-version",
+                "3.14.6",
+                "--zlib-version",
+                "1.2.12",
+            ],
+            success=success,
+        )
+
+    def verify_multi(self, output: Path, *, success: bool = True) -> subprocess.CompletedProcess[str]:
+        return self.run_command(
+            [
+                sys.executable,
+                str(ARTIFACT_TOOL),
+                "verify-multi",
+                "--output-dir",
+                str(output),
+                "--manifest",
+                str(output / "release-manifest.json"),
+                "--expected-version",
+                VERSION,
+                "--expected-upstream-commit",
+                UPSTREAM_COMMIT,
+                "--expected-overlay-commit",
+                OVERLAY_COMMIT,
+                "--expected-rustc-version",
+                "1.97.0",
+                "--expected-rustc-commit",
+                "2d8144b7880597b6e6d3dfd63a9a9efae3f533d3",
+                "--expected-cargo-version",
+                "1.97.0",
+                "--expected-cargo-zigbuild-version",
+                "0.23.0",
+                "--expected-zig-version",
+                "0.16.0",
+                "--expected-python-version",
+                "3.14.6",
+                "--expected-zlib-version",
                 "1.2.12",
             ],
             success=success,
@@ -183,6 +263,70 @@ class ReleaseArtifactTest(unittest.TestCase):
             result = self.package(binary, output, success=False)
             self.assertIn("拒绝覆盖", result.stderr)
             self.assertEqual([path.read_bytes() for path in paths], originals)
+
+    def test_multi_packaging_contains_both_binaries_and_checksums(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ssrp-release-multi-") as temporary:
+            root = Path(temporary)
+            input_dir = root / "input"
+            input_dir.mkdir()
+            server = self.fake_elf(input_dir)
+            auditd = input_dir / "shadowsocks-auditd"
+            auditd.write_bytes(server.read_bytes())
+            os.chmod(auditd, 0o755)
+            output = root / "output"
+            output.mkdir()
+            self.package_multi(server, auditd, output)
+            self.verify_multi(output)
+            expected = {
+                "ssserver",
+                "ssserver.sha256",
+                "shadowsocks-auditd",
+                "shadowsocks-auditd.sha256",
+                "release-manifest.json",
+            }
+            self.assertEqual({path.name for path in output.iterdir()}, expected)
+
+    def test_multi_verifier_rejects_noncanonical_metadata_and_manifest_location(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ssrp-release-multi-verify-") as temporary:
+            root = Path(temporary)
+            input_dir = root / "input"
+            input_dir.mkdir()
+            server = self.fake_elf(input_dir)
+            auditd = input_dir / "shadowsocks-auditd"
+            auditd.write_bytes(server.read_bytes())
+            os.chmod(auditd, 0o755)
+            output = root / "output"
+            output.mkdir()
+            self.package_multi(server, auditd, output)
+
+            binary = output / "ssserver"
+            os.chmod(binary, 0o755)
+            manifest = output / "release-manifest.json"
+            original_manifest = manifest.read_bytes()
+            value = json.loads(original_manifest)
+            value["schema_version"] = True
+            manifest.write_text(json.dumps(value, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+            self.verify_multi(output, success=False)
+            manifest.write_bytes(original_manifest)
+
+            os.chmod(binary, 0o754)
+            self.verify_multi(output, success=False)
+            os.chmod(binary, 0o755)
+
+            outside = root / "outside-manifest.json"
+            outside.write_bytes(original_manifest)
+            self.run_command(
+                [
+                    sys.executable,
+                    str(ARTIFACT_TOOL),
+                    "verify-multi",
+                    "--output-dir",
+                    str(output),
+                    "--manifest",
+                    str(outside),
+                ],
+                success=False,
+            )
 
     def test_verifier_rejects_archive_tampering(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ssrp-release-") as temporary:

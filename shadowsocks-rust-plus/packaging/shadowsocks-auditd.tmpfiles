@@ -1,0 +1,6 @@
+# Runtime socket directories and the private spool/config roots.
+d /run/shadowsocks-audit 0750 shadowsocks-audit shadowsocks-audit -
+d /run/shadowsocks-audit/ingest 0750 shadowsocks-audit shadowsocks-audit-ingest -
+d /run/shadowsocks-audit/export 0750 shadowsocks-audit shadowsocks-audit-export -
+d /var/lib/shadowsocks-audit 0700 shadowsocks-audit shadowsocks-audit -
+d /etc/shadowsocks-audit 0750 root shadowsocks-audit -

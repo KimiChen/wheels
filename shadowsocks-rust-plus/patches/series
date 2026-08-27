@@ -1,3 +1,4 @@
 # 补丁文件按依赖顺序应用；空行和以 # 开头的行会被忽略。
 0001-eih-user-stats-http-unix-exporter.patch
 0002-reproducible-build-time.patch
+0003-user-audit.patch

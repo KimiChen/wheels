@@ -14,7 +14,8 @@
 
 `build-linux-release.sh` 复用 `prepare-source.sh`，从 `upstream.lock` 固定的 `v1.24.0` 提交
 `7ee1aa9223ed8f4d34734aac919036c8ad4502c2` 重新准备源码、按 `patches/series` 应用补丁，
-并只构建启用 `user-stats` feature 的 `x86_64-unknown-linux-musl` `ssserver`。`--repository`
+并构建启用 `user-audit` feature 的 `x86_64-unknown-linux-musl` `ssserver` 与
+`shadowsocks-auditd`。`--repository`
 既可指向本地镜像也可省略后使用锁定地址，但两者都必须解析到精确上游 commit。发布构建要求
 overlay 工作树完全干净，并按 [`../packaging/release-toolchain.lock`](../packaging/release-toolchain.lock)
 核对 rustc commit、Cargo、cargo-zigbuild、Zig、Python 和 zlib 版本。
@@ -23,31 +24,27 @@ overlay 工作树完全干净，并按 [`../packaging/release-toolchain.lock`](.
 `SOURCE_DATE_EPOCH`、路径 remap、关闭 incremental/build-id 和剥离符号消除已知不稳定输入。
 上游 `build-time` 宏原本读取实时时钟，overlay 已将其替换为发布脚本从 commit epoch 派生的固定
 UTC 字符串；其他构建若未显式提供该值则显示 `unknown`。
-只有两个 ELF64 x86_64 二进制逐字节相同才会生成固定 gzip/tar mtime、属主、权限和成员顺序的
-发布包。外部规范 manifest 和包内 manifest 完全相同，包含版本、上游 commit、overlay commit、
-目标、构建时间基准、两次独立构建记录、完整工具链、二进制大小和 SHA-256；另有归档 SHA-256
-文件。不要复制 `.cache/` 或临时构建目录作为发布物。
+四次构建（两个 binary 各两次）必须逐字节相同，才会生成固定权限和顺序的双二进制发布目录。
+`release-manifest.json` 记录版本、上游 commit、overlay commit、目标、构建时间基准、两次独立
+构建记录、完整工具链以及两个 ELF 的大小和 SHA-256；每个 binary 另有独立 checksum 文件。
+不要复制 `.cache/` 或临时构建目录作为发布物。
 
 构建后由离线 RSA/ECDSA 私钥产生 detached SHA-256 签名，再用独立分发的公钥验签：
 
 ```bash
-release_stem=dist/shadowsocks-rust-plus-v1.24.0-x86_64-unknown-linux-musl
+release_dir=dist
 ./scripts/sign-release.sh \
-  --archive "$release_stem.tar.gz" \
-  --manifest "$release_stem.manifest.json" \
-  --checksum "$release_stem.tar.gz.sha256" \
+  --release-manifest "$release_dir/release-manifest.json" \
   --private-key /secure/offline/release-private.pem \
-  --output "$release_stem.manifest.json.sig"
+  --output "$release_dir/release-manifest.sig"
 ./scripts/verify-release.sh \
-  --archive "$release_stem.tar.gz" \
-  --manifest "$release_stem.manifest.json" \
-  --checksum "$release_stem.tar.gz.sha256" \
-  --signature "$release_stem.manifest.json.sig" \
+  --release-manifest "$release_dir/release-manifest.json" \
+  --signature "$release_dir/release-manifest.sig" \
   --public-key /secure/release-public.pem
 ```
 
-验签会同时锁定 `upstream.lock` 版本/commit 和期望 overlay HEAD，校验 detached 签名、归档
-SHA-256、规范 manifest、包内外 manifest、ELF 架构、二进制 SHA-256 及确定性归档元数据。私钥
+验签会同时锁定 `upstream.lock` 版本/commit 和期望 overlay HEAD，校验 detached
+签名、规范 manifest、两个 ELF 架构与 SHA-256、两个 checksum 和输出文件结构。私钥
 不得进入仓库、构建目录或发布包；公钥应通过与发布包不同的可信渠道分发。`dist/`、Cargo target
 和签名中间产物均已 ignore，仍不得使用 `git add -f` 提交。
 
@@ -55,8 +52,14 @@ SHA-256、规范 manifest、包内外 manifest、ELF 架构、二进制 SHA-256 
 
 ```text
 /usr/local/bin/ssserver
+/usr/local/bin/shadowsocks-auditd
 /etc/shadowsocks-rust-plus/server.json
+/etc/shadowsocks-audit/auditd.json
+/etc/shadowsocks-audit/export-hmac
 /run/shadowsocks-rust-plus/user-stats.sock
+/run/shadowsocks-audit/ingest/ingest.sock
+/run/shadowsocks-audit/export/export.sock
+/var/lib/shadowsocks-audit/{open,sealed,leased,acked,quarantine}
 ```
 
 配置目录应为 `0750`、配置文件应为 `0640` 或更严。socket 路径必须是规范绝对路径，不能含
@@ -76,11 +79,51 @@ NetBSD 及其他非 Linux Unix 构建使用 `fchmodat(..., AT_SYMLINK_NOFOLLOW)`
 执行完整 `verify.sh`，并实际检查 `0600`/`0660`、替换符号链接和并发 lockfile 场景。目标 libc/
 内核若不支持 no-follow chmod，exporter 应保持启动失败；禁止退回会跟随符号链接的 `chmod`。
 
-示例见 [`../config/server.example.json`](../config/server.example.json)，服务模板见
-[`../packaging/shadowsocks-rust-plus.service`](../packaging/shadowsocks-rust-plus.service)。
+示例见 [`../config/server.example.json`](../config/server.example.json) 与
+[`../config/auditd.example.json`](../config/auditd.example.json)，服务模板见
+[`../packaging/shadowsocks-rust-plus.service`](../packaging/shadowsocks-rust-plus.service) 和
+[`../packaging/shadowsocks-auditd.service`](../packaging/shadowsocks-auditd.service)。
 当前五节点部署固定使用 `2022-blake3-aes-128-gcm`：全集群共用一个 16 字节随机 iPSK，每个
 用户使用一个独立 16 字节随机 uPSK，全部采用带标准 padding 的 Base64。不得把替换后的示例
 配置或受控凭据源提交到 Git。
+
+### auditd 安装与权限
+
+先安装 `shadowsocks-auditd` 二进制、[`../packaging/shadowsocks-auditd.sysusers`](../packaging/shadowsocks-auditd.sysusers)
+和 [`../packaging/shadowsocks-auditd.tmpfiles`](../packaging/shadowsocks-auditd.tmpfiles)，再创建
+`/etc/shadowsocks-audit/auditd.json`。推荐使用发行版的 `systemd-sysusers`/`systemd-tmpfiles`，
+不要手工把目录设成可写给 group/other：
+
+```bash
+systemd-sysusers packaging/shadowsocks-auditd.sysusers
+systemd-tmpfiles --create packaging/shadowsocks-auditd.tmpfiles
+install -m 0640 -o root -g shadowsocks-audit config/auditd.example.json \
+  /etc/shadowsocks-audit/auditd.json
+install -m 0600 -o shadowsocks-audit -g shadowsocks-audit /secure/node-export-hmac \
+  /etc/shadowsocks-audit/export-hmac
+install -m 0644 packaging/shadowsocks-auditd.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now shadowsocks-auditd.service
+```
+
+`export-hmac` 必须由密钥管理系统生成每节点独立的 32-byte 随机值，文件内容为 64 个小写 hex
+字符，可选一个末尾 LF；命令输出、shell history、日志和仓库不得出现 key。`auditd` 使用不可
+登录的 `shadowsocks-audit` 账号，只写 `/var/lib/shadowsocks-audit` 和 `/run/shadowsocks-audit`；
+ingest/export socket 分别由 `shadowsocks-audit-ingest`/`shadowsocks-audit-export` 组隔离。服务
+单元启用 `ProtectSystem=strict`、`ProtectHome=true`、`NoNewPrivileges=true` 和 `AF_UNIX` 限制，
+不能读取 ssserver 配置或密钥。ssserver 单元对 auditd 使用 `Wants=`/`After=` 而不是 `Requires=`：
+auditd 离线时数据面仍启动，producer 只保留有界 queue 并后台重连。
+
+启动前以唯一显式路径检查配置（未知字段、重复参数、相对路径、symlink parent、UID/mode、范围
+错误都必须在创建 socket 或文件前失败）：
+
+```bash
+/usr/local/bin/shadowsocks-auditd --config /etc/shadowsocks-audit/auditd.json
+```
+
+不要同时使用环境变量或备用配置路径。修改 spool 上限、segment 或导出 HMAC 后必须先停止接受
+新采集、完成最终 lease/ACK 屏障，再重启 auditd；不要删除 `open/`、`leased/`、`acked/` 或
+`tombstones.json` 来“修复”状态。
 
 首次生成 200 个正式账号和 4 个测试账号的受控源时，先准备权限 `0700` 且已 ignore 的目录；工具只会创建显式目标，模式
 固定为 `0600`，已存在时拒绝覆盖，也不会把任何密钥写到终端：
@@ -152,6 +195,12 @@ install -d -m 0700 .artifacts/credentials
    生产持久化层落实并验收。
 8. 以实际服务用户启动灰度实例，确认 exporter socket 及其 `.lock` 文件的类型、属主和权限。
 9. 用本地测试身份分别完成一次 TCP 与 UDP 回显，核对四个计数字段的方向和增量。
+10. 确认 `user_audit` 的 ingest socket 祖先目录不可被非特权账号替换，且 `SO_PEERCRED`/socket inode
+    owner 校验使用配置中的 `auditd_user`；auditd 不可用时 ssserver 仍能代理但 health 标记 degraded。
+11. 通过 mock collector 完成一次 lease、响应 HMAC/Body-SHA256 校验和 ACK，再验证相同 batch 重试
+    幂等；不要把 event body 或 HMAC key 写入 shell 输出。
+12. 以容量、最小可用空间、open tail 截断和进程重启故障注入检查 spool recovery；确认未 ACK 删除会
+    生成 `spool_gap`，acked 副本仍按 86400 秒保留。
 
 exporter 无法安全绑定时，启用了统计的 `ssserver` 会启动失败；不要通过删除 socket 检查或放宽
 目录权限来绕过错误。exporter 先以 `O_NOFOLLOW` 打开模式 `0600` 的同路径 `.lock` 文件，取得
@@ -295,39 +344,92 @@ CPU 饥饿、身份数量、响应大小和采集频率，而不是降低超时�
 本机 exporter 仍按原故障模型运行；远程采集器则必须告警并依靠持久化基线、outbox 和幂等重试
 恢复。任何将 Unix socket 直接转成无认证 TCP 的字节转发都不构成安全的远程访问方案。
 
+## 审计采集与健康检查
+
+审计采集器只连接 auditd 的 export UDS，不连接 ingest UDS。每次请求都用节点独立 HMAC 签名，
+并在解析 body 前验证 response digest、response MAC、node ID 和 request nonce。请求必须严格使用
+HTTP/1.1 origin-form：`POST /v1/audit/lease` 的 body 固定为
+`{"schema_version":1}`，`POST /v1/audit/ack` 的字段顺序固定为
+`schema_version,batch_id,body_sha256`；每连接只发一个请求并关闭。
+
+一个最小采集循环如下，实际实现应使用安全的 HTTP/UDS 库或仓库 mock collector，不要自行拼接
+未校验的字符串：
+
+```text
+GET /v1/audit/healthz
+  -> 验证签名的完整 health；503/degraded 只告警，不入账
+POST /v1/audit/lease
+  -> 先验证 raw NDJSON/body digest，再校验 wrapper epoch/sequence/event digest
+写入 controller durable outbox（按 node_id,event_id 幂等）
+POST /v1/audit/ack
+  -> 仅在 durable commit 后发送；超时重试同一 batch_id/body_sha256
+```
+
+采集器必须保留最后处理的 `(spool_epoch, spool_sequence)`、每个 event ID 和 batch ID 的幂等状态；
+lease/ACK 超时、连接断开、未知 NACK 或 response MAC 失败都只能重试，不能把未确认数据标为丢失。
+`producer_gap`、`udp_window_contention` 和 `spool_gap` 是诊断记录，不得并入用户访问数；收到 gap
+应告警并保存原始诊断。auditd health 中 `status=degraded` 的触发包括 producer 断开超过 5 秒、
+存储不可写、recovery/quarantine 未处置、未 ACK gap 或计数饱和；累计计数不因恢复而清零。
+
+导出响应的 `X-Shadowsocks-Audit-Body-SHA256` 必须等于实际 raw NDJSON body 和
+`X-Shadowsocks-Audit-Response-SHA256`。collector 应保留 event 的原始 JSON bytes，按
+`event_payload_sha256` 复算，不得 parse 后重新序列化再 ACK。仓库提供的
+[`../tests/mock_collector.py`](../tests/mock_collector.py) 只用于协议互通和故障测试，不是生产
+controller；生产 controller 仍需实现 durable commit、跨节点隔离、retention 和管理员审计。
+
+建议额外告警：
+
+- auditd 进程退出、ingest/export socket 不存在、连续 5 秒无 producer 或 health 503；
+- `storage_rejected_attempts`、`evicted_unacked_records`、任一 gap 或 `udp_window_contention` 增长；
+- lease digest/MAC、epoch/sequence 连续性或 ACK 幂等校验失败；
+- spool bytes 接近 5 GiB、文件系统可用空间低于 1 GiB、acked retention 超期未清理；
+- ssserver `shutdown_skipped_observations`、`sequence_exhausted` 或 producer health counter 饱和。
+
 ## 计划重启与升级屏障
 
 计划停止、升级或密钥轮换按以下顺序执行：
 
 1. 停止把新连接调度到节点。
 2. 等待现有 TCP 连接和 UDP 关联排空到约定上限。
-3. 拉取健康的最终快照，使用唯一批次 ID 入账。
-4. 等待存储端确认该批次已经持久化。
-5. 停止服务，安装并校验新二进制/配置，再启动服务。
-6. 确认出现新的 `runtime_id`、计数从零开始且测试身份四向流量正确。
-7. 恢复调度。
+3. 让 ssserver 停止接受新数据、关闭 `AuditEmitter`，在 2 秒 drain 窗口内排空 queue/in-flight；
+   join 全部 relay 后记录最终 `shutdown_skipped_observations` health counter。
+4. 从 auditd 拉取健康的最终 lease，先 durable commit，再发送 ACK；同时按需拉取一次 user-stats
+   最终快照，使用唯一 batch ID 入账。
+5. 等待 controller 确认审计 batch 和统计快照都已持久化。
+6. 停止 `shadowsocks-rust-plus` 与 `shadowsocks-auditd`，安装并验签新双二进制/配置，再先启动
+   auditd、后启动 ssserver。
+7. 确认出现新的 `runtime_id`，审计 `spool_epoch`/producer hello 正常，计数从零开始且测试身份
+   TCP/UDP 四向流量正确。
+8. 恢复调度。
 
 异常退出无法执行最终屏障。采集器应保留最后成功快照，标记旧 runtime 的未闭合窗口并留下审计
 记录，不能把新 runtime 的累计值直接与旧 runtime 相减。
 
 ## 禁用与回滚
 
-快速禁用统计但保留 plus 二进制：
+快速禁用统计和审计但保留 plus 二进制：
 
 1. 按计划重启屏障取得最终快照。
-2. 从配置删除顶层 `user_stats`。
-3. 重启并确认不再创建 exporter socket。
+2. 从配置删除顶层 `user_audit` 与 `user_stats`。
+3. 停止并禁用 `shadowsocks-auditd.service`，确认 auditd export/ingest socket 不再创建。
+4. 重启并确认 ssserver 不再创建 user-stats exporter socket，manager 行为恢复为上游默认。
 
 运行时未配置 `user_stats` 时不会创建 registry/exporter；TCP/UDP 使用上游路径，EIH 线协议不变，
 manager 命令也恢复为上游行为。启用 `user_stats` 的配置本身不能以 manager 模式运行。
 
+仅回滚审计功能、保留用户统计：
+
+1. 完成上面的最终审计 lease/ACK 屏障并停止 ssserver。
+2. 从配置删除顶层 `user_audit`，保持 `user_stats` 配置，停止并禁用 auditd。
+3. 启动同一 plus 版本的 `ssserver`，确认统计 exporter 仍健康，且不存在 ingest socket。
+
 回滚到锁定的原始上游二进制：
 
-1. 完成最终快照屏障并停止服务。
-2. 切换到由同一 `upstream.lock` 提交构建的已校验上游 `ssserver`。
-3. 删除顶层 `user_stats` 配置；`servers[].id` 可以保留。
+1. 完成最终审计 lease/ACK 与统计快照屏障并停止两个服务。
+2. 切换到由同一 `upstream.lock` 提交构建的已校验上游 `ssserver`，不安装/启动 auditd。
+3. 删除顶层 `user_audit` 和 `user_stats` 配置；`servers[].id` 可以保留。
 4. 启动后完成 TCP、UDP、manager 与 ACL 冒烟测试。
-5. 把 exporter 停止视为预期维护窗口，防止监控误报为静默故障。
+5. 把 exporter/auditd 停止视为预期维护窗口，防止监控误报为静默故障。
 
 服务正常退出时会按 bind 后记录的设备号和 inode 清理自己的 socket。若进程被强制终止而留下
 旧 socket，下次启动会在取得 `.lock` 独占锁、确认 socket 不可连接且路径未被替换后安全清理。
@@ -337,7 +439,9 @@ lockfile。
 ## 灰度和发布记录
 
 单节点灰度、分批上线和上游提案属于生产或外部发布变更，必须在实际环境取得明确授权后执行。
-每批至少归档：已验签的规范 manifest、detached 签名、发布包 SHA-256、签名公钥标识、节点范围、
-配置版本、启动时刻、runtime ID、首末快照序号、TCP/UDP 测试增量、性能观测、回滚演练结果和
-审批人。manifest 已记录构建版本、上游/overlay commit、工具链及二进制 SHA-256；不得人工另抄
-一份可能漂移的来源字段。本仓库只提供模板和可复现验证，不包含真实节点记录。
+每批至少归档：已验签的 `release-manifest.json`、detached 签名、两个 binary 的 SHA-256、签名
+公钥标识、节点范围、配置版本、启动时刻、ssserver runtime ID、auditd spool epoch、producer
+hello 时间、首末 user-stats 快照序号、首末审计 spool sequence、TCP/UDP 测试增量、gap/health
+计数、性能观测、回滚演练结果和审批人。manifest 已记录构建版本、上游/overlay commit、工具链及
+两个 ELF 的 SHA-256；不得人工另抄一份可能漂移的来源字段。本仓库只提供模板和可复现验证，不包含
+真实节点记录。

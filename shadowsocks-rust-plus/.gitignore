@@ -10,3 +10,5 @@ target/
 *.pyc
 __pycache__/
 tests/runtime/
+tests/audit-runtime/
+*.ndjson

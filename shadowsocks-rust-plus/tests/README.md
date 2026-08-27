@@ -1,6 +1,6 @@
 # 测试与性能
 
-仓库提供可重复的单元、编译、结算、真实 TCP/UDP 集成和性能测试。测试通过只证明指定环境中的
+仓库提供可重复的单元、编译、协议/结算、真实 TCP/UDP 与 auditd 集成和性能测试。测试通过只证明指定环境中的
 实现与契约满足当前断言；生产灰度、目标节点性能验收和分批发布仍需独立授权与证据。
 
 ## 一键验证
@@ -32,7 +32,7 @@
 
 `scripts/test.sh` 的固定检查包括：
 
-1. workspace lib/bin 在 `user-stats` feature 下的 Rust 单元测试；
+1. workspace lib/bin 在 `user-audit` feature 下的 Rust 单元测试（同时覆盖 `user-stats` 路径）；
 2. core 的 AEAD-2022 TCP EIH 认证用户透传测试；
 3. service 只启用普通 `server`、不启用 `user-stats` 的独立编译，防止 Cargo workspace
    feature 合并掩盖 gating 错误；
@@ -40,20 +40,28 @@
 5. 结算模型契约测试；
 6. 私有凭据源生成、规范化和五配置一致性工具测试；
 7. 确定性 Linux 发布归档、manifest、SHA-256 和 detached 签名验签测试；
-8. 真实 `ssserver`/`sslocal` TCP+UDP 集成测试。
+8. 真实 `ssserver`/`sslocal` TCP+UDP 集成测试；
+9. `shadowsocks-audit-protocol`/`shadowsocks-auditd` 单元测试与 mock collector 协议测试。
+
+`shadowsocks-auditd` 是 Linux-only。在 macOS 等非 Linux 主机上，脚本会从宿主 workspace 测试中排除
+auditd，改为运行 service 的 `user-audit` 单元测试、协议单元测试，并对已安装的
+`SHADOWSOCKS_AUDIT_CHECK_TARGET`（默认 `x86_64-unknown-linux-gnu`）执行 `cargo check --all-targets`；
+auditd 的运行时单元/集成测试仍需在 Linux 主机执行。未安装该 target 时验证会明确失败，而不会把
+Linux-only 覆盖误报为通过。
 
 不准备上游源码、也不访问网络时，可单独运行新增的纯本地工具测试：
 
 ```bash
 python3 tests/test_cluster_users.py
 python3 tests/test_release_artifact.py
+python3 tests/test_mock_collector.py
 ```
 
 凭据工具测试会实际生成 205 个正式账号和 4 个测试账号，确认 kind 区分及剥离、每个 iPSK/uPSK
 都是 16 字节标准 Base64、用户名和 uPSK 唯一、输出精确 `0600`、禁止覆盖、拒绝仓库内未 ignore 目标，并覆盖规范排序、五配置完全
 一致、顺序漂移与 ID 冲突。随机凭据只存在于权限受限的临时目录，测试输出和失败消息不得包含
-它们。发布测试使用无密钥的最小 ELF x86_64 fixture 两次打包并比较全部字节，校验 manifest 与
-归档防篡改；本机有 OpenSSL 时还会临时生成测试专用密钥，覆盖 detached 签名成功、拒绝覆盖和
+它们。发布测试使用无密钥的最小 ELF x86_64 fixture 两次打包并比较全部字节，校验双二进制
+manifest 与归档防篡改；本机有 OpenSSL 时还会临时生成测试专用密钥，覆盖 detached 签名成功、拒绝覆盖和
 篡改验签失败。临时密钥与产物不会写入仓库。
 
 ## 覆盖范围
@@ -134,6 +142,27 @@ node_id + server_id + server_generation + identity_name
 契约模型还使用显式保留多个 generation lineage 的 fixture，确认完整键分别结算且任一已观察 lineage
 消失都会使整份快照原子拒绝。当前 exporter 的同名重激活会复用 `generation=1` 和原累计计数器，但控制面
 仍必须保留 generation 维度以遵循 v1 schema 并兼容未来实现。
+
+### 审计协议 mock collector
+
+[`mock_collector.py`](mock_collector.py) 是仅用于开发和协议互通测试的无第三方依赖 collector。它在
+解析 lease body 前验证响应 body SHA-256、节点标识和 HMAC，逐行校验 wrapper 的 spool epoch/sequence、
+事件 payload digest 与连续范围，再把 `(node_id, event_id)` 和 `(node_id, batch_id)` 的幂等状态写入可选
+的 `0600` JSON 状态文件。冲突只被记录到隔离列表，不覆盖已有事件。固定请求/响应 HMAC vectors 与
+重复 key、非有限数字、BOM、NDJSON 缺行等拒绝用例见 [`test_mock_collector.py`](test_mock_collector.py)。
+
+对运行中的 auditd 做一次本机采集（不会输出 event body 或 key）：
+
+```bash
+python3 tests/mock_collector.py \
+  --socket /run/shadowsocks-audit/export/export.sock \
+  --node node-example-01 \
+  --key-file /etc/shadowsocks-audit/export-hmac \
+  --state /var/lib/shadowsocks-audit/mock-collector.json
+```
+
+该工具不是生产 collector；真实 controller 仍需按 `docs/USER_ACCESS_AUDIT.md` 的 durable commit、
+跨节点隔离和 retention 合同实现。
 
 ## 快照性能
 

@@ -2,11 +2,14 @@
 Description=shadowsocks-rust-plus server
 After=network-online.target
 Wants=network-online.target
+After=shadowsocks-auditd.service
+Wants=shadowsocks-auditd.service
 
 [Service]
 Type=simple
 User=shadowsocks
 Group=shadowsocks
+SupplementaryGroups=shadowsocks-audit-ingest
 RuntimeDirectory=shadowsocks-rust-plus
 RuntimeDirectoryMode=0750
 UMask=0077
@@ -28,7 +31,7 @@ RestrictSUIDSGID=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
-ReadWritePaths=/run/shadowsocks-rust-plus
+ReadWritePaths=/run/shadowsocks-rust-plus /run/shadowsocks-audit/ingest
 
 [Install]
 WantedBy=multi-user.target

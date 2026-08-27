@@ -1,4 +1,4 @@
-# 用户统计接口 v1
+# 用户统计与用户成功访问审计接口 v1
 
 ## 配置
 
@@ -213,3 +213,135 @@ lineage；`active=false` 的已观察 lineage 仍必须出现在后续快照中�
 
 只有已实现“停止接入、排空、最终快照、确认入账”的重启屏障时，控制面才能可靠地决定
 如何切换策略。exporter 不隐式选择。
+
+## 用户成功访问审计
+
+审计是独立于用户统计快照的节点侧协议。权威字段、错误语义和 golden vectors 见
+[`USER_ACCESS_AUDIT.md`](USER_ACCESS_AUDIT.md)；本节给出实现和采集器需要稳定依赖的 wire 摘要。
+审计只记录已经满足成功条件的访问，不记录失败认证、ACL/DNS/connect 失败、单向 TCP、UDP send
+失败、连接时长、payload 或 transport peer。审计故障允许漏记，但不得阻断代理流量。
+
+### Feature 与配置
+
+根 crate 的非默认 `user-audit` feature 传播到 `shadowsocks-service/user-audit`，并依赖
+`user-stats`。第一版只支持 Linux、静态 `servers[]` 和 EIH AEAD-2022 server；它与
+built-in/standalone manager 互斥。未编译 feature 但配置存在 `user_audit` 时，配置加载必须明确
+返回 unsupported-feature；feature 未启用或未配置时不得创建 audit queue、task、callback 或元数据。
+
+ssserver 顶层配置在已有 `user_stats.node_id` 下增加以下严格字段；不得重复配置 node ID：
+
+| 字段 | 默认值 | 有效范围 |
+| --- | ---: | ---: |
+| `ingest_socket_path` | 无 | 规范绝对路径；无 `.`、`..`、空组件或符号链接祖先 |
+| `auditd_user` | 无 | 部署解析的专用账号，示例为 `shadowsocks-audit` |
+| `queue_capacity` | `4096` | `256..=4096` |
+| `max_udp_targets_per_association` | `256` | `1..=256` |
+| `max_udp_target_windows` | `65536` | `16384..=65536`，必须能被 64 整除 |
+
+UDP 去重窗口固定为 60 秒、固定 64 个 shard；这些值不出现在配置文件。任何范围和路径错误都在
+配置加载及 service 运行入口各校验一次。auditd 使用 [`../config/auditd.example.json`](../config/auditd.example.json)
+中的严格 schema；默认 spool 上限 5 GiB、最小可用空间 1 GiB、segment 上限 4 MiB、acked 保留
+86400 秒，HMAC key 文件必须是 64 个小写 hex 字符（可带一个末尾 LF）并解码为 32 bytes。
+
+### Event schema
+
+所有 event/diagnostic 是 UTF-8、无重复 key、无 NaN/Infinity/尾随数据的 JSON object。可能达到
+`u64` 的值使用无前导零十进制字符串；128-bit ID 使用 32 个小写 hex 字符。access event 的公共
+字段为：
+
+```text
+schema_version=1, record_type=access,
+event_type=tcp_target_success|udp_target_success,
+event_id=runtime_id ":" audit_sequence,
+audit_sequence, occurred_at_unix_ms, runtime_monotonic_ms,
+node_id, runtime_id, server_id, server_generation=1,
+identity_kind=user, identity_name, identity_generation=1,
+transport, target, success_evidence
+```
+
+`identity_name` 只能来自已认证的 `ServerUser.name()`。`target` 保留地址头原始 `host`、规范化后的
+`normalized_host`（失败时为 `null`）、端口和本次实际使用的 `remote_ip`；不记录 URL、DNS payload、
+TLS 名称、客户端地址或任何 payload。域名规范化使用 UTS #46 non-transitional + STD3，ASCII
+域名小写并移除一个末尾点；IP 使用 `IpAddr::to_string()`。
+
+TCP 事件只在同一 relay 已成功向目标写入至少一个应用字节且目标已成功向客户端写回至少一个应用
+字节时生成，单连接最多一条；TFO 与普通 connect 语义相同。`success_evidence` 固定为
+`tcp_bidirectional_payload`。UDP 事件只在 outbound datagram 非空且完整 send 成功时生成，
+`success_evidence` 固定为 `udp_send_ok`；这只证明本机内核接受发送，不证明远端收到。每个 association
+使用随机 `association_id`，相同规范目标 60 秒内最多一条，缓存淘汰允许提前重复。
+
+诊断不是访问事实，也使用相同通道：`producer_gap`（`queue_overflow`、`encode_error` 或
+`permanent_nack`）、`udp_window_contention` 和 auditd 生成的 `spool_gap`。诊断不得包含 identity、
+target 或把“可能漏记”冒充确定访问；variant 的必填/nullable/禁止字段必须逐项按规格校验。
+
+### Ingest UDS
+
+ssserver 到 auditd 使用 Linux `AF_UNIX` stream。每帧为 4-byte big-endian unsigned length 加 JSON
+payload，request/response 共用 framing，单帧最多 8192 bytes；零长度、超长、partial frame 超时或
+尾随数据直接断开。第一帧必须是 hello，最多 4 条连接但同一 daemon lifetime 只允许一个完成 hello
+的 producer。hello、partial frame 和 response 各自受 2 秒截止；frame 边界 idle 不计超时。
+
+hello 的 canonical object 为：
+
+```json
+{"protocol_version":1,"frame_type":"hello","node_id":"node-example-01","runtime_id":"0123456789abcdef0123456789abcdef"}
+```
+
+auditd 同时检查 `SO_PEERCRED.uid == producer_user`、node/runtime 与配置及格式匹配。成功返回
+`hello_ack/ready`；第二个 producer 返回 retryable `producer_busy` 后断开，其他 hello 错误
+（`unsupported_version`、`unauthorized_peer`、`invalid_hello`、`node_mismatch`）均不可重试地
+保留 producer queue/in-flight。event 成功写入并完成本组 `fdatasync()` 后才返回 `ack/stored`，
+ACK 包含 audit `event_id`、`spool_epoch` 和 `spool_sequence`。固定 NACK 为
+`invalid_schema`、`event_id_conflict`、`runtime_mismatch`（永久）以及 `storage_unavailable`、
+`internal_error`（可重试）。producer 必须保留原始 bytes 重放，未知/非法 ACK 不得生成 gap。
+
+同一 auditd lifetime 最近 65536 个 event ID 做内存 LRU：相同 ID/相同 payload 返回原 ACK，
+相同 ID/不同 payload 返回 conflict 并断开；重启或淘汰后允许重新写入。producer relay 只做有界
+`try_lock`/`try_emit`，绝不等待 auditd、ACK、fsync 或 drain。
+
+### Export HTTP/1.1 over UDS
+
+auditd 默认在 `/run/shadowsocks-audit/export/export.sock` 只监听 `AF_UNIX`，每连接只处理一个
+请求并返回 `Connection: close`。精确路由为：
+
+| 请求 | 成功 | 语义 |
+| --- | --- | --- |
+| `GET /v1/audit/healthz` | `200` 或 `503` JSON | 完整 health，不泄露 identity/target |
+| `POST /v1/audit/lease` | `200` NDJSON 或 `204` | 最老 sealed、未确认 batch；同一 leased batch 重试返回相同 bytes |
+| `POST /v1/audit/ack` | `200` JSON | 按 batch ID 与 body digest 幂等确认 |
+
+request-target 必须是精确 origin-form path（无 query、重定向、百分号变体或尾斜杠）；HTTP/1.1
+必须有唯一合法 `Host`。两个 POST 的 body 分别是严格 canonical lease `{"schema_version":1}`
+和字段顺序固定的 ACK object，无空白/BOM/LF。请求 header 总量最多 16 KiB/32 个，body 最多 4096
+bytes，并拒绝 `Transfer-Encoding`、`Content-Encoding`、obs-fold、HTAB 和控制字符；export 最多
+4 个并发连接，读写截止 5 秒。除 204 外响应都有准确 `Content-Length`、`Cache-Control: no-store`
+和 `Content-Type`；204 明确省略 body/framing headers。
+
+200 lease 必须携带 `X-Shadowsocks-Audit-Schema: 1`、node、batch、epoch、first/last sequence、
+event count，以及 `X-Shadowsocks-Audit-Body-SHA256`；该 digest 等于实际 raw NDJSON body 和通用
+`X-Shadowsocks-Audit-Response-SHA256`。collector 必须先校验响应 digest/MAC，再按 LF 分行校验
+wrapper、连续 spool sequence、epoch 和 `event_payload_sha256`，保留 event raw JSON bytes，不得
+普通 reserialize 改变 escaping。ACK 成功将 batch 原子移入 `acked/` 并保留 24 小时；未知、淘汰或
+digest 不同分别返回 `404 unknown_batch`、`410 batch_evicted`、`409 digest_mismatch`。
+
+### HMAC 与 health
+
+三个 export API 都需要独立 node HMAC。请求 canonical UTF-8 bytes（末尾无 LF）为：
+
+```text
+SHADOWSOCKS-AUDIT-V1\n<METHOD>\n<exact-path>\n<node-id>\n<timestamp>\n<nonce>\n<body-sha256>
+```
+
+请求 header 必须包含 node、无前导零 unix timestamp、32 位 hex nonce、实际 body 的 64 位 digest 和
+`Authorization: Shadowsocks-Audit-HMAC-SHA256 <64 lowercase hex>`。timestamp 偏差最多 300 秒，
+nonce 在 10 分钟/4096 条 cache 内不可重放；只有 timestamp、body digest 和 constant-time HMAC
+全部通过后才写入 cache。响应签名 canonical 以 `SHADOWSOCKS-AUDIT-RESPONSE-V1`、request nonce、
+status、content type/schema/digest、node、batch/epoch/sequence/count 和 response body digest 逐行
+组成，同样不带末尾 LF。无 key、错误 node、过期或重放请求不得回显输入。
+
+health object 固定包含 `schema_version`、node、`ok|degraded`、producer 状态、runtime、ingest
+时间、spool epoch/bytes/上限、sealed batch 数、最老未 ACK 时间、stored records、storage rejected
+attempts 和 evicted unacked records；无 producer/无未 ACK batch 的可选值为 `null`。所有计数饱和为
+`u64::MAX` 并置 degraded。已签名的 503 health 仍必须返回完整对象；其他错误使用固定 error code，
+不得泄露请求正文。仓库 [`../tests/mock_collector.py`](../tests/mock_collector.py) 提供无第三方依赖的
+lease/ACK 校验、幂等与冲突隔离参考实现。

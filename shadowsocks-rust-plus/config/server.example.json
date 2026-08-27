@@ -10,6 +10,13 @@
     "max_identities": 1000,
     "max_concurrent_clients": 4
   },
+  "user_audit": {
+    "ingest_socket_path": "/run/shadowsocks-audit/ingest/ingest.sock",
+    "auditd_user": "shadowsocks-audit",
+    "queue_capacity": 4096,
+    "max_udp_targets_per_association": 256,
+    "max_udp_target_windows": 65536
+  },
   "servers": [
     {
       "id": "ss-entry-01",

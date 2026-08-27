@@ -2,7 +2,9 @@
 
 `shadowsocks-rust-plus` 是固定在 `shadowsocks-rust v1.24.0` 上维护的轻量
 overlay。它已经实现 AEAD-2022 EIH 多用户服务端的用户级 TCP/UDP 应用负载累计统计，
-并通过仅本机可访问的只读 HTTP/1.1-over-Unix-stream exporter 输出可结算快照。
+并通过仅本机可访问的只读 HTTP/1.1-over-Unix-stream exporter 输出可结算快照；在启用
+`user-audit` 时还会记录满足成功条件的 TCP/UDP 目标访问，并由独立 `shadowsocks-auditd`
+负责本机 durable spool 与受 HMAC 保护的导出。
 
 仓库包含完整实现、可重放补丁、自动化与集成测试、构建脚本和可复现性能工具。真实节点的灰度、
 分批发布和上游提案属于生产或外部变更，必须另行取得明确授权。本仓库不包含真实节点、用户或
@@ -25,6 +27,8 @@ overlay。它已经实现 AEAD-2022 EIH 多用户服务端的用户级 TCP/UDP �
 ## 已实现能力
 
 - 非默认 Cargo feature `user-stats`；未编译该 feature、非 Unix 平台却配置统计，都会明确失败。
+- 非默认 Linux-only Cargo feature `user-audit`；它依赖 `user-stats`，未编译该 feature 但配置
+  `user_audit` 时会明确失败，未配置时不创建任何审计 task 或元数据。
 - 复用上游已经完成认证的 EIH 用户，不重新解析密码，也不把密钥或 identity hash 暴露给
   service/exporter。
 - 每个用户维护 `tcp_uplink_bytes`、`tcp_downlink_bytes`、`udp_uplink_bytes`、
@@ -51,17 +55,19 @@ overlay。它已经实现 AEAD-2022 EIH 多用户服务端的用户级 TCP/UDP �
   连续 3 次 `accept()` 失败，
   会由 relay 同一监督集合发现并使服务返回错误，避免“代理仍工作但统计已消失”。仓库提供的
   systemd 模板使用 `Restart=on-failure` 和 `RestartSec=3s` 自动重启整个服务。
-- 运行时未配置顶层 `user_stats` 时不创建 registry/exporter，单 server 保留上游快路径；
+- 运行时未配置顶层 `user_stats`/`user_audit` 时不创建对应 registry、exporter 或 auditd producer，单 server 保留上游快路径；
   Shadowsocks 线协议和 ACL 语义不变。统计模式与 builtin/standalone `ssmanager` 互斥，避免动态
   `add` 出现未注册、未计费却继续转发的服务。
 
-## 待实现：用户成功访问审计
+## 用户成功访问审计
 
 用户成功访问审计的权威开发合同见
-[`docs/USER_ACCESS_AUDIT.md`](docs/USER_ACCESS_AUDIT.md)。该功能仍处于待实现状态；在
-`0003-user-audit.patch`、对应 crates、测试和发布产物全部完成并通过该规格验收前，不得把它列为已实现
-能力。负责该功能的工程师只修改本 `shadowsocks-rust-plus` 子项目，外部 controller、数据库、反向代理、
-生产部署和业务管理系统均由下游集成方负责。
+[`docs/USER_ACCESS_AUDIT.md`](docs/USER_ACCESS_AUDIT.md)。交付包括 `0003-user-audit.patch`、
+`shadowsocks-audit-protocol`/`shadowsocks-auditd` crates、共享 producer/AuditSupervisor、严格
+ingest/export/spool/HMAC 协议、systemd/sysusers/tmpfiles 模板、双二进制 release manifest、故障与
+协议测试，以及供下游开发使用的 [`tests/mock_collector.py`](tests/mock_collector.py)。审计只记录成功
+目标访问和有界诊断 gap；auditd/collector/controller、数据库、反向代理、生产部署和业务管理系统仍由
+下游集成方负责。功能边界、字段和失败语义以该规格为唯一权威。
 
 ## 快速开始
 
@@ -80,37 +86,38 @@ overlay。它已经实现 AEAD-2022 EIH 多用户服务端的用户级 TCP/UDP �
 ```bash
 ./scripts/verify.sh
 ./scripts/build.sh
-(cd dist && shasum -a 256 -c ssserver.sha256)
+(cd dist && shasum -a 256 -c ssserver.sha256 && shasum -a 256 -c shadowsocks-auditd.sha256)
 ```
 
 `verify.sh` 会核对远端 tag 与锁定 commit、在临时目录重放补丁、运行 Rust/结算/真实
-TCP+UDP 集成测试，并对未被 ignore 规则排除的文件扫描常见私钥、`AKIA` access key ID 以及
+TCP+UDP 与 auditd/mock-collector 集成测试，并对未被 ignore 规则排除的文件扫描常见私钥、`AKIA` access key ID 以及
 `PrivateKey`/`Passphrase` 赋值。该检查用于提交前卫生检查，不是通用的 `secret`/`token`
-扫描器，也不会检查被忽略的部署 `.env`。`build.sh` 只构建当前宿主平台、启用 `user-stats`
-feature 的开发用 release `ssserver`，其 macOS 产物不得部署到 Linux。生成的源码、Cargo target
+扫描器，也不会检查被忽略的部署 `.env`。`build.sh` 默认构建当前宿主平台、启用 `user-audit`
+feature 的开发用 `ssserver` 与 `shadowsocks-auditd`；其 macOS 产物不得部署到 Linux。
+使用 `--without-audit` 仅用于对旧准备源码做兼容性回归。生成的源码、Cargo target
 和 `dist/` 不应提交。
+
+由于 `shadowsocks-auditd` 明确是 Linux-only，macOS 等非 Linux 主机上的 `verify.sh` 会保留
+service/协议审计测试，并对已安装的 Linux target 做 auditd 编译检查；auditd 运行时测试和完整
+Linux feature workspace 回归仍需在 Linux 主机执行。
 
 ### 2. Linux x86_64 可复现发布包与验签
 
 生产候选包使用锁定的 Rust、Cargo、cargo-zigbuild、Zig、Python 与 zlib 版本，两次在不同
 源码/target 路径独立构建 `x86_64-unknown-linux-musl`，二进制逐字节相同才生成固定 mtime、
-属主、权限和成员顺序的 `tar.gz`：
+属主、权限和成员顺序的双二进制发布目录：
 
 ```bash
 ./scripts/build-linux-release.sh --repository /absolute/path/to/upstream-mirror
 
-release_stem=dist/shadowsocks-rust-plus-v1.24.0-x86_64-unknown-linux-musl
+release_dir=dist
 ./scripts/sign-release.sh \
-  --archive "$release_stem.tar.gz" \
-  --manifest "$release_stem.manifest.json" \
-  --checksum "$release_stem.tar.gz.sha256" \
+  --release-manifest "$release_dir/release-manifest.json" \
   --private-key /secure/offline/release-private.pem \
-  --output "$release_stem.manifest.json.sig"
+  --output "$release_dir/release-manifest.sig"
 ./scripts/verify-release.sh \
-  --archive "$release_stem.tar.gz" \
-  --manifest "$release_stem.manifest.json" \
-  --checksum "$release_stem.tar.gz.sha256" \
-  --signature "$release_stem.manifest.json.sig" \
+  --release-manifest "$release_dir/release-manifest.json" \
+  --signature "$release_dir/release-manifest.sig" \
   --public-key /secure/release-public.pem
 ```
 
@@ -118,8 +125,8 @@ release_stem=dist/shadowsocks-rust-plus-v1.24.0-x86_64-unknown-linux-musl
 `prepare-source.sh` 校验精确 tag/commit 并零 fuzz 应用 overlay。发布构建要求当前 overlay
 工作树干净。固定版本见 [`packaging/release-toolchain.lock`](packaging/release-toolchain.lock)。
 manifest 包含版本、上游 commit、overlay commit、目标、`SOURCE_DATE_EPOCH`、两次独立构建记录、
-完整工具链和 `ssserver` SHA-256；验签工具还会验证外部 detached 签名、归档 SHA-256、包内外
-manifest、ELF64/x86_64 头和确定性归档元数据。发布私钥必须离线保管，不能放入仓库或构建主机。
+完整工具链和两个 ELF 的 SHA-256；验签工具还会验证 detached 签名、两个二进制 checksum、
+manifest 字段、ELF64/x86_64 头和确定性输出元数据。发布私钥必须离线保管，不能放入仓库或构建主机。
 overlay 还把上游默认的实时时钟 build timestamp 改为从 `SOURCE_DATE_EPOCH` 派生的固定 UTC 值；
 未经过发布脚本显式设置时显示 `unknown`，避免伪造可复现结果。
 
@@ -317,6 +324,7 @@ exporter 是统计启用时的必要服务，而不是可选旁路：
 - [安装、监控与回滚](docs/OPERATIONS.md)：生产前检查、systemd、采集、重启屏障和回滚。
 - [固定上游基线](docs/UPSTREAM_BASELINE.md)：tag/commit、已知测试基线和升级规则。
 - [参考性能基线](docs/PERFORMANCE.md)：快照规模与回环数据面对照结果、局限和复测要求。
+- [用户成功访问审计规格](docs/USER_ACCESS_AUDIT.md)：审计事件、ingest/spool/export 协议、HMAC、保留和验收合同。
 - [测试与性能](tests/README.md)：自动化测试、集成测试和 benchmark 运行方式。
 
 ## 范围边界

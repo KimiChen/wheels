@@ -11,6 +11,19 @@ require_command patch
 require_command python3
 require_command rg
 
+[[ -f "$SHADOWSOCKS_RUST_PLUS_ROOT/config/auditd.example.json" ]] || \
+  die "缺少 auditd 配置样例"
+[[ -f "$SHADOWSOCKS_RUST_PLUS_ROOT/packaging/shadowsocks-auditd.service" ]] || \
+  die "缺少 shadowsocks-auditd systemd 模板"
+[[ -f "$SHADOWSOCKS_RUST_PLUS_ROOT/packaging/shadowsocks-auditd.sysusers" ]] || \
+  die "缺少 auditd sysusers 模板"
+[[ -f "$SHADOWSOCKS_RUST_PLUS_ROOT/packaging/shadowsocks-auditd.tmpfiles" ]] || \
+  die "缺少 auditd tmpfiles 模板"
+[[ -f "$SHADOWSOCKS_RUST_PLUS_ROOT/tests/mock_collector.py" ]] || \
+  die "缺少 mock collector"
+[[ -f "$SHADOWSOCKS_RUST_PLUS_ROOT/tests/test_mock_collector.py" ]] || \
+  die "缺少 mock collector 测试"
+
 for script_path in "$SHADOWSOCKS_RUST_PLUS_ROOT"/scripts/*.sh; do
   bash -n "$script_path"
 done
@@ -34,9 +47,17 @@ for patch_path in "$SHADOWSOCKS_RUST_PLUS_ROOT"/patches/*.patch; do
     die "补丁未列入 series：$patch_name"
 done
 
+grep -Fxq "0003-user-audit.patch" "$SHADOWSOCKS_RUST_PLUS_ROOT/patches/series" || \
+  die "patches/series 未包含 0003-user-audit.patch"
+[[ -f "$SHADOWSOCKS_RUST_PLUS_ROOT/patches/0003-user-audit.patch" ]] || \
+  die "缺少 0003-user-audit.patch"
+
 python3 -m py_compile \
   "$SHADOWSOCKS_RUST_PLUS_ROOT"/scripts/*.py \
   "$SHADOWSOCKS_RUST_PLUS_ROOT"/tests/*.py
+
+python3 -m json.tool "$SHADOWSOCKS_RUST_PLUS_ROOT/config/server.example.json" >/dev/null
+python3 -m json.tool "$SHADOWSOCKS_RUST_PLUS_ROOT/config/auditd.example.json" >/dev/null
 
 temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/shadowsocks-rust-plus.XXXXXX")"
 trap 'safe_remove_temp_dir "$temp_dir"' EXIT

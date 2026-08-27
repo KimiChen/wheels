@@ -140,16 +140,55 @@ build_once() {
       --locked \
       --release \
       --target "$RELEASE_TARGET" \
-      --features user-stats \
+      --features user-audit \
       --bin ssserver
 }
 
+build_auditd_once() {
+  local prepared_source="$1"
+  local target_dir="$2"
+  local encoded_flags
+
+  encoded_flags="--remap-path-prefix=${prepared_source}=/usr/src/shadowsocks-rust"
+  encoded_flags+=$'\x1f'
+  encoded_flags+="--remap-path-prefix=${target_dir}=/usr/src/target"
+  encoded_flags+=$'\x1f'
+  encoded_flags+="--remap-path-prefix=${release_cargo_home}=/usr/local/cargo"
+  encoded_flags+=$'\x1f-C\x1flink-arg=-Wl,--build-id=none\x1f-C\x1fstrip=symbols'
+
+  CARGO_ENCODED_RUSTFLAGS="$encoded_flags" \
+    CARGO_INCREMENTAL=0 \
+    CARGO_PROFILE_RELEASE_INCREMENTAL=false \
+    CARGO_TARGET_DIR="$target_dir" \
+    LANG=C \
+    LC_ALL=C \
+    SOURCE_DATE_EPOCH="$source_date_epoch" \
+    SHADOWSOCKS_BUILD_TIME_UTC="$stable_build_time_utc" \
+    TZ=UTC \
+    ZERO_AR_DATE=1 \
+    cargo zigbuild \
+      --manifest-path "$prepared_source/Cargo.toml" \
+      --locked \
+      --release \
+      --target "$RELEASE_TARGET" \
+      --features user-audit \
+      --bin shadowsocks-auditd
+}
+
+[[ -f "$source_a/crates/shadowsocks-auditd/Cargo.toml" ]] || \
+  die "user-audit 已启用但准备源码缺少 shadowsocks-auditd crate"
+
 build_once "$source_a" "$target_a"
+build_auditd_once "$source_a" "$target_a"
 build_once "$source_b" "$target_b"
+build_auditd_once "$source_b" "$target_b"
 
 binary_a="$target_a/$RELEASE_TARGET/release/ssserver"
 binary_b="$target_b/$RELEASE_TARGET/release/ssserver"
+auditd_binary_a="$target_a/$RELEASE_TARGET/release/shadowsocks-auditd"
+auditd_binary_b="$target_b/$RELEASE_TARGET/release/shadowsocks-auditd"
 [[ -x "$binary_a" && -x "$binary_b" ]] || die "独立构建未生成两个 ssserver"
+[[ -x "$auditd_binary_a" && -x "$auditd_binary_b" ]] || die "独立构建未生成两个 shadowsocks-auditd"
 if ! cmp -s "$binary_a" "$binary_b"; then
   printf '第一次构建 SHA-256：%s\n' "$(shasum -a 256 "$binary_a" | awk '{ print $1 }')" >&2
   printf '第二次构建 SHA-256：%s\n' "$(shasum -a 256 "$binary_b" | awk '{ print $1 }')" >&2
@@ -159,14 +198,26 @@ if ! cmp -s "$binary_a" "$binary_b"; then
   fi
   die "两次独立构建的 ssserver 不一致，拒绝发布"
 fi
+if ! cmp -s "$auditd_binary_a" "$auditd_binary_b"; then
+  printf '第一次 auditd 构建 SHA-256：%s\n' "$(shasum -a 256 "$auditd_binary_a" | awk '{ print $1 }')" >&2
+  printf '第二次 auditd 构建 SHA-256：%s\n' "$(shasum -a 256 "$auditd_binary_b" | awk '{ print $1 }')" >&2
+  if [[ "${SHADOWSOCKS_RUST_PLUS_KEEP_FAILED_BUILD:-0}" == "1" ]]; then
+    trap - EXIT
+    printf '失败构建保留在：%s\n' "$temp_dir" >&2
+  fi
+  die "两次独立构建的 shadowsocks-auditd 不一致，拒绝发布"
+fi
 
 binary_sha256="$(shasum -a 256 "$binary_a" | awk '{ print $1 }')"
 [[ "$binary_sha256" =~ ^[0-9a-f]{64}$ ]] || die "无法计算 ssserver SHA-256"
+auditd_binary_sha256="$(shasum -a 256 "$auditd_binary_a" | awk '{ print $1 }')"
+[[ "$auditd_binary_sha256" =~ ^[0-9a-f]{64}$ ]] || die "无法计算 shadowsocks-auditd SHA-256"
 
 mkdir -p "$output_dir"
 output_dir="$(cd "$output_dir" && pwd -P)"
-"$SHADOWSOCKS_RUST_PLUS_ROOT/scripts/release-artifact.py" package \
+"$SHADOWSOCKS_RUST_PLUS_ROOT/scripts/release-artifact.py" package-multi \
   --binary "$binary_a" \
+  --auditd-binary "$auditd_binary_a" \
   --output-dir "$output_dir" \
   --version "$(lock_value tag)" \
   --upstream-commit "$(lock_value commit)" \
@@ -181,4 +232,5 @@ output_dir="$(cd "$output_dir" && pwd -P)"
   --zlib-version "$actual_zlib_version"
 
 printf '可复现性检查通过：两次独立构建 SHA-256 均为 %s\n' "$binary_sha256"
+printf 'shadowsocks-auditd SHA-256：%s\n' "$auditd_binary_sha256"
 printf '下一步：离线签署 manifest，再用 scripts/verify-release.sh 验签；本脚本不部署产物。\n'

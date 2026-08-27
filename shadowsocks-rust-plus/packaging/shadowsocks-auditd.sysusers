@@ -1,0 +1,12 @@
+# Dedicated server/audit accounts and access groups.
+u shadowsocks - "Shadowsocks server"
+g shadowsocks -
+u shadowsocks-audit - "Shadowsocks audit daemon"
+g shadowsocks-audit-ingest -
+g shadowsocks-audit-export -
+# The server producer is the only non-daemon member of the ingest group.
+m shadowsocks shadowsocks-audit-ingest
+m shadowsocks-audit shadowsocks-audit-ingest
+m shadowsocks-audit shadowsocks-audit-export
+# The configured export peer (for example, audit-exporter) is external and
+# must be added to shadowsocks-audit-export by deployment tooling.

@@ -4,11 +4,12 @@ set -euo pipefail
 source "$(dirname "$0")/lib.sh"
 
 usage() {
-  printf '用法：%s [--source <已准备源码目录>] [--no-integration]\n' "$(basename "$0")" >&2
+  printf '用法：%s [--source <已准备源码目录>] [--no-integration] [--without-audit]\n' "$(basename "$0")" >&2
 }
 
 source_dir=""
 run_integration=1
+run_audit=1
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --source)
@@ -18,6 +19,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --no-integration)
       run_integration=0
+      shift
+      ;;
+    --without-audit)
+      run_audit=0
       shift
       ;;
     *)
@@ -40,9 +45,26 @@ else
 fi
 
 target_dir="$SHADOWSOCKS_RUST_PLUS_ROOT/.cache/cargo-target"
+host_os="$(uname -s)"
+audit_native=0
+if [[ "$host_os" == "Linux" ]]; then
+  audit_native=1
+fi
+
+features=user-stats
+if [[ "$run_audit" -eq 1 && "$audit_native" -eq 1 ]]; then
+  features=user-audit
+fi
+workspace_args=(--workspace --lib --bins --features "$features")
+if [[ "$audit_native" -eq 0 ]]; then
+  # The auditd crate has an intentional Linux-only compile gate.  Keep the
+  # cross-platform workspace regression useful by excluding that member from
+  # the host test run; it is checked below for a Linux target instead.
+  workspace_args+=(--exclude shadowsocks-auditd)
+fi
 CARGO_TARGET_DIR="$target_dir" cargo test \
   --manifest-path "$source_dir/Cargo.toml" \
-  --locked --workspace --lib --bins --features user-stats
+  --locked "${workspace_args[@]}"
 
 CARGO_TARGET_DIR="$target_dir" cargo test \
   --manifest-path "$source_dir/Cargo.toml" \
@@ -55,16 +77,52 @@ CARGO_TARGET_DIR="$target_dir" cargo check \
   --manifest-path "$source_dir/Cargo.toml" \
   --locked -p shadowsocks-service --no-default-features --features server
 
+if [[ "$run_audit" -eq 1 ]]; then
+  audit_manifest="$source_dir/crates/shadowsocks-auditd/Cargo.toml"
+  protocol_manifest="$source_dir/crates/shadowsocks-audit-protocol/Cargo.toml"
+  [[ -f "$protocol_manifest" ]] || die "user-audit 测试缺少 shadowsocks-audit-protocol crate"
+  [[ -f "$audit_manifest" ]] || die "user-audit 测试缺少 shadowsocks-auditd crate"
+  CARGO_TARGET_DIR="$target_dir" cargo test \
+    --manifest-path "$source_dir/Cargo.toml" \
+    --locked -p shadowsocks-audit-protocol
+  if [[ "$audit_native" -eq 1 ]]; then
+    CARGO_TARGET_DIR="$target_dir" cargo test \
+      --manifest-path "$source_dir/Cargo.toml" \
+      --locked -p shadowsocks-auditd
+  else
+    # Service audit code is target-independent apart from the daemon client;
+    # exercise it natively, then compile the Linux-only daemon for a target
+    # triple without trying to execute foreign test binaries.
+    CARGO_TARGET_DIR="$target_dir" cargo test \
+      --manifest-path "$source_dir/Cargo.toml" \
+      --locked -p shadowsocks-service --no-default-features --features user-audit --lib
+
+    audit_target="${SHADOWSOCKS_AUDIT_CHECK_TARGET:-x86_64-unknown-linux-gnu}"
+    audit_libdir="$(rustc --print target-libdir --target "$audit_target" 2>/dev/null || true)"
+    [[ -d "$audit_libdir" ]] || die "非 Linux 主机需要已安装 Rust target 以检查 Linux-only auditd：$audit_target"
+    printf '非 Linux 主机：auditd 使用 %s 做跨目标 cargo check（不运行 foreign test binary）。\n' "$audit_target" >&2
+    CARGO_TARGET_DIR="$target_dir" cargo check \
+      --manifest-path "$source_dir/Cargo.toml" \
+      --locked --target "$audit_target" -p shadowsocks-auditd --all-targets
+  fi
+fi
+
 if [[ "$run_integration" -eq 1 ]]; then
   require_command python3
   python3 "$SHADOWSOCKS_RUST_PLUS_ROOT/tests/test_cluster_users.py"
   python3 "$SHADOWSOCKS_RUST_PLUS_ROOT/tests/test_http_unix.py"
   python3 "$SHADOWSOCKS_RUST_PLUS_ROOT/tests/test_release_artifact.py"
   python3 "$SHADOWSOCKS_RUST_PLUS_ROOT/tests/test_settlement.py"
+  python3 "$SHADOWSOCKS_RUST_PLUS_ROOT/tests/test_mock_collector.py"
+  python3 "$SHADOWSOCKS_RUST_PLUS_ROOT/tests/test_audit_packaging.py"
   [[ -f "$SHADOWSOCKS_RUST_PLUS_ROOT/tests/integration_user_stats.py" ]] || \
     die "缺少真实数据面集成测试：tests/integration_user_stats.py"
   CARGO_TARGET_DIR="$target_dir" \
     python3 "$SHADOWSOCKS_RUST_PLUS_ROOT/tests/integration_user_stats.py" --source "$source_dir"
+  if [[ "$run_audit" -eq 1 && -f "$SHADOWSOCKS_RUST_PLUS_ROOT/tests/integration_audit.py" ]]; then
+    CARGO_TARGET_DIR="$target_dir" \
+      python3 "$SHADOWSOCKS_RUST_PLUS_ROOT/tests/integration_audit.py" --source "$source_dir"
+  fi
 fi
 
 printf '测试通过。\n'

@@ -1,0 +1,37 @@
+[Unit]
+Description=shadowsocks-rust-plus access audit daemon
+After=local-fs.target
+Before=shadowsocks-rust-plus.service
+
+[Service]
+Type=simple
+User=shadowsocks-audit
+Group=shadowsocks-audit
+UMask=0077
+ExecStart=/usr/local/bin/shadowsocks-auditd --config /etc/shadowsocks-audit/auditd.json
+Restart=on-failure
+RestartSec=3s
+TimeoutStopSec=10s
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_UNIX
+
+RuntimeDirectory=shadowsocks-audit
+RuntimeDirectoryMode=0750
+StateDirectory=shadowsocks-audit
+StateDirectoryMode=0700
+ReadOnlyPaths=/etc/shadowsocks-audit
+ReadWritePaths=/run/shadowsocks-audit /var/lib/shadowsocks-audit
+
+[Install]
+WantedBy=multi-user.target

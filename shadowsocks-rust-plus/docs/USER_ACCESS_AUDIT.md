@@ -4,9 +4,13 @@
 >
 > 目标读者：独立负责 `shadowsocks-rust-plus` 节点侧审计功能的开发同事
 >
-> 规范版本：1
+> 规范版本：2
 >
 > 最后决策日期：2026-08-27
+>
+> 版本 2 变更：落实同日评审修正——UDP 去重窗口固定 60 秒、acked 保留固定 86400 秒、auditd 配置
+> 改为逐字段校验表、producer ACK 超时与 auditd 写截止对齐、UDP shard index 与固定常量清单明确、
+> runtime 起点外部依赖声明及术语统一。
 
 本文是节点侧成功访问审计的规范性合同。实现者不需要再决定产品语义、组件边界、失败策略、
 存储上限或协议形态。文中的“必须”“不得”“应当”分别对应 MUST、MUST NOT、SHOULD。
@@ -171,12 +175,13 @@ struct AuditEmitter {
     notify: Arc<Notify>,
     diagnostics: Arc<DiagnosticAccumulators>,
     udp_windows: Arc<UdpAuditWindowCache>,
-    lifecycle_state: AtomicU64, // high bit CLOSED, low 63 bits active try_emit guards
+    lifecycle_state: AtomicU64, // high bit CLOSED, low 63 bits active observation guards
 }
 
 #[cfg(feature = "user-audit")]
 impl UserStatsRegistry {
-    fn new_with_audit(node_id: impl Into<String>, max_identities: usize) -> io::Result<Arc<Self>>;
+    fn new_with_audit(node_id: impl Into<String>, max_identities: usize)
+        -> Result<Arc<Self>, AuditInitError>;
 }
 
 impl ServerStatsHandle {
@@ -188,7 +193,8 @@ feature-off 和 feature-on 但未配置 `user_audit` 时，现有 `UserStatsRegi
 任何审计元数据。`user-audit` feature 下新增 `UserStatsRegistry::new_with_audit()`（可共享 private
 `new_inner`）；只有配置存在且通过验证时，调用它在读取现有 `started_at_unix_ms` 的同时捕获一次
 `Instant::now()`，并构造每个 process runtime 唯一的 `Arc<AuditRuntimeMetadata>`。不得用墙钟差值生成
-`runtime_monotonic_ms`。
+`runtime_monotonic_ms`。`new_with_audit()` 不执行任何 I/O，失败返回专用的 `AuditInitError`（属于
+配置错误，必须阻止启动），不得复用 `io::Result`。
 
 audit-enabled registry 的 `register_server()` 构造与该 stable server record/generation 绑定的 server
 metadata；`register_user()` 构造与 active user record/generation 绑定的 identity metadata 和
@@ -206,6 +212,8 @@ typed handle 在 registry 注册路径构造并注入 `ServiceContext`；TCP/UDP
 closed/active lifecycle state。server builder 通过新增 `ServiceContext::set_user_audit_emitter()` 把同一个
 emitter clone 给所有 static server；TCP tracker 和 UDP association 只能继续 clone 这个 handle，禁止每个
 server 各建 sequence、queue、cache 或 supervisor，否则第二个 ingest hello 会被 `producer_busy` 拒绝。
+术语约定：AuditEmitter 是进程内共享状态句柄，AuditSupervisor 是消费 queue 的唯一 task，AuditClient
+只是 AuditSupervisor 每次连接 session 的内部实现；relay 只持有 emitter。
 
 每次审计 observation 必须先调用 `begin_observation()`：用 CAS 在 CLOSED bit 未设置时增加 active count，
 返回的 RAII guard 在所有路径减一。TCP 在双向条件刚满足时取得 guard；UDP 在完整 send 成功后、访问 shard
@@ -222,7 +230,7 @@ relay，2 秒总 timeout 仍由根 launcher 控制。该 skipped counter 不属�
 表示至少该值；若进程在 join 稳定点前被 SIGKILL，则允许没有 final journald。
 
 主要接线位置固定为：配置和 feature 在 `crates/shadowsocks-service/src/config.rs`，不可变元数据与
-AuditClient handle 在 `crates/shadowsocks-service/src/server/context.rs`，成功条件分别在
+`Arc<AuditEmitter>` handle 在 `crates/shadowsocks-service/src/server/context.rs`，成功条件分别在
 `server/tcprelay.rs` 和 `server/udprelay.rs`。不得通过用户累计计数器前后相减推算单连接状态。
 
 ## 5. Cargo feature 与配置合同
@@ -271,7 +279,6 @@ crossbeam-queue = { version = "0.3.13", optional = true }
     "ingest_socket_path": "/run/shadowsocks-audit/ingest/ingest.sock",
     "auditd_user": "shadowsocks-audit",
     "queue_capacity": 4096,
-    "udp_target_window_seconds": 60,
     "max_udp_targets_per_association": 256,
     "max_udp_target_windows": 65536
   }
@@ -281,7 +288,6 @@ crossbeam-queue = { version = "0.3.13", optional = true }
 | 字段 | 默认值 | 可配置范围 | 编译期硬上限 |
 | --- | ---: | ---: | ---: |
 | `queue_capacity` | 4096 | 256–4096 | 4096 |
-| `udp_target_window_seconds` | 60 | 10–3600 | 3600 |
 | `max_udp_targets_per_association` | 256 | 1–256 | 256 |
 | `max_udp_target_windows` | 65536 | 16384–65536 | 65536 |
 | 单事件 JSON | 不可配置 | 不适用 | 8192 bytes |
@@ -292,12 +298,16 @@ crossbeam-queue = { version = "0.3.13", optional = true }
 
 - `user_audit` 使用 `deny_unknown_fields`；
 - node ID 只复用 `user_stats.node_id`，不得重复配置第二份 node ID；
-- `ingest_socket_path` 必须是规范绝对路径，不含 `.`、`..`、空组件或 symlink parent；
+- `ingest_socket_path` 必须是规范绝对路径，不含 `.`、`..`、空组件或 symlink parent；symlink
+  parent 在启动解析配置时校验一次，运行期由 `SO_PEERCRED`/socket inode owner 校验和 root 管理的
+  父目录（第 11 节）兜底，路径组件不得可被非特权账号替换；
 - `auditd_user` 是部署时配置的专用 daemon 账号，示例值为 `shadowsocks-audit`；ssserver 启动时解析为
   UID，连接后同时校验
-  `SO_PEERCRED.uid` 和 socket inode owner UID；
+  `SO_PEERCRED.uid` 和 socket inode owner UID；校验失败视为连接失败：按第 7.3 节退避重连、
+  置 producer health degraded、写限频 journald，不得影响代理，也不得使 ssserver 退出；
 - 审计不得要求、设置或改写现有顶层 `udp_max_associations`，也不得改变数据面既有 TTL 或淘汰行为；
   UDP NAT association 的容量和生命周期仍完全由原数据面配置决定；
+- UDP 去重窗口固定为 60 秒（第 1 节决策），不提供配置项；
 - 审计窗口固定分为 64 个 shard；使用 checked arithmetic 验证 `max_udp_target_windows` 能被 64 整除，
   且每 shard capacity 不小于 `max_udp_targets_per_association`。默认值为
   `65536 / 64 = 1024` 项/shard；
@@ -329,26 +339,52 @@ CLI 固定为 `shadowsocks-auditd [--config <path>]`：省略参数时读取
   "segment_max_age_seconds": 60,
   "group_commit_max_events": 256,
   "group_commit_max_delay_ms": 100,
-  "acked_retention_seconds": 86400,
   "export_max_response_bytes": 8388608,
   "export_hmac_key_file": "/etc/shadowsocks-audit/export-hmac"
 }
 ```
 
-这些默认值构成发布验收 profile。自动化测试可以使用更小值，部署配置不得超过以下硬上限：
+这些默认值构成发布验收 profile。部署方只能在下列范围内调整（自动化测试可以使用更小值）：
 
-- spool 硬上限 5 GiB；
-- segment 硬上限 4 MiB；
-- export body 硬上限 8 MiB；
-- group commit 最多 256 条或 100 ms，以先到者为准；
-- 已确认副本正常保留 86400 秒；
+| 字段 | 默认值 | 可配置范围 | 编译期硬上限 |
+| --- | ---: | ---: | ---: |
+| `max_spool_bytes` | 5368709120 | 67108864–5368709120 | 5368709120 |
+| `min_free_bytes` | 1073741824 | 268435456–5368709120 | 5368709120 |
+| `segment_max_bytes` | 4194304 | 16384–4194304 | 4194304 |
+| `segment_max_age_seconds` | 60 | 1–3600 | 3600 |
+| `group_commit_max_events` | 256 | 1–256 | 256 |
+| `group_commit_max_delay_ms` | 100 | 1–100 | 100 |
+| `export_max_response_bytes` | 8388608 | 4194304–8388608 | 8388608 |
+
+另需满足：
+
 - `max_spool_bytes` 必须大于 `2 × segment_max_bytes`；
-- `min_free_bytes` 必须至少 256 MiB 且小于所在文件系统总容量。
+- `min_free_bytes` 必须至少 256 MiB 且小于所在文件系统总容量；
+- `segment_max_bytes` 必须不小于协议 crate 计算的最大单条 record 字节数（8192 字节事件 +
+  wrapper 开销 + LF），否则空 segment 可能被单条超限 record 静默写超；
+- `export_max_response_bytes` 必须不小于 `segment_max_bytes`；默认 8 MiB 是 segment 硬上限的
+  两倍余量，用于容纳恢复路径中因单 record 超过配置上限而略超的历史 segment；
+- `producer_user` 与 `export_peer_user` 必须解析为两个不同的 UID。
 
-auditd 配置同样拒绝未知字段、symlink parent、错误 owner/mode、相对路径和重复 node ID。
+auditd 配置同样拒绝未知字段、symlink parent、错误 owner/mode 和相对路径；symlink parent 在启动时、
+任何 socket/文件创建前校验一次，父目录权限要求见第 11 节。
 
 HMAC key 文件必须恰好为 64 个小写十六进制字符加一个可选末尾 LF，解码后为 32 个随机字节。
 每节点使用不同 key，不得复用 iPSK、uPSK、stats CA、release signing key 或其他节点 key。
+
+### 5.4 固定常量（不可配置）
+
+以下常量第一版固定，不进入任何配置文件；改动必须先对本文件升版：
+
+- UDP 去重窗口 60 秒；审计窗口 64 shard（第 5.2/6.4 节）；
+- acked 副本正常保留 86400 秒（24 小时），容量/磁盘水位优先（第 1/9.5/10.1 节）；
+- in-flight 硬上限 256 条；producer 读 ACK 超时 3 秒（第 7.2/7.3 节）；
+- ingest 最多 4 连接、hello/partial frame/response 截止 2 秒；export 最多 4 并发连接、
+  请求/响应截止 5 秒（第 8.1/10.1 节）；
+- 单事件 JSON 与 ingest frame 上限 8192 bytes（第 5.2/8.1 节）；
+- UDP contention snapshot 与同类 journald 错误各 60 秒限频（第 6.5/7.2 节）；
+- HMAC timestamp 偏差 300 秒；nonce cache 10 分钟 / 4096 条（第 10.2 节）；
+- dedup LRU 65536 条（第 8.3 节）；tombstone ledger 4096 项、receipt 保留 7 天（第 9.5 节）。
 
 ## 6. 成功事件定义
 
@@ -493,7 +529,8 @@ cooldown 和 emit。send 失败或 short write 不得返回地址、更新 coold
 
 - 审计使用独立于 UDP NAT map 的 process-wide `UdpAuditWindowCache`，固定 64 个
   `std::sync::Mutex<AuditWindowShard>`；不得改动或借用现有 association LRU capacity；
-- shard index 固定取随机 `association_id` 前 8 bytes 的 big-endian `u64 & 63`；一个 association 的所有
+- shard index 固定取 `association_id` 128-bit 随机值的前 8 个 byte（非 hex 文本）按 big-endian
+  组成的 `u64 & 63`；一个 association 的所有
   target 必在同一 shard。`shard_capacity = max_udp_target_windows / 64`，默认 profile 为 1024；LRU 与 association
   count map 都以 `(server_id, association_id)` 区分 lineage，总窗口严格不超过配置值；
 - 每个 association 最多保留配置的 `max_udp_targets_per_association`（默认 profile 为 256）个 key；插入下一项时，
@@ -589,8 +626,8 @@ cooldown 和 emit。send 失败或 short write 不得返回地址、更新 coold
   access drop，避免递归生成 gap；
 - 不得包含被丢事件的 identity 或 target。
 
-`sequence_exhausted` 无法再分配 producer gap 的 audit sequence，因此只进入本机 health counter 和
-限频 journald；代理继续服务，禁止回绕。
+`sequence_exhausted` 是 producer 内部状态而非 wire diagnostic：无法再分配 producer gap 的 audit
+sequence，因此只进入本机 health counter 和限频 journald；代理继续服务，禁止回绕。
 
 `udp_window_contention` 由 ssserver 生成，用于披露已经成功发送、但因审计 shard lock 正忙而没有执行
 cooldown/access-event 判断的数据报；它不等于确定丢失了相同数量的 access event：
@@ -727,8 +764,8 @@ relay task 不得：
   in-flight，然后才消费 access queue；两类 producer diagnostic 都不调用 `force_push()`；
 - 每个 `(reason, permanent_nack_code)` 同时最多存在一个 producer gap snapshot/in-flight；当前最多 5 个
   bucket（queue、encode 和 3 个永久 NACK code），UDP contention 同时最多一个 snapshot/in-flight；因此
-  256 个 in-flight 槽中至少 250 个可供 access。同一 accumulator 的新计数必须等待上一诊断 ACK 或永久
-  失败处理完，禁止诊断正反馈饿死 access queue；
+  256 个 in-flight 槽中至少 250 个可供 access。同一 accumulator 的下一次 snapshot 必须等待上一诊断
+  ACK 或永久失败处理完（期间新计数继续原子累加），禁止诊断正反馈饿死 access queue；
 - 任一 producer diagnostic 构造/序列化失败或收到合法永久 NACK 时，把 snapshot 的原始计数和边界合并
   回原 accumulator，增加 health counter 并最多每 60 秒重试一次；本轮允许继续处理 access，禁止 tight
   loop 或递归 gap；
@@ -746,7 +783,7 @@ producer diagnostics 不是访问事件，字段集合严格以第 6.5 节为准
 - 强类型序列化发生在 supervisor 从 queue 取出 draft 后、放入 in-flight 前；序列化失败累计
   `encode_error`，不得在 relay task 序列化；
 - 首次重连等待 100 ms，指数退避到 5 秒并加入 0–20% jitter；成功收到合法 ACK 后重置；
-- 每次发送和读取 ACK 超时 1 秒；超时只触发后台重连；
+- 每次发送和读取 ACK 超时 3 秒，不短于第 8.1 节 auditd 响应 2 秒写截止；超时只触发后台重连；
 - ACK 丢失时以完全相同的 event ID 和 JSON bytes 重试；
 - 256 条 in-flight 在重连时优先重试；未发送 queue 独立使用淘汰最老策略保留最新事件；
 - auditd 在 ssserver 启动时不可用，ssserver 仍正常监听并代理；
@@ -783,7 +820,7 @@ auditd 运行故障，必须通过单元测试、故障注入、fuzz 和 canary 
 - request 和 response 使用相同 framing；
 - 单帧 payload 最大 8192 bytes；长度 0、超长、partial frame 超时或尾随 JSON 数据均断开；
 - 长连接第一帧必须是 hello；hello 前的 event 永久拒绝；
-- auditd 最多同时接受 4 个 ingest 连接，但最多一个完成 hello；hello 必须在 accept 后 2 秒内完成；
+- auditd 最多同时接受 4 个 ingest 连接，但最多一个完成 hello；
 - hello 必须在 accept 后 2 秒内完整读完；hello ACK 后允许连接在 frame 边界无限 idle，不对等待下一帧
   第一个 byte 设置 read timeout；一旦读到 length prefix 的第一个 byte，其余 3-byte length 和完整 payload
   必须在同一个 2 秒 deadline 内读完；所有 response 必须在 2 秒内完整写完；
@@ -896,7 +933,8 @@ retryable event_nack 也保留全部 in-flight 并断开重连；重放时仍以
 
 - 相同 ID、相同 payload 返回原 ACK，不重复写入；
 - 相同 ID、不同 payload 返回 `event_id_conflict` 并断开；
-- auditd 重启后允许同一 event ID 被再次写入；controller 必须按 event ID 去重。
+- LRU 淘汰或 auditd 重启后，允许同一 event ID 被再次写入并分配新的 spool sequence；auditd 不做
+  持久去重，controller 必须按 event ID 去重。
 
 ACK 只表示节点日志已同步到本机文件，不是允许代理流量的凭证。
 
@@ -958,11 +996,13 @@ nullable 字段和所有 variant 提供 golden vectors。
   `next_spool_sequence` 和 `pending_state_reset`；正常时 pending 为 null，reset 时为包含固定
   `gap_event_id`、occurred time、nullable lost epoch/sequence 范围的 object。文件通过同目录 temp file 的
   write、`fdatasync`、atomic rename 和目录 `fsync` 更新；
-- group writer 最多聚合 256 条或 100 ms；依次完成 record `write_all`、open file `fdatasync`、把
+- group writer 最多聚合配置的 `group_commit_max_events` 条或 `group_commit_max_delay_ms` 毫秒
+  （默认 256 条 / 100 ms），以先到者为准；依次完成 record `write_all`、open file `fdatasync`、把
   `next_spool_sequence` 原子持久化到 `state.json` 后才 ACK；任一步失败均不 ACK；
-- append 前先序列化完整 wrapper 加 LF；若非空 open 加上该 record 将超过 4194304 bytes，则先 seal，
-  再写入新 open；等于上限允许；
-- 非空 open segment 达 4 MiB 或年龄 60 秒时封口，以先到者为准；空 segment 永不 seal/export；
+- append 前先序列化完整 wrapper 加 LF；若非空 open 加上该 record 将超过配置的 `segment_max_bytes`
+  （默认 4194304 bytes），则先 seal，再写入新 open；等于上限允许；
+- 非空 open segment 达到配置的 `segment_max_bytes` 或年龄达到 `segment_max_age_seconds`（默认 60
+  秒）时封口，以先到者为准；空 segment 永不 seal/export；
 - 单条 event 不得跨 segment；
 - seal 顺序固定为：在 sealed 同级创建临时 batch 目录；同步并关闭 open file；把
   `open/current.ndjson` rename 为临时目录内 `segment.ndjson` 后同时 `fsync(open/)` 和临时目录；计算 raw
@@ -1002,7 +1042,10 @@ nullable 字段和所有 variant 提供 golden vectors。
 - `state.json` 缺失、非法、next 小于等于扫描最大值，或无法证明其属于当前 open epoch 时，必须封口或
   quarantine 可恢复的旧 open，并原子创建新的随机 epoch、sequence 1 和非空 `pending_state_reset`；新
   epoch 第一个可写 record 必须使用 pending 中固定 ID 的 `state_reset` spool gap，旧 epoch 和无法确定的
-  sequence 范围允许为 null；该 gap 与 next sequence durable 后才把 pending 原子清为 null；
+  sequence 范围允许为 null；该 gap 与 next sequence durable 后才把 pending 原子清为 null；group writer
+  在 record `fdatasync` 与 `state.json` 持久化之间崩溃也会落入该分支，此时换 epoch 并生成
+  `state_reset` gap 是有意的保守行为，不代表确认丢失，无法确定的 lost 字段必须为 null，controller
+  不得把单独的 `state_reset` 等同于确认丢失；
 - 启动发现 pending 非空时先按固定 gap ID 扫描：若 gap 已 durable，则把 next 提升到同 epoch 扫描最大值
   加一并清 pending；若不存在则用 state 中同一 ID 补写后再清。仅这个可验证的 pending crash window 允许
   修复 `next <= scanned_max` 而不再次换 epoch；
@@ -1020,11 +1063,12 @@ nullable 字段和所有 variant 提供 golden vectors。
 
 容量计算包括 open、sealed、acked、quarantine、state、tombstone ledger 和临时文件。
 
-触发条件：总量即将超过 5368709120 bytes，或文件系统可用空间低于 1073741824 bytes。
+触发条件：总量即将超过配置的 `max_spool_bytes`（默认 5368709120 bytes），或文件系统可用空间低于
+配置的 `min_free_bytes`（默认 1073741824 bytes）。
 
 清理顺序：
 
-1. 删除超过 24 小时的 acked segment；
+1. 删除超过 86400 秒（24 小时，固定）的 acked segment；
 2. 若仍超限，提前删除最老 acked segment；
 3. 删除最老 quarantine batch；删除前必须按下文同步 `quarantine_pending`，不得只在内存中“安排” gap；
 4. 删除最老 sealed、尚未 ACK 的 batch；删除前必须先把 batch ID、digest、epoch、sequence 范围、
@@ -1109,7 +1153,8 @@ auditd 在 `/run/shadowsocks-audit/export/export.sock` 提供严格 HTTP/1.1：
 - 同一未 ACK batch 重复 lease 返回相同 raw NDJSON 和 metadata；
 - v1 同时只存在一个逻辑 leased batch；
 - 环形清理可以淘汰 leased batch，之后 ACK 返回 `410 batch_evicted`；
-- 200 lease body 不超过 8 MiB；正常 segment 不超过 4 MiB；
+- 200 lease body 不超过配置的 `export_max_response_bytes`（默认 8 MiB）；正常 segment 不超过配置的
+  `segment_max_bytes`（硬上限 4 MiB）；
 - 不在任何 HTTP intermediary access log、错误响应或 health 中输出 identity、target 或 event body。
 
 204 lease 响应按 HTTP/1.1 明确省略 Content-Length、Content-Type、Transfer-Encoding 和
@@ -1154,7 +1199,7 @@ ACK 行为：
 - batch 未知：404 `unknown_batch`；
 - 已被循环覆盖：410 `batch_evicted`；
 - digest 不同：409 `digest_mismatch`；
-- ACK 成功不得立即删除文件，正常保留 24 小时。
+- ACK 成功不得立即删除文件，正常保留 86400 秒（24 小时，固定）。
 
 若 rename 已完成但 receipt barrier 失败，不得返回 200；重试或 crash recovery 必须从仍存在的 acked
 batch/meta 重建 receipt 后再幂等成功。任何因 5 GiB/1 GiB 水位提前删除的 acked batch，在删除和同步
@@ -1285,7 +1330,7 @@ collector 必须从实际响应 header 构造 canonical bytes并先核对两个 
 intermediary 或其他本机进程不能在不破坏 MAC 的情况下替换 schema、digest 或 batch metadata。
 
 只有请求中 node、nonce 均能够按严格格式解析时，错误响应才携带 response MAC；缺失或格式非法时
-可以返回未签名 400/401。collector 对任何未签名响应一律视为采集失败，不解析 body 或发送 ACK。
+可以返回未签名 400/401。collector 对任何未签名响应一律视为采集失败，不解析 body，也不发送 ACK。
 
 collector 必须验证 response MAC 后才解析或 ACK batch。协议文档和测试必须提供固定 key、请求、响应
 以及期望 HMAC 的 golden vector。
@@ -1367,10 +1412,12 @@ collector 必须：
   先升版并定义超龄 batch 的确定拒绝规则。
 
 `identity_name` 到业务账号的映射完全属于外部系统。无法映射时仍必须保存 access record，不能拒绝整个
-batch。若外部系统需要历史归属，应使用 append-only assignment history，并以已批准 runtime 的
+batch。若外部系统需要历史归属，应使用 append-only assignment history。runtime 起点不随审计事件、
+ingest hello 或 export health 携带，collector 必须另行通过 user-stats exporter 管线按 `runtime_id`
+关联获得 `started_at_unix_ms`；以已批准 runtime 的
 `runtime_started_at_unix_ms + runtime_monotonic_ms`（checked arithmetic）作为归属时间；runtime 不可信、
-缺失或该结果与 `occurred_at_unix_ms` 相差超过 300000 ms 时必须标记 clock ambiguous，不得只用采集时的
-当前映射覆盖历史身份。
+起点缺失或该结果与 `occurred_at_unix_ms` 相差超过 300000 ms 时必须标记 clock ambiguous，不得只用
+采集时的当前映射覆盖历史身份。
 
 ## 13. 安全与隐私
 
