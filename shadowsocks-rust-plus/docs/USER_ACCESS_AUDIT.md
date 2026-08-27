@@ -1590,3 +1590,155 @@ release-manifest.sig
 - `ssserver` 与 `shadowsocks-auditd` 均可复现构建、校验和签名；
 - 完整测试矩阵和性能门槛通过；
 - 文档、配置样例、mock collector 和运维说明足以让另一位工程师独立对接。
+
+## 17. 代码审计记录（2026-08-28）
+
+> 本节是审计记录，不改变合同条文。所列问题以代码修复为主；标注"需规格决策"的条目必须先按约定
+> 对本文件升版。行号基于 `.cache/audit-work-source`（upstream v1.24.0 + 0001/0002/0003 应用树），
+> 与 `patches/0003-user-audit.patch` 内容一致。
+
+### 17.1 审计范围与方法
+
+- 对象：`patches/0003-user-audit.patch`（16291 行）、`crates/shadowsocks-audit-protocol`、
+  `crates/shadowsocks-auditd`、`shadowsocks-service` 的 user-audit 接线、packaging、tests、scripts、
+  docs。
+- 方法：对照本文件 v2 逐节静态审查；HMAC golden 值用独立实现重算；补丁↔源码树用
+  `patch --dry-run -R --fuzz=0` 全量反向校验（逐字一致）；未执行编译与测试，feature-off/feature-on
+  编译矩阵和测试通过情况未在本次验证范围内。
+
+### 17.2 总体结论
+
+核心合同点——事件语义（TCP 双向/UDP 完整发送）、持久化顺序、HMAC、权限模型、配置/feature 合同、
+panic-free——落实到位，未发现数据面阻断或 wire 不兼容。但存在 1 个 critical 与 11 个 major，
+集中在 shutdown 竞态、session 模型、producer 诊断义务、group commit、崩溃窗口、mock 幂等合同与
+测试欠账。建议 17.3/17.4 全部修复后再按第 16 节验收。
+
+### 17.3 Critical
+
+- **C-1 relay task 在首次 poll 前被 abort 泄漏 `active_tasks`，`terminate_and_join` 永久等待。**
+  `context.rs:120-152`：`active_tasks` 在 spawn 前递增，`RelayTaskGuard` 却在 task 内部首次 poll
+  时才构造（`context.rs:133-137`）；tokio 对未 poll 即 abort 的 task 直接 drop future，guard 从不
+  存在，计数永不递减。`terminate_and_join`（`context.rs:166-175`）无超时自旋等待，且经
+  `stop_data_tasks`（`server/mod.rs:399-404`）被两条 shutdown 分支（`server/mod.rs:459,477`）
+  调用，外层均无超时兜底（2 秒 timeout 只包 `emitter.drain()`）。触发路径：spawn 后
+  `!is_accepting` 分支的 abort（`context.rs:144-148`）与 terminate 时对未 poll task 的 abort。
+  命中即 ssserver 关机永久挂起，只能靠 systemd SIGKILL 收场。修复：guard 在 spawn 前构造好再
+  move 进 task（或计数与 JoinHandle 完成绑定），并给 `terminate_and_join` 加有界超时。
+  （§7.3 SIGTERM 顺序）
+
+### 17.4 Major
+
+- **M-1 AuditClient session 每批 flush 完主动断开，下一批重新 hello。** `user_audit.rs:1969-2014`
+  清空 pending 即 `Ok(())` 返回并 drop stream；`run_supervisor`（`user_audit.rs:1897-1899`）把该
+  Ok 当正常路径。后果：突发流量每 256 条一次 connect+hello；空闲期连接断开使 auditd health 的
+  `producer_connected` 在健康节点上超过 5 秒即 flap 为 degraded（§10.1）。违反 §7.3 session
+  模型（"意外返回 Ok"应按异常处理）与 §8.1 长连接语义。修复：session 内等待新入队事件或
+  shutdown 信号，保持长连接，仅在 shutdown 时正常返回。
+- **M-2 feature-on 改变 0 字节 UDP 数据报接收行为。** `udprelay.rs:435-453`：audit build 不再按
+  上游 `return None` 早退，空数据报继续进入 association 创建与解密失败路径。注释理由不成立：
+  合法 SS UDP 包必含加密地址头，wire 上不可能为 0 字节；空包只会是伪造包或 Windows ICMP 假包。
+  与 feature-off 产生数据面行为差异，并可被伪造空包造成 association churn。违反 §1"审计不得
+  改变代理行为"。修复：还原上游早退；emit 点的 `!data.is_empty()` 守卫（`udprelay.rs:993-997`）
+  已正确处理解密后空载荷。
+- **M-3 缺少 Linux-only 编译门。** `server/mod.rs:32` 仅按 feature 门控 `user_audit` 模块；
+  `user_audit.rs:1919-1943` 的全部 peer 校验（auditd UID、socket inode、SO_PEERCRED）都在
+  `#[cfg(target_os = "linux")]` 内，非 Linux 下 producer 不校验对端身份直接连接，目前只靠
+  `check_integrity` 的运行期检查兜底。违反 §5.1"只支持 Linux"。修复：模块加
+  `target_os = "linux"` 门，或对 `all(feature = "user-audit", not(target_os = "linux"))` 出
+  `compile_error!`。
+- **M-4 producer 侧 journald 与 health 义务大面积缺失。** `user_audit.rs` 全文仅一处日志
+  （sequence exhausted，`user_audit.rs:1312`）：`run_supervisor` Err 分支（`user_audit.rs:1901-1914`）
+  对所有连接失败静默 sleep 重试；SO_PEERCRED/inode 校验失败无 journald（§5.2）；非 retryable
+  hello NACK 无 sticky degraded、无 journald（§8.2）；无 60 秒限频聚合 journald 机制
+  （§6.5/§7.2）；supervisor 异常无 journald（§7.3）；`auditd_user` 解析失败表现为无限静默重试，
+  启动期不可见。
+- **M-5 shutdown final journald 不含遗留诊断聚合。** `server/mod.rs:390-397` 只输出 skipped
+  observations 与 diagnostic_drops；drain 超时后仍滞留在 contention/queue_overflow/encode_error/
+  permanent_nack accumulator、queue 与 256 条 in-flight 中的聚合计数被静默丢弃，违反 §6.5"退出前
+  至少输出最终聚合 journald"。
+- **M-6 auditd group commit 未实现，两个配置项成死配置。** `group_commit_max_events`/
+  `group_commit_max_delay_ms` 在 `shadowsocks-auditd/src/config.rs:205-206` 定义并校验，但 spool
+  无任何引用；实际写路径是每事件 `write_all→sync_data→persist_state→ACK`
+  （`spool.rs:894-910`）。耐久性顺序正确、不丢数据，但 §9.3 的 group writer 语义不存在，部署方
+  调整配置无任何效果，且每事件两次 fsync 的吞吐代价与设计意图不符。修复：实现 §9.3 group
+  writer，或按"逐条提交"升版改写条文（需规格决策）。
+- **M-7 corruption quarantine 的 spool_gap 存在崩溃丢失窗口。** `spool.rs:872-885`
+  `quarantine_batch_locked` 先 durable rename（`quarantine_path`），再把 gap 推入仅内存的
+  `recovery_gaps`，随后才 flush；崩溃发生在 rename 后、gap durable 前时，重启后 `recover_layout`
+  不再扫描 quarantine 内对象，该 `segment_corruption` gap 永久丢失。`recover_layout` 自产的
+  recovery gaps 同理。§9.5 为两类 eviction 设计了 pending ledger 事务解决同一问题，corruption
+  类缺等价物，违反 §9.4"recovery、quarantine 和新 epoch 不能伪装为无数据丢失"。
+- **M-8 mock collector 幂等/冲突语义违反 §12。** `tests/mock_collector.py:489-513`：
+  (a) 无 `(node_id, spool_epoch, spool_sequence)` 维度，`spool_sequence_conflict` 未实现；
+  (b) `event_payload_conflict`/`batch_id_conflict` 时只追加一条 conflict 记录即 raise，同批可接受
+  record 被丢弃、incoming wrapper 未 durable 隔离、随后不发送 ACK——正是 §12 禁止的 poison
+  batch 永久占据 lease；(c) batch 幂等只比较 body digest，未比较 epoch/first/last/count 全字段。
+  mock 是外部 collector 的参照实现（§3.2/§12），必须按"冲突证据+可接受 record 原子 durable
+  commit 后 ACK"改写。
+- **M-9 测试关键缺口。** §14.2 TCP 成功矩阵仅 3 个测试（缺仅握手/仅上行/仅 banner、双向顺序
+  exactly-once、TFO、reset、peer_addr 失败 encode_error、故障不阻断）；§14.3 UDP 窗口/contention
+  核心语义无测试（60 秒冷却、LRU 边界、WouldBlock 计数、poison recovery、queue 满刷新窗口）；
+  §3.2/§14.4 fuzz target 完全未交付；§14.5 性能门槛无 user-audit feature-off/on 对照
+  （`tests/benchmark_data_path.py`、`docs/PERFORMANCE.md` 零提及）；`tests/integration_audit.py`
+  不存在，`scripts/test.sh:122` 以 `-f` 判断静默跳过，而 `tests/README.md` 声称提供真实
+  TCP/UDP 与 auditd 集成测试。
+- **M-10 事件 JSON golden vectors 缺失。** protocol crate 测试（`shadowsocks-audit-protocol/src/
+  lib.rs:3060-3349`）只有自生成 round-trip，无钉死期望字节串的向量；escaping/Unicode/nullable/
+  全部 5 个 variant 的 golden vectors 未交付（§9.2/§3.2）。HMAC 请求/响应两条向量存在且经
+  独立重算正确。
+- **M-11 release manifest 未覆盖补丁 series。** `scripts/release-artifact.py:563-571` 的
+  exact-keys 不含 series；§15.1 要求发布验证覆盖来源 commit、补丁 series、toolchain lock、
+  artifact SHA 和 detached signature。
+
+### 17.5 Minor
+
+| 编号 | 位置 | 问题 |
+| --- | --- | --- |
+| m-1 | `user_audit.rs:1435-1452` | queue_overflow gap 的 first/last_seen 用被淘汰事件的 `occurred_at`，而非淘汰观测墙钟（encode_error 路径正确用 `wall_now()`），两处时间语义不一致（§6.5） |
+| m-2 | `user_audit.rs:82-91` | 重连 jitter 叠加在 5 秒 cap 之上，最大 6 秒；§7.3 措辞歧义（需规格决策） |
+| m-3 | `udprelay.rs:863-864,988-992` | 热路径每包可避免的 Address/Arc 克隆；有界合规，可在 association 上缓存 |
+| m-4 | `user_audit.rs:1454-1457` | 带 guard 的公有 `record_contention` 无调用方，死代码 |
+| m-5 | `user_stats.rs:228-231` | `UserStatsRegistry::new()` 新增 node_id 校验改变 0001 已验收共享路径行为，应在补丁说明中声明 |
+| m-6 | 0003 对 `local/*`、`manager/*`、`net/sys/*`、`acl` 的改动 | 绝大多数为 let-chain 格式化 churn，与本功能无关，应剥离或单独成补丁；唯一实质改动是 `local/http/http_stream.rs:23` 双 TLS 后端编译修复 |
+| m-7 | `src/service/server.rs:574-598`、`server/mod.rs:483-494` | feature-off 的 SIGTERM 从立即 drop 变为最长 5 秒优雅停机；语义有界但需在发布说明中注明 |
+| m-8 | 根 `Cargo.toml` | `user-audit` 含 §5.1 公式之外的 `dep:shadowsocks-auditd`（根 crate 产出 auditd bin 所需），合理但需规格补记（需规格决策） |
+| m-9 | `shadowsocks-audit-protocol/src/lib.rs:565-567` | ASCII domain 含空 label 判规范化失败，超出 §6.2 字面规则（需规格决策：补条文或放开） |
+| m-10 | `shadowsocks-auditd/src/ingest.rs:446-448` | `protocol_version` 超 u8 的合法 JSON hello 被静默断开，未回 `unsupported_version` hello_nack（§8.2） |
+| m-11 | `spool.rs:2696,749-759` | health 计数饱和 u64::MAX 时不置 degraded；§10.1 要求"饱和并置 degraded" |
+| m-12 | `ingest.rs:291` | hello 完成即更新 `last_ingest_at_unix_ms`；该字段语义应为最后事件接收时间 |
+| m-13 | `spool.rs:423-426`、`lib.rs:76-77` | `segment_max_age_seconds` 无后台 seal timer，只在 append/lease 顺带检查；producer 静默时超龄 segment 不按时封口（lease 强制 seal 使可见行为等价） |
+| m-14 | `spool.rs:706-748`、`ingest.rs:124-131` | health/ACK 对每个 sealed batch 全量读取+逐行校验+SHA-256；dedup LRU 用 VecDeque `position()` 线性扫描；性能层面 minor |
+| m-15 | `shadowsocks-auditd/Cargo.toml:22`、`spool.rs:2521` | `rand` 依赖未使用；`write_atomic_file` 临时文件崩溃残留无清理 |
+| m-16 | `spool.rs` 全模块、`main.rs:33` | spool 同步 I/O 持 std::Mutex 跑在 current_thread runtime，慢盘下事件循环秒级 stall；§14.5 验收须覆盖 |
+| m-17 | 根 `Cargo.toml:27-30` vs `shadowsocks-auditd/Cargo.toml:13-15` | 两个同名 `shadowsocks-auditd` bin、两份 CLI 解析，存在发散风险，应只留一份 |
+| m-18 | `tests/mock_collector.py`、`test_mock_collector.py:151-153` | mock 无诊断/gap 告警行为；冲突路径测试构造了冲突事件但从未提交断言，测试名不副实 |
+| m-19 | `docs/PERFORMANCE.md` | 未同步 §14.5 user-audit 性能门槛（§3.1 文档同步义务） |
+| m-20 | `packaging/shadowsocks-auditd.service:34` | `ReadWritePaths` 写父目录而非 ingest/export 两个子目录；实际影响为零，字面与 §11 有出入 |
+
+### 17.6 需规格决策的条目
+
+以下条目代码与规格存在双向出入或规格措辞歧义，须先对本文件升版再由代码跟进：
+
+1. §7.3"指数退避到 5 秒并加入 0–20% jitter"：5 秒是 base cap 还是总延迟硬顶（代码为前者，
+   最大 6 秒）。
+2. §5.2 `auditd_user` 启动解析失败是否阻断启动（代码降级为无限静默重试的运行故障，且无日志，
+   见 M-4）。
+3. §6.2 ASCII domain 含空 label 是否视为规范化失败（代码判失败、`normalized_host=null`）。
+4. §5.1 根 crate `user-audit` 是否补记 `dep:shadowsocks-auditd`。
+5. §9.3 group commit：若采纳逐条提交实现（M-6），须升版改写 group writer 条文并删除两个
+   配置项；否则代码补齐 group writer。
+
+### 17.7 已验证无问题（摘要）
+
+- protocol crate：十进制字符串规则、严格 schema 与 variant 交叉校验、target 规范化（UTS #46、
+  IPv4-mapped 不折叠）、canonical serializer + RawValue 逐字嵌入 + payload digest 复算、HMAC
+  canonical bytes（两条 golden MAC 独立重算吻合）、panic-free、无 I/O。
+- producer：§4 类型/API 与锁序、TCP 双向 exactly-once 与 `peer_addr()` 失败 encode_error 路径、
+  UDP send helper/64 shard/窗口/poison recovery、guard 覆盖范围、queue/gap 会计与诊断旁路、
+  SIGTERM 顺序骨架（除 C-1/M-5）、配置与 feature 合同（除 M-3）、热路径有界无 await、
+  非测试代码零 unwrap/expect/panic。
+- auditd：CLI 与逐字段配置校验、ingest 帧/hello/ACK/NACK/65536 dedup LRU、spool 持久化顺序与
+  crash recovery 主分支、tombstone 两类 pending 事务、export HTTP 严格语法/HMAC/health/204 语义、
+  §11 权限模型、panic-free 与资源有界。
+- 交付：补丁↔源码树逐字一致、§11 打包（sysusers/tmpfiles/unit/组）、§15 发布链路（除 M-11）、
+  文档已同步 v2 常量（无 v1 残留）、无敏感信息泄露、`.gitignore` 覆盖生成物。
