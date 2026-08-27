@@ -55,6 +55,14 @@ overlay。它已经实现 AEAD-2022 EIH 多用户服务端的用户级 TCP/UDP �
   Shadowsocks 线协议和 ACL 语义不变。统计模式与 builtin/standalone `ssmanager` 互斥，避免动态
   `add` 出现未注册、未计费却继续转发的服务。
 
+## 待实现：用户成功访问审计
+
+用户成功访问审计的权威开发合同见
+[`docs/USER_ACCESS_AUDIT.md`](docs/USER_ACCESS_AUDIT.md)。该功能仍处于待实现状态；在
+`0003-user-audit.patch`、对应 crates、测试和发布产物全部完成并通过该规格验收前，不得把它列为已实现
+能力。负责该功能的工程师只修改本 `shadowsocks-rust-plus` 子项目，外部 controller、数据库、反向代理、
+生产部署和业务管理系统均由下游集成方负责。
+
 ## 快速开始
 
 环境要求：Unix domain socket、Git、Rust/Cargo、Bash、Python 3、`patch`、`tar`、
