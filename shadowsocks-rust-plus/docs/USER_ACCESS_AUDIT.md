@@ -2479,3 +2479,389 @@ Minor：
 4. 更正 §19.4 失真命令（m-66）与 tests/README.md 过时描述（m-67）；
 5. m-68/m-69 的 shutdown 窗口建议同批收紧（睡前预检 CLOSED_BIT/freeze 标志）；
 6. 其余 minor 可排期；Linux runtime、fuzz 实跑与完整容量/crash 矩阵仍为发布前置项。
+
+## 21. 第四轮代码审计记录（2026-08-28）
+
+> 本节是对整改 commit `4a6348e` 的第四轮审计，不改变合同条文。编号接续：critical 自 `C-4` 起，
+> major 自 `M-32` 起，minor 自 `m-85` 起。行号基于当前 `patches/0003-user-audit.patch` 应用树
+> （已用 `patch --dry-run -R -p1 --fuzz=0` 对全部 48 个文件确认逐字一致）。
+
+### 21.1 审计范围与方法
+
+- 对象：整改后全部交付物。重点是**整改自身引入的回归**——`spool.rs` 2999→5406 行、
+  `user_audit.rs` 2654→3616 行、`protocol/lib.rs` 3349→3516 行，以及 6 个新增测试/工具文件。
+- 方法：12 维度并行审查（producer 诊断/shutdown/热路径、protocol 与 golden vectors、auditd
+  配置与生命周期/ingest/spool 索引/spool 事务/spool 恢复/export 与 health、测试工具、打包文档），
+  每条候选交独立复核者对抗性反驳（73 条候选 → 驳回 8 条、保留 65 条）；两个 critical 由编排者
+  亲自对照 `0f52bd9` 与当前补丁逐行复核；多条发现由复核者在私有副本树上**实测复现**（实验后
+  经反向 patch 确认源码树逐字还原）。
+- 本机实跑（macOS）：`cargo check` feature-off 通过（2 条警告）、`cargo test -p
+  shadowsocks-audit-protocol` 20 项通过、`cargo test --workspace --features user-stats` 302 项通过、
+  `test_mock_collector` 10 项、`test_audit_packaging` 6 项、`test_release_artifact` 7 项、
+  `test_http_unix` 14 项、`test_check_audit_static` 5 项、`check_audit_static.py`、
+  `test_benchmark_audit` 2 项、`test_panic_abort`、`check-sensitive.sh` 均通过；
+  `test_fuzz_target` 2 项中 1 项 skip、`integration_audit.py` 整体 skip。
+- 本机失败/不可执行：`cargo test -p shadowsocks-service --features user-audit --lib`
+  （被 `crates/shadowsocks-service/src/lib.rs:56` 的新 `compile_error!` 拦截）、
+  `cargo check --target x86_64-unknown-linux-gnu -p shadowsocks-auditd`（该 target 未安装）、
+  因而 `scripts/test.sh` 在本机也会在 `test.sh:100` 硬 `die`。
+- 未做：Linux runtime 实跑、fuzz 实跑、性能压测（与 §19.4/§20.1 的披露一致）。
+
+### 21.2 总体结论
+
+§19 的修复方向正确，§20 对其的核查也基本准确；但本轮发现**整改质量存在系统性问题**：
+
+1. **两个 critical**。`C-4` 是三轮审计全部漏检的既存缺陷——auditd 在真实 Linux 上**根本无法
+   启动**，整个功能零可用；`C-5` 是整改引入的新回归——容量清理在正常水位场景下变成永不退出的
+   销毁性死循环，比它所修复的 `C-3`（立即报错自锁）后果严重得多。
+2. **回归比例高**。65 条保留发现中 20 条标记为 regression、5 条为 incomplete_fix。整改在修好
+   一个问题的同时引入了新问题的模式反复出现：`C-3` 解除容量短路 + 把 seal 挪进循环 → `C-5`；
+   `C-2` 加 `InaccessiblePaths` → `M-40`；`M-18` 改增量索引 → `M-36`/多条索引漂移；
+   `M-22` 改增量 health → 损坏检测能力丢失；`M-12` 改 round-robin → 空转与死代码。
+3. **两条交付的回归测试本身必然失败**（`M-35`、`M-39`），加上 §20 已记的 `M-29`，现在共有
+   3 条“已交付的验证”在任何机器上都跑不过。根因相同：Linux-only 代码从未在 Linux 上执行过，
+   而本机被 `compile_error!` 拦截，`cargo check` 只做类型检查。
+4. **验证声明失真扩大**。§19.4 清单中的两条 cargo 命令在本机不可能通过（缺 Linux target），
+   §20.5“cargo 侧均复跑一致”因此不成立；§20.5 关于“本机缺 `rg`”的说明也与事实不符
+   （`rg` 已安装，`check-sensitive.sh` 实跑通过）。
+
+**当前状态不适合进入第 16 节验收。** `C-4` 未修复前，任何 Linux 验收都无法开始。
+
+### 21.3 Critical
+
+- **C-4 两个 UDS 的属组设置使用 `fchownat(fd, NULL, …, AT_EMPTY_PATH)`，在 Linux 上必然失败，
+  auditd 永远无法启动，审计功能在真实目标平台零可用。**
+  `crates/shadowsocks-auditd/src/config.rs:876-928` 的 `secure_bound_socket_with_gid` 在 bind 后
+  以 `O_PATH|O_NOFOLLOW|O_CLOEXEC` 打开 socket，然后执行：
+
+  ```rust
+  libc::fchownat(file.as_raw_fd(), std::ptr::null(), u32::MAX, expected_gid, libc::AT_EMPTY_PATH)
+  // result != 0 -> return Err(io::Error::last_os_error());   // 无任何兜底
+  ```
+
+  `AT_EMPTY_PATH` 的 Linux 语义是“pathname 为**空字符串** `""` 时对 dfd 本身操作”，NULL 指针
+  不是空字符串：内核 `do_fchownat → user_path_at → getname_flags → strncpy_from_user(NULL)`
+  返回 `-EFAULT`（允许 NULL 的 `getname_maybe_null()` 是 6.13 才引入且未用于 `fchownat`，
+  Debian 12 / Ubuntu 22.04·24.04 / RHEL 9 全部早于该版本）；glibc 与 musl 的 `fchownat` 都只是
+  原样转发指针，不做 NULL→“” 归一化。该分支**没有兜底**，直接 `return Err`。
+
+  退一步说，即使 `fchownat` 未报错也没有真正改到 gid，紧随其后的
+  `validate_socket_metadata(&opened, expected_gid)`（`config.rs:917-920`）同样必然失败——
+  `packaging/shadowsocks-auditd.tmpfiles:3-4` 给 ingest/export 目录的是 `0750` 且**未设 setgid**，
+  unit 以 `Group=shadowsocks-audit` 运行，因此 `bind()` 产生的 inode 主组绝不可能自然等于
+  `shadowsocks-audit-ingest`/`-export`，这次 chgrp 不可省略。两条路都是 `Err`。
+
+  旁证：同一函数紧接着的 `fchmodat(..., AT_EMPTY_PATH)`（`config.rs:905-916`）同样非法
+  （`fchmodat(2)` 从不支持 `AT_EMPTY_PATH`），作者为它写了 `/proc/self/fd/N` 兜底，却唯独
+  没给 `fchownat` 写。同仓库已在生产运行的 `user_stats.rs:949-994`
+  （`set_socket_permissions_nofollow`）采用的正是 `O_PATH` + `/proc/self/fd/N` 方案，并明确注释了
+  内核/glibc 版本限制——auditd 这段没有沿用。
+
+  后果：Linux 节点按 `docs/OPERATIONS.md:96-111` 安装后 `systemctl start shadowsocks-auditd`，
+  `IngestServer::run`（`ingest.rs:199`）与 `ExportServer::run`（`export.rs:175`）在 bind 后立即
+  失败 → `AuditDaemon::run` 返回 Err → 进程退出 → `Restart=on-failure` 死循环，
+  `ingest.sock`/`export.sock` 从不出现，ssserver producer 永远连不上，§6 的两类成功访问事件
+  一条也进不了 spool。§11「两个 socket `0660 shadowsocks-audit:<对应组>`」与 §16「UDS 双向
+  `SO_PEERCRED`、分组权限通过」在真实 Linux 上无法达成。
+
+  **这不是整改引入的回归**：`git show 0f52bd9:…/patches/0003-user-audit.patch:4473-4507` 显示
+  该写法自首次交付起就存在。三轮审计全部漏检，原因是该路径零单元测试覆盖
+  （`config.rs` 的 13 个测试均不调用 `secure_bound_socket*`），而非 Linux 主机只做
+  `cargo check`，类型检查不会暴露运行期 `EFAULT`。
+
+  修复：pathname 改用空字符串常量（`c""`），或直接照搬 `user_stats.rs:949-994` 的
+  `/proc/self/fd/N` 方案同时完成 chown 与 chmod；并补一条 Linux 运行期回归断言
+  「bind 后 socket 为 `0660` 且 gid 等于父目录组」。
+
+- **C-5 整改把 seal 移进容量清理的 while 循环，与“gap 写入不再受容量水位约束”叠加，形成
+  seal→evict→写 gap 的永不退出死循环：auditd 全局锁被永久占用、三条服务路径全部挂死，同时以
+  fsync 风暴持续销毁真实审计数据。**
+  整改前（`0f52bd9` 版补丁第 8169-8171 行）“必要时先 seal open”在 `while` **之外**只执行一次，
+  候选耗尽后必然 `break` 并返回 `StorageUnavailable`。整改后（`spool.rs:2386-2402`）变成循环体
+  末尾的 `if inner.open_meta.event_count > 0 { seal_locked(...); continue; }`；而
+  `evict_sealed_locked`（`spool.rs:2851-2911`）在删除 sealed batch 后**必然**经
+  `write_gap_locked`（`spool.rs:2905`）向 open 段写一条 gap——按 `C-3` 的整改该函数刻意不再受容量
+  水位约束（`spool.rs:2190-2194`）。于是每轮：seal 上一轮的 gap → 它成为新的 sealed 候选 →
+  驱逐它 → 再写一条新 gap 回 open → 再 seal……`progressed` 每轮为真，`spool.rs:2402` 的 `break`
+  永不可达。
+
+  `capacity_ok`（`spool.rs:2201-2207`）= `size_ok && free_space_ok`，而
+  `free_space_ok`（`spool.rs:4721-4736`）只读 statvfs 的 `f_bavail`：**spool 自己删空也不会变
+  true**（空间被同一文件系统上的其它文件占用），statvfs 失败时同样恒 false。tombstone ledger
+  满不是出口（`add_tombstone_locked` 淘汰最老 receipt 后继续）；真实 ENOSPC 也不是出口（1 GiB
+  水位远早于写失败触发，且循环净字节持平）。
+
+  两条独立复现（均在私有副本树，实验后源码树经反向 patch 确认逐字还原）：
+  - `min_free_bytes=u64::MAX`、先写 3 条事件后重开再 append 第 4 条 → 45 秒未返回，
+    `next_spool_sequence` 从 17 涨到 498，sealed 目录反复出现/消失，tombstone receipt 累积到 1532 条；
+  - 79 条事件 / 3 个 sealed batch 场景 → 单次 `append()` 持锁运行 4 分 38 秒未返回，CPU 40%，
+    spool 目录大小恒定（纯空转）；同配置下**空 spool** 对照组立即返回 `Err(StorageUnavailable)`，
+    证明分支判定无误。
+
+  触发条件是 §9.5 明确列为正常运行场景的水位：节点 `/var` 所在文件系统被其它服务（journald、
+  镜像层、core dump）占到可用空间低于 `min_free_bytes`（默认 1 GiB）——**此时写入本身仍成功**，
+  故不会被 ENOSPC 打断。另有两条同源触发路径：statvfs 失败，以及 `M-36` 把 `spool_bytes` 永久
+  锁存为 `u64::MAX`（只需 spool 树里出现一个符号链接或一次瞬时 `read_dir` 错误）。
+
+  后果：`append_parsed`（`spool.rs:1171`）持有全局 `Mutex<SpoolInner>` 永不释放，`lease`(1220)、
+  `ack`(1391)、`health`(1597) 全部阻塞在同一把锁上——**`healthz` 连 degraded 503 都返回不了**
+  （比 `C-3` 时代“healthz 仍可用”更差，唯一的可观测信号也没了）；期间每秒十余轮 seal/evict/
+  fsync，把 spool 内全部 batch 连同记录其丢失的 gap 反复销毁，`evicted_unacked_records` 无界
+  增长；§9.5 第 6 条要求的“不分配 spool sequence、返回 retryable `storage_unavailable`、累计
+  `storage_rejected_attempts`”永远无法执行；producer 侧 3 秒 ACK 超时全部落空，队列溢出丢事件。
+  需人工 kill 并扩容磁盘才能恢复。ssserver 代理流量本身不中断。
+
+  修复：把“seal 活跃 open”恢复为每次 cleanup 至多一次（局部 `sealed_once` 守卫），并给 while
+  增加显式进度判据（一轮内没有净减少字节即 `break`）与迭代上限，超限按 §9.5 第 6 条返回
+  `StorageUnavailable`；`spool.rs:2389` 的分支还应排除“open 段只含本次 cleanup 自己写入的
+  诊断记录”这一自激情形。
+
+### 21.4 Major
+
+- **M-32 `saturating_add_atomic` 在 4 次 CAS 失败后无条件写入 `u64::MAX`，把并发累加伪造成
+  “至少 1.8e19”的灾难性缺口。** `user_audit.rs:673-689`：
+
+  ```rust
+  let mut current = atom.load(Ordering::Acquire);
+  for _ in 0..GAP_FALLBACK_CAS_ATTEMPTS {          // user_audit.rs:572，= 4
+      if current == u64::MAX { return; }
+      let next = current.checked_add(amount).unwrap_or(u64::MAX);
+      match atom.compare_exchange_weak(...) { Ok(_) => return, Err(actual) => current = actual }
+  }
+  atom.store(u64::MAX, Ordering::Release);          // 与真实计数无关
+  ```
+
+  4 次 CAS 失败只证明存在并发争用，与计数是否接近上限无关。饱和后循环入口的
+  `if current == u64::MAX { return; }` 还会让该 atomic 在下次 `take()` 清零前静默丢弃所有后续
+  真实计数。可达调用点为 `GapFallback::merge` 的 count-only 分支（`user_audit.rs:594`）与
+  `merge_locked`（`601`）：当 8 个 `GapSlot` 的 `try_merge` 全部失败（`GapAccumulator::merge`，
+  `718-732`）时，多个 relay 线程一起对同一个 `count` 做 CAS。复核者用独立程序复刻该函数实测：
+  2 个线程即在极短时间内读出 `18446744073709551615`，真实计数仅数十；单线程 100 万次从不饱和
+  （故根因是真实争用，不是 weak CAS 伪失败）。
+  后果：`take_diagnostic_round_robin` 取出该 count 后直接构造
+  `"skipped_successful_datagrams": "18446744073709551615"` 的 `udp_window_contention`，或
+  `"dropped_events": "18446744073709551615"` 的 `producer_gap`；protocol crate
+  （`lib.rs:836,900`）只拒绝 0、不设上限，原样上线。§6.5 定义 `dropped_events` 为“精确累计值”，
+  §12 第 5 条要求 collector 对其明确告警——真实跳过量只有数十时，controller 会把它升级为节点级
+  灾难告警。§7.2 要求永久 NACK 时把 snapshot 的“原始计数”合并回 accumulator，经该函数同样可能被
+  改写为 `u64::MAX`。
+  **既存缺陷**（`0f52bd9` 版补丁 13263-13281 行与当前逐字相同），三轮审计均漏检。
+  修复：改用无重试预算的 `fetch_update`（本文件其它计数器已这样用，见 `1983-1987`、`2419-2423`），
+  使 `u64::MAX` 只在真实溢出时出现；若必须保留有界重试，超预算的余量应记入独立的
+  `merge_lost` health counter 并置 degraded，而不是伪造 on-wire 计数。（§6.5 §7.2 §12）
+
+- **M-33 session 空闲等待缺少 `emitter.queue` 复检，drain 抢走唯一 `notify` permit 后 supervisor
+  睡满 60 秒，2 秒 drain 必然失败并丢弃整条 access queue。** `connect_and_send_session`
+  （`user_audit.rs:2723-2740`）在注册 `emitter.notify.notified()` 后只复检本地 `state.pending`，
+  **从不复检 `emitter.queue`**；而 `run_supervisor`（`2486-2489`）保留了该复检，整改前的单循环
+  实现也有——是 `4a6348e` 复制空闲块时漏掉的一行。tokio `Notify` 只保存单个 NOTIFIED permit：
+  relay 在 session 阻塞于 `read_frame_with_deadline` 期间 `try_push(E1)` + `notify_one()` 留下
+  permit，`close_emitter()` 与 drain 首轮的 `notify_waiters()` 在无 waiter 时保留/消耗该 permit，
+  等 session 回到空闲块注册 waiter 时 permit 已被抢走，于是睡满 60 秒空闲超时。
+  §7.3 的 `timeout(2s, drain())` 到期，queue 中最多 4096 条 access event 与全部 in-flight 随内存
+  丢弃。违反 §7.2「consumer 每次注册 notified future 前后都检查 queue，避免 lost wakeup」。
+  修复：在 `2723-2740` 的空闲块补上与 `2486-2489` 相同的 `emitter.queue` 复检。（§7.2 §7.3）
+
+- **M-34 UDP 窗口缓存重写把每个窗口的 key 材料从 1 份变成 4 份，默认 65536 窗口下缓存本身实测
+  可达 110 MB，突破 §14.5 的 64 MiB RSS 预算。** `user_audit.rs:830-840` 的 `UdpWindowEntry`
+  同时持有 `key` 与 `raw_key`，`842-853` 的 shard 同时维护 `by_key` 与 `by_raw_key` 两张 map，
+  `insert_entry`（`1122-1123`）两次写入完整 key 拷贝，而 `UdpWindowKey`（`796-802`）内含 `host`
+  与 `kind` 两个 `String`。复核者在同一二进制内做新旧布局对照实测（填满 65536 窗口）：
+  255 字节域名 110.4 MB（1766 B/窗口）vs 整改前 42.4 MB（678 B/窗口），2.6 倍；
+  20 字节普通域名 54.5 MB（872 B/窗口）vs 整改前 12.2 MB（196 B/窗口），4.5 倍。
+  即便是普通域名也已占满 §14.5 预算的 85%，255 字节域名场景（已认证用户控制一个通配 DNS 区即可
+  构造）直接超出 72%。修复：`by_raw_key` 只存 key 的引用/索引而非第二份完整拷贝，或把
+  `UdpWindowKey` 的 host 换成 `Arc<str>` 让四处共享同一份分配。（§14.5 §6.4）
+
+- **M-35 `validate_absolute_path` 无法拒绝 `.` 组件，§5.3 的路径规则失效，且两条交付的回归用例
+  在 Linux 上必然 panic。** `config.rs:462-490` 对 `.`/`..` 的判定全部依赖 `path.components()`
+  （`479`），而 `std::path::Components` 会把绝对路径中的 `.` 全部归一化掉——本机 rustc 实测
+  `/a/./b → [RootDir, Normal("a"), Normal("b")]`、`/./a → [RootDir, Normal("a")]`——因此 `482` 的
+  `Component::CurDir` 分支对绝对路径**永远不可达**；`474` 的词法检查只覆盖尾 `/` 与 `//`。
+  后果一（规格偏离）：`shadowsocks-auditd --config /etc/shadowsocks-audit/./auditd.json` 被接受，
+  配置中 `"spool_dir": "/var/lib/./shadowsocks-audit"`、
+  `"export_hmac_key_file": "/etc/shadowsocks-audit/./export-hmac"` 同样通过 `validate()`，
+  而 §5.3 要求这些拼写在任何 socket/文件创建前失败。
+  后果二（验收阻断）：`config.rs:1069` 的 `paths_reject_variants` 与 `lib.rs:207` 的
+  `config_path_rejects_noncanonical_spellings` 两个用例数组都含 `/a/./b` 并 `assert!(...is_err())`，
+  在 Linux 上执行 §14.4 要求的 `cargo test -p shadowsocks-auditd` 时必然 panic。
+  修复：在词法层直接检查 `/./`、`/../`、以 `/.`/`/..` 结尾的拼写，不要依赖 `components()`。（§5.3 §14.1）
+
+- **M-36 `rebuild_runtime_indexes_locked` 把 `directory_size` 失败永久锁存为
+  `spool_bytes = u64::MAX`，一次瞬时错误即导致全部 spool 数据被销毁并永久拒收。**
+  `spool.rs:1639-1648` 在 `directory_size` 失败时 `mark_storage_rejection` 后把 `spool_bytes` 置为
+  `u64::MAX`；整改后 `capacity_ok`（`2201-2207`）**只读该增量索引、不再现算**，而 rebuild 只在三处
+  被调用（`Spool::open:1064`、`recover_runtime_temp_objects_locked` 的 changed 分支 `2513`、
+  `seal_locked` 错误分支 `3265`），正常路径上没有任何重测机会。
+  而 `directory_size`（`4699-4718`）用 `symlink_metadata` 且对**任何**非普通文件/目录项
+  （符号链接、FIFO、socket、设备节点）返回 `Err(InvalidData)`（整改前返回 `Ok(0)`），
+  `read_dir` 的 EIO/EMFILE 同样上抛。因此运维在 spool 根或任一子目录留下一个诊断用符号链接、
+  或重启瞬间撞上一次 `read_dir` 错误，`Spool::open` 仍会成功返回，但 `spool_bytes` 被终身锁死为
+  `u64::MAX` → `capacity_ok` 的 `checked_add` 恒为 `None` → 第一条 producer 事件即触发
+  `cleanup_locked`。**与 `C-5` 叠加后果最严重**：不需要磁盘真的满，一个符号链接就足以让 auditd
+  进入永不退出的销毁性死循环。错误条件消失后也不自愈，必须重启进程。
+  修复：`directory_size` 对非文件/目录项计 0 并记 degraded 而非整体失败；`spool_bytes` 未知时应
+  触发一次重测而不是永久锁存；`capacity_ok` 在索引处于“未知”状态时走 §9.5 第 6 条拒绝路径。
+  （§9.5 §10.1）
+
+- **M-37 清理候选循环在单个候选失败后不复检容量，一次 cleanup 会把整个未导出 sealed 积压全部
+  删除并对外返回 `Ok`。** `cleanup_locked`（`spool.rs:2220-2412`）的容量条件只在外层
+  `while !self.capacity_ok(...)`（`2245`）顶部求值；acked（`2263-2307`）、quarantine
+  （`2323-2336`）、sealed（`2369-2382`）三个候选 `for` 循环在候选返回 `Err` 时只记录
+  `first_error` 就落到下一个候选，中间没有任何 `capacity_ok` 复检。但“失败”的候选其实**已经释放
+  了空间**——`evict_sealed_locked` 的删除发生在 `2879 remove_tree_tracked`（已扣减
+  `spool_bytes`）/`2880 sync_dir`，其后 `2905 write_gap_locked`、`2913 replace_tombstone_locked`
+  才可能失败并 `return Err`；`evict_quarantine_locked`（`2950` 删除 → `2969` 写 gap）与 acked
+  循环（`2294`）同构。于是当出现落在删除动作之后的持久失败（`sync_dir(sealed/)` 持续 EIO、
+  §20 M-31 描述的 seal 持续故障使 `write_gap_locked` 内的 `seal_locked(inner)?` 恒失败等），
+  明明只需释放一个 batch 的容量压力，却会把 `sealed/` 下**全部**未 ACK batch（最坏 5 GiB）逐个
+  删光，然后返回 `Ok`——append 正常 ACK、producer 毫无感知。这直接违反 §9.5 清理顺序“若仍超限
+  才进入下一级”的逐级语义。修复：每删除一个候选后立即复检 `capacity_ok`，满足即退出循环；
+  候选失败但空间已释放的情形必须计入进度并复检。（§9.5）
+
+- **M-38 open 段的 `first/last_received_at` 按写入顺序记录而非取 min/max，接收时间一旦非单调，
+  封口永久失败，append 与 lease 全部长期返回错误且重启不自愈。** `update_open_metadata`
+  （`spool.rs:4060-4067`）用 `first_received_at.get_or_insert(received)` /
+  `last_received_at = Some(received)`，无归一化；`seal_locked`（`3191-3196`）把它们直接交给
+  `wire::SpoolMeta::new`，而 `SpoolMeta::validate`（audit-protocol `lib.rs:1500-1502`）拒绝
+  `first > last`。seal 失败发生在 `open→sealed/.tmp` rename 之后，`recover_seal_failure` 把段原样
+  搬回并保留 in-memory `open_meta`，故失败可无限重复；重启时 `scan_open_bytes`（`3967`）以同一
+  逻辑重放，同样不隔离该段。两条触发路径：
+  (a) 墙钟向后 step（chrony makestep、VM 快照恢复、启动时 RTC 校正，跳变常达小时级）；
+  (b) 一次 crash recovery 同时产生 `state_reset` gap 与 corruption/tail-truncation gap 时，两条
+  gap 的 `received_at` 递减（`write_gap_locked:2194` 用 `spec.occurred_at` 当 received_at）。
+  后果分两级：只要 open 段非空且非单调，`lease()`（`1241-1247`）立即返回错误，export 全线阻断
+  ——恰恰是“数据丢失证据”本身永远无法被 collector 取走；一旦该段涨到 `segment_max_bytes`，
+  append 的“先 seal 再写”分支（`1161-1168`）在写入前失败，`ingest.rs:401-405` 把
+  `SpoolError::Protocol` 映射为 retryable 的 `internal_error` NACK 并断开，producer 退避重连后
+  再次收到同样 NACK，形成永久重连循环，此后所有成功访问事件全部丢失。
+  修复：`update_open_metadata` 对 first 取 min、对 last 取 max（或在 seal 前归一化），
+  并对已倒置的历史 open 段走 quarantine + gap 而不是无限失败。（§9.3 §9.4）
+
+- **M-39 交付的回归用例 `empty_interrupted_seal_directory_is_reclaimed` 必然失败。**
+  `cleanup_recovered_temp_files`（`spool.rs:4622-4691`）在扫描阶段对缺失目录容错
+  （`4635` `NotFound => continue`），但收尾的同步阶段（`4685-4689`）对固定的 5 个目录
+  `[root, open, sealed, acked, quarantine]` 无任何容错。随 `4a6348e` 交付的用例
+  （`spool.rs:5298-5309`）只创建了 `sealed/`，删除孤儿后 `changed = true`，随即
+  `sync_dir(root/open)` 返回 ENOENT，`5306` 的 `.expect("cleanup")` panic（实测错误为
+  `Os { code: 2, kind: NotFound }`；补建另外三个目录即通过，根因确证）。该失败为纯 ENOENT，
+  与平台无关，Linux 上执行 `cargo test -p shadowsocks-auditd` 时 100% 失败并使整个 crate 测试
+  套件 FAILED。次生影响：运行期 `cleanup_locked → recover_runtime_temp_objects_locked` 调用同一
+  函数，若 `quarantine/` 等目录在运行中被移除，删除临时文件后的 fsync 会把整条容量路径变成 I/O
+  错误。修复：同步阶段跳过 `NotFound`。（§14.4 §19.2 M-26）
+
+- **M-40 `C-2` 修复新增的 `InaccessiblePaths` 未加 systemd 的 `-` 可选前缀，auditd 在 ssserver
+  未运行时启动即 226/NAMESPACE 失败。** `packaging/shadowsocks-auditd.service:36`
+  `InaccessiblePaths=/etc/shadowsocks-rust-plus /run/shadowsocks-rust-plus`，而
+  `/run/shadowsocks-rust-plus` 全仓库只由 `packaging/shadowsocks-rust-plus.service:13` 的
+  `RuntimeDirectory=`（同样无 `RuntimeDirectoryPreserve=`）创建、ssserver stop 时即被删除、
+  `/run` 为 tmpfs 重启后不存在；`/etc/shadowsocks-rust-plus` 在 `packaging/README.md` 第 4 步
+  之前也不存在。三条必然触发路径：
+  (1) 全新节点按 `packaging/README.md` 第 3 步先装 auditd（第 4/5 步才装 ssserver）→
+  `systemctl enable --now shadowsocks-auditd.service` 立即失败，§15.2 第 3 步「auditd 运行但
+  ssserver 尚未启用 producer」的验证步骤无法执行；
+  (2) 已上线节点重启主机：auditd 因 `Before=shadowsocks-rust-plus.service` 先启动，此时
+  `/run/shadowsocks-rust-plus` 尚不存在 → 失败；
+  (3) `docs/OPERATIONS.md:406` 的升级屏障要求「先停两个服务，再先启动 auditd」→ 停 ssserver 已
+  删掉该目录 → auditd 起不来。
+  这是 `C-2` 修复（为落实 §11「auditd 不得能读取 ssserver config」）引入的新回归，方向与 `C-2`
+  相反：这次是审计侧被数据面的生命周期绑架。修复：两个路径都加 `-` 前缀。（§11 §15.2）
+
+### 21.5 对 §19/§20 结论的更正
+
+- **§19.4「已执行验证」清单有两条在本机不可能通过。** 本机未安装 `x86_64-unknown-linux-gnu`
+  target（`rustup target list --installed` 只有 `aarch64-apple-darwin`），因此
+  `cargo check --locked --target x86_64-unknown-linux-gnu -p shadowsocks-auditd --all-targets`
+  实测以 `error[E0463]: can't find crate for core — the target may not be installed` 失败；
+  `bash scripts/test.sh` 也会在 `scripts/test.sh:100` 的
+  `[[ -d "$audit_libdir" ]] || die` 处硬失败。§20.5「§19.4 已执行清单……cargo 侧与 Python 侧均
+  复跑一致」因此不成立。建议：把该 target 写成显式前置条件（README/tests/README 目前只在
+  `tests/README.md:48` 提到环境变量名），并在 §19.4 中如实标注该条依赖。
+- **§20.5 关于 `check-sensitive.sh` 的说明与事实不符。** `rg` 已安装，
+  `bash scripts/check-sensitive.sh` 本机实跑通过（rc=0）；§20.5 的“本机缺 `rg`”应删除。
+- **§20.3 把 `M-28` 记为“已修复”不准确。** 共享 `tests/golden_vectors.json` 确实建立并双端消费
+  （链路闭合、内容经独立重算正确），但其顶层 key 仅
+  `hmac_key_hex`/`request`/`response`/`records`——`M-28` 自身点名的 **NDJSON wrapper 行 golden
+  vector 仍完全缺失**，§14.4「protocol JSON/**NDJSON**/HMAC golden vectors 在 Rust 与 mock
+  collector 间逐字一致」这一条并未达成。应改记为“部分修复”（与 §20 已记的 `m-75` 合并）。
+- **`M-27` 的修复引入了新的验证真空。** `crates/shadowsocks-service/src/lib.rs:54-56` 新增的
+  `compile_error!` 使 producer 侧全部单元测试在任何非 Linux 主机上无法编译，而
+  `scripts/test.sh:60-62` 在非 Linux 上把 workspace features 降级为 `user-stats`。于是
+  `user_audit.rs`(25)、`udprelay.rs`(10)、`server/mod.rs`(4)、`tcprelay.rs`(2)、`context.rs`(1)
+  共约 42 个 producer 侧测试**只能在 Linux 上执行**——而 Linux runtime 迄今从未执行过
+  （§19.4/§20.1 自述）。整改前这些测试在 macOS 上是可跑的（第二轮审计实测 71 项通过）。
+  这不是要求回退 `compile_error!`（Linux-only 是 §5.1 的合同），而是必须把“在 Linux 上跑一次
+  完整 feature-on 测试”列为发布前置硬条件，否则该批测试等同于未交付。
+- **`M-31`（§20）的实际后果比记录的更重。** §20 记为“seal 持续失败时每条 append 触发全量索引
+  重建，吞吐崩塌”；结合本轮 `M-37`，同一场景下 `write_gap_locked` 内的 `seal_locked(inner)?`
+  恒失败会使清理循环把全部未 ACK sealed batch 删光并返回 `Ok`，是数据丢失而不只是性能问题。
+- **§20 的 `m-71`（`ack()` 漏设 `non_gap_degraded`）范围偏小。** 除已记的三个分支外，
+  `Spool::ack` 的 rename、双目录 fsync、receipt 落盘四个失败分支（`spool.rs:1529-1533`、
+  `1534-1538`、`1539-1543`、`1564-1568`）同样漏设，使无关 gap 的 ACK 可经
+  `refresh_degraded_after_ack_locked` 抹掉 ACK durability barrier 故障。
+- **§19.2 关于“带回归测试”的表述对 `M-12` 不成立。** per-bucket deadline + round-robin cursor
+  是该条修复的核心机制，但 `diagnostic_cursor`（`user_audit.rs:1336/1347/1363/2396/2402`）在整个
+  测试集中零覆盖，唯一新增的诊断测试（`3219-3232`）不触及调度顺序。
+
+### 21.6 Minor
+
+| 编号 | 位置 | 问题 |
+| --- | --- | --- |
+| m-85 | `user_audit.rs:1353-1364` | `mark_diagnostic_attempt` 的非 contention 分支是语义空操作（死代码），掩盖了“正常 snapshot 不限频”的真实语义 |
+| m-86 | `user_audit.rs:1698-1701`、`2361-2371` | `diagnostic_retry_buckets` 的位在 `fill_pending` 内循环只读不清，失败 bucket 的 60 秒重试被重复应用一次（实际推迟 60 s + 两次 fill 间隔） |
+| m-87 | `user_audit.rs:1413-1459`、`1730-…` | §6.5 要求的“contention 计数达到 `u64::MAX` 时置 producer health degraded”未实现，`AuditHealthSnapshot` 无饱和维度 |
+| m-88 | `user_audit.rs:2565-2582` | 整改把生产路径改名为 `connect_and_send_session` 后，旧的 `connect_and_send` 沦为仅测试可达的非 `cfg(test)` 死函数；feature-on `cargo check` 实测 12 条警告（`m-70` 的加深） |
+| m-89 | `server/mod.rs`、`context.rs` | §7.3 固定 SIGTERM 顺序被 `stop_accepting()` 的传递性破坏：relay task 在 `close_emitter`/`drain` 之前就被全部 abort，而非规格要求的“drain 之后” |
+| m-90 | `context.rs:36-42,49-62` | `RelayTaskGuard::drop` 与 shutdown 共用同一个 `Notify`，每条 relay 任务结束都广播唤醒 accept loop 与全部 UDP 接收 worker（整改引入） |
+| m-91 | `user_audit.rs:1194-1233` | `eligible_lazy` 把 UTS #46/lowercase 域名规范化搬进了 shard mutex 临界区，交替拼写可让每个数据报都触发锁内规范化 + 两次 HashMap 改写；§6.4 要求临界区只做有界 lookup/LRU |
+| m-92 | `tcprelay.rs:452-459`、`udprelay.rs:630-634` | 审计 identity handle 在 emitter 存在性检查**之前**求值，每条 TCP 连接与每个 UDP session 白付两次 RwLock 读 + 一次 String 分配 |
+| m-93 | `audit-protocol/src/lib.rs:2849` | 204 与全部非 lease 响应的 canonical“空字段”分支在两侧均零覆盖：无 golden vector、无单测正例 |
+| m-94 | `audit-protocol/src/lib.rs:234-235` | `ProtocolError::DuplicateKey` 携带的 key 名被 serde 的位置后缀污染，重复 key 诊断信息永远是乱码 |
+| m-95 | `tests/mock_collector.py:305,356-410` | 参考 collector 从不校验任何 canonical 字节形态：乱序 wrapper、内嵌事件的等价转义写法均被接受，与 §9.2「逐字相等」的示范意图相反 |
+| m-96 | `audit-protocol/Cargo.toml:20` | 声明了全树零引用的 dev-dependency `serde_bytes`（`m-81` 同类） |
+| m-97 | `spool.rs:4526-4582`、`812-820` | `M-15` 修复不完整：`SpoolLock` 没有 `verify()`，`spool_dir/.lock` 被删除或替换后两个 auditd 仍可并发写同一 ledger |
+| m-98 | `auditd/src/config.rs:686,746,810,…` | 6 个 `pub(crate)` socket 路径辅助函数全无调用方，其中一个注释还声称“retained for low-level tests”，在唯一受支持的 Linux 目标上产生 dead_code 警告 |
+| m-99 | `user_audit.rs`（退避重置点） | 整改新增的“hello ACK 即重置退避”使 retryable `event_nack` 的重连退避永远停在 100 ms 下限，`storage_unavailable` 期间变成 10 Hz 热重连 + 256 条全量重放 |
+| m-100 | `auditd/src/ingest.rs`（dedup） | dedup LRU 改 HashMap+token 后失去“最近 65536 条”容量保证：每次命中都挤掉一条别的活条目，重放场景下有效容量实测坍缩到 in-flight 规模（65536 → 256），违反 §8.3 |
+| m-101 | `auditd/src/ingest.rs`（accept 恢复） | transient `accept()` 恢复只有固定 50 ms 睡眠：无退避升级、无连续失败上限、无诊断，且把 ECONNABORTED/ECONNRESET 这类单连接常态错误按资源枯竭处理；sleep 位于 select 分支内，阻塞 shutdown 与任务回收（`m-41` 修复不完整） |
+| m-102 | `auditd/src/ingest.rs`（hello 版本） | §19 为 hello `protocol_version` 越界新增的 `unsupported_version` 分支不可达，配套回归测试是空测（在整改前代码上同样通过） |
+| m-103 | `spool.rs:2878-2882`、`1752-1762`、`1581-1594` | `evict_sealed_locked` 在 `remove_tree_tracked` 之后、索引更新之前 `sync_dir(...)?` 早退，`unacked_gap_batches`/`sealed_received_at` 残留幽灵条目，health 从此永远无法从 degraded 恢复 |
+| m-104 | `spool.rs:2949-2952` | `evict_quarantine_locked` 先删后同步再记账，`sync_dir` 失败使 `spool_bytes` 永久高估，反过来驱动 cleanup 继续淘汰真实 sealed 数据 |
+| m-105 | `spool.rs:2294-2306`、`2574-2580` | `remove_tree_tracked(..).and_then(sync_dir)` 只回滚一半：字节已扣、`stored_records` 未扣 |
+| m-106 | `spool.rs:4622-4691`、`2421-2426` | `cleanup_recovered_temp_files` 中途出错时丢弃已累计的 `removed_bytes`，调用方用 `?` 传播，`spool_bytes` 对已删除的临时文件永久高估 |
+| m-107 | `spool.rs:2463-2510` | `recover_runtime_temp_objects_locked` 在一次 promotion 成功之后遇到 I/O 错误就 `?` 早退，跳过尾部 rebuild，被提升的 sealed batch 永不进入 `sealed_batches`/`stored_records` 索引 |
+| m-108 | `spool.rs:1649`、`2019-2023`、`1756-1762` | 整改把未封口的 open 段计入 `oldest_unacked_at_unix_ms`，无 sealed/leased 批次时不再返回 null，与 §10.1「没有 sealed/leased unacked batch 时该字段为 null」明文相反（整改前只统计 sealed） |
+| m-109 | `spool.rs`（quarantine 记账） | quarantine 驱逐在 sync/remove 失败时不回补字节记账，`spool_bytes` 永久高估直到下次全量 rebuild（`m-72`/`m-73` 同类） |
+| m-110 | `spool.rs`（corruption 隔离） | corruption 隔离复用 `quarantine_pending` variant 并把 reason 硬编码成 `quarantine_eviction`，与 §9.5 的 variant 定义不符，且迫使恢复靠全树扫描反推语义 |
+| m-111 | `spool.rs:3698-3709` | 新节点判定分支无条件清空 `degraded`，抹掉已记录的 `storage_rejected_attempts`，health 谎报 `ok`（`§19.3`「新节点不再伪造 state-reset」的副作用） |
+| m-112 | `spool.rs:1529-1568` | `m-71` 漏记：`ack()` 在 rename／双目录 fsync／receipt 落盘失败的四个分支同样漏设 `non_gap_degraded` |
+| m-113 | `spool.rs:1596-1631`、`1794-1804` | 整改后的 health 不再是 sealed batch 静默损坏的运行期信号：损坏对象仍计入 `sealed_batches` 且 status 保持 `ok`（整改前 health 会因 `read_batch` 失败置 degraded） |
+| m-114 | `tests/check_audit_static.py:11-15,126-137` | 越界护栏对变量下标与切片完全失明，且 `unreachable!`/`todo!`/`unimplemented!` 不在禁止表——`M-27` 声称的 panic 静态护栏近乎零杀伤力 |
+| m-115 | `tests/check_audit_static.py:132-136` | “附近有守卫”启发式会抑制**已被证明越界**的字面量下标；`test_check_audit_static.py:28-50` 未覆盖该抑制路径 |
+| m-116 | `tests/check_audit_static.py:140-176` | `--source` 指向错误或空目录时静默输出“静态审计通过”并 exit 0；`test_check_audit_static.py:68-78` 把该行为固化为正向断言 |
+| m-117 | `tests/check_audit_static.py:130` vs `:23-92` | 对注释与字符串字面量中的 `unwrap/expect/panic!` 误报——同文件已有的注释剥离器未被该检查使用 |
+| m-118 | `tests/benchmark_audit.py:111,176,…` | `scenario_gate` 与 queue gate 恒为真（`"proxy_errors": 0` 是写死的字面量），`--enforce` 在无 data-path 报告时永远不会失败 |
+| m-119 | `tests/benchmark_audit.py:86-120` | §14.5 的 5 个场景中 offline 与 queue_full 完全同构（共用同一 `queue_capacity`），healthy 场景自身报告 79.5% 事件丢弃，且 queue 丢弃从不产生 gap 记录 |
+| m-120 | `scripts/test.sh:109-138`、`scripts/verify.sh` | `tests/benchmark_audit.py` 与 `tests/test_check_audit_static.py` 无任何脚本调用，是孤儿交付物 |
+| m-121 | `tests/test_audit_packaging.py:30` | 凭据泄露断言是死断言：正则在 JSON 语法下永不匹配 |
+| m-122 | `tests/mock_collector.py:488,547-548` | 默认路径（无 `--state`）在**零 durable 提交**下就发送 ACK，而 `integration_audit.py` 走的正是该路径——§12.4「durable 保存后才 ACK」的示范失效 |
+| m-123 | `tests/integration_audit.py:102-111` | §12 health 步骤只验签名不验内容，503 也判通过——端到端“health 验证”实质为空 |
+| m-124 | `packaging/release-toolchain.lock:8-9` | 把宿主 Python 的 zlib 版本（`1.2.12`，来自 macOS 系统 zlib）作为发布门禁，任何 Linux 发布机都会在构建开始前被拒 |
+| m-125 | `scripts/release-artifact.py:128-160,308-492`、`scripts/verify-release.sh` | 仍保留单产物（无 `shadowsocks-auditd`）的 package/verify 通路，`_parse_manifest` 强制 `artifact.name == "ssserver"`，验签成功时打印全绿，绕过 §15.1 的六产物合同（`m-54` 未尽） |
+| m-126 | `docs/OPERATIONS.md:293-353`、`docs/API.md:80-81,302-317` | §10.3 要求的 audit export HTTP intermediary 约束与 export peer 入组要求未进入任何运维文档；文档中唯一的反向代理配方是 user-stats 的 GET-only nginx 块，照抄会破坏两个 POST 路由 |
+| m-127 | `README.md:86-102`、`patches/README.md` | README 与 patches/README 声称非 Linux 主机不做 auditd 编译检查，但 `scripts/test.sh:99-105` 仍强制交叉 target 编译并硬失败；README 快速开始的三条命令在 macOS 上逐条不可执行 |
+
+### 21.7 验收建议
+
+1. **先修 `C-4`**，否则任何 Linux 验收都无法开始；修好后第一件事是在 Linux 上完整跑一次
+   `cargo test -p shadowsocks-auditd` 与 `cargo test --workspace --features user-audit`——
+   这会同时暴露 `M-35`、`M-39` 两条必然失败的用例，以及 §20 `M-29`。
+2. **`C-5` 与 `M-36`/`M-37` 必须同批修复**：三者共同构成“低磁盘水位 → 无限循环 → 销毁全部审计
+   数据”的链条，且 `M-36` 使触发条件从“磁盘真的满”降低到“spool 树里有一个符号链接”。
+3. `M-32` 属于 on-wire 数据伪造，修复成本极低（改用 `fetch_update`），应优先。
+4. `M-40` 与 `M-33` 各是一行改动，建议随 1-3 一起提交。
+5. `M-34` 需要在 §14.5 目标机上复测 RSS，确认修复后回到 64 MiB 预算内。
+6. 把“Linux 上完整 feature-on 测试 + fuzz 实跑 + §14.5 压测”写成发布前置硬条件；在此之前
+   §19.4/§20.5/§21.1 的所有本机结论都只覆盖可移植部分。
+7. 更正 §19.4 与 §20.5 的失真条目（见 21.5），并把 `x86_64-unknown-linux-gnu` target 列为
+   非 Linux 主机的显式前置依赖。
