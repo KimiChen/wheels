@@ -107,9 +107,13 @@ if [[ "$run_audit" -eq 1 ]]; then
 fi
 
 python3 "$SHADOWSOCKS_RUST_PLUS_ROOT/tests/check_audit_static.py" --source "$source_dir"
-python3 "$SHADOWSOCKS_RUST_PLUS_ROOT/tests/test_fuzz_target.py"
+python3 "$SHADOWSOCKS_RUST_PLUS_ROOT/tests/test_check_audit_static.py"
+python3 "$SHADOWSOCKS_RUST_PLUS_ROOT/tests/test_fuzz_target.py" --source "$source_dir"
 python3 "$SHADOWSOCKS_RUST_PLUS_ROOT/tests/test_panic_abort.py" --source "$source_dir"
 python3 "$SHADOWSOCKS_RUST_PLUS_ROOT/tests/test_benchmark_audit.py"
+python3 "$SHADOWSOCKS_RUST_PLUS_ROOT/tests/test_integration_audit.py"
+python3 "$SHADOWSOCKS_RUST_PLUS_ROOT/tests/benchmark_audit.py" \
+  --events 2000 --producers 4 --queue-capacity 128 --spool-capacity 256 >/dev/null
 
 if [[ "${SHADOWSOCKS_RUN_FUZZ:-0}" == 1 ]]; then
   "$SHADOWSOCKS_RUST_PLUS_ROOT/scripts/test-fuzz.sh" --source "$source_dir" \

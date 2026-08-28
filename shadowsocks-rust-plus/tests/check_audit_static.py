@@ -8,15 +8,25 @@ import re
 from pathlib import Path
 
 
-FORBIDDEN = re.compile(r"\b(?:unwrap|expect)\s*\(|\bpanic!\s*\(")
-INDEX = re.compile(
-    r"\b(?P<name>[A-Za-z_][A-Za-z0-9_]*)"
-    r"\[(?P<start>[0-9]+)(?:\.\.(?P<inclusive>=)?(?P<end>[0-9]+))?\]"
+FORBIDDEN = re.compile(
+    r"\b(?:unwrap|expect)\s*\(|\b(?:panic|unreachable|todo|unimplemented)!\s*\("
 )
-AUDIT_DIRS = ("crates/shadowsocks-auditd/src",)
+INDEX = re.compile(
+    r"\b(?P<name>[A-Za-z_][A-Za-z0-9_]*)\[(?P<expression>[^\]\n]+)\]"
+)
+AUDIT_DIRS = (
+    "crates/shadowsocks-auditd/src",
+    "crates/shadowsocks-audit-protocol/src",
+)
+SERVICE_AUDIT_FILES = ("crates/shadowsocks-service/src/server/user_audit.rs",)
+SERVICE_WIRING_FILES = (
+    "crates/shadowsocks-service/src/config.rs",
+    "crates/shadowsocks-service/src/lib.rs",
+    "crates/shadowsocks-service/src/server/mod.rs",
+)
 FIXED_ARRAY_DECLARATION = (
-    r"\b{name}\s*:\s*&?\s*(?:mut\s+)?\[[^\]\n;]+;\s*(?P<typed_len>[0-9]+)\]"
-    r"|\blet\s+(?:mut\s+)?{name}\s*=\s*\[[^\]\n;]*;\s*(?P<literal_len>[0-9]+)\]"
+    r"\b{name}\s*:\s*&?\s*(?:mut\s+)?\[[^\]\n;]+;\s*(?P<typed_len>[A-Z_][A-Z0-9_]*(?:\.len\(\))?|[0-9]+)\]"
+    r"|\blet\s+(?:mut\s+)?{name}\s*=\s*\[[^\]\n;]*;\s*(?P<literal_len>[A-Z_][A-Z0-9_]*|[0-9]+)\]"
 )
 
 
@@ -102,53 +112,156 @@ def _fixed_array_length(lines: list[str], line_index: int, name: str) -> int | N
         return None
     match = matches[-1]
     length = match.group("typed_len") or match.group("literal_len")
-    return int(length)
+    if length.isdecimal():
+        return int(length)
+    if length.endswith(".len()"):
+        array_name = length.removesuffix(".len()")
+        declaration = re.search(
+            rf"\bconst\s+{re.escape(array_name)}\s*:\s*\[[^\]\n;]+;\s*([0-9]+)\]",
+            context,
+        )
+    else:
+        declaration = re.search(
+            rf"\bconst\s+{re.escape(length)}\s*:\s*usize\s*=\s*([0-9]+)",
+            context,
+        )
+    return int(declaration.group(1)) if declaration is not None else None
 
 
 def _fixed_array_index_is_safe(lines: list[str], line_index: int, match: re.Match[str]) -> bool:
     length = _fixed_array_length(lines, line_index, match.group("name"))
     if length is None:
         return False
-    start = int(match.group("start"))
-    end = match.group("end")
-    if end is None:
-        return start < length
-    end_value = int(end)
-    if match.group("inclusive"):
-        return start <= end_value < length
-    return start <= end_value <= length
+    expression = match.group("expression").strip()
+    if re.fullmatch(r"[0-9]+", expression):
+        return int(expression) < length
+    range_match = re.fullmatch(r"(?P<start>[0-9]*)\.\.(?P<inclusive>=)?(?P<end>[0-9]*)", expression)
+    if range_match is None:
+        return False
+    start = int(range_match.group("start") or 0)
+    end_text = range_match.group("end")
+    if not end_text:
+        return not range_match.group("inclusive") and start <= length
+    end = int(end_text)
+    if range_match.group("inclusive"):
+        return start <= end < length
+    return start <= end <= length
+
+
+def _index_is_proven_safe(lines: list[str], line_index: int, match: re.Match[str]) -> bool:
+    length = _fixed_array_length(lines, line_index, match.group("name"))
+    expression = match.group("expression").strip()
+    literal_expression = re.fullmatch(r"[0-9]+|[0-9]*\.\.?=?[0-9]*", expression) is not None
+    if length is not None and literal_expression:
+        # A known array bound is authoritative. Contextual guard words must
+        # never suppress a compile-time out-of-bounds index.
+        return _fixed_array_index_is_safe(lines, line_index, match)
+
+    name = re.escape(match.group("name"))
+    context = "\n".join(lines[max(0, line_index - 256):line_index + 1])
+    if re.search(
+        rf"\b{name}\s*(?:\n\s*)?\.(?:len|starts_with|strip_prefix|find|windows|iter)\s*\(",
+        context,
+    ):
+        return True
+    if re.search(rf"\b(?:validate|check)[A-Za-z0-9_]*\s*\([^;\n]*\b{name}\b", context):
+        return True
+    if re.search(rf"\.read\s*\(\s*&mut\s+{name}\b", context):
+        return True
+    if re.search(rf"\b{name}\.len\(\)", expression):
+        return True
+
+    # `slice.windows(N)` yields subslices of exactly N elements.
+    if expression.isdecimal():
+        window = re.search(rf"\.windows\(([0-9]+)\).*\|\s*{name}\s*\|", context, re.DOTALL)
+        if window is not None and int(expression) < int(window.group(1)):
+            return True
+
+    if length is not None:
+        modulo = re.search(
+            rf"\blet\s+{re.escape(expression)}\s*=.*%\s*(?:[A-Z_][A-Z0-9_]*|[A-Za-z_][A-Za-z0-9_]*\.len\(\))",
+            context,
+        )
+        if modulo is not None:
+            return True
+        if expression.endswith(".index()"):
+            index_functions = list(re.finditer(r"\bfn\s+index\s*\([^)]*\)\s*->\s*usize\s*\{", "\n".join(lines[:line_index + 1])))
+            if index_functions:
+                function_tail = "\n".join(lines[:line_index + 1])[index_functions[-1].end():]
+                function_body = function_tail.split("\n    }", 1)[0]
+                arms = [int(value) for value in re.findall(r"=>\s*([0-9]+)\b", function_body)]
+                if arms and max(arms) < length:
+                    return True
+    return False
 
 
 def _check_file(path: Path) -> list[str]:
     findings: list[str] = []
     lines = path.read_text(encoding="utf-8").splitlines()
     test_only = _test_only_lines(lines)
+    structural_lines: list[str] = []
+    comment_depth = 0
+    for line in lines:
+        structural, comment_depth = _structural_characters(line, comment_depth)
+        structural_lines.append(structural)
     for line_index, line in enumerate(lines):
         if line_index in test_only:
             continue
         number = line_index + 1
-        if FORBIDDEN.search(line):
+        structural = structural_lines[line_index]
+        if FORBIDDEN.search(structural):
             findings.append(f"{path}:{number}: forbidden panic path")
-        context = " ".join(lines[max(0, line_index - 3):line_index + 2])
-        guarded = re.search(r"(?:len\(|if |match |checked_|is_some|is_none|validate)", context)
-        for match in INDEX.finditer(line):
-            if not guarded and not _fixed_array_index_is_safe(lines, line_index, match):
-                findings.append(f"{path}:{number}: index lacks nearby bounds guard")
+        for match in INDEX.finditer(structural):
+            if not _index_is_proven_safe(structural_lines, line_index, match):
+                findings.append(f"{path}:{number}: direct index is not statically bounded")
+    return findings
+
+
+def _check_wiring_file(path: Path) -> list[str]:
+    """Check the feature wiring statements without auditing unrelated upstream code."""
+
+    findings: list[str] = []
+    lines = path.read_text(encoding="utf-8").splitlines()
+    test_only = _test_only_lines(lines)
+    comment_depth = 0
+    for line_index, line in enumerate(lines):
+        structural, comment_depth = _structural_characters(line, comment_depth)
+        if line_index in test_only:
+            continue
+        number = line_index + 1
+        if "user_audit" not in structural and "user-audit" not in structural:
+            continue
+        if FORBIDDEN.search(structural):
+            findings.append(f"{path}:{number}: forbidden panic path in user-audit wiring")
+        if INDEX.search(structural):
+            findings.append(f"{path}:{number}: direct index in user-audit wiring")
     return findings
 
 
 def check(root: Path) -> list[str]:
     findings: list[str] = []
+    if not root.is_dir():
+        return [f"{root}: source root does not exist or is not a directory"]
+    scanned: set[Path] = set()
     for relative in AUDIT_DIRS:
         directory = root / relative
         if not directory.is_dir():
             continue
         for path in sorted(directory.rglob("*.rs")):
             findings.extend(_check_file(path))
-    service_files = list((root / "crates/shadowsocks-service/src").rglob("user_audit.rs"))
-    for service_file in service_files:
+            scanned.add(path)
+    for relative in SERVICE_AUDIT_FILES:
+        service_file = root / relative
         if service_file.is_file():
             findings.extend(_check_file(service_file))
+            scanned.add(service_file)
+    for relative in SERVICE_WIRING_FILES:
+        service_file = root / relative
+        if service_file.is_file():
+            findings.extend(_check_wiring_file(service_file))
+            scanned.add(service_file)
+    if not scanned:
+        findings.append(f"{root}: no audit production Rust sources found")
     # `user-audit` is a Linux-only feature even when a consumer depends on
     # shadowsocks-service directly (the root crate's auditd dependency is not
     # present in that use case). Keep the compile gate in the prepared source
@@ -172,7 +285,7 @@ def main() -> int:
         for finding in findings:
             print(finding)
         return 1
-    print("静态审计通过：user-audit/auditd 生产 Rust 路径无 unwrap/expect/panic。")
+    print("静态审计通过：audit protocol/auditd/service 接线路径无禁止 panic 或未证明安全的直接索引。")
     return 0
 
 

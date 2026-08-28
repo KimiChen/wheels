@@ -317,6 +317,13 @@ bytes，并拒绝 `Transfer-Encoding`、`Content-Encoding`、obs-fold、HTAB 和
 4 个并发连接，读写截止 5 秒。除 204 外响应都有准确 `Content-Length`、`Cache-Control: no-store`
 和 `Content-Type`；204 明确省略 body/framing headers。
 
+远程访问只能经独立的 HTTPS/mTLS HTTP 中介。中介 worker 的实际 UID 必须等于配置的
+`export_peer_user`，并通过 `shadowsocks-audit-export` 专用组连接 export UDS；auditd 的
+`SO_PEERCRED` 验证对象是该 worker，而不是远端 collector。中介必须保持三个精确 method/path、raw
+request body、`Authorization` 与全部 `X-Shadowsocks-Audit-*` header，不得重新序列化 JSON、缓存、
+压缩、自动 retry upstream 或向 204 添加 body。公网侧还必须限制 collector 来源并记录不含正文的
+访问审计。可部署的 Nginx 边界与账号/组验收步骤见 [`OPERATIONS.md`](OPERATIONS.md#审计-export-的-http-中介)。
+
 200 lease 必须携带 `X-Shadowsocks-Audit-Schema: 1`、node、batch、epoch、first/last sequence、
 event count，以及 `X-Shadowsocks-Audit-Body-SHA256`；该 digest 等于实际 raw NDJSON body 和通用
 `X-Shadowsocks-Audit-Response-SHA256`。collector 必须先校验响应 digest/MAC，再按 LF 分行校验

@@ -83,10 +83,23 @@ ingest/export/spool/HMAC 协议、systemd/sysusers/tmpfiles 模板、双二进�
 
 ### 1. 本地验证和开发构建
 
+Linux 主机直接运行完整开发路径：
+
 ```bash
 ./scripts/verify.sh
 ./scripts/build.sh
 (cd dist && shasum -a 256 -c ssserver.sha256 && shasum -a 256 -c shadowsocks-auditd.sha256)
+```
+
+macOS 等非 Linux 主机必须先安装用于 auditd 静态交叉检查的 Rust Linux target；默认 target 为
+`x86_64-unknown-linux-gnu`，也可通过 `SHADOWSOCKS_AUDIT_CHECK_TARGET` 选择另一个已安装的 Linux
+target。非 Linux 开发构建只能显式关闭 auditd：
+
+```bash
+rustup target add x86_64-unknown-linux-gnu
+SHADOWSOCKS_AUDIT_CHECK_TARGET=x86_64-unknown-linux-gnu ./scripts/verify.sh
+./scripts/build.sh --without-audit
+(cd dist && shasum -a 256 -c ssserver.sha256)
 ```
 
 `verify.sh` 会核对远端 tag 与锁定 commit、在临时目录重放补丁、运行 Rust/结算/HTTP Unix 与
@@ -98,15 +111,16 @@ feature 的开发用 `ssserver` 与 `shadowsocks-auditd`；该 feature 在非 Li
 生成的源码、Cargo target
 和 `dist/` 不应提交。
 
-由于 `shadowsocks-auditd` 明确是 Linux-only，macOS 等非 Linux 主机上的 `verify.sh` 会保留
-service/协议审计测试；auditd 编译、运行时测试和完整 Linux feature workspace 回归仍需在 Linux
-主机执行。
+由于 `shadowsocks-auditd` 明确是 Linux-only，非 Linux 主机上的 `verify.sh` 会运行 feature-off
+workspace、service/协议测试，并对上述 Linux target 执行 auditd `cargo check --all-targets`；target
+缺失时验证会失败。auditd 原生单元/集成测试和完整 `user-audit` feature workspace 回归只能在
+Linux 主机执行，且是发布前置硬条件。
 
 ### 2. Linux x86_64 可复现发布包与验签
 
-生产候选包使用锁定的 Rust、Cargo、cargo-zigbuild、Zig、Python 与 zlib 版本，两次在不同
-源码/target 路径独立构建 `x86_64-unknown-linux-musl`，二进制逐字节相同才生成固定 mtime、
-属主、权限和成员顺序的双二进制发布目录：
+生产候选包使用锁定的 Rust、Cargo、cargo-zigbuild、Zig 与 Python 版本，两次在不同源码/target
+路径独立构建 `x86_64-unknown-linux-musl`，二进制逐字节相同才生成包含两个 ELF、两个 SHA-256
+文件和规范 manifest 的发布目录：
 
 ```bash
 ./scripts/build-linux-release.sh --repository /absolute/path/to/upstream-mirror

@@ -18,7 +18,8 @@
 `shadowsocks-auditd`。`--repository`
 既可指向本地镜像也可省略后使用锁定地址，但两者都必须解析到精确上游 commit。发布构建要求
 overlay 工作树完全干净，并按 [`../packaging/release-toolchain.lock`](../packaging/release-toolchain.lock)
-核对 rustc commit、Cargo、cargo-zigbuild、Zig、Python 和 zlib 版本。
+核对 rustc commit、Cargo、cargo-zigbuild、Zig 和 Python 版本。宿主 Python 链接的 zlib 不参与
+双二进制发布内容，不作为跨发行版发布门禁。
 
 脚本把同一准备源码复制到不同绝对路径，使用两个独立 Cargo target 构建；通过
 `SOURCE_DATE_EPOCH`、路径 remap、关闭 incremental/build-id 和剥离符号消除已知不稳定输入。
@@ -383,6 +384,64 @@ lease/ACK 超时、连接断开、未知 NACK 或 response MAC 失败都只能�
 `event_payload_sha256` 复算，不得 parse 后重新序列化再 ACK。仓库提供的
 [`../tests/mock_collector.py`](../tests/mock_collector.py) 只用于协议互通和故障测试，不是生产
 controller；生产 controller 仍需实现 durable commit、跨节点隔离、retention 和管理员审计。
+
+### 审计 export 的 HTTP 中介
+
+远程 collector 不能直接获得 export UDS。需要 HTTP 中介时，必须运行独立的反向代理实例，并让其
+worker 使用 auditd 配置中 `export_peer_user` 对应的专用 UID（模板默认 `audit-exporter`）。该账号
+只能加入 `shadowsocks-audit-export` 组；不得加入 ingest 组，也不得复用 ssserver、auditd 或普通
+Web worker 账号。`systemd-sysusers` 后应同时验证：worker 的实际 UID 与 `export_peer_user` 解析结果
+一致、它能遍历 `0750 shadowsocks-audit:shadowsocks-audit-export` 的父目录并连接
+`0660 shadowsocks-audit:shadowsocks-audit-export` 的 socket。auditd 的 `SO_PEERCRED` 看到的是中介
+worker，不是远端 collector；仅把某个账号加入 export 组而不匹配配置 UID 仍会被拒绝。
+
+公网侧必须使用 HTTPS、mTLS、collector 来源 allowlist、限速和不记录请求/响应正文的审计日志。
+中介只能转发三个精确的 method/path 组合，不得重写 method/path、规范 JSON body、
+`Authorization` 或 `X-Shadowsocks-Audit-*` 请求头，不得解压/压缩正文、缓存响应、自动重试 upstream
+或把 204 改写为带 body 的响应。下面片段放在专用 Nginx `http`/`server` 上下文；TLS 和 allowlist
+仍需由部署系统补齐：
+
+```nginx
+map "$request_method:$uri" $audit_route_allowed {
+    default                         0;
+    "GET:/v1/audit/healthz"        1;
+    "POST:/v1/audit/lease"        1;
+    "POST:/v1/audit/ack"          1;
+}
+
+location ~ ^/v1/audit/(?:healthz|lease|ack)$ {
+    if ($audit_route_allowed = 0) { return 405; }
+    if ($is_args != "") { return 400; }
+    if ($http_transfer_encoding != "") { return 400; }
+    if ($http_content_encoding != "") { return 400; }
+
+    proxy_pass http://unix:/run/shadowsocks-audit/export/export.sock:;
+    proxy_http_version 1.1;
+    proxy_set_header Host localhost;
+    proxy_set_header Connection close;
+    proxy_set_header Transfer-Encoding "";
+    proxy_set_header Content-Encoding "";
+    proxy_set_header Expect "";
+    proxy_set_header Upgrade "";
+    proxy_set_header Content-Length $content_length;
+    proxy_set_header Authorization $http_authorization;
+    proxy_set_header X-Shadowsocks-Audit-Node $http_x_shadowsocks_audit_node;
+    proxy_set_header X-Shadowsocks-Audit-Timestamp $http_x_shadowsocks_audit_timestamp;
+    proxy_set_header X-Shadowsocks-Audit-Nonce $http_x_shadowsocks_audit_nonce;
+    proxy_set_header X-Shadowsocks-Audit-Content-SHA256 $http_x_shadowsocks_audit_content_sha256;
+    proxy_pass_request_body on;
+    proxy_request_buffering on;
+    proxy_buffering off;
+    proxy_cache off;
+    proxy_next_upstream off;
+    proxy_intercept_errors off;
+}
+```
+
+该正则 location 之外必须默认拒绝。上线前使用真实 mTLS collector 逐一验证三条合法路由、错误
+method/query/body framing 的拒绝、200/204/503 的逐字 body 与所有 response HMAC headers，以及
+upstream 断开时不会自动重试 lease/ACK。任何会重新序列化 ACK JSON 或 lease body 的 API gateway
+都不兼容本协议。
 
 建议额外告警：
 

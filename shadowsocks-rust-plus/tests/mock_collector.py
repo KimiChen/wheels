@@ -125,7 +125,7 @@ def canonical_request(
     if any("\r" in value or "\n" in value for value in (method, path, node_id, timestamp, nonce, body_sha256)):
         raise CollectorError("request signing field contains CR/LF")
     _field(node_id, IDENTIFIER, "node")
-    _field(timestamp, POSITIVE_DECIMAL, "timestamp")
+    _field(timestamp, DECIMAL, "timestamp")
     _field(nonce, HEX32, "nonce")
     _field(body_sha256, HEX64, "body digest")
     return "\n".join(
@@ -302,18 +302,22 @@ def parse_lease(body: bytes, metadata: ResponseMetadata) -> ParsedLease:
         record = strict_json(raw_line)
         if not isinstance(record, dict):
             raise CollectorError("lease record must be an object")
+        wrapper_fields = (
+            "spool_schema_version",
+            "spool_epoch",
+            "spool_sequence",
+            "received_at_unix_ms",
+            "event_payload_sha256",
+            "event",
+        )
         _exact_keys(
             record,
-            {
-                "spool_schema_version",
-                "spool_epoch",
-                "spool_sequence",
-                "received_at_unix_ms",
-                "event_payload_sha256",
-                "event",
-            },
+            set(wrapper_fields),
             "wrapper",
         )
+        canonical_wrapper = {name: record[name] for name in wrapper_fields}
+        if canonical_json(canonical_wrapper) != raw_line:
+            raise CollectorError("wrapper is not canonical JSON")
         if record["spool_schema_version"] != 1:
             raise CollectorError("unsupported spool schema")
         epoch = _field(record["spool_epoch"], HEX32, "spool epoch")
@@ -331,6 +335,8 @@ def parse_lease(body: bytes, metadata: ResponseMetadata) -> ParsedLease:
         if not isinstance(event, dict):
             raise CollectorError("event must be an object")
         event_bytes = _raw_object_field(raw_line, "event")
+        if _canonical_event(event) != event_bytes:
+            raise CollectorError("embedded event is not canonical JSON")
         if not hmac.compare_digest(payload_hash, sha256_hex(event_bytes)):
             raise CollectorError("event payload digest mismatch")
         if epoch != metadata.spool_epoch:
@@ -420,6 +426,92 @@ def canonical_json(value: Any) -> bytes:
     return encoded.encode("utf-8")
 
 
+def _canonical_event(event: dict[str, Any]) -> bytes:
+    event_type = event.get("event_type")
+    common_access = (
+        "schema_version",
+        "record_type",
+        "event_type",
+        "event_id",
+        "audit_sequence",
+        "occurred_at_unix_ms",
+        "runtime_monotonic_ms",
+        "node_id",
+        "runtime_id",
+        "server_id",
+        "server_generation",
+        "identity_kind",
+        "identity_name",
+        "identity_generation",
+        "transport",
+    )
+    orders = {
+        "tcp_target_success": common_access + ("target", "success_evidence"),
+        "udp_target_success": common_access + ("association_id", "target", "success_evidence"),
+        "producer_gap": (
+            "schema_version",
+            "record_type",
+            "event_type",
+            "event_id",
+            "audit_sequence",
+            "occurred_at_unix_ms",
+            "node_id",
+            "runtime_id",
+            "reason",
+            "permanent_nack_code",
+            "dropped_events",
+            "first_dropped_sequence",
+            "last_dropped_sequence",
+            "first_seen_unix_ms",
+            "last_seen_unix_ms",
+        ),
+        "udp_window_contention": (
+            "schema_version",
+            "record_type",
+            "event_type",
+            "event_id",
+            "audit_sequence",
+            "occurred_at_unix_ms",
+            "node_id",
+            "runtime_id",
+            "skipped_successful_datagrams",
+            "first_seen_unix_ms",
+            "last_seen_unix_ms",
+        ),
+        "spool_gap": (
+            "schema_version",
+            "record_type",
+            "event_type",
+            "event_id",
+            "occurred_at_unix_ms",
+            "node_id",
+            "spool_epoch",
+            "lost_spool_epoch",
+            "reason",
+            "first_lost_spool_sequence",
+            "last_lost_spool_sequence",
+            "lost_events",
+            "lost_bytes",
+            "lost_batch_id",
+        ),
+    }
+    order = orders.get(event_type)
+    if order is None:
+        # Compatibility for unit-level idempotency fixtures that do not model a
+        # complete wire event. Real protocol events always select a fixed order.
+        return canonical_json(event)
+    _exact_keys(event, set(order), "event")
+    ordered = {name: event[name] for name in order}
+    if event_type in {"tcp_target_success", "udp_target_success"}:
+        target = event["target"]
+        if not isinstance(target, dict):
+            raise CollectorError("event target must be an object")
+        target_order = ("kind", "host", "normalized_host", "port", "remote_ip")
+        _exact_keys(target, set(target_order), "event target")
+        ordered["target"] = {name: target[name] for name in target_order}
+    return canonical_json(ordered)
+
+
 def _secure_state_write(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     path.parent.chmod(0o700)
@@ -505,10 +597,11 @@ class MockCollector:
         if not isinstance(value, dict):
             raise CollectorError("collector state must be an object")
         keys = set(value)
-        allowed = {"schema_version", "node_id", "events", "batches", "conflicts"}
+        required = {"schema_version", "node_id", "events", "batches", "conflicts"}
+        allowed = set(required)
         allowed.update({"sequences", "diagnostics", "gaps", "isolated_batches", "isolated_wrappers"})
-        if not keys <= allowed:
-            raise CollectorError("collector state has unexpected fields")
+        if not required <= keys or not keys <= allowed:
+            raise CollectorError("collector state has missing or unexpected fields")
         if value["schema_version"] != 1 or value["node_id"] != self.node_id:
             raise CollectorError("collector state identity mismatch")
         if not isinstance(value["events"], dict) or not isinstance(value["batches"], dict):
@@ -598,7 +691,12 @@ class MockCollector:
     def record_diagnostic(self, kind: str, **fields: Any) -> None:
         """Record a producer/audit diagnostic and make it visible to health."""
 
-        if not kind or any("\r" in str(value) or "\n" in str(value) for value in fields.values()):
+        if (
+            not kind
+            or "\r" in kind
+            or "\n" in kind
+            or any("\r" in str(value) or "\n" in str(value) for value in fields.values())
+        ):
             raise CollectorError("invalid diagnostic")
         self._durable_mutation(lambda: self.diagnostics.append({"kind": kind, **fields}))
 
@@ -774,6 +872,8 @@ class MockCollector:
     def collect_once(self, socket_path: Path) -> int:
         """Lease, verify, durably accept, and ACK one batch from an auditd UDS."""
 
+        if self.state_path is None:
+            raise CollectorError("collect_once requires a durable state path before ACK")
         request_body = b'{"schema_version":1}'
         nonce = os.urandom(16).hex()
         request = self.build_request("POST", "/v1/audit/lease", request_body, nonce=nonce)
@@ -829,7 +929,10 @@ def _parse_http_response(payload: bytes) -> tuple[int, dict[str, str], bytes]:
         if name.lower() in {key.lower() for key in headers}:
             raise CollectorError("duplicate response header")
         headers[name] = value
-    content_length = headers.get("Content-Length")
+    content_length = next(
+        (value for name, value in headers.items() if name.lower() == "content-length"),
+        None,
+    )
     if content_length is not None:
         try:
             expected = int(content_length)
@@ -876,7 +979,7 @@ def main() -> int:
     parser.add_argument("--socket", required=True, type=Path)
     parser.add_argument("--node", required=True)
     parser.add_argument("--key-file", required=True, type=Path)
-    parser.add_argument("--state", type=Path)
+    parser.add_argument("--state", type=Path, required=True)
     args = parser.parse_args()
     try:
         collector = MockCollector(args.node, _read_key(args.key_file), args.state)

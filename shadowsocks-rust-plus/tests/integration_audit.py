@@ -9,16 +9,23 @@ import json
 import os
 import platform
 import pwd
+import re
 import signal
+import socket
+import struct
 import subprocess
 import sys
 import tempfile
 import time
-import struct
-import socket
 from pathlib import Path
 
-from mock_collector import MockCollector, verify_response
+from mock_collector import (
+    MockCollector,
+    canonical_json,
+    strict_json,
+    unix_http_request,
+    verify_response,
+)
 
 
 def _identity(user_name: str) -> pwd.struct_passwd:
@@ -59,6 +66,72 @@ def _frame(payload: bytes) -> bytes:
     return struct.pack(">I", len(payload)) + payload
 
 
+def _receive_json_frame(connection: socket.socket) -> dict[str, object]:
+    def receive_exact(size: int) -> bytes:
+        chunks: list[bytes] = []
+        while size:
+            chunk = connection.recv(size)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size -= len(chunk)
+        return b"".join(chunks)
+
+    header = receive_exact(4)
+    if len(header) != 4:
+        raise RuntimeError("auditd ingest response header truncated")
+    size = struct.unpack(">I", header)[0]
+    if size < 1 or size > 64 * 1024:
+        raise RuntimeError(f"auditd ingest response has invalid length: {size}")
+    payload = receive_exact(size)
+    if len(payload) != size:
+        raise RuntimeError("auditd ingest response frame truncated")
+    value = strict_json(payload)
+    if not isinstance(value, dict):
+        raise RuntimeError("auditd ingest response is not an object")
+    return value
+
+
+def _validate_hello_ack(value: dict[str, object]) -> None:
+    expected = {"protocol_version": 1, "frame_type": "hello_ack", "status": "ready"}
+    if value != expected:
+        raise RuntimeError(f"auditd rejected or malformed hello ACK: {value!r}")
+
+
+def _validate_event_ack(value: dict[str, object], runtime_id: str) -> None:
+    if set(value) != {
+        "protocol_version",
+        "frame_type",
+        "event_id",
+        "status",
+        "spool_epoch",
+        "spool_sequence",
+    }:
+        raise RuntimeError(f"auditd returned malformed event ACK fields: {value!r}")
+    if (
+        value.get("protocol_version") != 1
+        or value.get("frame_type") != "ack"
+        or value.get("event_id") != f"{runtime_id}:1"
+        or value.get("status") != "stored"
+        or not isinstance(value.get("spool_epoch"), str)
+        or re.fullmatch(r"[0-9a-f]{32}", str(value["spool_epoch"])) is None
+        or not isinstance(value.get("spool_sequence"), str)
+        or re.fullmatch(r"[1-9][0-9]*", str(value["spool_sequence"])) is None
+    ):
+        raise RuntimeError(f"auditd returned invalid event ACK: {value!r}")
+
+
+def _validate_hello_nack(value: dict[str, object], expected_error: str) -> None:
+    expected = {
+        "protocol_version": 1,
+        "frame_type": "hello_nack",
+        "error_code": expected_error,
+        "retryable": False,
+    }
+    if value != expected:
+        raise RuntimeError(f"unexpected rejected hello response: {value!r}")
+
+
 def _run_producer(socket_path: Path, node_id: str, runtime_id: str) -> int:
     """Send one hello and one event from the configured producer identity."""
 
@@ -66,48 +139,93 @@ def _run_producer(socket_path: Path, node_id: str, runtime_id: str) -> int:
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as producer:
         producer.settimeout(3)
         producer.connect(str(socket_path))
-
-        def recv_exact(size: int) -> bytes:
-            chunks: list[bytes] = []
-            while size:
-                chunk = producer.recv(size)
-                if not chunk:
-                    break
-                chunks.append(chunk)
-                size -= len(chunk)
-            return b"".join(chunks)
-
         hello = json.dumps(
             {"protocol_version": 1, "frame_type": "hello", "node_id": node_id, "runtime_id": runtime_id},
             separators=(",", ":"),
         ).encode()
         producer.sendall(_frame(hello) + _frame(event))
-        for _ in range(2):
-            header = recv_exact(4)
-            if len(header) != 4:
-                raise RuntimeError("auditd ingest response truncated")
-            size = struct.unpack(">I", header)[0]
-            payload = recv_exact(size)
-            if len(payload) != size:
-                raise RuntimeError("auditd ingest frame truncated")
+        _validate_hello_ack(_receive_json_frame(producer))
+        _validate_event_ack(_receive_json_frame(producer), runtime_id)
     return 0
 
 
-def _run_collector(socket_path: Path, node_id: str, key: bytes) -> int:
+def _run_rejected_hello(socket_path: Path, node_id: str, runtime_id: str, expected_error: str) -> int:
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as producer:
+        producer.settimeout(3)
+        producer.connect(str(socket_path))
+        hello = canonical_json(
+            {"protocol_version": 1, "frame_type": "hello", "node_id": node_id, "runtime_id": runtime_id}
+        )
+        producer.sendall(_frame(hello))
+        response = _receive_json_frame(producer)
+    _validate_hello_nack(response, expected_error)
+    return 0
+
+
+def _validate_health_body(status: int, body: bytes, node_id: str) -> None:
+    if status != 200:
+        raise RuntimeError(f"auditd health must be healthy after durable ACK, got HTTP {status}")
+    health = strict_json(body)
+    expected_fields = {
+        "schema_version",
+        "node_id",
+        "status",
+        "producer_connected",
+        "producer_runtime_id",
+        "last_ingest_at_unix_ms",
+        "spool_epoch",
+        "spool_bytes",
+        "max_spool_bytes",
+        "sealed_batches",
+        "oldest_unacked_at_unix_ms",
+        "stored_records",
+        "storage_rejected_attempts",
+        "evicted_unacked_records",
+    }
+    if not isinstance(health, dict) or set(health) != expected_fields:
+        raise RuntimeError(f"auditd health body has unexpected fields: {health!r}")
+    if health["schema_version"] != 1 or health["node_id"] != node_id or health["status"] != "ok":
+        raise RuntimeError(f"auditd health body is not healthy: {health!r}")
+    if not isinstance(health["producer_connected"], bool):
+        raise RuntimeError("auditd health producer_connected is not boolean")
+    if not health["producer_connected"] and (
+        health["producer_runtime_id"] is not None or health["last_ingest_at_unix_ms"] is not None
+    ):
+        raise RuntimeError("disconnected auditd health retained producer identity")
+    if not isinstance(health["spool_epoch"], str) or re.fullmatch(
+        r"[0-9a-f]{32}", health["spool_epoch"]
+    ) is None:
+        raise RuntimeError("auditd health spool_epoch is invalid")
+    for field in (
+        "spool_bytes",
+        "max_spool_bytes",
+        "sealed_batches",
+        "stored_records",
+        "storage_rejected_attempts",
+        "evicted_unacked_records",
+    ):
+        value = health[field]
+        if not isinstance(value, str) or re.fullmatch(r"0|[1-9][0-9]*", value) is None:
+            raise RuntimeError(f"auditd health {field} is not a canonical decimal")
+    oldest = health["oldest_unacked_at_unix_ms"]
+    if oldest is not None and (not isinstance(oldest, str) or re.fullmatch(r"[1-9][0-9]*", oldest) is None):
+        raise RuntimeError("auditd health oldest_unacked_at_unix_ms is invalid")
+    if canonical_json(health) != body:
+        raise RuntimeError("auditd health body is not canonical JSON")
+
+
+def _run_collector(socket_path: Path, node_id: str, key: bytes, state_path: Path) -> int:
     """Run lease/ACK/health checks from the dedicated export peer identity."""
 
-    collector = MockCollector(node_id, key)
+    collector = MockCollector(node_id, key, state_path)
     if collector.collect_once(socket_path) != 1:
         raise RuntimeError("auditd did not expose the ingested event as a lease")
     nonce = "0123456789abcdef0123456789abcdef"
     request = collector.build_request("GET", "/v1/audit/healthz", nonce=nonce)
-    from http_unix import unix_http_request
-
     status, headers, body = unix_http_request(socket_path, request)
     verify_response(key, status=status, headers=headers, body=body,
                     request_nonce=nonce, expected_node=node_id)
-    if status not in (200, 503):
-        raise RuntimeError(f"unexpected health status: {status}")
+    _validate_health_body(status, body, node_id)
     return 0
 
 
@@ -118,41 +236,44 @@ def _run_role(args: argparse.Namespace) -> int:
         key_hex = os.environ.get("SSRP_TEST_AUDIT_KEY", "")
         if len(key_hex) != 64:
             raise RuntimeError("missing integration test HMAC key")
-        return _run_collector(Path(args.socket), args.node_id, bytes.fromhex(key_hex))
+        if args.state is None:
+            raise RuntimeError("collector role requires --state")
+        return _run_collector(Path(args.socket), args.node_id, bytes.fromhex(key_hex), Path(args.state))
+    if args.role == "rejected-hello":
+        if args.runtime_id is None or args.expected_error is None:
+            raise RuntimeError("rejected-hello role requires runtime id and expected error")
+        return _run_rejected_hello(
+            Path(args.socket), args.node_id, args.runtime_id, args.expected_error
+        )
     raise RuntimeError(f"unknown integration role: {args.role}")
 
 
-def _prepare_identities() -> tuple[dict[str, pwd.struct_passwd], dict[str, int]] | None:
-    """Return production identities, or explain why a real Linux run is skipped."""
+def _prepare_identities() -> tuple[dict[str, pwd.struct_passwd], dict[str, int]]:
+    """Require the production identities used by the native Linux gate."""
 
     if os.geteuid() != 0:
-        print("Linux auditd 集成测试需要 root 以按 systemd 身份降权：跳过真实运行测试。")
-        return None
+        raise RuntimeError("Linux auditd 集成测试需要 root 以按 systemd 身份降权")
     users: dict[str, pwd.struct_passwd] = {}
     for name in ("shadowsocks-audit", "shadowsocks", "audit-exporter"):
         try:
             users[name] = _identity(name)
         except KeyError:
-            print(f"Linux 主机缺少专用账号 {name!r}：跳过 auditd 真实运行测试。")
-            return None
+            raise RuntimeError(f"Linux 主机缺少专用账号 {name!r}")
     if len({item.pw_uid for item in users.values()}) != len(users):
-        print("Linux auditd 集成测试要求 daemon、producer、exporter 使用不同 UID：跳过。")
-        return None
+        raise RuntimeError("Linux auditd 集成测试要求 daemon、producer、exporter 使用不同 UID")
     groups: dict[str, int] = {}
     for name in ("shadowsocks-audit", "shadowsocks-audit-ingest", "shadowsocks-audit-export"):
         try:
             groups[name] = _group_id(name)
         except KeyError:
-            print(f"Linux 主机缺少专用组 {name!r}：跳过 auditd 真实运行测试。")
-            return None
+            raise RuntimeError(f"Linux 主机缺少专用组 {name!r}")
     for user_name, group_name in (
         ("shadowsocks", "shadowsocks-audit-ingest"),
         ("audit-exporter", "shadowsocks-audit-export"),
     ):
         member_groups = os.getgrouplist(user_name, users[user_name].pw_gid)
         if groups[group_name] not in member_groups:
-            print(f"账号 {user_name!r} 不在组 {group_name!r}：跳过 auditd 真实运行测试。")
-            return None
+            raise RuntimeError(f"账号 {user_name!r} 不在组 {group_name!r}")
     return users, groups
 
 
@@ -160,16 +281,18 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", type=Path)
     parser.add_argument("--auditd-binary", type=Path)
-    parser.add_argument("--role", choices=("producer", "collector"))
+    parser.add_argument("--role", choices=("producer", "collector", "rejected-hello"))
     parser.add_argument("--socket", type=Path)
     parser.add_argument("--node-id")
     parser.add_argument("--runtime-id")
+    parser.add_argument("--expected-error", choices=("unauthorized_peer", "node_mismatch"))
+    parser.add_argument("--state", type=Path)
     args = parser.parse_args()
     if args.role:
         if args.socket is None or args.node_id is None:
             raise SystemExit("integration role requires --socket and --node-id")
-        if args.role == "producer" and args.runtime_id is None:
-            raise SystemExit("producer role requires --runtime-id")
+        if args.role in ("producer", "rejected-hello") and args.runtime_id is None:
+            raise SystemExit(f"{args.role} role requires --runtime-id")
         return _run_role(args)
     if platform.system() != "Linux":
         print("非 Linux 主机：跳过 auditd 真实运行集成测试（需 Linux CI）。")
@@ -177,8 +300,6 @@ def main() -> int:
     if args.source is None:
         raise SystemExit("--source is required for the parent integration test")
     identities = _prepare_identities()
-    if identities is None:
-        return 0
     users, groups = identities
     binary = args.auditd_binary or (args.source / "target" / "debug" / "shadowsocks-auditd")
     if not binary.is_file() or not os.access(binary, os.X_OK):
@@ -197,8 +318,7 @@ def main() -> int:
     try:
         temp = tempfile.TemporaryDirectory(prefix="ssrp-audit-integration-", dir="/run")
     except (FileNotFoundError, PermissionError) as error:
-        print(f"Linux auditd 集成测试无法创建安全临时目录：{error}；跳过真实运行测试。")
-        return 0
+        raise RuntimeError(f"Linux auditd 集成测试无法创建安全临时目录：{error}") from error
     with temp as temp_path:
         root = Path(temp_path)
         os.chown(root, 0, 0)
@@ -249,6 +369,24 @@ def main() -> int:
                 time.sleep(0.05)
             runtime_id = "0123456789abcdef0123456789abcdef"
             ingest_path = run / "ingest/ingest.sock"
+            negative_cases = (
+                (producer_user, f"{config['node_id']}-wrong", "node_mismatch"),
+                (exporter_user, config["node_id"], "unauthorized_peer"),
+            )
+            for identity, test_node, expected_error in negative_cases:
+                rejected = subprocess.run(
+                    [sys.executable, str(Path(__file__).resolve()), "--role", "rejected-hello",
+                     "--socket", str(ingest_path), "--node-id", test_node, "--runtime-id", runtime_id,
+                     "--expected-error", expected_error],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    preexec_fn=_preexec_for(identity.pw_name, (ingest_group,)),
+                )
+                if rejected.returncode != 0:
+                    raise RuntimeError(
+                        f"{expected_error} identity negative failed: {rejected.stderr}"
+                    )
             producer = subprocess.run(
                 [sys.executable, str(Path(__file__).resolve()), "--role", "producer",
                  "--socket", str(ingest_path), "--node-id", config["node_id"], "--runtime-id", runtime_id],
@@ -259,9 +397,14 @@ def main() -> int:
             )
             if producer.returncode != 0:
                 raise RuntimeError(f"producer role failed: {producer.stderr}")
+            collector_state_dir = root / "collector"
+            collector_state_dir.mkdir(mode=0o700)
+            os.chown(collector_state_dir, exporter_user.pw_uid, exporter_user.pw_gid)
+            collector_state = collector_state_dir / "state.json"
             collector = subprocess.run(
                 [sys.executable, str(Path(__file__).resolve()), "--role", "collector",
-                 "--socket", str(socket_path), "--node-id", config["node_id"]],
+                 "--socket", str(socket_path), "--node-id", config["node_id"],
+                 "--state", str(collector_state)],
                 capture_output=True,
                 text=True,
                 timeout=10,

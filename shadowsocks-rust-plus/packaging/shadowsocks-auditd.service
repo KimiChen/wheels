@@ -33,7 +33,7 @@ StateDirectory=shadowsocks-audit
 StateDirectoryMode=0700
 ReadOnlyPaths=/etc/shadowsocks-audit
 ReadWritePaths=/run/shadowsocks-audit /var/lib/shadowsocks-audit
-InaccessiblePaths=/etc/shadowsocks-rust-plus /run/shadowsocks-rust-plus
+InaccessiblePaths=-/etc/shadowsocks-rust-plus -/run/shadowsocks-rust-plus
 
 [Install]
 WantedBy=multi-user.target

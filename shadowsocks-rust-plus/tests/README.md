@@ -32,22 +32,24 @@
 
 `scripts/test.sh` 的固定检查包括：
 
-1. workspace lib/bin 在 `user-audit` feature 下的 Rust 单元测试（同时覆盖 `user-stats` 路径）；
+1. Linux 上运行 workspace lib/bin 的 `user-audit` Rust 单元测试；非 Linux 上改跑 `user-stats`
+   feature-off 路径并排除 Linux-only auditd；
 2. core 的 AEAD-2022 TCP EIH 认证用户透传测试；
 3. service 只启用普通 `server`、不启用 `user-stats` 的独立编译，防止 Cargo workspace
    feature 合并掩盖 gating 错误；
 4. HTTP response framing 与 snapshot schema 的 Python 单元测试；
 5. 结算模型契约测试；
 6. 私有凭据源生成、规范化和五配置一致性工具测试；
-7. 确定性 Linux 发布归档、manifest、SHA-256 和 detached 签名验签测试；
+7. 确定性 Linux 双二进制发布目录、manifest、SHA-256 和 detached 签名验签测试；
 8. 真实 `ssserver`/`sslocal` TCP+UDP 集成测试；
 9. `shadowsocks-audit-protocol`/`shadowsocks-auditd` 单元测试与 mock collector 协议测试。
 
 `shadowsocks-auditd` 是 Linux-only。在 macOS 等非 Linux 主机上，脚本会从宿主 workspace 测试中排除
-auditd，改为运行 service 的 `user-audit` 单元测试、协议单元测试，并对已安装的
-`SHADOWSOCKS_AUDIT_CHECK_TARGET`（默认 `x86_64-unknown-linux-gnu`）执行 `cargo check --all-targets`；
-auditd 的运行时单元/集成测试仍需在 Linux 主机执行。未安装该 target 时验证会明确失败，而不会把
-Linux-only 覆盖误报为通过。
+auditd，并把 workspace feature 降为 `user-stats`；producer 的 `user-audit` 单元测试不会在宿主
+运行。协议单元测试仍会执行，auditd 则对已安装的 `SHADOWSOCKS_AUDIT_CHECK_TARGET`（默认
+`x86_64-unknown-linux-gnu`）做 `cargo check --all-targets`。先运行
+`rustup target add x86_64-unknown-linux-gnu`（或安装所选 target）；未安装时脚本明确失败。auditd
+运行时测试、producer feature-on 测试和完整 workspace 回归必须在 Linux 主机执行并作为发布硬门禁。
 
 不准备上游源码、也不访问网络时，可单独运行新增的纯本地工具测试：
 
@@ -61,7 +63,7 @@ python3 tests/test_mock_collector.py
 都是 16 字节标准 Base64、用户名和 uPSK 唯一、输出精确 `0600`、禁止覆盖、拒绝仓库内未 ignore 目标，并覆盖规范排序、五配置完全
 一致、顺序漂移与 ID 冲突。随机凭据只存在于权限受限的临时目录，测试输出和失败消息不得包含
 它们。发布测试使用无密钥的最小 ELF x86_64 fixture 两次打包并比较全部字节，校验双二进制
-manifest 与归档防篡改；本机有 OpenSSL 时还会临时生成测试专用密钥，覆盖 detached 签名成功、拒绝覆盖和
+manifest、两个二进制及 checksum 防篡改；本机有 OpenSSL 时还会临时生成测试专用密钥，覆盖 detached 签名成功、拒绝覆盖和
 篡改验签失败。临时密钥与产物不会写入仓库。
 
 ## 覆盖范围

@@ -3,25 +3,27 @@
 
 from __future__ import annotations
 
+import argparse
 import re
+import sys
 import unittest
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-TARGET = ROOT / ".cache" / "audit-work-source" / "fuzz" / "fuzz_targets" / "audit_protocol.rs"
-MANIFEST = ROOT / ".cache" / "audit-work-source" / "fuzz" / "Cargo.toml"
+SOURCE: Path | None = None
 
 
 class FuzzTargetTest(unittest.TestCase):
     def test_target_manifest_and_all_parser_entrypoints_are_present(self) -> None:
-        # The prepared source is generated during a full verify run. This test
-        # is intentionally tolerant when only the overlay repository is being
-        # linted, but it must fail if a prepared tree exists without the target.
-        if not MANIFEST.exists() or not TARGET.exists():
-            self.skipTest("prepared source tree is not present")
-        manifest = MANIFEST.read_text(encoding="utf-8")
-        target = TARGET.read_text(encoding="utf-8")
+        self.assertIsNotNone(SOURCE, "test requires an explicit prepared --source tree")
+        assert SOURCE is not None
+        manifest_path = SOURCE / "fuzz" / "Cargo.toml"
+        target_path = SOURCE / "fuzz" / "fuzz_targets" / "audit_protocol.rs"
+        self.assertTrue(manifest_path.is_file(), manifest_path)
+        self.assertTrue(target_path.is_file(), target_path)
+        manifest = manifest_path.read_text(encoding="utf-8")
+        target = target_path.read_text(encoding="utf-8")
         self.assertIn('cargo-fuzz = true', manifest)
         self.assertIn('name = "audit_protocol"', manifest)
         for parser in (
@@ -52,8 +54,14 @@ class FuzzTargetTest(unittest.TestCase):
         runner = (ROOT / "scripts" / "test-fuzz.sh").read_text(encoding="utf-8")
         self.assertIn("--require", runner)
         self.assertIn("cargo-fuzz", runner)
+        self.assertIn("--release", runner)
+        self.assertIn("--sanitizer address", runner)
         self.assertIn("-max_total_time", runner)
 
 
 if __name__ == "__main__":
-    unittest.main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--source", type=Path, required=True)
+    arguments = parser.parse_args()
+    SOURCE = arguments.source.resolve()
+    unittest.main(argv=[sys.argv[0]])

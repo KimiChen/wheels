@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -32,10 +34,20 @@ class AuditBenchmarkTest(unittest.TestCase):
             },
         )()
         report = MODULE.run(args)
-        self.assertTrue(report["gate"])
+        self.assertIsNone(report["gate"])
         self.assertEqual(set(report["scenarios"]), set(MODULE.SCENARIOS))
         for scenario in report["scenarios"].values():
             self.assertEqual(scenario["proxy_errors"], 0)
+            self.assertTrue(scenario["gate"])
+        self.assertEqual(report["scenarios"]["offline"]["queue_drops"], 0)
+        self.assertEqual(report["scenarios"]["offline"]["spool_evictions"], 0)
+        self.assertGreater(report["scenarios"]["queue_full"]["queue_drops"], 0)
+        self.assertEqual(
+            report["scenarios"]["queue_full"]["gap_records"],
+            report["scenarios"]["queue_full"]["queue_drops"],
+        )
+        self.assertEqual(report["scenarios"]["healthy"]["acked"], 200)
+        self.assertEqual(report["scenarios"]["healthy"]["queue_drops"], 0)
         self.assertLessEqual(report["queue_microbenchmark"]["feature_on"]["capacity"], 4096)
 
     def test_data_path_report_enforces_feature_thresholds(self) -> None:
@@ -66,6 +78,43 @@ class AuditBenchmarkTest(unittest.TestCase):
         self.assertTrue(metrics["throughput_gate"])
         self.assertTrue(metrics["cpu_gate"])
         self.assertTrue(metrics["ssserver_rss_gate"])
+
+    def test_missing_measurements_cannot_pass_enforcement_gate(self) -> None:
+        args = type(
+            "Args",
+            (),
+            {
+                "events": 200,
+                "producers": 2,
+                "queue_capacity": 16,
+                "spool_capacity": 8,
+                "data_path_report": None,
+                "require_linux": False,
+            },
+        )()
+        report = MODULE.run(args)
+        self.assertIsNone(report["queue_microbenchmark"]["gate"])
+        self.assertIsNone(report["gate"])
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(MODULE_PATH),
+                "--events",
+                "200",
+                "--producers",
+                "2",
+                "--queue-capacity",
+                "16",
+                "--spool-capacity",
+                "8",
+                "--enforce",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("--data-path-report", completed.stderr)
 
 
 if __name__ == "__main__":

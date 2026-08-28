@@ -51,5 +51,5 @@ fi
 target_dir="$SHADOWSOCKS_RUST_PLUS_ROOT/.cache/fuzz-target"
 mkdir -p "$target_dir"
 CARGO_TARGET_DIR="$target_dir" cargo fuzz run \
-  --manifest-path "$manifest" audit_protocol -- \
+  --release --sanitizer address --manifest-path "$manifest" audit_protocol -- \
   -max_total_time="$seconds" -max_len=8192 -close_fd_mask=3

@@ -86,37 +86,83 @@ def _run_queue(feature_on: bool, events: int, producers: int, capacity: int) -> 
 def _run_scenarios(events: int, queue_capacity: int, spool_capacity: int) -> dict[str, dict[str, Any]]:
     result: dict[str, dict[str, Any]] = {}
     for scenario in SCENARIOS:
-        queue = BoundedQueue(queue_capacity)
+        # queue_full intentionally uses a smaller producer queue; the offline
+        # scenario drains that queue into available durable storage. Keeping
+        # those resources distinct prevents two failure modes from collapsing
+        # into the same synthetic trace.
+        scenario_queue_capacity = (
+            min(queue_capacity, max(1, events // 4)) if scenario == "queue_full" else queue_capacity
+        )
+        queue = BoundedQueue(scenario_queue_capacity)
         stored = 0
         evicted = 0
         acked = 0
+        gap_records = 0
+        proxy_attempts = 0
+        proxy_successes = 0
         started = time.perf_counter_ns()
         for value in range(events):
-            if scenario == "spool_full" and stored >= spool_capacity:
-                # Capacity eviction is represented by a bounded counter and a
-                # gap, exactly as the daemon's durable path reports it.
-                stored -= 1
-                evicted += 1
+            proxy_attempts += 1
             queue.push(value)
+            proxy_successes += 1
+            if scenario == "queue_full":
+                # No consumer progress: each oldest-item eviction is a producer
+                # gap and the remaining queue stays bounded.
+                gap_records = queue.drops
+                stored = len(queue.items)
+                continue
+
+            queued = queue.items.popleft()
+            if queued != value:
+                raise RuntimeError("synthetic queue reordered an audit event")
             if scenario == "healthy":
                 acked += 1
             elif scenario == "slow_ack" and value % 8 == 0:
                 acked += 1
             elif scenario == "spool_full":
+                if stored >= spool_capacity:
+                    stored -= 1
+                    evicted += 1
+                    gap_records += 1
                 stored += 1
             else:
                 stored += 1
         elapsed = max(time.perf_counter_ns() - started, 1)
-        result[scenario] = {
-            "proxy_errors": 0,
+        proxy_errors = proxy_attempts - proxy_successes
+        item: dict[str, Any] = {
+            "proxy_attempts": proxy_attempts,
+            "proxy_successes": proxy_successes,
+            "proxy_errors": proxy_errors,
             "events": events,
+            "queue_capacity": scenario_queue_capacity,
             "queue_drops": queue.drops,
             "spool_records": stored,
             "spool_evictions": evicted,
-            "gap_records": evicted,
+            "gap_records": gap_records,
             "acked": acked,
             "elapsed_seconds": elapsed / 1_000_000_000,
         }
+        if scenario == "healthy":
+            gate = queue.drops == 0 and stored == 0 and acked == events and gap_records == 0
+        elif scenario == "offline":
+            gate = queue.drops == 0 and stored == events and acked == 0 and evicted == 0
+        elif scenario == "slow_ack":
+            gate = queue.drops == 0 and 0 < acked < events and stored + acked == events
+        elif scenario == "queue_full":
+            expected_drops = max(0, events - scenario_queue_capacity)
+            gate = queue.drops == expected_drops and gap_records == expected_drops and stored == min(
+                events, scenario_queue_capacity
+            )
+        else:
+            expected_evictions = max(0, events - spool_capacity)
+            gate = (
+                queue.drops == 0
+                and stored == min(events, spool_capacity)
+                and evicted == expected_evictions
+                and gap_records == expected_evictions
+            )
+        item["gate"] = proxy_errors == 0 and gate
+        result[scenario] = item
     return result
 
 
@@ -173,7 +219,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     enabled = _run_queue(True, events, args.producers, args.queue_capacity)
     ratio = enabled["events_per_second"] / queue["events_per_second"]
     scenarios = _run_scenarios(events, args.queue_capacity, args.spool_capacity)
-    scenario_gate = all(item["proxy_errors"] == 0 for item in scenarios.values())
+    scenario_gate = all(item["gate"] for item in scenarios.values())
     report: dict[str, Any] = {
         "schema_version": 1,
         "benchmark": "shadowsocks-rust-plus-user-audit-gate",
@@ -192,7 +238,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             # ratio as a diagnostic, but apply the 5% gate only when a real
             # ssserver data-path report is supplied below.
             "threshold": THROUGHPUT_FLOOR,
-            "gate": True,
+            "gate": None,
             "threshold_status": "pending_real_data_path",
         },
         "scenarios": scenarios,
@@ -202,18 +248,18 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     }
     if args.data_path_report is not None:
         report["data_path"] = _evaluate_data_path(_read_data_path_report(args.data_path_report))
-        report["queue_microbenchmark"]["gate"] = ratio >= THROUGHPUT_FLOOR
-        report["queue_microbenchmark"]["threshold_status"] = "measured"
+        report["queue_microbenchmark"]["threshold_status"] = "diagnostic_only"
     if args.require_linux and platform.system() != "Linux":
         raise RuntimeError("--require-linux 只能在 Linux 主机执行")
-    gates = [report["queue_microbenchmark"]["gate"], scenario_gate]
+    report["gate"] = None
     if "data_path" in report:
         data_path = report["data_path"]
-        gates.extend(
-            value for value in (data_path.get("throughput_gate"), data_path.get("cpu_gate"), data_path.get("ssserver_rss_gate"))
-            if value is not None
+        measured_gates = (
+            data_path.get("throughput_gate"),
+            data_path.get("cpu_gate"),
+            data_path.get("ssserver_rss_gate"),
         )
-    report["gate"] = all(gates)
+        report["gate"] = scenario_gate and all(value is True for value in measured_gates)
     return report
 
 
@@ -238,7 +284,9 @@ def main() -> int:
     else:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(encoded, encoding="utf-8")
-    if args.enforce and not report["gate"]:
+    if args.enforce and args.data_path_report is None:
+        raise SystemExit("性能门禁失败：--enforce 要求真实 --data-path-report")
+    if args.enforce and report["gate"] is not True:
         raise SystemExit("性能门禁失败：请检查报告中的 gate 字段")
     return 0
 

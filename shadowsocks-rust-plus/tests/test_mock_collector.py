@@ -15,6 +15,7 @@ from mock_collector import (
     canonical_json,
     canonical_request,
     canonical_response,
+    _parse_http_response,
     parse_lease,
     request_mac,
     sha256_hex,
@@ -77,7 +78,16 @@ class MockCollectorProtocolTest(unittest.TestCase):
         self.assertIsInstance(records, dict)
         self.assertEqual(
             set(records),
-            {"tcp_access", "udp_access", "producer_gap", "udp_window_contention", "spool_gap", "unicode_access"},
+            {
+                "tcp_access",
+                "udp_access",
+                "producer_gap",
+                "udp_window_contention",
+                "spool_gap",
+                "unicode_access",
+                "escaping_access",
+                "nullable_spool_gap",
+            },
         )
         for name, vector in records.items():
             self.assertIsInstance(vector, dict, name)
@@ -106,6 +116,8 @@ class MockCollectorProtocolTest(unittest.TestCase):
             request_mac(key, canonical),
             request_vector["mac"],
         )
+        zero = canonical_request("GET", "/v1/audit/healthz", NODE, "0", NONCE, sha256_hex(b""))
+        self.assertIn(b"\n0\n", zero)
 
     def test_response_golden_vector(self) -> None:
         data = vectors()
@@ -135,6 +147,45 @@ class MockCollectorProtocolTest(unittest.TestCase):
             response_vector["mac"],
         )
 
+    def test_empty_response_golden_vector(self) -> None:
+        data = vectors()
+        response_vector = data["empty_response"]
+        metadata = ResponseMetadata(
+            status=response_vector["status"],
+            content_type="",
+            schema="",
+            lease_body_sha256="",
+            node_id=response_vector["node_id"],
+            batch_id="",
+            spool_epoch="",
+            first_sequence="",
+            last_sequence="",
+            event_count="",
+            response_sha256=response_vector["response_sha256"],
+            response_mac="",
+            request_nonce=response_vector["request_nonce"],
+        )
+        canonical = canonical_response(metadata)
+        self.assertEqual(canonical, response_vector["canonical"].encode("utf-8"))
+        self.assertEqual(sha256_hex(canonical), response_vector["canonical_sha256"])
+        self.assertEqual(request_mac(KEY, canonical), response_vector["mac"])
+
+    def test_ndjson_golden_vectors_are_exact_and_parse_together(self) -> None:
+        data = vectors()
+        wrappers = data["ndjson_records"]
+        self.assertEqual(set(wrappers), {"escaping_access", "nullable_spool_gap"})
+        body = b""
+        for name, vector in wrappers.items():
+            raw = vector["canonical"].encode("utf-8")
+            self.assertTrue(raw.endswith(b"\n"), name)
+            self.assertEqual(sha256_hex(raw), vector["sha256"], name)
+            self.assertEqual(canonical_json(strict_json(raw[:-1])), raw[:-1], name)
+            body += raw
+        parsed = parse_lease(body, lease_metadata(body, "e" * 32, 1, 2, 2))
+        self.assertEqual(len(parsed), 2)
+        self.assertEqual(parsed[0]["event"]["server_id"], 'server"quoted\\path')
+        self.assertIsNone(parsed[1]["event"]["lost_spool_epoch"])
+
     def test_strict_json_rejects_duplicate_and_nonfinite_values(self) -> None:
         with self.assertRaises(CollectorError):
             strict_json(b'{"schema_version":1,"schema_version":1}')
@@ -144,13 +195,8 @@ class MockCollectorProtocolTest(unittest.TestCase):
             strict_json(b"\xef\xbb\xbf{}")
 
     def test_lease_parser_checks_wrapper_and_contiguous_sequences(self) -> None:
-        event = {
-            "schema_version": 1,
-            "record_type": "access",
-            "event_type": "tcp_target_success",
-            "event_id": "0" * 32 + ":1",
-        }
-        event_bytes = b'{"schema_version":1,"record_type":"access","event_type":"tcp_target_success","event_id":"' + (b"0" * 32) + b':1"}'
+        event_bytes = vectors()["records"]["tcp_access"]["canonical"].encode("utf-8")
+        event = strict_json(event_bytes)
         wrapper = (
             b'{"spool_schema_version":1,"spool_epoch":"'
             + b"c" * 32
@@ -180,6 +226,42 @@ class MockCollectorProtocolTest(unittest.TestCase):
         bad = wrapper.replace(b'"spool_sequence":"1"', b'"spool_sequence":"2"')
         with self.assertRaises(CollectorError):
             parse_lease(bad, metadata)
+
+    def test_lease_parser_rejects_noncanonical_wrapper_and_event_escaping(self) -> None:
+        event = b'{"event_id":"' + (b"0" * 32) + b':1","label":"a"}'
+        canonical = wrapper_bytes(event, 1)
+        metadata = lease_metadata(canonical, "b" * 32, 1, 1, 1)
+        self.assertEqual(len(parse_lease(canonical, metadata)), 1)
+
+        parsed_wrapper = strict_json(canonical[:-1])
+        reordered = canonical_json(
+            {
+                "spool_epoch": parsed_wrapper["spool_epoch"],
+                "spool_schema_version": parsed_wrapper["spool_schema_version"],
+                "spool_sequence": parsed_wrapper["spool_sequence"],
+                "received_at_unix_ms": parsed_wrapper["received_at_unix_ms"],
+                "event_payload_sha256": parsed_wrapper["event_payload_sha256"],
+                "event": parsed_wrapper["event"],
+            }
+        ) + b"\n"
+        with self.assertRaisesRegex(CollectorError, "canonical"):
+            parse_lease(reordered, lease_metadata(reordered, "c" * 32, 1, 1, 1))
+
+        escaped_event = event.replace(b'"label":"a"', b'"label":"\\u0061"')
+        escaped = wrapper_bytes(escaped_event, 1)
+        with self.assertRaisesRegex(CollectorError, "canonical"):
+            parse_lease(escaped, lease_metadata(escaped, "d" * 32, 1, 1, 1))
+
+        access = strict_json(vectors()["records"]["tcp_access"]["canonical"])
+        reordered_access = canonical_json(
+            {"record_type": access["record_type"], **{key: value for key, value in access.items() if key != "record_type"}}
+        )
+        reordered_event_wrapper = wrapper_bytes(reordered_access, 1)
+        with self.assertRaisesRegex(CollectorError, "embedded event.*canonical"):
+            parse_lease(
+                reordered_event_wrapper,
+                lease_metadata(reordered_event_wrapper, "f" * 32, 1, 1, 1),
+            )
 
     def test_event_and_batch_conflicts_are_isolated(self) -> None:
         event = {"event_id": "0" * 32 + ":1", "value": 1}
@@ -329,6 +411,25 @@ class MockCollectorProtocolTest(unittest.TestCase):
             self.assertEqual(collector.events, {})
             self.assertEqual(collector.batches, {})
 
+    def test_wire_collection_requires_durable_state(self) -> None:
+        collector = MockCollector(NODE, KEY)
+        with self.assertRaisesRegex(CollectorError, "durable state"):
+            collector.collect_once(Path("/does/not/matter.sock"))
+
+    def test_state_requires_all_base_members(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ssrp-collector-state-") as directory:
+            state = Path(directory) / "collector.json"
+            state.write_text('{"schema_version":1,"node_id":"' + NODE + '"}', encoding="utf-8")
+            with self.assertRaisesRegex(CollectorError, "missing or unexpected"):
+                MockCollector(NODE, KEY, state)
+
+    def test_http_content_length_is_case_insensitive(self) -> None:
+        status, headers, body = _parse_http_response(
+            b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{}"
+        )
+        self.assertEqual((status, body), (200, b"{}"))
+        self.assertEqual(headers, {"content-length": "2"})
+
     def test_health_exposes_diagnostics_and_gap_alerts(self) -> None:
         collector = MockCollector(NODE, KEY)
         self.assertEqual(collector.health()["status"], "ok")
@@ -346,6 +447,8 @@ class MockCollectorProtocolTest(unittest.TestCase):
             health["alerts"],
             ["batch_evicted", "producer_gap", "spool_gap", "udp_window_contention"],
         )
+        with self.assertRaises(CollectorError):
+            collector.record_diagnostic("invalid\nkind")
 
 
 if __name__ == "__main__":

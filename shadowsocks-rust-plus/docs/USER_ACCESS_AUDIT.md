@@ -8,11 +8,18 @@
 >
 > 最后决策日期：2026-08-28
 >
-> 版本 4 变更：正式锁定第二轮审计后的实现决策——逐条 durability 提交、已认证空 UDP payload
-> 在 feature-on/off 下保持相同数据面语义、`min_free_bytes` 仅作为运行期清理水位、未 ACK 的
-> spool gap 使 health 为 `degraded`、producer diagnostic 按 bucket 独立重试并 round-robin、
-> 以及对 `spool_dir/.lock` 持有排他锁。同步记录当前 macOS 可执行验证数字与 Linux runtime、
-> fuzz、性能和完整容量/crash 矩阵的环境限制。
+> 版本沿革：
+>
+> - v2（2026-08-27）：UDP 去重窗口固定 60 秒、acked 保留固定 86400 秒、auditd 配置改为逐字段
+>   校验表、producer ACK 超时与 auditd 写截止对齐，并明确 UDP shard/固定常量与 runtime 起点依赖；
+> - v3（2026-08-28）：锁定首次审计 §17.6 第 1-4 条——重连总等待含 jitter 硬顶 5 秒；
+>   `auditd_user` 解析失败按运行故障重试而不阻断 ssserver；ASCII domain 空 label 规范化失败但保留
+>   访问事件；根 `user-audit` feature 显式包含 `dep:shadowsocks-auditd`；
+> - v4（2026-08-28）：锁定第二轮审计决策——逐条 durability 提交、已认证空 UDP payload 在
+>   feature-on/off 下保持相同数据面语义、`min_free_bytes` 仅作为运行期清理水位、未 ACK spool gap
+>   使 health 为 `degraded`、producer diagnostic 按 bucket 独立重试并 round-robin，以及对
+>   `spool_dir/.lock` 持有排他锁。同步记录 macOS 可执行验证与 Linux runtime、fuzz、性能及完整
+>   capacity/crash 矩阵的环境限制。
 
 本文是节点侧成功访问审计的规范性合同。实现者不需要再决定产品语义、组件边界、失败策略、
 存储上限或协议形态。文中的“必须”“不得”“应当”分别对应 MUST、MUST NOT、SHOULD。
@@ -1507,7 +1514,7 @@ ingest hello 或 export health 携带，collector 必须另行通过 user-stats 
   顺序取得稳定的 shutdown skipped observations，且仅写一条 final journald；
 - 审计路径无 `unwrap()`/`expect()`/越界索引，panic fuzz target 与 release-profile 子进程测试证明
   panic 会 abort，因此不能把 panic 当作 task 内可恢复错误；
-- group sync 只在 durability barrier 后 ACK；
+- 每条 record 只在 open segment 与 `state.json` 的 durability barrier 均完成后 ACK；
 - open 尾部截断、中间损坏、state 丢失/倒退、已删历史 high-water、pending state-reset 各崩溃点、
   quarantine 和新 epoch 不复用 sequence/不重复 gap；
 - tombstone 4096 上限、pending 各崩溃点、ledger 满/同步失败不删除 unacked、receipt 淘汰后 ACK 404；
@@ -2326,14 +2333,15 @@ quarantine gap 先落 durable 证据，mock collector 执行冲突隔离后再 A
 
 ### 19.4 已执行验证与环境限制
 
-本机为 **macOS**。以下命令在当前工作树/准备源码树上实际执行并通过：
+本机为 **macOS**。本节按第四轮审计证据更正 `4a6348e` 当时的验证记录；以下命令在当时的
+工作树/准备源码树上实际执行并通过：
 
 ```text
 cargo test --locked -p shadowsocks-audit-protocol                                      # 20 passed
 cargo test --locked -p shadowsocks-service --no-default-features --features server --lib # 8 passed
-bash scripts/test.sh --source .cache/audit-work-source --no-integration                  # workspace passed; service 302, EIH 4
-cargo check --locked --target x86_64-unknown-linux-gnu -p shadowsocks-auditd --all-targets # passed
-python3 tests/test_check_audit_static.py --source .cache/audit-work-source
+cargo test --locked --workspace --features user-stats                                   # 302 passed
+python3 tests/check_audit_static.py --source .cache/audit-work-source
+python3 tests/test_check_audit_static.py
 python3 tests/test_mock_collector.py
 python3 tests/test_audit_packaging.py
 python3 tests/test_release_artifact.py
@@ -2344,17 +2352,16 @@ bash scripts/check-sensitive.sh
 git diff --check
 ```
 
-此外已检查补丁与源码树的 `patch --fuzz=0` clean replay、逐文件一致性、共享 golden vectors
-逐字一致性和敏感信息扫描；`scripts/verify.sh` 的最终结果与补丁行数以本轮重新生成后的实际
-输出为准。
+原记录中的 `python3 tests/test_check_audit_static.py --source ...` 是不可执行的命令（该 unittest
+文件没有该参数），已按上面拆成实际的静态检查器与 unittest 两条命令。当时 `rg` 已安装，
+`bash scripts/check-sensitive.sh` 实跑通过，不存在“本机缺 `rg`”的例外。
 
-以下项目在本机**未执行**：Linux auditd runtime（包括 ingest/export 原生认证、peer/UDS、
-真实 Linux SIGTERM 与 crash/capacity 场景）、完整 Linux feature-on workspace 测试、fuzz
-实际运行，以及第 14.5 节性能压测。因此当前结论是“代码与静态/可移植测试修复已完成，Linux
-runtime、fuzz、性能和完整容量/crash 矩阵仍待目标环境验收”，不是最终发布签字。完整
-`cargo check --locked --target x86_64-unknown-linux-gnu --features user-audit --workspace` 曾尝试，
-但本机缺少 `x86_64-linux-gnu-gcc`，在 `ring` 的交叉编译步骤被环境阻断；这不影响上列 auditd
-crate 级 Linux-target check 的通过结论。
+以下项目在该次记录时**未执行**：`cargo check --locked --target x86_64-unknown-linux-gnu -p
+shadowsocks-auditd --all-targets` 和 `bash scripts/test.sh ...`，因为当时未安装该 Rust target；Linux
+auditd runtime（包括 ingest/export 原生认证、peer/UDS、真实 Linux SIGTERM 与 crash/capacity
+场景）、完整 Linux feature-on workspace、fuzz 实际运行及第 14.5 节性能压测也均未执行。非 Linux
+运行完整脚本的显式前置条件是先安装 `SHADOWSOCKS_AUDIT_CHECK_TARGET`；交叉 `cargo check` 仍不能
+替代 Linux 原生测试。因此该次结论只覆盖静态/可移植测试，不是最终发布签字。
 
 ## 20. 第三轮代码审计记录（2026-08-28）
 
@@ -2465,8 +2472,9 @@ Minor：
 - 合同文本：`07a3b83` 对规格为纯插入（仅 §18）；`4a6348e` 对 §1–16 共 9 处 hunk，全部落在
   v4 决策 6-11 与 §17.6 第 1/3/4 条对应范围，无夹带变更；示例配置与 v4 文本逐字一致，
   `group_commit_*`/`acked_retention_seconds`/`udp_target_window_seconds` 全仓库零残留。
-- §19.4 已执行清单：cargo 侧与 Python 侧（除本机缺 `rg` 的 check-sensitive 与 m-66 的失真条目）
-  均复跑一致；Linux runtime/fuzz/性能/完整容量矩阵的未执行披露与代码状态相符。
+- §19.4 已执行清单已按实际证据更正：可移植 cargo/Python 项和 `check-sensitive.sh`（本机已有 `rg`）
+  复跑一致；Linux-target auditd check、完整 `scripts/test.sh`、Linux runtime/fuzz/性能/容量矩阵不在
+  该次通过清单中，不能用可移植结果替代。
 - golden vectors 双端消费链路（仓库文件 ↔ 补丁内嵌副本 ↔ Rust `include_str!` ↔ Python 读取 ↔
   test.sh 逐字 cmp）闭合，向量内容经独立重算正确。
 - 敏感信息：tracked 文件零命中；`.gitignore` 覆盖生成物与 key 文件名；git 工作树干净。
@@ -2865,3 +2873,79 @@ Minor：
    §19.4/§20.5/§21.1 的所有本机结论都只覆盖可移植部分。
 7. 更正 §19.4 与 §20.5 的失真条目（见 21.5），并把 `x86_64-unknown-linux-gnu` target 列为
    非 Linux 主机的显式前置依赖。
+
+## 22. 第四轮审计整改记录（2026-08-28）
+
+本节记录对 §20、§21 保留发现的实现整改，不改变 §1–16 的合同。整改源码位于锁定上游基线加
+`0001`/`0002` 后形成的 `0003-user-audit.patch`；补丁、共享 golden vectors 和准备源码树必须在提交前
+重新生成并逐字核对。下列“已修复”只表示代码与当前环境可执行的回归验证已经闭合，不能替代
+§16 要求的 Linux 发布验收。
+
+### 22.1 Critical 与 Major
+
+| 编号 | 整改结果 |
+| --- | --- |
+| C-4 | 两个 UDS 均通过已经固定并复核 inode 的 `/proc/self/fd/N` 路径设置 gid 与 `0660`，失败时明确指出 procfs 前置条件；新增 Linux bind 后 mode/gid 回归测试。 |
+| C-5 | 容量清理每次至多 seal 活跃 open 一次；循环加入迭代上限和净字节减少判据，清理自己产生的 gap 不再进入 seal/evict/gap 自激循环。 |
+| M-29 | 集成测试复用 `mock_collector.unix_http_request`，严格验证 hello/event ACK/NACK、错误 node、伪 UID、durable state 后 ACK，以及签名后的完整 health 响应。 |
+| M-30 | 启动恢复时建立 durable gap reason 索引，运行期随写入、隔离、ACK 和驱逐增量维护，不再在持锁路径全树逐行扫描。 |
+| M-31 | seal 的 rename 前持续失败不再让每次 append 全量重建；只在磁盘状态确实可能变化的异常路径重建，并对重复恢复工作限频。 |
+| M-32 | 饱和累加改用无重试预算的 `fetch_update`；只有真实算术饱和才产生 `u64::MAX`，并把饱和状态纳入 producer health。 |
+| M-33 | session 进入空闲等待前复检 queue，避免 drain 消耗唯一 notify permit 后已有事件无限滞留。 |
+| M-34 | UDP 窗口只保存一份规范目标 key，lookup/touch 不再复制 association、identity 与 target 材料；保留有界 shard/LRU 语义及内存回归断言。 |
+| M-35 | 绝对路径改为词法组件校验，明确拒绝 `.`、`..`、prefix 和 NUL；原有错误测试改成真正可达的失败断言。 |
+| M-36 | `spool_bytes` 以独立 `spool_bytes_known` 表达未知，非普通对象计零但置 degraded；后续完整测量成功可恢复已知状态，不再永久锁存 `u64::MAX`。 |
+| M-37 | 每处理一个 cleanup 候选就立即复检容量，并把“操作返回错误但对象已经删除”的净字节进度纳入判定，达到水位即停止继续驱逐。 |
+| M-38 | open segment 的 first/last receive time 分别取 min/max，接收墙钟回拨不会生成反向区间。 |
+| M-39 | 恢复临时对象后的目录同步允许目录已不存在；回归测试创建真实中断目录并验证回收结果。 |
+| M-40 | systemd 对 `/etc/shadowsocks-rust-plus` 与 `/run/shadowsocks-rust-plus` 的 `InaccessiblePaths` 使用可选前缀；全新节点或 ssserver 尚未创建运行目录时不再阻止 auditd 启动。 |
+
+### 22.2 Minor 与前序残留
+
+- producer：完成 §20 的 M-4、m-68–m-70 以及 §21 的 m-85–m-92、m-99；删除或测试门控死代码，
+  分离 relay completion 与 shutdown 通知，恢复规范 shutdown 顺序，把域名规范化移出 shard mutex，
+  emitter 检查先于 identity lookup，并使 retryable event NACK 保持会升级的连接退避。
+- protocol、mock 与验证工具：完成 m-75/m-76、m-79/m-82/m-83 和 m-93–m-96、m-114–m-123；
+  新增 204 空响应、完整 NDJSON wrapper、escape/null golden，修正 DuplicateKey，严格验证 canonical
+  原始字节和 durable ACK；静态检查覆盖变量索引、切片和禁止宏，错误/空 source 失败关闭；benchmark
+  场景、gap 和 gate 使用实测不变量，正式 fuzz 入口固定 source、release 与 sanitizer 参数。
+- spool 与 ingest：完成 m-71–m-74、m-97、m-100–m-113；每个磁盘 API 入口复核 `.lock` 的
+  pathname/dev/inode，回滚失败后冻结本进程磁盘变更，tombstone 按条恢复；所有删除、rename、sync
+  失败路径立即更新索引或异常重建，corruption 使用 `segment_corruption` reason，新节点不再清掉已有
+  storage rejection，open 不计入 oldest unacked，并以有界轮转巡检发现 sealed 静默损坏。
+- packaging、release 与文档：完成 m-67、m-77/m-78、m-80/m-81、m-98、m-121、m-124–m-127；
+  删除宿主 zlib 门禁和单二进制发布旁路，发布 manifest/签名/校验固定包含两个 ELF 及两个 checksum；
+  补齐 export intermediary、peer 入组、非 Linux 交叉检查前置条件和敏感扫描自证明测试。
+
+### 22.3 当前验证边界
+
+本机为 macOS。整改后的最终补丁已实际通过：
+
+```text
+./scripts/verify.sh                                                        # 完整通过；service 304、protocol 22、EIH 4
+cargo check --locked --target x86_64-unknown-linux-gnu \
+  -p shadowsocks-auditd --all-targets                                      # 通过，零 warning
+cargo test --locked -p shadowsocks-service --no-default-features \
+  --features server --lib                                                  # 10 passed
+python3 tests/test_mock_collector.py                                        # 16 passed
+python3 tests/test_check_audit_static.py                                    # 10 passed
+python3 tests/test_benchmark_audit.py                                       # 3 passed
+python3 tests/test_fuzz_target.py --source .cache/audit-work-source         # 2 passed
+python3 tests/test_integration_audit.py                                     # 3 passed（portable 部分）
+python3 tests/test_audit_packaging.py                                       # 8 passed
+python3 tests/test_release_artifact.py                                      # 9 passed
+python3 tests/test_http_unix.py                                             # 14 passed
+python3 tests/check_audit_static.py --source .cache/audit-work-source       # 通过
+bash scripts/check-sensitive.sh                                            # 通过
+cargo fmt --all -- --check && cargo fmt --manifest-path fuzz/Cargo.toml -- --check
+git diff --check
+```
+
+synthetic benchmark preflight 的五个故障场景均为 `gate=true`，总 `scenario_gate=true`；由于没有真实
+data-path report，顶层 `gate` 正确保持 `null`，不能据此声称通过性能门禁。最终 `0003` 在独立基线树以
+`patch -p1 --fuzz=0` 无 offset 重放，49 个变更文件的内容与 mode 均和准备源码树一致。
+
+以下项目在本机仍未执行，必须在发布前补齐：Linux 原生 auditd UDS/SO_PEERCRED、mode/gid、signal、
+crash/capacity runtime 测试；Linux 上完整 `cargo test --workspace --features user-audit`；`cargo-fuzz`
+的 sanitizer 实跑；§14.5 真实数据面吞吐、CPU、RSS 和离线/队列满压测。非 Linux 的交叉
+`cargo check` 只能证明 Linux cfg 分支可编译，不能替代这些运行期结论。

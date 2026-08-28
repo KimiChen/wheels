@@ -24,7 +24,8 @@ assignment_record='(export[[:space:]]+)?(PrivateKey|Passphrase)[[:space:]]*=[[:s
 # shapes are deliberately narrow: a 32-byte hex HMAC key or a padded Base64
 # encoding of a 16-byte iPSK/uPSK.  Use a double-quoted shell string so the
 # optional quote class is actually `['"]?` after shell expansion.
-secret_assignment="[\"']?(export[-_]?hmac|hmac[-_]?key|uPSK|iPSK)[\"']?[[:space:]]*[:=][[:space:]]*[\"']?[A-Fa-f0-9]{64}|[\"']?(export[-_]?hmac|hmac[-_]?key|uPSK|iPSK)[\"']?[[:space:]]*[:=][[:space:]]*[\"']?[A-Za-z0-9+/]{22}==?"
+secret_name='export[-_]?hmac([-_]?key)?|hmac[-_]?key|uPSK|iPSK|shared_i_psk|password'
+secret_assignment="[\"']?(${secret_name})[\"']?[[:space:]]*[:=][[:space:]]*[\"']?[A-Fa-f0-9]{64}|[\"']?(${secret_name})[\"']?[[:space:]]*[:=][[:space:]]*[\"']?[A-Za-z0-9+/]{22}==?"
 sensitive_pattern="(AKIA[0-9A-Z]{16}|^[[:space:]]*(${pem_record}|${assignment_record}|${secret_assignment})|^[+-][[:space:]]*(${pem_record}|${assignment_record}|${secret_assignment}))"
 scan_output=""
 scan_status=0

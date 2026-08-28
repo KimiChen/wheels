@@ -54,7 +54,6 @@ actual_cargo_version="$(cargo -V | awk '{ print $2 }')"
 actual_cargo_zigbuild_version="$(cargo-zigbuild --version | awk '{ print $2 }')"
 actual_zig_version="$(zig version)"
 actual_python_version="$(python3 -c 'import platform; print(platform.python_version())')"
-actual_zlib_version="$(python3 -c 'import zlib; print(zlib.ZLIB_RUNTIME_VERSION)')"
 
 [[ "$actual_rustc_version" == "$RELEASE_RUSTC_VERSION" ]] || \
   die "rustc 版本不匹配：期望 $RELEASE_RUSTC_VERSION，实际 $actual_rustc_version"
@@ -68,8 +67,6 @@ actual_zlib_version="$(python3 -c 'import zlib; print(zlib.ZLIB_RUNTIME_VERSION)
   die "zig 版本不匹配：期望 $RELEASE_ZIG_VERSION，实际 $actual_zig_version"
 [[ "$actual_python_version" == "$RELEASE_PYTHON_VERSION" ]] || \
   die "Python 版本不匹配：期望 $RELEASE_PYTHON_VERSION，实际 $actual_python_version"
-[[ "$actual_zlib_version" == "$RELEASE_ZLIB_VERSION" ]] || \
-  die "zlib 版本不匹配：期望 $RELEASE_ZLIB_VERSION，实际 $actual_zlib_version"
 
 release_user_home="${HOME:?HOME 未设置}"
 release_cargo_home="${CARGO_HOME:-$release_user_home/.cargo}"
@@ -228,8 +225,7 @@ output_dir="$(cd "$output_dir" && pwd -P)"
   --cargo-version "$actual_cargo_version" \
   --cargo-zigbuild-version "$actual_cargo_zigbuild_version" \
   --zig-version "$actual_zig_version" \
-  --python-version "$actual_python_version" \
-  --zlib-version "$actual_zlib_version"
+  --python-version "$actual_python_version"
 
 printf '可复现性检查通过：两次独立构建 SHA-256 均为 %s\n' "$binary_sha256"
 printf 'shadowsocks-auditd SHA-256：%s\n' "$auditd_binary_sha256"

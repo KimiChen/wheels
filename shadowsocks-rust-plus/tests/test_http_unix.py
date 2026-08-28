@@ -189,8 +189,11 @@ class SensitiveScanTest(unittest.TestCase):
     def test_hmac_and_psk_assignments_are_scanned_without_echoing_them(self) -> None:
         fixtures = {
             "hmac.json": '"export_hmac": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"\n',
+            "hmac-key.json": '"export_hmac_key": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"\n',
             "psk.json": '"uPSK": "AAAAAAAAAAAAAAAAAAAAAA=="\n',
             "psk.patch": '+"iPSK": "AQEBAQEBAQEBAQEBAQEBAg=="\n',
+            "cluster.json": '"shared_i_psk": "AgICAgICAgICAgICAgICAg=="\n',
+            "users.json": '"password": "AwMDAwMDAwMDAwMDAwMDAw=="\n',
         }
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -205,6 +208,8 @@ class SensitiveScanTest(unittest.TestCase):
             self.assertNotIn("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", output)
             self.assertNotIn("AAAAAAAAAAAAAAAAAAAAAA==", output)
             self.assertNotIn("AQEBAQEBAQEBAQEBAQEBAg==", output)
+            self.assertNotIn("AgICAgICAgICAgICAgICAg==", output)
+            self.assertNotIn("AwMDAwMDAwMDAwMDAwMDAw==", output)
 
     def test_prose_that_mentions_a_pem_marker_is_not_a_secret_record(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

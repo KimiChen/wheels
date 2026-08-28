@@ -49,6 +49,11 @@ curl --unix-socket /run/shadowsocks-rust-plus/user-stats.sock \
 不得为 `ssserver` 增加 TCP 或公网 exporter 监听。远程采集必须部署独立反向代理，并在公网一侧
 配置 HTTPS、mTLS、来源限制和禁用缓存；反向代理不属于本 systemd 模板的监督范围。
 
+auditd export 的远程 HTTP 中介必须使用 `audit-exporter` 专用 worker UID，并仅通过
+`shadowsocks-audit-export` 组连接 export socket；auditd 会用 `SO_PEERCRED` 要求该 UID 与
+`export_peer_user` 精确匹配。它还必须原样转发 HMAC 请求头、POST body 与响应签名，不能照抄上面的
+user-stats GET-only 配方。精确路由和 Nginx 示例见 [`../docs/OPERATIONS.md`](../docs/OPERATIONS.md#审计-export-的-http-中介)。
+
 停止或升级前不能直接依赖 systemd 的终止信号完成结算。控制面应先停止新接入并排空，
 调用 `scripts/user-stats-client.py --require-healthy` 拉取最终快照，等待存储端确认批次，
 再执行 `systemctl stop/restart`。
