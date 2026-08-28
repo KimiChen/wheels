@@ -2355,3 +2355,127 @@ runtime、fuzz、性能和完整容量/crash 矩阵仍待目标环境验收”�
 `cargo check --locked --target x86_64-unknown-linux-gnu --features user-audit --workspace` 曾尝试，
 但本机缺少 `x86_64-linux-gnu-gcc`，在 `ring` 的交叉编译步骤被环境阻断；这不影响上列 auditd
 crate 级 Linux-target check 的通过结论。
+
+## 20. 第三轮代码审计记录（2026-08-28）
+
+> 本节是对第 19 节修复结论（commit `4a6348e`）的对抗性验证记录，不改变合同条文。新增问题编号
+> 接续前序：major 自 `M-29` 起，minor 自 `m-66` 起；本轮无新 critical。行号基于整改后的
+> `.cache/audit-work-source`（与 `patches/0003-user-audit.patch` 逐字一致）。
+
+### 20.1 审计范围与方法
+
+- 对象：整改后全部交付物；重点是 §19 每条"已修复"声明的代码证据，以及整改 diff 引入的回归。
+- 方法：四路并行对抗性验证（producer / auditd / 协议与 mock / 打包脚本文档），关键发现由
+  编排者亲自复核源码确认；本机实跑可移植验证项（protocol 20 项、service server --lib 8 项、
+  workspace 302 项、mock/packaging/release/fuzz/panic 各 Python 套件、golden vectors 独立重算、
+  feature-off `cargo check` 零警告、user-audit 在非 Linux 被 `compile_error!` 拦截）；补丁↔源码树
+  `patch --dry-run -R -p1 --fuzz=0` 48 个文件干净反向应用；对合同条文（§1–16）逐 hunk 核对
+  两个整改 commit，确认无夹带变更。
+- 未做：Linux runtime 实跑、fuzz 实跑、性能压测（同 §19.4 披露）。
+
+### 20.2 总体结论
+
+§19 的修复声明**大体属实**：三个 critical（C-1/C-2/C-3）与绝大多数 major/minor 经当前代码逐条
+证实已修复并带有回归测试；两项核心交付核查（补丁与源码树逐字一致、合同文本无夹带）明确通过。
+但有 3 条 major 级新问题/残留需要在验收前处理：**M-29**（集成测试必然 ImportError，§19 声称的
+Linux 端到端路径按现状跑不过）、**M-30**（整改把 M-22 消灭的"锁内全量读+逐行解析"又在 gap
+写入路径请回了 §9.5 过载场景）、**M-31**（seal 持续失败时每条 append 触发全量索引重建）。
+另有 m-1 证伪未修复、M-17 兜底缺失等部分修复项，见 20.3/20.4。
+
+### 20.3 §17/§18 条目验证结果汇总
+
+已修复（本轮逐条证实，含回归测试）：C-1、C-2、C-3；M-1、M-2、M-3、M-5、M-8、M-11、M-12、
+M-13、M-14、M-15、M-16、M-18、M-19、M-20、M-21、M-23、M-27、M-28；m-21、m-22、m-23、m-24、
+m-25、m-26、m-28、m-29、m-30、m-31、m-32、m-33、m-34、m-35、m-36、m-37、m-38、m-39、m-40、
+m-41、m-42、m-43、m-44、m-45、m-46、m-47、m-48、m-49、m-50、m-51、m-52、m-53、m-57、m-59、
+m-60、m-63、m-64、m-65。
+
+部分修复：
+
+| 编号 | 状态 |
+| --- | --- |
+| M-4 | 连接失败/NACK/解析失败已接入 60 秒限频 journald 与 sticky degraded；§6.5 要求的 contention 运行期聚合 journald 仍缺（仅 wire + final） |
+| M-17 | 写入/同步失败的回滚（ftruncate+同步+索引恢复）已实现；回滚失败后的 seal/quarantine open + gap 兜底未实现（残留见 m-72），外部表现为 retryable NACK + degraded 直到重启 |
+| M-22 | health/ACK 已改增量快照；但 gap 写入路径新引入全量扫描，见 M-30 |
+| M-24/M-25/M-26 | export 认证矩阵、ingest 服务端、spool 容量/crash 矩阵的 Rust 测试仍大面积缺失；新增覆盖与 §19.2/§19.4 披露口径相符，不夸大 |
+| m-55 | 组成员/spool 0700//etc 0750 已有断言；socket 0660 为名义覆盖（m-78） |
+| m-56 | 敏感扫描新增两类形态，仍有逃逸形态（m-77） |
+| m-58 | mock 已有 health/gap primitives 与测试；未接入 collect_once/ACK-410/跨批缺号检测（m-76） |
+| m-61 | 静态护栏存在且接入 test.sh；protocol crate 与 config/mod 接线不在扫描范围（m-82） |
+| m-62 | §14.5 仅合成 preflight；真实 feature-off/on 对照构建、auditd RSS 测量仍不可执行，文档披露诚实 |
+
+未修复：
+
+- **m-1 仍未修复。** `user_audit.rs:2007-2008` 的 queue_overflow gap 仍用被淘汰事件的
+  `occurred_at` 作为 first/last_seen，未统一为丢弃观测墙钟（permanent_nack 与 supervisor 侧
+  encode_error 同样用事件原时间，relay 侧用 `wall_now()`，语义不一致依旧）。
+
+### 20.4 新发现问题
+
+Major：
+
+- **M-29 `tests/integration_audit.py:104` 存在必然 ImportError，Linux 端到端验证路径按现状不可
+  通过。** 该文件从 `http_unix` 导入不存在的 `unix_http_request`（`http_unix.py` 只有 `request()`，
+  签名与返回类型均不同；正确来源是同文件已导入的 `mock_collector.unix_http_request`，
+  `mock_collector.py:845`）。collector 角色在 lease/ACK 全部成功后才执行到该 import，随后整个
+  角色非零退出。即 M-23/M-25 交付的端到端验证（含 §12 health 步骤）在任何机器上都跑不过，
+  只是从未在 Linux 执行而未暴露。修复：改从 `mock_collector` 导入，并在 Linux 环境实跑一次。
+- **M-30 gap 写入在 §9.5 驱逐热路径上每次全量扫描并逐行解析整个 spool。** `spool.rs:2154`
+  `write_gap_locked` 每次写 gap 前调用 `event_id_exists_in_epoch`（`spool.rs:4881-4926`），后者
+  读取 open + 全部 sealed + 全部 acked 的 segment 正文并逐行 `parse_spool_line` + canonical 复验；
+  对刚用随机 ID 生成的新 gap 也做该扫描（碰撞概率为零，纯属浪费）。容量到顶触发驱逐时，每驱逐
+  一个 batch 都在全局 Mutex + current_thread runtime 下读完并解析整个 spool（极限约 5 GiB），
+  必然超过 producer 3 秒 ACK 超时——M-18/M-22 消灭的丢失机制在过载场景重现。
+  `find_spool_gap_reason`（`spool.rs:4830-4875`，reconcile QuarantinePending 每次调用）同构。
+  修复：为已写 gap ID 维护内存集合（`unacked_gap_batches` 已有类似机制），或对新生成随机 ID
+  跳过存在性扫描（固定 ID 重放路径才需要扫描）。
+- **M-31 seal 持续失败时，每条 append 触发全量索引重建。** `seal_locked` 错误分支无条件
+  `rebuild_runtime_indexes_locked`（`spool.rs:3265`），后者对整树 `directory_size` 并读取每个
+  sealed batch 正文做 gap 检测；seal 持久失败（如 `sealed/` 被替换为普通文件）时，open 段超龄后
+  每条 append 都走 best-effort seal → 失败 → 全量 rebuild，degraded 状态下 ingest 吞吐崩塌。
+  修复：rebuild 结果做脏标记缓存，连续失败时降频（如 60 秒一次）。
+
+Minor：
+
+| 编号 | 位置 | 问题 |
+| --- | --- | --- |
+| m-66 | docs §19.4 | 验证清单中 `python3 tests/test_check_audit_static.py --source ...` 字面不可通过（exit 2，该文件无 argparse）；可跑的是 `tests/check_audit_static.py --source`。验证记录失真，需更正 |
+| m-67 | `tests/README.md:46-48` | 仍描述整改 commit 已删除的"非 Linux 主机运行 user-audit 单元测试"路径；同文件 :35 的 workspace 表述也只在 Linux 成立 |
+| m-68 | `user_audit.rs:2541-2563、2727-2740` | shutdown 残留窗口：backoff 睡前未预检 CLOSED_BIT 且 `notify_waiters` 无 permit 记忆；session 空闲等待在 `diagnostic_shutdown_requested` 消费前计算 due。close 落在帧 IO 窗口时可耗尽 2 秒 drain 预算；聚合计数仍进 final journald，不静默 |
+| m-69 | `user_audit.rs:2508-2517` | session 意外 `Ok` 的兜底无退避无日志（当前不可达）；§7.3 要求意外 Ok 与 Err 同构（相同退避 + 限频 journald） |
+| m-70 | `user_audit.rs` 多处 | 整改新增约 10 个无调用方 accessor 与一个只写字段（`supervisor_stopped`）；§17 m-4 点名的 `record_contention` 死代码原样保留；Linux feature-on `cargo check` 受环境阻断未验证警告清零 |
+| m-71 | `spool.rs:1396-1414` | `ack()` 三个错误分支漏设 `non_gap_degraded`（append/lease 均有）：ack 路径真实故障可被无关 gap ACK 经 `refresh_degraded_after_ack_locked` 抹掉 degraded，与 m-46/M-21 的防护意图不一致 |
+| m-72 | `spool.rs:2027-2035` | M-17 残留细节：persist_state 失败且 ftruncate 失败时仍扣减增量索引，磁盘字节领先内存索引直到下次 rebuild |
+| m-73 | `spool.rs:1947-1957、3006-3008` | 元数据不可读对象的 quarantine 不维护 `sealed_batches`/`stored_records` 增量索引（两处），health 字段高估直到下次 rebuild |
+| m-74 | `spool.rs:2991-3113` | `reconcile_tombstones_locked` 对单条目 I/O 错误 fail-fast（多处 `?`）：一个永久失败对象可 wedge 全部 append/lease/ack；C-3 的"单候选失败继续"未覆盖 reconcile |
+| m-75 | `tests/golden_vectors.json`、`lib.rs:3455-3478` | golden vectors 残留：无 escaping 向量、无 NDJSON wrapper 行向量、nullable 仅一例、Rust 侧只断言数量不钉 key 集合 |
+| m-76 | `mock_collector.py:512-514、832、128、601` | `_load_state` 缺 key 抛裸 KeyError；Content-Length 查找大小写敏感（与同函数查重逻辑不一致）；`canonical_request` 拒绝 timestamp "0"（略严于 §10.2）；`record_diagnostic` 的 CR/LF 检查未覆盖 `kind` |
+| m-77 | `scripts/check-sensitive.sh:27` | 三类真实凭据形态不命中：`shared_i_psk`（cluster-users.py 源字段）、users[] 的 `password`、合并名 `export_hmac_key`；缓解：相关路径已 gitignore 且扫描跳过 ignored 文件 |
+| m-78 | `tests/test_audit_packaging.py:63、100` | C-2 回归断言为整行字面匹配，等价重排写法可绕过；socket 0660 断言锚在 OPERATIONS.md 的 user-stats 段落，审计 socket 0660（auditd 代码常量）实际无测试锚定 |
+| m-79 | `tests/test_fuzz_target.py:12-13`、`scripts/test-fuzz.sh:53-55` | fuzz 检查硬编码 `.cache/audit-work-source` 与被测树脱钩（test.sh 不传 `--source`，默认流程下可能检查陈旧树或 skip）；runner 未按 `fuzz/README.md` 要求使用 release+sanitizer |
+| m-80 | docs §头部/§14.4 | 版本记录链断档："版本 2 变更"说明被整体替换、无 v3 记录、§17.6 第 1-4 条决策落点未记录；§14.4 仍残留"group sync"失效术语（v4 已删 group commit） |
+| m-81 | `auditd/Cargo.toml:18`、`spool.rs:1123-1139`、`export.rs:132-135` | `rand` 依赖仍未使用未清；append 错误分支 `non_gap_degraded` 重复赋值两行（笔误）；export 注释与实际取锁路径不符 |
+| m-82 | `tests/check_audit_static.py:16` | unwrap/越界静态护栏只覆盖 auditd crate 与 user_audit.rs；protocol crate（全部 wire parser/HMAC）与 config/mod 接线无护栏 |
+| m-83 | `tests/integration_audit.py:85-93、128-156` | producer 角色只读帧不解析 ACK 内容（NACK 也判通过）；Linux 非 root/缺账号时打印后 exit 0，"强制"仅保证文件存在；无伪 UID/错误 node 负例 |
+| m-84 | `spool.rs:1710-1726` | 观察项：周期 sweep 在全局锁内做目录列举+逐候选 fsync，collector 长期离线后恢复时单次 sweep 可阻塞 runtime；§14.5 复测应覆盖 |
+
+### 20.5 交付一致性核查结论
+
+- 补丁↔源码树：`patch --dry-run -R -p1 --fuzz=0` 对 0003 全部 48 个文件干净反向应用，逐字一致。
+- 合同文本：`07a3b83` 对规格为纯插入（仅 §18）；`4a6348e` 对 §1–16 共 9 处 hunk，全部落在
+  v4 决策 6-11 与 §17.6 第 1/3/4 条对应范围，无夹带变更；示例配置与 v4 文本逐字一致，
+  `group_commit_*`/`acked_retention_seconds`/`udp_target_window_seconds` 全仓库零残留。
+- §19.4 已执行清单：cargo 侧与 Python 侧（除本机缺 `rg` 的 check-sensitive 与 m-66 的失真条目）
+  均复跑一致；Linux runtime/fuzz/性能/完整容量矩阵的未执行披露与代码状态相符。
+- golden vectors 双端消费链路（仓库文件 ↔ 补丁内嵌副本 ↔ Rust `include_str!` ↔ Python 读取 ↔
+  test.sh 逐字 cmp）闭合，向量内容经独立重算正确。
+- 敏感信息：tracked 文件零命中；`.gitignore` 覆盖生成物与 key 文件名；git 工作树干净。
+
+### 20.6 验收建议
+
+1. 修复 M-29（一行导入错误）后在 Linux 环境实跑 `integration_audit.py`，坐实 §12 端到端路径；
+2. 修复 M-30/M-31（gap ID 内存索引/随机 ID 免扫描；rebuild 降频）后再做 §14.5 目标机压测；
+3. m-1 按 §18.4 判定统一为观测墙钟；M-4 的 contention 运行期聚合 journald 补齐；
+4. 更正 §19.4 失真命令（m-66）与 tests/README.md 过时描述（m-67）；
+5. m-68/m-69 的 shutdown 窗口建议同批收紧（睡前预检 CLOSED_BIT/freeze 标志）；
+6. 其余 minor 可排期；Linux runtime、fuzz 实跑与完整容量/crash 矩阵仍为发布前置项。
