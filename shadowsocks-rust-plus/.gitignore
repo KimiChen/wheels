@@ -6,9 +6,16 @@ target/
 *.sock
 *.pid
 *.log
+export-hmac*
+export_hmac*
+*hmac-key*
+*hmac_key*
 *.profraw
 *.pyc
 __pycache__/
 tests/runtime/
 tests/audit-runtime/
 *.ndjson
+fuzz/target/
+fuzz/corpus/
+fuzz/artifacts/

@@ -54,3 +54,10 @@ safe_remove_temp_dir() {
       ;;
   esac
 }
+
+require_clean_worktree() {
+  local status
+
+  status="$(git -C "$SHADOWSOCKS_RUST_PLUS_ROOT" status --porcelain --untracked-files=normal)"
+  [[ -z "$status" ]] || die "发布签名与验签要求 overlay 工作树干净"
+}

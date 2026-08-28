@@ -44,6 +44,12 @@ else
   source_dir="$(cd "$source_dir" && pwd -P)"
 fi
 
+[[ -f "$SHADOWSOCKS_RUST_PLUS_ROOT/tests/golden_vectors.json" ]] || die "缺少共享 golden vectors"
+protocol_vectors="$source_dir/crates/shadowsocks-audit-protocol/src/golden_vectors.json"
+[[ -f "$protocol_vectors" ]] || die "源码缺少 protocol golden vectors"
+cmp -s "$SHADOWSOCKS_RUST_PLUS_ROOT/tests/golden_vectors.json" "$protocol_vectors" || \
+  die "Rust protocol 与 mock collector 的 golden vectors 不一致"
+
 target_dir="$SHADOWSOCKS_RUST_PLUS_ROOT/.cache/cargo-target"
 host_os="$(uname -s)"
 audit_native=0
@@ -90,13 +96,6 @@ if [[ "$run_audit" -eq 1 ]]; then
       --manifest-path "$source_dir/Cargo.toml" \
       --locked -p shadowsocks-auditd
   else
-    # Service audit code is target-independent apart from the daemon client;
-    # exercise it natively, then compile the Linux-only daemon for a target
-    # triple without trying to execute foreign test binaries.
-    CARGO_TARGET_DIR="$target_dir" cargo test \
-      --manifest-path "$source_dir/Cargo.toml" \
-      --locked -p shadowsocks-service --no-default-features --features user-audit --lib
-
     audit_target="${SHADOWSOCKS_AUDIT_CHECK_TARGET:-x86_64-unknown-linux-gnu}"
     audit_libdir="$(rustc --print target-libdir --target "$audit_target" 2>/dev/null || true)"
     [[ -d "$audit_libdir" ]] || die "非 Linux 主机需要已安装 Rust target 以检查 Linux-only auditd：$audit_target"
@@ -105,6 +104,16 @@ if [[ "$run_audit" -eq 1 ]]; then
       --manifest-path "$source_dir/Cargo.toml" \
       --locked --target "$audit_target" -p shadowsocks-auditd --all-targets
   fi
+fi
+
+python3 "$SHADOWSOCKS_RUST_PLUS_ROOT/tests/check_audit_static.py" --source "$source_dir"
+python3 "$SHADOWSOCKS_RUST_PLUS_ROOT/tests/test_fuzz_target.py"
+python3 "$SHADOWSOCKS_RUST_PLUS_ROOT/tests/test_panic_abort.py" --source "$source_dir"
+python3 "$SHADOWSOCKS_RUST_PLUS_ROOT/tests/test_benchmark_audit.py"
+
+if [[ "${SHADOWSOCKS_RUN_FUZZ:-0}" == 1 ]]; then
+  "$SHADOWSOCKS_RUST_PLUS_ROOT/scripts/test-fuzz.sh" --source "$source_dir" \
+    --seconds "${SHADOWSOCKS_FUZZ_SECONDS:-30}" --require
 fi
 
 if [[ "$run_integration" -eq 1 ]]; then
@@ -119,9 +128,12 @@ if [[ "$run_integration" -eq 1 ]]; then
     die "缺少真实数据面集成测试：tests/integration_user_stats.py"
   CARGO_TARGET_DIR="$target_dir" \
     python3 "$SHADOWSOCKS_RUST_PLUS_ROOT/tests/integration_user_stats.py" --source "$source_dir"
-  if [[ "$run_audit" -eq 1 && -f "$SHADOWSOCKS_RUST_PLUS_ROOT/tests/integration_audit.py" ]]; then
+  if [[ "$run_audit" -eq 1 ]]; then
+    [[ -f "$SHADOWSOCKS_RUST_PLUS_ROOT/tests/integration_audit.py" ]] || \
+      die "缺少 auditd 真实集成测试：tests/integration_audit.py"
     CARGO_TARGET_DIR="$target_dir" \
-      python3 "$SHADOWSOCKS_RUST_PLUS_ROOT/tests/integration_audit.py" --source "$source_dir"
+      python3 "$SHADOWSOCKS_RUST_PLUS_ROOT/tests/integration_audit.py" --source "$source_dir" \
+        --auditd-binary "$target_dir/debug/shadowsocks-auditd"
   fi
 fi
 

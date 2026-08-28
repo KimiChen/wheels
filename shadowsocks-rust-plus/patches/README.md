@@ -34,6 +34,6 @@ printf '%s\n' 0001-eih-user-stats-http-unix-exporter.patch 0002-reproducible-bui
 ```
 
 `--no-renames` 用于把移动文件展开为明确的删除与新增，保证无 `.git` 源码树中的通用 `patch`
-可以重放。不得拼接补丁、手工忽略冲突或允许 fuzz；更新后必须运行
-`scripts/verify.sh`，并确认 `cargo test --workspace --features user-audit` 与 auditd/mock collector
-互通测试均通过。
+可以重放。不得拼接补丁、手工忽略冲突或允许 fuzz；更新后必须运行 `scripts/verify.sh`。
+Linux 主机再运行 `cargo test --workspace --features user-audit`；非 Linux 主机应使用脚本提供的
+feature-off、protocol 与 mock collector 测试，auditd 编译和运行测试在 Linux CI 执行。

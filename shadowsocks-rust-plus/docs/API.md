@@ -290,7 +290,7 @@ hello 的 canonical object 为：
 auditd 同时检查 `SO_PEERCRED.uid == producer_user`、node/runtime 与配置及格式匹配。成功返回
 `hello_ack/ready`；第二个 producer 返回 retryable `producer_busy` 后断开，其他 hello 错误
 （`unsupported_version`、`unauthorized_peer`、`invalid_hello`、`node_mismatch`）均不可重试地
-保留 producer queue/in-flight。event 成功写入并完成本组 `fdatasync()` 后才返回 `ack/stored`，
+保留 producer queue/in-flight。event 成功写入并完成该事件的 `fdatasync()` 后才返回 `ack/stored`，
 ACK 包含 audit `event_id`、`spool_epoch` 和 `spool_sequence`。固定 NACK 为
 `invalid_schema`、`event_id_conflict`、`runtime_mismatch`（永久）以及 `storage_unavailable`、
 `internal_error`（可重试）。producer 必须保留原始 bytes 重放，未知/非法 ACK 不得生成 gap。

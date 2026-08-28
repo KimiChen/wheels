@@ -4,13 +4,15 @@
 >
 > 目标读者：独立负责 `shadowsocks-rust-plus` 节点侧审计功能的开发同事
 >
-> 规范版本：2
+> 规范版本：4
 >
-> 最后决策日期：2026-08-27
+> 最后决策日期：2026-08-28
 >
-> 版本 2 变更：落实同日评审修正——UDP 去重窗口固定 60 秒、acked 保留固定 86400 秒、auditd 配置
-> 改为逐字段校验表、producer ACK 超时与 auditd 写截止对齐、UDP shard index 与固定常量清单明确、
-> runtime 起点外部依赖声明及术语统一。
+> 版本 4 变更：正式锁定第二轮审计后的实现决策——逐条 durability 提交、已认证空 UDP payload
+> 在 feature-on/off 下保持相同数据面语义、`min_free_bytes` 仅作为运行期清理水位、未 ACK 的
+> spool gap 使 health 为 `degraded`、producer diagnostic 按 bucket 独立重试并 round-robin、
+> 以及对 `spool_dir/.lock` 持有排他锁。同步记录当前 macOS 可执行验证数字与 Linux runtime、
+> fuzz、性能和完整容量/crash 矩阵的环境限制。
 
 本文是节点侧成功访问审计的规范性合同。实现者不需要再决定产品语义、组件边界、失败策略、
 存储上限或协议形态。文中的“必须”“不得”“应当”分别对应 MUST、MUST NOT、SHOULD。
@@ -241,7 +243,7 @@ relay，2 秒总 timeout 仍由根 launcher 控制。该 skipped counter 不属�
 
 ```toml
 # root Cargo.toml
-user-audit = ["user-stats", "shadowsocks-service/user-audit"]
+user-audit = ["user-stats", "shadowsocks-service/user-audit", "dep:shadowsocks-auditd"]
 
 # crates/shadowsocks-service/Cargo.toml
 user-audit = ["user-stats", "dep:shadowsocks-audit-protocol", "dep:crossbeam-queue"]
@@ -337,8 +339,6 @@ CLI 固定为 `shadowsocks-auditd [--config <path>]`：省略参数时读取
   "min_free_bytes": 1073741824,
   "segment_max_bytes": 4194304,
   "segment_max_age_seconds": 60,
-  "group_commit_max_events": 256,
-  "group_commit_max_delay_ms": 100,
   "export_max_response_bytes": 8388608,
   "export_hmac_key_file": "/etc/shadowsocks-audit/export-hmac"
 }
@@ -352,14 +352,13 @@ CLI 固定为 `shadowsocks-auditd [--config <path>]`：省略参数时读取
 | `min_free_bytes` | 1073741824 | 268435456–5368709120 | 5368709120 |
 | `segment_max_bytes` | 4194304 | 16384–4194304 | 4194304 |
 | `segment_max_age_seconds` | 60 | 1–3600 | 3600 |
-| `group_commit_max_events` | 256 | 1–256 | 256 |
-| `group_commit_max_delay_ms` | 100 | 1–100 | 100 |
 | `export_max_response_bytes` | 8388608 | 4194304–8388608 | 8388608 |
 
 另需满足：
 
 - `max_spool_bytes` 必须大于 `2 × segment_max_bytes`；
-- `min_free_bytes` 必须至少 256 MiB 且小于所在文件系统总容量；
+- `min_free_bytes` 必须至少 256 MiB 且小于所在文件系统总容量；它只作为运行期清理触发水位，
+  不得阻止 auditd 启动；低于水位时按第 9.5 节清理并在 health 中反映 degraded；
 - `segment_max_bytes` 必须不小于协议 crate 计算的最大单条 record 字节数（8192 字节事件 +
   wrapper 开销 + LF），否则空 segment 可能被单条超限 record 静默写超；
 - `export_max_response_bytes` 必须不小于 `segment_max_bytes`；默认 8 MiB 是 segment 硬上限的
@@ -378,6 +377,9 @@ HMAC key 文件必须恰好为 64 个小写十六进制字符加一个可选末�
 
 - UDP 去重窗口 60 秒；审计窗口 64 shard（第 5.2/6.4 节）；
 - acked 副本正常保留 86400 秒（24 小时），容量/磁盘水位优先（第 1/9.5/10.1 节）；
+- 每条已接受 record 独立完成 `write_all`、open segment `fdatasync` 和 `state.json` durability
+  barrier 后才 ACK；当前 producer/ingest lock-step 不启用 group commit，因此 auditd 配置不得包含
+  `group_commit_max_events` 或 `group_commit_max_delay_ms`；
 - in-flight 硬上限 256 条；producer 读 ACK 超时 3 秒（第 7.2/7.3 节）；
 - ingest 最多 4 连接、hello/partial frame/response 截止 2 秒；export 最多 4 并发连接、
   请求/响应截止 5 秒（第 8.1/10.1 节）；
@@ -442,7 +444,8 @@ HMAC key 文件必须恰好为 64 个小写十六进制字符加一个可选末�
 
 - `host` 是 Shadowsocks 地址头解析后的目标，不是 DNS payload 或 TLS SNI；
 - domain 最多 255 UTF-8 bytes；不得因为审计规范化而改变实际路由目标；
-- ASCII domain：转换为小写并移除一个末尾点；
+- ASCII domain：转换为小写并移除一个末尾点；任何空 label（包括连续点或仅由点组成的输入）均视为
+  规范化失败，保留原始 `host` 并将 `normalized_host` 置为 `null`；
 - Unicode domain：使用 UTS #46 non-transitional + STD3 规则转 ASCII、小写并移除一个末尾点；
 - 规范化失败时保留 `host`，`normalized_host` 为 `null`，不得丢弃访问事件；
 - IP 使用 `std::net::IpAddr::to_string()` 的规范文本；IPv4-mapped IPv6 保持 IPv6，不折叠；
@@ -511,6 +514,9 @@ banner，必须等首个客户端载荷也成功写入目标后才满足条件�
 UDP 在现有 user-stats uplink 唯一成功计数点判断：outbound send 返回 `Ok(bytes_sent)`，且
 `payload.len() > 0`、`bytes_sent == payload.len()`。short datagram write 视为失败。这个条件只证明节点
 内核完整接受了本次发送，不证明远端接收或响应，也不要求上游内部 API 必须恰好命名为 `send_to()`。
+
+已认证的空 UDP payload 与非空 payload 采用相同的数据面处理：feature-on/off 都放行成功的完整发送，
+但空 payload 不生成 `udp_target_success`（审计事件的成功条件仍要求 `payload.len() > 0`）。
 
 现有 UDP helper 在成功后只返回 `()`，domain lookup 路径也会丢弃最终成功的 `SocketAddr`；本次必须把
 send helper 改为仅在完整 write 后返回 `io::Result<SocketAddr>`。返回值是经过 IP stack capability 映射、
@@ -782,7 +788,8 @@ producer diagnostics 不是访问事件，字段集合严格以第 6.5 节为准
   UDS、hello、ACK/NACK 和一次连接内的读写，不能拥有或在返回时 drop in-flight；
 - 强类型序列化发生在 supervisor 从 queue 取出 draft 后、放入 in-flight 前；序列化失败累计
   `encode_error`，不得在 relay task 序列化；
-- 首次重连等待 100 ms，指数退避到 5 秒并加入 0–20% jitter；成功收到合法 ACK 后重置；
+- 首次重连等待 100 ms，指数退避并加入 0–20% 正抖动，但总等待时间硬顶 5 秒（含 jitter）；成功收到
+  任一合法 ACK 后立即重置；非 retryable hello NACK 使用精确固定 5 秒重试；
 - 每次发送和读取 ACK 超时 3 秒，不短于第 8.1 节 auditd 响应 2 秒写截止；超时只触发后台重连；
 - ACK 丢失时以完全相同的 event ID 和 JSON bytes 重试；
 - 256 条 in-flight 在重连时优先重试；未发送 queue 独立使用淘汰最老策略保留最新事件；
@@ -996,9 +1003,10 @@ nullable 字段和所有 variant 提供 golden vectors。
   `next_spool_sequence` 和 `pending_state_reset`；正常时 pending 为 null，reset 时为包含固定
   `gap_event_id`、occurred time、nullable lost epoch/sequence 范围的 object。文件通过同目录 temp file 的
   write、`fdatasync`、atomic rename 和目录 `fsync` 更新；
-- group writer 最多聚合配置的 `group_commit_max_events` 条或 `group_commit_max_delay_ms` 毫秒
-  （默认 256 条 / 100 ms），以先到者为准；依次完成 record `write_all`、open file `fdatasync`、把
-  `next_spool_sequence` 原子持久化到 `state.json` 后才 ACK；任一步失败均不 ACK；
+- 当前 producer、ingest 和 spool 采用 lock-step 逐条提交：每条 record 依次完成 `write_all`、open
+  file `fdatasync`、把 `next_spool_sequence` 原子持久化到 `state.json` 后才 ACK；任一步失败均不 ACK。
+  `group_commit_max_events` 与 `group_commit_max_delay_ms` 不属于配置 schema。未来若引入批量提交，
+  必须先升版并同时改造 producer、ingest 和 spool 三侧；不得以未生效的配置字段冒充 durability；
 - append 前先序列化完整 wrapper 加 LF；若非空 open 加上该 record 将超过配置的 `segment_max_bytes`
   （默认 4194304 bytes），则先 seal，再写入新 open；等于上限允许；
 - 非空 open segment 达到配置的 `segment_max_bytes` 或年龄达到 `segment_max_age_seconds`（默认 60
@@ -2199,27 +2207,27 @@ panic-free——落实到位，未发现数据面阻断或 wire 不兼容。但�
 | m-64 | `tests/test_audit_packaging.py:38-40,57` | 同样把 `m-20` 的非规格 `ReadWritePaths` 写法与 `M-6` 的两个死配置项固化为期望值 |
 | m-65 | `docs/OPERATIONS.md:96-106,117-122`、`README.md:86-102,92-93`、`docs/API.md:293`、`docs/ARCHITECTURE.md:159-160`、`docs/PERFORMANCE.md:9-14` | 文档与实现不符的五处：安装步骤原样安装示例配置（缺 `export_peer_user` 账号与 `node_id` 定制，必然启动失败）；把直接运行 `shadowsocks-auditd` 描述为“启动前配置检查”，但二进制没有 check-only 模式且以 root 运行必然失败；声称 `scripts/build.sh` 在当前宿主平台（含 macOS）构建 auditd，实际非 Linux 无法编译；声称 `verify.sh` 会运行 auditd 集成测试，实际 `tests/integration_audit.py` 不存在；`API.md`/`ARCHITECTURE.md` 明文承诺 group `fdatasync` 提交语义，与逐条提交实现不符（见 `M-16`） |
 
-### 18.7 需规格决策的新增条目
+### 18.7 v4 已锁定的审计决策
 
-接续 17.6，以下条目须先对本文件升版，再由代码跟进：
+本节所列 18.7 条目已在 v4 正式决策，并已纳入当前实现与第 19 节结论；不再是待选择的方案：
 
-6. §9.3 group commit（对 17.6 第 5 条的替换）：由于 `M-16` 证明「仅补 spool 侧 group writer」不可行，
-   必须二选一并升版——(a) 同时改造 producer 流水线（利用已定义的 256 条 in-flight：连续写多帧、按
-   `event_id` 匹配乱序 ACK、失败整段按原序原 bytes 重放）、ingest 批量收帧与 spool 组提交；
-   (b) 改写 §9.3 为「逐条提交」并删除 `group_commit_max_events`/`group_commit_max_delay_ms` 两个
-   配置项，同时在 §14.5 明确逐条 `fdatasync` 下的吞吐门槛与 `queue_capacity` 取值指引。
-7. §1「审计不得改变代理行为」在**已认证空载荷 UDP 数据报**上的取舍（见 18.4 对 `M-2` 的更正）：
-   是要求 feature-on/off 逐字等价（则应把上游早退条件改为按 wire 长度判断，两个 build 都不丢弃合法
-   空载荷），还是接受 feature-on 放行该数据报并在补丁说明中声明差异。
-8. §5.3 `min_free_bytes` 的语义（见 `M-14`）：明确它**只是**运行期清理触发水位，不得作为启动前置
-   条件；或反之明确启动期即要求满足，但那样必须同时定义如何自愈。
-9. §10.1 health `status` 是否必须包含「存在未 ACK 的 spool_gap」（见 `M-21`）：条文已写明，但需确认
-   `evicted_unacked_records > 0` 是否等价于该条件，以及 ACK 后 `status` 恢复 `ok` 而累计计数不清零的
-   精确判定点。
-10. §7.2 producer diagnostic 的节流粒度（见 `M-12`）：明确 60 秒限频只作用于 contention snapshot 与
-    失败重试，正常的 gap snapshot 只受 per-accumulator in-flight 门控；否则应写明全局 1 条/60 秒是
-    有意为之并接受其饿死风险。
-11. §9.3/§9.4 是否要求 auditd 对 `spool_dir` 持有文件系统级排他锁（见 `M-15`）。
+6. §9.3 采用逐条提交。每条 record 必须依次完成 `write_all`、open segment `fdatasync` 和
+   `state.json` durability barrier，完成后才发送 ACK；`group_commit_max_events` 与
+   `group_commit_max_delay_ms` 从配置 schema 删除。未来若改为批量提交，必须先升版并同时改造
+   producer、ingest、spool 三侧，不能以未生效字段宣称 durability。
+7. §1 的“审计不得改变代理行为”适用于已认证空 UDP payload：feature-on 与 feature-off 都放行
+   完整成功发送，空 payload 不生成 audit event。该行为由 wire 长度/发送结果决定，而不是由审计
+   feature 决定。
+8. §5.3 的 `min_free_bytes` 只是运行期清理触发水位，不是启动前置条件。auditd 在低于水位时仍
+   启动并按 §9.5 尝试清理；无法恢复时通过 `degraded` health 和有界计数表达。
+9. §10.1 的 health `status` 在存在未 ACK 的 `spool_gap` 时必须为 `degraded`；相关 gap ACK
+   后可恢复为 `ok`，但 `evicted_unacked_records` 等累计计数不得清零，其他降级原因也不得被无关
+   ACK 抹掉。
+10. §7.2 的 producer diagnostic 按 bucket 独立维护 retry/deadline，并以 round-robin 选择待发
+    bucket。contention 及其 journald 错误各自 60 秒限频；正常 producer-gap snapshot 只受自身
+    in-flight 门控，不得被另一个 bucket 的退避饿死。
+11. §9.3/§9.4 要求 auditd 在 `spool_dir/.lock` 上持有文件系统级 `flock` 排他锁；同一 spool
+    目录即使使用不同 socket 配置，也不得由两个 auditd 并发写入。
 
 ### 18.8 本轮驳回的候选问题（记录以免重复排查）
 
@@ -2240,3 +2248,110 @@ dedup 命中不更新 `last_ingest_at_unix_ms` 与 `m-12` 是同一问题；运�
 字面「容量或磁盘水位优先」并非违背（其真实危害已并入 `M-18`）；「producer 从未连接过时 health 返回
 ok」符合 §10.1 字面（degraded 条件是“断开超过 5 秒”，未连接不是断开）；
 `OPERATIONS.md` 的 0600 socket 模式描述指的是 stats socket 而非审计 socket。
+
+## 19. 修复结论（2026-08-28）
+
+> 本节记录按第 17、18 节审计结果在当前工作树中实施的修复，不改变前述规范条文。
+> 结论对应当前未提交的开发工作树；代码、准备源码树和补丁 series 已按本节的 clean replay
+> 流程校验。凡标注“环境限制”或“未完成”的项目，不得解释为已通过完整发布门槛。
+
+### 19.1 Critical 修复
+
+- **C-1 已修复。** `server/context.rs::spawn_relay` 在 task 首次 poll 之前即建立并移入
+  `RelayTaskGuard`，并用 start gate 覆盖尚未开始执行时的 abort 路径；无论 task 是否被
+  首次 poll，`active_tasks` 注册都会释放。回归用例
+  `abort_before_first_poll_releases_task_registration` 固定了该关机竞态。
+- **C-2 已修复。** auditd unit 增加 `RuntimeDirectoryPreserve=yes`，并明确隔离
+  `/etc/shadowsocks-rust-plus` 与 `/run/shadowsocks-rust-plus`；ssserver 删除对 audit ingest
+  目录的强制 `ReadWritePaths`，只保留 `Wants=`/`After=`，auditd 离线不会阻断数据面。补齐
+  `audit-exporter` sysuser、成员组、sysusers/tmpfiles 安装步骤和权限/打包断言，重启后
+  ingest/export socket 父目录可由 tmpfiles 恢复。
+- **C-3 已修复。** `spool.rs::write_gap_locked` 不再受普通容量水位短路；quarantine 和
+  eviction 先写入并同步 marker/tombstone，再执行 rename/remove 等破坏性操作。单个候选
+  清理失败会记录并继续尝试其他候选，避免一个坏对象永久锁死整个 spool；失败状态仍进入
+  degraded/计数路径。
+
+### 19.2 Major 修复
+
+以下项目已按第二轮审计意见落地：
+
+| 编号 | 修复结论 |
+| --- | --- |
+| M-12 | 诊断 bucket 使用独立 deadline、round-robin cursor 和逐 bucket retry；contention 或永久 NACK 不再让固定遍历顺序饿死其他诊断。 |
+| M-13 | 重连等待改为 shutdown-aware `select!`，关闭时立即退出并重置退避；sticky hello NACK 使用固定 5 秒间隔，收到合法 ACK 后恢复正常退避。 |
+| M-14 | `min_free_bytes` 仅是运行期清理触发水位，不再作为启动前置条件；无法满足水位时由清理和 degraded health 表达，而不是拒绝启动。 |
+| M-15 | spool 目录增加 `.lock`/`flock` 排他锁，同一目录即使 socket 配置不同也不能由两个 auditd 并发写入。 |
+| M-16 | 移除未生效的 group-commit 配置；逐条 `write_all`、open segment `fdatasync`、state durability barrier 完成后才 ACK。若将来引入批量提交，必须先升版并同时改造 producer、ingest、spool。 |
+| M-17 | 写入或同步任一步失败时回滚文件长度、metadata、sequence、计数和 oldest timestamp，避免内存索引领先于磁盘。 |
+| M-18 | spool bytes/records/batches 改由启动扫描后的增量索引维护；acked retention 由周期 sweep 触发，不在每次 health/ACK 下全量重读。 |
+| M-19 | tombstone 身份按 variant 区分；quarantine marker 先 durable；corruption quarantine 与 quarantine eviction 分开处理，并维护对应 receipt/index。 |
+| M-20 | seal 失败会解除旧 descriptor 与已封口 inode 的绑定，重新打开 `open/current.ndjson`，再重建运行时索引，避免继续写入已封口对象。 |
+| M-21 | health 纳入 `gap_degraded`、未 ACK gap 和饱和计数；ACK 只清除已恢复的 gap 条件，不抹掉其他 degraded 原因。 |
+| M-22 | health/ACK 使用增量快照，避免在 current-thread runtime 和 spool mutex 下递归扫描、全量 hash 或逐行解析 sealed 集合。 |
+| M-23 | mock collector 仅对 200 lease 响应要求 Body-SHA256；状态写入采用 temp + fsync + rename + 目录 fsync，并提供可复用的 `collect_once` 流程。 |
+| M-24 | 增加签名 lease、ACK、health 的集成路径和协议验证；export 原生认证 runtime 矩阵仍受本机 macOS 限制，见 19.4。 |
+| M-25 | `integration_audit.py` 覆盖 ingest hello、事件、ACK 和 peer 身份；原生 ingest runtime 测试需 Linux auditd 环境，未在本机执行。 |
+| M-26 | 增加 spool lock、state reset、seal failure、health gap 等回归用例；完整 crash-point、5 GiB/1 GiB 容量回收矩阵仍未完全覆盖，不能据此宣称第 14.4 节全通过。 |
+| M-27 | 增加 Linux-only `compile_error!` 和 socket/path/config 静态检查；Linux feature-on 测试需 Linux 主机，本机只完成交叉编译检查。 |
+| M-28 | Rust protocol 与 Python mock collector 共用 `tests/golden_vectors.json`；`scripts/test.sh` 逐字 `cmp`，两侧同时验证 canonical record 与 HMAC vectors。 |
+
+第 17 节遗留的 session、UDP 空 payload、producer shutdown 诊断、quarantine gap、mock 幂等、
+事件 golden vector 和 release manifest 问题也随上述改动一并收敛：session 保持长连接，
+feature-on/off 对已认证空 payload 采用相同数据面处理，最终诊断和 health counter 有独立汇总，
+quarantine gap 先落 durable 证据，mock collector 执行冲突隔离后再 ACK，事件向量和补丁 series
+进入自动校验。未把旧的“group commit”死配置重新带回 schema。
+
+### 19.3 关键 minor 与交付护栏
+
+- drain 判断调整为先观察 pending/in-flight，再读取 diagnostics，修复 TOCTOU；合法 ACK 后立即
+  重置退避；shutdown contention drops 与普通 diagnostic drops 分开计数并进入最终报告。
+- ingest hello 只更新 producer 连接状态，不伪造 `last_ingest_at_unix_ms`；新事件和去重重放在成功
+  ACK 后按实际接收时间刷新该字段，断开时清理 runtime/timestamp。
+- 审计 ingest socket 的现有父目录只信任 root、当前 producer 或已解析的 `auditd_user` UID；root
+  启动且不降权时不再接受任意非特权属主目录。ssserver 根 launcher 在构建 listener 前同步首次
+  poll signal monitor，消除 `spawn + yield_now` 的未注册窗口。
+- producer health counters 接入 snapshot/final reporting；诊断 accumulator 使用有界扫描和
+  fallback，避免 seqlock 紧循环；严格 JSON 边界拒绝前后空白，payload 上限改用共享常量，并补充
+  合法 lease golden vector。
+- CLI/config parser、Linux `sun_path` 长度、dedup LRU 的 HashMap/token、transient `accept()`
+  错误恢复和 ingest I/O 的 retryable NACK 均加入检查；spool 新节点不再伪造 state-reset，跨
+  epoch event ID 与 tombstone salvage 路径有明确处理。
+- packaging 补齐 exporter 账号、manifest patch series、敏感信息扫描和权限断言；mock collector
+  增加 health/gap 记录与原子状态写入；README、API、ARCHITECTURE、OPERATIONS、PERFORMANCE
+  及 patches 文档同步当前逐条 durability 和 Linux-only 边界。
+
+这些改动解决了本轮已确认的行为缺陷，但不把“有界设计取舍”写成性能保证：UDP 热路径、诊断
+扫描等仍须以第 14.5 节目标机数据复测；fuzz、release-profile `panic = "abort"` 子进程门和
+完整容量/crash 矩阵仍属于未完成验收项。
+
+### 19.4 已执行验证与环境限制
+
+本机为 **macOS**。以下命令在当前工作树/准备源码树上实际执行并通过：
+
+```text
+cargo test --locked -p shadowsocks-audit-protocol                                      # 20 passed
+cargo test --locked -p shadowsocks-service --no-default-features --features server --lib # 8 passed
+bash scripts/test.sh --source .cache/audit-work-source --no-integration                  # workspace passed; service 302, EIH 4
+cargo check --locked --target x86_64-unknown-linux-gnu -p shadowsocks-auditd --all-targets # passed
+python3 tests/test_check_audit_static.py --source .cache/audit-work-source
+python3 tests/test_mock_collector.py
+python3 tests/test_audit_packaging.py
+python3 tests/test_release_artifact.py
+python3 tests/test_fuzz_target.py
+python3 tests/test_panic_abort.py --source .cache/audit-work-source
+python3 tests/test_benchmark_audit.py
+bash scripts/check-sensitive.sh
+git diff --check
+```
+
+此外已检查补丁与源码树的 `patch --fuzz=0` clean replay、逐文件一致性、共享 golden vectors
+逐字一致性和敏感信息扫描；`scripts/verify.sh` 的最终结果与补丁行数以本轮重新生成后的实际
+输出为准。
+
+以下项目在本机**未执行**：Linux auditd runtime（包括 ingest/export 原生认证、peer/UDS、
+真实 Linux SIGTERM 与 crash/capacity 场景）、完整 Linux feature-on workspace 测试、fuzz
+实际运行，以及第 14.5 节性能压测。因此当前结论是“代码与静态/可移植测试修复已完成，Linux
+runtime、fuzz、性能和完整容量/crash 矩阵仍待目标环境验收”，不是最终发布签字。完整
+`cargo check --locked --target x86_64-unknown-linux-gnu --features user-audit --workspace` 曾尝试，
+但本机缺少 `x86_64-linux-gnu-gcc`，在 `ring` 的交叉编译步骤被环境阻断；这不影响上列 auditd
+crate 级 Linux-target check 的通过结论。

@@ -10,8 +10,6 @@
   "min_free_bytes": 1073741824,
   "segment_max_bytes": 4194304,
   "segment_max_age_seconds": 60,
-  "group_commit_max_events": 256,
-  "group_commit_max_delay_ms": 100,
   "export_max_response_bytes": 8388608,
   "export_hmac_key_file": "/etc/shadowsocks-audit/export-hmac"
 }

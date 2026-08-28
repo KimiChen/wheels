@@ -59,7 +59,7 @@ release_dir=dist
 /run/shadowsocks-rust-plus/user-stats.sock
 /run/shadowsocks-audit/ingest/ingest.sock
 /run/shadowsocks-audit/export/export.sock
-/var/lib/shadowsocks-audit/{open,sealed,leased,acked,quarantine}
+/var/lib/shadowsocks-audit/{open,sealed,acked,quarantine}
 ```
 
 配置目录应为 `0750`、配置文件应为 `0640` 或更严。socket 路径必须是规范绝对路径，不能含
@@ -95,10 +95,15 @@ NetBSD 及其他非 Linux Unix 构建使用 `fchmodat(..., AT_SYMLINK_NOFOLLOW)`
 不要手工把目录设成可写给 group/other：
 
 ```bash
-systemd-sysusers packaging/shadowsocks-auditd.sysusers
-systemd-tmpfiles --create packaging/shadowsocks-auditd.tmpfiles
+install -D -m 0644 packaging/shadowsocks-auditd.sysusers \
+  /usr/lib/sysusers.d/shadowsocks-audit.conf
+install -D -m 0644 packaging/shadowsocks-auditd.tmpfiles \
+  /usr/lib/tmpfiles.d/shadowsocks-audit.conf
+systemd-sysusers /usr/lib/sysusers.d/shadowsocks-audit.conf
+systemd-tmpfiles --create /usr/lib/tmpfiles.d/shadowsocks-audit.conf
 install -m 0640 -o root -g shadowsocks-audit config/auditd.example.json \
   /etc/shadowsocks-audit/auditd.json
+# 在启用服务前，将 node_id、socket 路径和 spool 参数替换为本节点值；示例值不可直接用于生产。
 install -m 0600 -o shadowsocks-audit -g shadowsocks-audit /secure/node-export-hmac \
   /etc/shadowsocks-audit/export-hmac
 install -m 0644 packaging/shadowsocks-auditd.service /etc/systemd/system/
@@ -114,15 +119,17 @@ ingest/export socket 分别由 `shadowsocks-audit-ingest`/`shadowsocks-audit-exp
 不能读取 ssserver 配置或密钥。ssserver 单元对 auditd 使用 `Wants=`/`After=` 而不是 `Requires=`：
 auditd 离线时数据面仍启动，producer 只保留有界 queue 并后台重连。
 
-启动前以唯一显式路径检查配置（未知字段、重复参数、相对路径、symlink parent、UID/mode、范围
-错误都必须在创建 socket 或文件前失败）：
+配置校验发生在服务启动时（未知字段、重复参数、相对路径、symlink parent、UID/mode、范围
+错误都必须在创建 socket 或文件前失败）。不要以 root 直接运行 daemon；由 systemd 使用
+`shadowsocks-audit` 身份启动并从 journal 检查失败原因：
 
 ```bash
-/usr/local/bin/shadowsocks-auditd --config /etc/shadowsocks-audit/auditd.json
+systemctl start shadowsocks-auditd.service
+journalctl -u shadowsocks-auditd.service -n 50 --no-pager
 ```
 
 不要同时使用环境变量或备用配置路径。修改 spool 上限、segment 或导出 HMAC 后必须先停止接受
-新采集、完成最终 lease/ACK 屏障，再重启 auditd；不要删除 `open/`、`leased/`、`acked/` 或
+新采集、完成最终 lease/ACK 屏障，再重启 auditd；不要删除 `open/`、`acked/` 或
 `tombstones.json` 来“修复”状态。
 
 首次生成 200 个正式账号和 4 个测试账号的受控源时，先准备权限 `0700` 且已 ignore 的目录；工具只会创建显式目标，模式

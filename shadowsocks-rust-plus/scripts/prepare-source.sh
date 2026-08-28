@@ -39,10 +39,20 @@ git --git-dir="$temp_dir/upstream.git" archive "$upstream_commit" | tar -x -C "$
 while IFS= read -r patch_name; do
   [[ -z "$patch_name" || "$patch_name" == \#* ]] && continue
   [[ "$patch_name" != */* && "$patch_name" == *.patch ]] || die "非法补丁名：$patch_name"
-  [[ -f "$SHADOWSOCKS_RUST_PLUS_ROOT/patches/$patch_name" ]] || die "补丁不存在：$patch_name"
+  patch_path="$SHADOWSOCKS_RUST_PLUS_ROOT/patches/$patch_name"
+  [[ -f "$patch_path" ]] || die "补丁不存在：$patch_name"
+  # `patch` cannot create missing parent directories for a new file.  Create
+  # only directories named by this patch, inside the disposable source tree,
+  # so newly added crates and fuzz targets remain replayable from a clean
+  # upstream archive.
+  while IFS= read -r target_path; do
+    [[ "$target_path" == b/* ]] || continue
+    target_path="${target_path#b/}"
+    mkdir -p "$output_dir/$(dirname "$target_path")"
+  done < <(sed -n 's#^+++ b/##p' "$patch_path")
   (
     cd "$output_dir"
-    patch --batch --forward --fuzz=0 -E -p1 < "$SHADOWSOCKS_RUST_PLUS_ROOT/patches/$patch_name"
+    patch --batch --forward --fuzz=0 -E -p1 < "$patch_path"
   )
 done < "$SHADOWSOCKS_RUST_PLUS_ROOT/patches/series"
 

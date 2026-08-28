@@ -7,9 +7,11 @@
    `scripts/verify-release.sh`；只有 detached 签名、版本/commit、ELF 架构、规范 release manifest、
    两个二进制及 SHA-256 全部通过后，才从发布目录取出 `ssserver` 和 `shadowsocks-auditd`，分别安装为
    `/usr/local/bin/ssserver` 与 `/usr/local/bin/shadowsocks-auditd`。`scripts/build.sh` 的宿主平台开发产物不得用于 Linux 部署。
-3. 安装 `packaging/shadowsocks-auditd.sysusers` 和 `packaging/shadowsocks-auditd.tmpfiles`，
-   创建不可登录的 `shadowsocks`、`shadowsocks-audit` 用户及专用 ingest/export 组，然后安装
-   `packaging/shadowsocks-auditd.service`。
+3. 将 `packaging/shadowsocks-auditd.sysusers` 安装到 `/usr/lib/sysusers.d/`，将
+   `packaging/shadowsocks-auditd.tmpfiles` 安装到 `/usr/lib/tmpfiles.d/`，执行
+   `systemd-sysusers`/`systemd-tmpfiles --create`，创建不可登录的 `shadowsocks`、
+   `shadowsocks-audit`、`audit-exporter` 用户及专用 ingest/export 组，然后安装
+   `packaging/shadowsocks-auditd.service`。这样 `/run` 重建后两个 socket 父目录仍会自动恢复。
 4. 从 `scripts/cluster-users.py` 生成并规范化的唯一私有源注入配置；五节点 profile 固定
    `2022-blake3-aes-128-gcm`，共享 iPSK 与每用户 uPSK 都是 16 字节随机值的标准 Base64。
    受控源用 `kind: formal|test` 区分默认 200 个正式账号和 4 个测试账号；注入配置时剥离

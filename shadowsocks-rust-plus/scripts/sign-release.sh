@@ -93,7 +93,12 @@ fi
 [[ "$overlay_commit" =~ ^[0-9a-f]{40}$ ]] || die "期望 overlay commit 格式错误"
 
 if [[ -n "$release_manifest" ]]; then
+  require_clean_worktree
   multi_output_dir="$(dirname "$manifest")"
+  [[ "$(basename "$output")" == "release-manifest.sig" ]] || \
+    die "双二进制发布签名文件必须命名为 release-manifest.sig"
+  [[ "$(dirname "$(absolute_path "$output")")" == "$(cd "$multi_output_dir" && pwd -P)" ]] || \
+    die "双二进制发布签名必须位于 release-manifest.json 同一目录"
   "$SHADOWSOCKS_RUST_PLUS_ROOT/scripts/release-artifact.py" verify-multi \
     --output-dir "$multi_output_dir" \
     --manifest "$manifest" \

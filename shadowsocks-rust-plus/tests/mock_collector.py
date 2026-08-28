@@ -10,6 +10,7 @@ production collector or a replacement for a controller database.
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import hmac
 import json
@@ -36,6 +37,22 @@ IDENTIFIER = re.compile(r"[!-~]{1,128}\Z")
 
 class CollectorError(ValueError):
     """A protocol or durable-state validation failure."""
+
+
+class ParsedLease(list[dict[str, Any]]):
+    """Parsed records plus the exact raw NDJSON wrapper digest for each row.
+
+    The wire-level sequence idempotency key is defined over the wrapper bytes,
+    not over the event payload digest.  Keeping the sidecar out of each record
+    preserves the protocol object's exact field set while allowing the durable
+    collector path to compare the original bytes across retries.
+    """
+
+    def __init__(self, records: Iterable[dict[str, Any]], wrapper_hashes: Iterable[str]) -> None:
+        super().__init__(records)
+        self.wrapper_hashes = tuple(wrapper_hashes)
+        if len(self) != len(self.wrapper_hashes):
+            raise CollectorError("parsed lease wrapper hash count mismatch")
 
 
 def _duplicate_key_guard(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -225,6 +242,7 @@ def verify_response(
     body: bytes,
     request_nonce: str,
     expected_node: str,
+    require_lease_body_digest: bool = False,
 ) -> ResponseMetadata:
     """Verify response digest, node and MAC before exposing response content."""
 
@@ -233,7 +251,7 @@ def verify_response(
         raise CollectorError("response node mismatch")
     if not hmac.compare_digest(metadata.response_sha256, sha256_hex(body)):
         raise CollectorError("response body digest mismatch")
-    if status == 200:
+    if require_lease_body_digest:
         if not metadata.lease_body_sha256:
             raise CollectorError("lease response lacks body digest")
         if not hmac.compare_digest(metadata.lease_body_sha256, sha256_hex(body)):
@@ -254,7 +272,7 @@ def _strict_decimal(value: Any, *, positive: bool = False) -> str:
     return _field(value, POSITIVE_DECIMAL if positive else DECIMAL, "decimal")
 
 
-def parse_lease(body: bytes, metadata: ResponseMetadata) -> list[dict[str, Any]]:
+def parse_lease(body: bytes, metadata: ResponseMetadata) -> ParsedLease:
     """Parse and validate a signed NDJSON lease after MAC verification."""
 
     if metadata.status != 200:
@@ -273,6 +291,7 @@ def parse_lease(body: bytes, metadata: ResponseMetadata) -> list[dict[str, Any]]
     if not body or not body.endswith(b"\n"):
         raise CollectorError("lease must be newline terminated")
     records: list[dict[str, Any]] = []
+    wrapper_hashes: list[str] = []
     previous: int | None = None
     for line in body.splitlines(keepends=True):
         if not line.endswith(b"\n") or line.endswith(b"\r\n"):
@@ -317,6 +336,9 @@ def parse_lease(body: bytes, metadata: ResponseMetadata) -> list[dict[str, Any]]
         if epoch != metadata.spool_epoch:
             raise CollectorError("spool epoch mismatch")
         records.append(record)
+        # Include the required LF: this is the exact wrapper row carried by
+        # the signed NDJSON body and therefore the correct sequence key.
+        wrapper_hashes.append(sha256_hex(line))
     try:
         expected_count = int(metadata.event_count)
     except ValueError as exc:
@@ -328,7 +350,7 @@ def parse_lease(body: bytes, metadata: ResponseMetadata) -> list[dict[str, Any]]
             raise CollectorError("first sequence mismatch")
         if records[-1]["spool_sequence"] != metadata.last_sequence:
             raise CollectorError("last sequence mismatch")
-    return records
+    return ParsedLease(records, wrapper_hashes)
 
 
 def _raw_object_field(raw_object: bytes, wanted_key: str) -> bytes:
@@ -402,16 +424,52 @@ def _secure_state_write(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     path.parent.chmod(0o700)
     encoded = canonical_json(value) + b"\n"
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # A process crash can leave an uncommitted temporary state file. Remove
+    # only the exact private naming pattern before creating the next snapshot;
+    # never follow a symlink or sweep unrelated collector data.
+    for stale in path.parent.glob(f".{path.name}.tmp*"):
+        try:
+            metadata = stale.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISREG(metadata.st_mode):
+            stale.unlink()
+    directory_fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+    temporary = path.with_name(f".{path.name}.tmp")
+    descriptor = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+        0o600,
+    )
     try:
         os.fchmod(descriptor, 0o600)
-        with os.fdopen(descriptor, "wb") as stream:
+        stream = os.fdopen(descriptor, "wb")
+        # Ownership transfers to the file object.  If a later operation
+        # fails, do not close the descriptor a second time (or close a
+        # different descriptor after its number has been reused).
+        descriptor = -1
+        with stream:
             stream.write(encoded)
             stream.flush()
             os.fsync(stream.fileno())
-    except BaseException:
+        os.replace(temporary, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY)
         try:
-            os.close(descriptor)
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except BaseException:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        try:
+            temporary.unlink()
         except OSError:
             pass
         raise
@@ -430,7 +488,14 @@ class MockCollector:
         self.state_path = state_path
         self.events: dict[str, tuple[str, dict[str, Any]]] = {}
         self.batches: dict[str, tuple[str, dict[str, Any]]] = {}
+        self.sequences: dict[str, str] = {}
         self.conflicts: list[dict[str, Any]] = []
+        # Incoming material that conflicts with an accepted key is retained
+        # separately. It is evidence, not a replacement for the first value.
+        self.isolated_batches: dict[str, dict[str, Any]] = {}
+        self.isolated_wrappers: list[dict[str, Any]] = []
+        self.diagnostics: list[dict[str, Any]] = []
+        self.gaps: list[dict[str, Any]] = []
         if state_path is not None and state_path.exists():
             self._load_state(state_path)
 
@@ -439,7 +504,11 @@ class MockCollector:
         value = strict_json(payload)
         if not isinstance(value, dict):
             raise CollectorError("collector state must be an object")
-        _exact_keys(value, {"schema_version", "node_id", "events", "batches", "conflicts"}, "collector state")
+        keys = set(value)
+        allowed = {"schema_version", "node_id", "events", "batches", "conflicts"}
+        allowed.update({"sequences", "diagnostics", "gaps", "isolated_batches", "isolated_wrappers"})
+        if not keys <= allowed:
+            raise CollectorError("collector state has unexpected fields")
         if value["schema_version"] != 1 or value["node_id"] != self.node_id:
             raise CollectorError("collector state identity mismatch")
         if not isinstance(value["events"], dict) or not isinstance(value["batches"], dict):
@@ -452,10 +521,27 @@ class MockCollector:
             if not isinstance(item, dict) or set(item) != {"hash", "metadata"}:
                 raise CollectorError("collector batch state is invalid")
             self.batches[batch_id] = (str(item["hash"]), item["metadata"])
+        for sequence_id, digest in value.get("sequences", {}).items():
+            if not isinstance(sequence_id, str) or not isinstance(digest, str):
+                raise CollectorError("collector sequence state is invalid")
+            self.sequences[sequence_id] = digest
         conflicts = value["conflicts"]
         if not isinstance(conflicts, list):
             raise CollectorError("collector conflict state is invalid")
         self.conflicts = conflicts
+        isolated_batches = value.get("isolated_batches", {})
+        if not isinstance(isolated_batches, dict):
+            raise CollectorError("collector isolated batch state is invalid")
+        self.isolated_batches = isolated_batches
+        isolated_wrappers = value.get("isolated_wrappers", [])
+        if not isinstance(isolated_wrappers, list) or not all(isinstance(item, dict) for item in isolated_wrappers):
+            raise CollectorError("collector isolated wrapper state is invalid")
+        self.isolated_wrappers = isolated_wrappers
+        for field, target in (("diagnostics", self.diagnostics), ("gaps", self.gaps)):
+            values = value.get(field, [])
+            if not isinstance(values, list) or not all(isinstance(item, dict) for item in values):
+                raise CollectorError(f"collector {field} state is invalid")
+            target.extend(values)
 
     def _save_state(self) -> None:
         if self.state_path is None:
@@ -471,13 +557,100 @@ class MockCollector:
                 key: {"hash": digest, "metadata": metadata}
                 for key, (digest, metadata) in sorted(self.batches.items())
             },
+            "sequences": dict(sorted(self.sequences.items())),
             "conflicts": self.conflicts,
+            "diagnostics": self.diagnostics,
+            "gaps": self.gaps,
+            "isolated_batches": self.isolated_batches,
+            "isolated_wrappers": self.isolated_wrappers,
         }
         _secure_state_write(self.state_path, value)
+
+    def _durable_mutation(self, callback: Any) -> None:
+        """Apply a state mutation only if its durable snapshot succeeds."""
+
+        snapshot = (
+            copy.deepcopy(self.events),
+            copy.deepcopy(self.batches),
+            copy.deepcopy(self.sequences),
+            copy.deepcopy(self.conflicts),
+            copy.deepcopy(self.diagnostics),
+            copy.deepcopy(self.gaps),
+            copy.deepcopy(self.isolated_batches),
+            copy.deepcopy(self.isolated_wrappers),
+        )
+        try:
+            callback()
+            self._save_state()
+        except BaseException:
+            (
+                self.events,
+                self.batches,
+                self.sequences,
+                self.conflicts,
+                self.diagnostics,
+                self.gaps,
+                self.isolated_batches,
+                self.isolated_wrappers,
+            ) = snapshot
+            raise
+
+    def record_diagnostic(self, kind: str, **fields: Any) -> None:
+        """Record a producer/audit diagnostic and make it visible to health."""
+
+        if not kind or any("\r" in str(value) or "\n" in str(value) for value in fields.values()):
+            raise CollectorError("invalid diagnostic")
+        self._durable_mutation(lambda: self.diagnostics.append({"kind": kind, **fields}))
+
+    def record_gap(self, kind: str, **fields: Any) -> None:
+        """Record a loss gap; gaps remain observable until explicitly cleared."""
+
+        if kind not in {"spool_gap", "producer_gap", "batch_evicted"}:
+            raise CollectorError("invalid gap kind")
+        self._durable_mutation(lambda: self.gaps.append({"kind": kind, **fields}))
+
+    def health(self) -> dict[str, Any]:
+        """Return a collector-facing health summary with actionable alerts."""
+
+        alerts: list[str] = []
+        if self.conflicts:
+            alerts.append("idempotency_conflict")
+        if self.diagnostics:
+            alerts.extend(sorted({str(item["kind"]) for item in self.diagnostics}))
+        if self.gaps:
+            alerts.extend(sorted({str(item["kind"]) for item in self.gaps}))
+        return {
+            "schema_version": 1,
+            "node_id": self.node_id,
+            "status": "degraded" if alerts else "ok",
+            "event_count": len(self.events),
+            "batch_count": len(self.batches),
+            "conflict_count": len(self.conflicts),
+            "diagnostic_count": len(self.diagnostics),
+            "spool_gap_count": sum(item["kind"] == "spool_gap" for item in self.gaps),
+            "producer_gap_count": sum(item["kind"] == "producer_gap" for item in self.gaps),
+            "batch_evicted_count": sum(item["kind"] == "batch_evicted" for item in self.gaps),
+            "isolated_batch_count": len(self.isolated_batches),
+            "isolated_wrapper_count": len(self.isolated_wrappers),
+            "alerts": sorted(set(alerts)),
+        }
 
     def accept_records(self, records: Iterable[dict[str, Any]], metadata: ResponseMetadata) -> None:
         """Durably accept records, isolating event/batch conflicts atomically."""
 
+        raw_wrapper_hashes = getattr(records, "wrapper_hashes", None)
+        records_list = list(records)
+        if raw_wrapper_hashes is not None and len(raw_wrapper_hashes) != len(records_list):
+            raise CollectorError("parsed lease wrapper hash count mismatch")
+        if raw_wrapper_hashes is None:
+            # This compatibility path is only for callers that already hold
+            # parsed records (the wire-facing collect_once path always uses
+            # ParsedLease).  There are no raw bytes left to hash, so use the
+            # collector's deterministic representation rather than the event
+            # payload hash, which would collapse distinct wrappers.
+            wrapper_hashes = [sha256_hex(canonical_json(wrapper)) for wrapper in records_list]
+        else:
+            wrapper_hashes = list(raw_wrapper_hashes)
         batch_id = metadata.batch_id
         batch_hash = metadata.lease_body_sha256
         batch_metadata = {
@@ -486,31 +659,102 @@ class MockCollector:
             "last_sequence": metadata.last_sequence,
             "event_count": metadata.event_count,
         }
+        isolation_key = self._batch_isolation_key(batch_id, batch_hash, batch_metadata)
         existing_batch = self.batches.get(batch_id)
-        if existing_batch is not None and existing_batch[0] != batch_hash:
-            self.conflicts.append({"kind": "batch_id_conflict", "batch_id": batch_id})
-            self._save_state()
-            raise CollectorError("batch_id_conflict")
+        if existing_batch is not None:
+            existing_hash, existing_metadata = existing_batch
+            if existing_hash != batch_hash or existing_metadata != batch_metadata:
+                if isolation_key in self.isolated_batches:
+                    # The conflicting raw batch was already durably isolated
+                    # and ACKed by the caller; do not create an unbounded
+                    # duplicate conflict record on a retry.
+                    return
+                def isolate_batch() -> None:
+                    self.conflicts.append({"kind": "batch_id_conflict", "batch_id": batch_id})
+                    self.isolated_batches[isolation_key] = {
+                        "batch_id": batch_id,
+                        "body_sha256": batch_hash,
+                        "metadata": batch_metadata,
+                        "records": copy.deepcopy(records_list),
+                    }
+
+                # A batch identity conflict is all-or-nothing: no incoming
+                # record may enter the accepted maps.
+                self._durable_mutation(isolate_batch)
+                return
+            # A byte-identical batch replay is fully idempotent.
+            return
         staged: list[tuple[str, str, dict[str, Any]]] = []
-        for wrapper in records:
-            event = wrapper["event"]
-            event_id = event.get("event_id")
-            if not isinstance(event_id, str):
-                raise CollectorError("event has no event_id")
-            # The protocol hashes the exact event bytes carried in the wrapper;
-            # do not reserialize an object and accidentally change escaping.
-            event_hash = _field(wrapper["event_payload_sha256"], HEX64, "event payload digest")
-            previous = self.events.get(event_id)
-            if previous is not None and previous[0] != event_hash:
-                self.conflicts.append({"kind": "event_payload_conflict", "event_id": event_id})
-                self._save_state()
-                raise CollectorError("event_payload_conflict")
-            if previous is None:
-                staged.append((event_id, event_hash, event))
-        for event_id, event_hash, event in staged:
-            self.events[event_id] = (event_hash, event)
-        self.batches[batch_id] = (batch_hash, batch_metadata)
-        self._save_state()
+        staged_by_event: dict[str, str] = {}
+        staged_sequences: dict[str, str] = {}
+        def stage() -> None:
+            for index, wrapper in enumerate(records_list):
+                self._stage_wrapper(
+                    wrapper,
+                    batch_metadata["spool_epoch"],
+                    wrapper_hashes[index],
+                    staged,
+                    staged_by_event,
+                    staged_sequences,
+                )
+            for event_id, event_hash, event in staged:
+                self.events[event_id] = (event_hash, event)
+            for sequence_id, wrapper_hash in staged_sequences.items():
+                self.sequences[sequence_id] = wrapper_hash
+            self.batches[batch_id] = (batch_hash, batch_metadata)
+
+        self._durable_mutation(stage)
+
+    @staticmethod
+    def _batch_isolation_key(batch_id: str, body_hash: str, metadata: dict[str, str]) -> str:
+        metadata_hash = sha256_hex(canonical_json(metadata))
+        return f"{batch_id}:{body_hash}:{metadata_hash}"
+
+    def _stage_wrapper(
+        self,
+        wrapper: dict[str, Any],
+        spool_epoch: str,
+        wrapper_hash: str,
+        staged: list[tuple[str, str, dict[str, Any]]],
+        staged_by_event: dict[str, str],
+        staged_sequences: dict[str, str],
+    ) -> None:
+        event = wrapper.get("event")
+        if not isinstance(event, dict):
+            raise CollectorError("event must be an object")
+        event_id = event.get("event_id")
+        if not isinstance(event_id, str):
+            raise CollectorError("event has no event_id")
+        # The protocol hashes the exact event bytes carried in the wrapper;
+        # do not reserialize an object and accidentally change escaping.
+        event_hash = _field(wrapper.get("event_payload_sha256"), HEX64, "event payload digest")
+        sequence = _strict_decimal(wrapper.get("spool_sequence"), positive=True)
+        wrapper_hash = _field(wrapper_hash, HEX64, "wrapper digest")
+        sequence_id = f"{self.node_id}:{spool_epoch}:{sequence}"
+        sequence_hash = self.sequences.get(sequence_id)
+        if sequence_hash is None:
+            sequence_hash = staged_sequences.get(sequence_id)
+        if sequence_hash is not None and sequence_hash != wrapper_hash:
+            self.conflicts.append(
+                {"kind": "spool_sequence_conflict", "spool_epoch": spool_epoch, "spool_sequence": sequence}
+            )
+            self.isolated_wrappers.append(copy.deepcopy(wrapper))
+            return
+        previous = self.events.get(event_id)
+        if previous is not None and previous[0] != event_hash:
+            self.conflicts.append({"kind": "event_payload_conflict", "event_id": event_id})
+            self.isolated_wrappers.append(copy.deepcopy(wrapper))
+            return
+        staged_hash = staged_by_event.get(event_id)
+        if staged_hash is not None and staged_hash != event_hash:
+            self.conflicts.append({"kind": "event_payload_conflict", "event_id": event_id})
+            self.isolated_wrappers.append(copy.deepcopy(wrapper))
+            return
+        if previous is None and staged_hash is None:
+            staged.append((event_id, event_hash, copy.deepcopy(event)))
+            staged_by_event[event_id] = event_hash
+        if sequence_hash is None:
+            staged_sequences[sequence_id] = wrapper_hash
 
     def ack_body(self, metadata: ResponseMetadata) -> bytes:
         return canonical_json(
@@ -541,6 +785,7 @@ class MockCollector:
             body=body,
             request_nonce=nonce,
             expected_node=self.node_id,
+            require_lease_body_digest=(status == 200),
         )
         if status == 204:
             return 0

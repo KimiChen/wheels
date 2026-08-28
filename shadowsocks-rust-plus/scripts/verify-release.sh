@@ -65,6 +65,19 @@ else
   done
 fi
 
+if [[ -n "$release_manifest" ]]; then
+  require_clean_worktree
+  release_dir="$(cd "$(dirname "$manifest")" && pwd -P)"
+  [[ "$(basename "$signature")" == "release-manifest.sig" ]] || \
+    die "双二进制发布签名文件必须命名为 release-manifest.sig"
+  [[ "$(cd "$(dirname "$signature")" && pwd -P)" == "$release_dir" ]] || \
+    die "双二进制发布签名必须位于 release-manifest.json 同一目录"
+  for artifact_name in ssserver ssserver.sha256 shadowsocks-auditd shadowsocks-auditd.sha256 release-manifest.json release-manifest.sig; do
+    [[ -f "$release_dir/$artifact_name" && ! -L "$release_dir/$artifact_name" ]] || \
+      die "发布目录缺少普通产物：$artifact_name"
+  done
+fi
+
 if [[ -z "$overlay_commit" ]]; then
   overlay_commit="$(git -C "$SHADOWSOCKS_RUST_PLUS_ROOT" rev-parse HEAD)"
 fi

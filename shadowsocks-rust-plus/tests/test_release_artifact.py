@@ -264,6 +264,19 @@ class ReleaseArtifactTest(unittest.TestCase):
             self.assertIn("拒绝覆盖", result.stderr)
             self.assertEqual([path.read_bytes() for path in paths], originals)
 
+    def test_manifest_binds_patch_series(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ssrp-release-series-") as temporary:
+            root = Path(temporary)
+            binary = self.fake_elf(root)
+            output = root / "output"
+            output.mkdir()
+            self.package(binary, output)
+            archive, manifest, checksum = self.artifact_paths(output)
+            value = json.loads(manifest.read_text(encoding="utf-8"))
+            value["patch_series"][0]["sha256"] = "0" * 64
+            manifest.write_text(json.dumps(value, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+            self.verify_artifact(archive, manifest, checksum, success=False)
+
     def test_multi_packaging_contains_both_binaries_and_checksums(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ssrp-release-multi-") as temporary:
             root = Path(temporary)

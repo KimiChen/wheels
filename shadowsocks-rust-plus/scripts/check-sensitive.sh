@@ -20,7 +20,12 @@ scan_root="${1:-$SHADOWSOCKS_RUST_PLUS_ROOT}"
 # are included because committed patch payloads are part of this overlay's source.
 pem_record='-----BEGIN (RSA |EC |OPENSSH |ENCRYPTED )?PRIVATE KEY-----'
 assignment_record='(export[[:space:]]+)?(PrivateKey|Passphrase)[[:space:]]*=[[:space:]]*[^[:space:]#]+'
-sensitive_pattern="(AKIA[0-9A-Z]{16}|^[[:space:]]*(${pem_record}|${assignment_record})|^[+-][[:space:]]*(${pem_record}|${assignment_record}))"
+# Keep both JSON and shell/TOML assignment forms recognizable.  The value
+# shapes are deliberately narrow: a 32-byte hex HMAC key or a padded Base64
+# encoding of a 16-byte iPSK/uPSK.  Use a double-quoted shell string so the
+# optional quote class is actually `['"]?` after shell expansion.
+secret_assignment="[\"']?(export[-_]?hmac|hmac[-_]?key|uPSK|iPSK)[\"']?[[:space:]]*[:=][[:space:]]*[\"']?[A-Fa-f0-9]{64}|[\"']?(export[-_]?hmac|hmac[-_]?key|uPSK|iPSK)[\"']?[[:space:]]*[:=][[:space:]]*[\"']?[A-Za-z0-9+/]{22}==?"
+sensitive_pattern="(AKIA[0-9A-Z]{16}|^[[:space:]]*(${pem_record}|${assignment_record}|${secret_assignment})|^[+-][[:space:]]*(${pem_record}|${assignment_record}|${secret_assignment}))"
 scan_output=""
 scan_status=0
 scan_output="$(

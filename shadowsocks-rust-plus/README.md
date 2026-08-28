@@ -89,17 +89,18 @@ ingest/export/spool/HMAC 协议、systemd/sysusers/tmpfiles 模板、双二进�
 (cd dist && shasum -a 256 -c ssserver.sha256 && shasum -a 256 -c shadowsocks-auditd.sha256)
 ```
 
-`verify.sh` 会核对远端 tag 与锁定 commit、在临时目录重放补丁、运行 Rust/结算/真实
-TCP+UDP 与 auditd/mock-collector 集成测试，并对未被 ignore 规则排除的文件扫描常见私钥、`AKIA` access key ID 以及
+`verify.sh` 会核对远端 tag 与锁定 commit、在临时目录重放补丁、运行 Rust/结算/HTTP Unix 与
+mock-collector 测试，并对未被 ignore 规则排除的文件扫描常见私钥、`AKIA` access key ID 以及
 `PrivateKey`/`Passphrase` 赋值。该检查用于提交前卫生检查，不是通用的 `secret`/`token`
-扫描器，也不会检查被忽略的部署 `.env`。`build.sh` 默认构建当前宿主平台、启用 `user-audit`
-feature 的开发用 `ssserver` 与 `shadowsocks-auditd`；其 macOS 产物不得部署到 Linux。
-使用 `--without-audit` 仅用于对旧准备源码做兼容性回归。生成的源码、Cargo target
+扫描器，也不会检查被忽略的部署 `.env`。`build.sh` 在 Linux 主机默认构建启用 `user-audit`
+feature 的开发用 `ssserver` 与 `shadowsocks-auditd`；该 feature 在非 Linux 主机上明确拒绝编译，
+因此 macOS 等平台的本地构建应显式使用 `--without-audit`。Linux 发布构建仍必须使用专用脚本。
+生成的源码、Cargo target
 和 `dist/` 不应提交。
 
 由于 `shadowsocks-auditd` 明确是 Linux-only，macOS 等非 Linux 主机上的 `verify.sh` 会保留
-service/协议审计测试，并对已安装的 Linux target 做 auditd 编译检查；auditd 运行时测试和完整
-Linux feature workspace 回归仍需在 Linux 主机执行。
+service/协议审计测试；auditd 编译、运行时测试和完整 Linux feature workspace 回归仍需在 Linux
+主机执行。
 
 ### 2. Linux x86_64 可复现发布包与验签
 

@@ -57,6 +57,14 @@ UDP uplink/downlink:  57,600,000 /  57,600,000 bytes
 
 ## 结论与复测要求
 
+### user-audit 对照与场景
+
+目标 Linux 节点必须分别运行 feature-off 与 `--features user-audit` 构建，覆盖 auditd healthy、
+offline、慢 ACK、producer queue 接近上限和 spool 接近容量上限五种场景。每种场景至少 30 次重复，
+记录 p50/p95/p99、代理成功率、queue 深度、spool bytes、auditd RSS 与错误计数；审计故障不得增加
+代理请求错误，达到水位时只能产生规范 gap/health degraded。当前 macOS 参考表不是目标机门槛，
+不得据此伪造 Linux 验收结果；原始 JSON 必须注明 CPU、内核、磁盘和工具链。
+
 本机结果没有发现可见的数据面回归，并验证了 benchmark 开启统计时的精确计数断言。由于每个
 样本仅约 0.33–0.37 秒、仅覆盖单机 loopback，结果不能评估真实 RTT、丢包、拥塞、NUMA、长期
 运行、更多身份或生产 TLS/隧道开销。

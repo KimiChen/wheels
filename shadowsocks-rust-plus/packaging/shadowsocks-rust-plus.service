@@ -31,7 +31,7 @@ RestrictSUIDSGID=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
-ReadWritePaths=/run/shadowsocks-rust-plus /run/shadowsocks-audit/ingest
+ReadWritePaths=/run/shadowsocks-rust-plus
 
 [Install]
 WantedBy=multi-user.target

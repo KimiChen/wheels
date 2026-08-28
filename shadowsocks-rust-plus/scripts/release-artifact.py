@@ -45,6 +45,26 @@ def _sha256(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _patch_series() -> list[dict[str, str]]:
+    series_path = Path(__file__).resolve().parent.parent / "patches" / "series"
+    try:
+        lines = series_path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise ArtifactError(f"无法读取补丁 series：{exc}") from exc
+    series = [line.strip() for line in lines if line.strip() and not line.lstrip().startswith("#")]
+    if not series or any("/" in item or "\\" in item for item in series):
+        raise ArtifactError("补丁 series 为空或包含非法路径")
+    if len(series) != len(set(series)):
+        raise ArtifactError("补丁 series 包含重复项")
+    for item in series:
+        if not (series_path.parent / item).is_file():
+            raise ArtifactError(f"补丁 series 引用不存在文件：{item}")
+    return [
+        {"name": item, "sha256": _sha256((series_path.parent / item).read_bytes())}
+        for item in series
+    ]
+
+
 def _read_regular(path: Path, limit: int) -> tuple[bytes, os.stat_result]:
     flags = os.O_RDONLY
     if hasattr(os, "O_CLOEXEC"):
@@ -118,7 +138,9 @@ def _parse_manifest(payload: bytes) -> dict[str, Any]:
         raise ArtifactError(f"manifest JSON 解析失败：{exc.lineno}:{exc.colno}") from exc
     if not isinstance(value, dict):
         raise ArtifactError("manifest 顶层必须是对象")
-    _exact_keys(value, {"schema_version", "artifact", "build", "toolchain"}, "manifest")
+    _exact_keys(value, {"schema_version", "artifact", "build", "toolchain", "patch_series"}, "manifest")
+    if value["patch_series"] != _patch_series():
+        raise ArtifactError("manifest patch_series 与仓库不一致")
     if type(value["schema_version"]) is not int or value["schema_version"] != 1:
         raise ArtifactError("manifest schema_version 必须为 1")
 
@@ -326,6 +348,7 @@ def command_package(args: argparse.Namespace) -> None:
             "python_version": args.python_version,
             "zlib_version": args.zlib_version,
         },
+        "patch_series": _patch_series(),
     }
     _parse_manifest(_canonical_manifest(manifest_value))
     manifest = _canonical_manifest(manifest_value)
@@ -514,8 +537,10 @@ def _multi_manifest(value: dict[str, Any]) -> bytes:
 
 def _parse_multi_manifest(payload: bytes) -> dict[str, Any]:
     value = _parse_manifest_multi_common(payload)
-    if set(value) != {"schema_version", "artifacts", "build", "toolchain"}:
+    if set(value) != {"schema_version", "artifacts", "build", "toolchain", "patch_series"}:
         raise ArtifactError("multi manifest 顶层字段错误")
+    if value["patch_series"] != _patch_series():
+        raise ArtifactError("multi manifest patch_series 与仓库不一致")
     artifacts = value["artifacts"]
     if not isinstance(artifacts, list) or len(artifacts) != len(MULTI_ARTIFACTS):
         raise ArtifactError("multi manifest 必须包含两个 artifacts")
@@ -635,6 +660,7 @@ def command_package_multi(args: argparse.Namespace) -> None:
         ],
         "build": build,
         "toolchain": _toolchain_metadata(args),
+        "patch_series": _patch_series(),
     }
     manifest = _multi_manifest(manifest_value)
     _parse_multi_manifest(manifest)

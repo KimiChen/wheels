@@ -186,6 +186,26 @@ class SensitiveScanTest(unittest.TestCase):
             self.assertNotIn(secret_value, output)
             self.assertNotIn("PrivateKey=", output)
 
+    def test_hmac_and_psk_assignments_are_scanned_without_echoing_them(self) -> None:
+        fixtures = {
+            "hmac.json": '"export_hmac": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"\n',
+            "psk.json": '"uPSK": "AAAAAAAAAAAAAAAAAAAAAA=="\n',
+            "psk.patch": '+"iPSK": "AQEBAQEBAQEBAQEBAQEBAg=="\n',
+        }
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            for name, contents in fixtures.items():
+                (root / name).write_text(contents, encoding="utf-8")
+
+            result = self.run_scan(root)
+            output = result.stdout + result.stderr
+            self.assertNotEqual(result.returncode, 0)
+            for name in fixtures:
+                self.assertIn(str(root / name), output)
+            self.assertNotIn("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", output)
+            self.assertNotIn("AAAAAAAAAAAAAAAAAAAAAA==", output)
+            self.assertNotIn("AQEBAQEBAQEBAQEBAQEBAg==", output)
+
     def test_prose_that_mentions_a_pem_marker_is_not_a_secret_record(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

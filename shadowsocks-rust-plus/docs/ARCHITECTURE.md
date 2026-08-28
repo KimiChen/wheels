@@ -156,11 +156,11 @@ vectors，不执行 I/O。`crates/shadowsocks-auditd` 是 Linux-only binary，�
 
 ingest 连接第一帧必须是 hello，最多 4 个连接但同一 daemon lifetime 只允许一个完成 hello 的
 producer。auditd 先校验 `SO_PEERCRED`、node/runtime 和严格 JSON，再把原始 event bytes 嵌入 wrapper；
-完成 open segment 写入、group `fdatasync` 与 sequence state 持久化后才回 ACK。重复 event ID 的内存
+完成 open segment 写入、该事件的 `fdatasync` 与 sequence state 持久化后才回 ACK。重复 event ID 的内存
 LRU（65536 条）返回原 ACK；payload 冲突永久 NACK 并断开。producer 在 retryable 错误、超时或未知
 ACK 时保留 bytes，不能把“尚未放弃”计作 gap。
 
-spool 采用 `open/`、`sealed/`、`leased/`、`acked/`、`quarantine/`、`state.json`、`tombstones.json`
+spool 采用 `open/`、`sealed/`、`acked/`、`quarantine/`、`state.json`、`tombstones.json`
 布局。每个 wrapper 一行 NDJSON，保存原始 event canonical bytes 和 payload digest；segment 封口后
 以 batch ID 导出，lease/ACK 通过跨目录原子 rename、双侧 fsync 和 durable receipt 保证崩溃可恢复。
 容量达到 5 GiB 或文件系统低于 1 GiB 时按固定顺序回收；删除未 ACK 数据必须在后续可写 segment 生成
