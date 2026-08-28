@@ -2949,3 +2949,142 @@ data-path report，顶层 `gate` 正确保持 `null`，不能据此声称通过�
 crash/capacity runtime 测试；Linux 上完整 `cargo test --workspace --features user-audit`；`cargo-fuzz`
 的 sanitizer 实跑；§14.5 真实数据面吞吐、CPU、RSS 和离线/队列满压测。非 Linux 的交叉
 `cargo check` 只能证明 Linux cfg 分支可编译，不能替代这些运行期结论。
+
+## 23. 第五轮代码审计记录（2026-08-28）
+
+> 本节是对第 22 节整改（commit `20480fd`）的对抗性验证记录，不改变合同条文。新增问题编号接续：
+> critical 自 `C-6` 起，major 自 `M-41` 起，minor 自 `m-128` 起。行号基于当前
+> `.cache/audit-work-source`（与 `patches/0003-user-audit.patch` 逐字一致，49 个文件
+> `patch --dry-run -R -p1 --fuzz=0` 干净反向应用）。
+
+### 23.1 审计范围与方法
+
+- 对象：第四轮整改后的全部交付物；重点是 §22 每条"已修复"声明的代码证据，以及整改 diff
+  （补丁净变化约 3000 行）引入的回归。
+- 方法：四路并行对抗性验证（producer / auditd / 协议与测试工具 / 打包发布与一致性）；两个新
+  critical/major 由编排者亲自复核源码确认；本机（macOS）实跑可移植项：protocol 22 项、workspace
+  `--features user-stats` 304 项、service server --lib 10 项、EIH 4 项、Python 套件
+  （mock 16、check-static 10、benchmark 3、integration-audit 3、packaging 8、release 9、fuzz 2）、
+  golden vectors 独立重算全对、`cargo check --target x86_64-unknown-linux-gnu -p
+  shadowsocks-auditd --all-targets` 零警告（该 target 现已安装，§21.5 的环境缺口已消除）。
+- 未做：Linux runtime 实跑、fuzz 实跑、§14.5 压测（同 §22.3 披露）。`rg` 依赖项当前不可复现，
+  见 m-143。
+
+### 23.2 总体结论
+
+§22 的修复声明**逐条基本属实**（汇总见 23.3）：C-4/C-5 两个 critical 的修复方向、实现与回归测试
+真实有效，C-5 的三个 §21 复现场景经心智重放确定退出；§17 遗留的 m-1 也在本轮闭合。但本轮仍发现
+**1 个新 critical 与 1 个新 major**：
+
+- `C-6` 是一行级启动期 panic，为主机开机 60 秒内启动的节点击落 ssserver 与 auditd 两个进程，
+  系第三轮整改引入、两轮漏检；修复成本一行。
+- `M-41` 是 M-30 索引化修复引入的启动期幂等回归，可在崩溃窗口把同一固定 ID 的 spool_gap 重复
+  写入 durable spool；修复方向是把索引建立挪到启动 flush 块之前。
+
+两者都在 Linux 实跑一次完整 feature-on 测试/集成测试时会立即暴露，再次印证 §21.7 把"Linux 完整
+实跑"列为发布前置硬条件的必要性。修完这两条后，本功能的已知缺陷清单收敛到 minor 级。
+
+### 23.3 Critical
+
+- **C-6 `Instant::now() - Duration::from_secs(60)` 在主机开机 60 秒内下溢 panic，panic=abort
+  击落整个进程；ssserver 与 auditd 各有一处。** producer 侧
+  `crates/shadowsocks-service/src/server/user_audit.rs:2422-2423`：`run_supervisor` 函数体开头以
+  `Instant::now() - Duration::from_secs(60)` 初始化 `last_error_log`/`last_hello_nack_log`。Rust
+  std 的 `Instant - Duration` 在下溢时 panic（"overflow when subtracting duration from instant"），
+  Linux 上 `Instant` 基于 CLOCK_MONOTONIC（自举 uptime），主机启动后 60 秒内执行该减法必然
+  panic。fast-boot 的 systemd 节点（云镜像、容器化 VM）开机即拉起了带 user_audit 的 ssserver 属
+  常态，此时 emitter 建成后 supervisor 启动即崩，按 §7.3 release `panic="abort"` 数据面进程随之
+  终止；systemd 默认 StartLimit 下反复重启进入 failed 态，直到 uptime 超过 60 秒后人工介入。
+  auditd 侧同源：`crates/shadowsocks-auditd/src/spool.rs:1019-1020` 的 `SpoolInner` 构造以
+  `Instant::now() - INDEX_REBUILD_RETRY_INTERVAL` 与 `Instant::now() - RETENTION_SWEEP_INTERVAL`
+  （均为 60 秒）初始化两个限频戳，auditd 在同一窗口内启动同样 panic。
+  引入时点：`0f52bd9` 首版补丁无此代码，系 `4a6348e`（§19 整改轮）引入，`20480fd` 原样保留。
+  这直接违反 §7.3"审计路径必须 panic-free……属于阻断数据面的发布缺陷"。修复：`checked_sub`
+  或初始化为 `None` 在首次日志时填充（一处一行）；全树 grep `- Duration::` / `- *_INTERVAL`
+  类初始化模式，补一个 `checked_sub` 单测。
+
+### 23.4 Major
+
+- **M-41 M-30 的 `durable_gap_reasons` 内存索引在启动 flush 窗口内必为空，固定 ID gap 会被重复
+  写入 durable spool，违反 §9.4 幂等补写规则。** `open_with_lock` 的顺序是：构造
+  `SpoolInner`（`durable_gap_reasons: HashMap::new()`，`spool.rs:1016`）→
+  `flush_state_reset_locked`（1034）→ `reconcile_tombstones_locked`（1044）→
+  `rebuild_acked_receipts_locked` → `flush_recovery_gaps_locked`（1058）→ 最后才
+  `rebuild_runtime_indexes_locked`（1066）建立索引。整改前这三条路径用 `event_id_exists_in_epoch`
+  磁盘扫描（启动时天然正确）；整改后全部改查内存表（`spool.rs:2204/2238/2260/3239/3290/3358`），
+  而此刻表必为空：崩溃落在"gap 已 durable、pending/marker 尚未压缩或删除"窗口（或
+  `quarantine_batch_locked` 的 marker unlink 失败，无需崩溃）时，重启会把同一固定 `gap_event_id`
+  的 spool_gap 再写一条（sequence 不同、内容相同），collector 侧丢失量被双计，按 event_id 去重的
+  实现报 `event_payload_conflict`。`flush_state_reset` 不受害（`recover_layout:3956-3958` 仍用磁盘
+  扫描）。影响有界（每个窗口化 pending/marker 至多一条重复，无循环无 wedge，健康本已 degraded），
+  定 major。修复：把 `durable_gap_reasons` 的采集（或整个 `rebuild_runtime_indexes_locked`）挪到
+  启动 flush 块之前；该块内函数不依赖"索引尚未建立"的状态，前移安全。现有两个 corrupt-ledger
+  测试的 gap 事先均未 durable，恰好在盲区（见 m-136）。
+
+### 23.5 §22 声明验证结果汇总
+
+- **Critical**：C-4 已修复（`/proc/self/fd/N` 方案与 `user_stats.rs` 成熟实现同构，失败信息指明
+  procfs 前置条件，带 Linux mode/gid 回归测试）；C-5 已修复（seal 移出循环且每次清理至多一次、
+  迭代上限 4096、逐候选净字节判据、超限返回 `StorageUnavailable` 四要件齐全、自激分支排除）。
+- **Major**：M-29、M-31、M-32、M-33、M-35、M-36、M-37、M-38、M-39、M-40 逐条证实已修复且带真实
+  回归断言；M-30 部分修复（热路径目标达成，但引入 M-41）；M-34 基本修复（保留见 m-131）。
+- **Minor**：m-68、m-69、m-70、m-85、m-86、m-88、m-89、m-90、m-91、m-92、m-99；m-71、m-72、
+  m-73、m-74、m-97、m-100–m-113；m-75、m-93、m-94、m-95、m-96；m-79、m-82、m-83、m-114–m-123；
+  m-66、m-67；m-118–m-122；m-124、m-125、m-127、m-77、m-78、m-80、m-98、m-120 均证实已修复。
+  m-126 主体修复（残留 m-141）。
+- **额外闭合**：§17 遗留的 m-1（queue_overflow gap 时间语义）实际已修复——三类 gap 的
+  first/last_seen 已统一为丢弃观测墙钟（`user_audit.rs:1935-1936、2187-2189、2394`，附断言
+  `first_time==last_time==200` 的回归测试）。
+- **无回归**：m-23/m-24、m-40/m-41 复核仍成立；producer 与 auditd 非测试代码保持零
+  unwrap/expect/panic/越界索引（C-6 属算术下溢 panic，不是裸 unwrap 类，现有静态护栏抓不到，
+  见 m-144 建议）；feature-off 行为零变化（除已记录项）。
+
+### 23.6 Minor
+
+| 编号 | 位置 | 问题 |
+| --- | --- | --- |
+| m-128 | `user_audit.rs:2430-2451` | run_supervisor 空闲块缺 `diagnostic_shutdown_requested` 复检（session 侧已补、supervisor 侧未补，与 M-33/m-68 不对称）；`Notified` 惰性注册窗口另存在于 drain 与 `wait_until_stopped` 两处，均仅限关机路径且有外层超时兜底；建议统一 `Notified::enable()` 或 freeze 信号改 `notify_one` |
+| m-129 | `user_audit.rs:2352-2354、2402-2406` | force-final 完成条件实际不可达（`final_diagnostic_attempted` 只对非空桶置位），drain 窗口内退化为 10ms 轮询；逻辑赘疣，与注释意图不符 |
+| m-130 | `user_audit.rs:785-792、1100-1101` | M-34 保留：内存回归断言只钉 Arc 共享机制、未钉字节预算；病态交替拼写场景静态估算约 66–70 MB 仍贴近 §14.5 的 64 MiB 预算，待 Linux 实测收口 |
+| m-131 | `spool.rs:1566-1579` | `ack()` 在 rename 成功后 `sync_dir` 失败会在 `remove_sealed_index` 前返回，sealed 内存索引幽灵化直到下次 rebuild（m-103 已修模式未覆盖 ack 路径）；方向保守、无 wedge |
+| m-132 | `spool.rs:801、2301` | `durable_gap_reasons` 只增不删：segment 被驱逐/24h 清理后其 gap ID 仍标 durable，陈旧索引可抑制 §9.5 要求的同 ID 补写（窗口极窄）；建议删除 segment 时顺带剔除或注释界限 |
+| m-133 | `spool.rs:2318-2319、2577` | 两处重测/重建未按 60 秒限频：seal 双重失败置脏后每条 append 触发一次全树 `directory_size_status`；recover temp 错误分支在持续失败时每 cleanup 一次 rebuild；均为 degraded 下的性能残留 |
+| m-134 | `spool.rs` 测试集 | 测试盲区：C-5 迭代上限退出、m-74 单条目继续、m-72 冻结、M-41 的"启动时 gap 已 durable"幂等路径均无测试；C-4 新测试的 gid 变更被平凡满足（expected_gid==egid），未真正 exercise 改组路径 |
+| m-135 | `tests/check_audit_static.py:241-264` | partial-tree 静默欠扫描：`--source` 指向存在但截断的准备树（缺 crate/文件）时输出"静态审计通过"；m-116 的失败关闭只覆盖空/不存在根目录 |
+| m-136 | `tests/check_audit_static.py:171` | `name.len()` 启发式反向盲区：`v[v.len()]`（必然越界）与 `v[1..v.len()]`（空 slice panic）被判 safe 静默 |
+| m-137 | `tests/mock_collector.py:498-502、906` | 未知 event_type 回退不钉字段顺序（保留插入序）；204 响应携带多余的已签名 batch headers 不被拒；ACK body 做语义比对而非 §10.1 逐字相等；均无安全后果 |
+| m-138 | docs §22.2 | 整改记录枚举遗漏 m-66（更正实际已落在 20480fd） |
+| m-139 | `docs/OPERATIONS.md:306-328,388-444` | m-126 残留：user-stats nginx 块未就地标注不可照抄用于 audit export；§10.3 三条细则未落文档——endpoint↔node 一一映射、转发前拒绝 >4096 bytes body（Nginx 片段无 `client_max_body_size`）、access log 不记录 Authorization/MAC 头 |
+| m-140 | `export.rs:201-206`、`spool.rs` | export 的瞬时 accept 仍是固定 50ms 睡眠，未享受 ingest 的 m-101 加固（退避升级/上限/诊断）；`integrity_queue` 仅随 health 懒清理 |
+| m-141 | `scripts/check-sensitive.sh`、`tests/test_http_unix.py`、`scripts/verify.sh` | 环境/记录可信度：本机当前无 `rg`，三条 §22.3 记录（check-sensitive 通过、test_http_unix 14 passed、verify.sh 完整通过）在现状下不可复现（rc=1 / 5 项失败 / 立即失败）；门禁 fail-closed 设计本身诚实，建议重装 rg 重跑后背书 |
+| m-142 | `spool.rs:39` 等 | 建议项：把 `- Duration::`/`Instant` 算术下溢模式加入 `check_audit_static.py` 禁止表（C-6 类缺陷现有护栏抓不到） |
+
+### 23.7 需规格处理的文本项
+
+1. §7.3"成功收到合法 ACK 后重置"与实现（m-99 修复后仅 event ACK 重置，hello ACK 不重置）存在
+   字面张力；行为正确，建议升版时把该句收紧为"合法 event ACK"。
+2. §9.5 `quarantine_pending` 的 `reason=quarantine_eviction` 固定值与 wire/代码已引入的
+   `segment_corruption`（m-110 修复需要）不一致；建议升版时把 reason 枚举同步进合同文本。
+
+### 23.8 交付一致性核查
+
+- 补丁↔源码树：49 个文件 `patch --dry-run -R -p1 --fuzz=0` 干净反向应用，逐字一致。
+- 合同文本：`20480fd` 对 §1–16 仅两处改动（版本沿革补齐 v2/v3/v4 链、§14.4 "group sync"术语
+  更新），无夹带。
+- §22.3 验证清单复跑：cargo 侧与 Python 侧逐数一致（含交叉 check 零警告、benchmark 五场景
+  `gate=true`/顶层 `gate=null` 的披露口径）；反例 3 项均由当前机器缺 `rg` 导致（m-141）。
+- golden vectors：双端逐字一致，新增向量（204 空响应、escaping/Unicode、nullable spool_gap、
+  NDJSON wrapper 行）经独立重算全部正确；mock 的 canonical 对抗探针 11 项全部按预期拒绝。
+- 敏感信息：tracked 文件零命中；git 工作树干净；无生成物混入。
+
+### 23.9 验收建议
+
+1. **先修 C-6**（一行 `checked_sub`，两个进程各一处；全树排查同类 Instant 算术初始化模式并把该
+   模式加入静态护栏，m-142）；
+2. **修 M-41**（索引建立前移到启动 flush 块之前），并补"启动时 gap 已 durable"的幂等回归测试
+   （m-134）；
+3. 两项修完后在 Linux 上完整实跑：`cargo test --workspace --features user-audit`、
+   `cargo test -p shadowsocks-auditd`、`tests/integration_audit.py`、fuzz sanitizer 实跑——
+   这会同时坐实 C-4 的 procfs chown 与各 Linux-only 回归测试；
+4. §14.5 目标机压测（含 m-130 的 UDP 窗口 RSS 实测）仍为发布前置；
+5. 23.7 的两处规格文本随下次升版同步。
