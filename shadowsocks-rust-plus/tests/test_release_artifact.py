@@ -77,6 +77,12 @@ class ReleaseArtifactTest(unittest.TestCase):
         *,
         success: bool = True,
     ) -> subprocess.CompletedProcess[str]:
+        second_server = server_binary.parent / f".{server_binary.name}.independent"
+        second_auditd = auditd_binary.parent / f".{auditd_binary.name}.independent"
+        shutil.copyfile(server_binary, second_server)
+        shutil.copyfile(auditd_binary, second_auditd)
+        os.chmod(second_server, 0o755)
+        os.chmod(second_auditd, 0o755)
         return self.run_command(
             [
                 sys.executable,
@@ -86,6 +92,10 @@ class ReleaseArtifactTest(unittest.TestCase):
                 str(server_binary),
                 "--auditd-binary",
                 str(auditd_binary),
+                "--second-binary",
+                str(second_server),
+                "--second-auditd-binary",
+                str(second_auditd),
                 "--output-dir",
                 str(output),
                 "--version",
@@ -241,6 +251,18 @@ class ReleaseArtifactTest(unittest.TestCase):
             }
             self.assertEqual({path.name for path in output.iterdir()}, expected)
             manifest = json.loads((output / "release-manifest.json").read_text(encoding="utf-8"))
+            build = manifest["build"]
+            self.assertEqual(build["generated_at"], "2026-08-26T06:30:00Z")
+            self.assertEqual(build["independent_builds"]["count"], 2)
+            self.assertEqual(
+                [item["name"] for item in build["independent_builds"]["artifacts"]],
+                ["ssserver", "shadowsocks-auditd"],
+            )
+            for item in build["independent_builds"]["artifacts"]:
+                self.assertEqual(item["first"]["path"], f"build-a/{item['name']}")
+                self.assertEqual(item["second"]["path"], f"build-b/{item['name']}")
+                self.assertEqual(item["first"]["sha256"], next(a["sha256"] for a in manifest["artifacts"] if a["name"] == item["name"]))
+                self.assertEqual(item["second"]["sha256"], item["first"]["sha256"])
             self.assertEqual(
                 set(manifest["toolchain"]),
                 {
@@ -294,6 +316,26 @@ class ReleaseArtifactTest(unittest.TestCase):
                 ],
                 success=False,
             )
+
+    def test_verifier_rejects_unverifiable_build_evidence(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ssrp-release-evidence-") as temporary:
+            root = Path(temporary)
+            server, auditd = self.fake_release_binaries(root)
+            output = root / "output"
+            output.mkdir()
+            self.package_multi(server, auditd, output)
+            manifest = output / "release-manifest.json"
+            original_manifest = manifest.read_bytes()
+            value = json.loads(original_manifest)
+            value["build"]["generated_at"] = "2026-08-26T06:30:01Z"
+            manifest.write_text(json.dumps(value, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+            self.verify_multi(output, success=False)
+
+            value["build"]["generated_at"] = "2026-08-26T06:30:00Z"
+            value["build"]["independent_builds"]["artifacts"][0]["second"]["sha256"] = "0" * 64
+            manifest.write_text(json.dumps(value, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+            self.verify_multi(output, success=False)
+            manifest.write_bytes(original_manifest)
 
     def test_verifier_rejects_binary_tampering(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ssrp-release-") as temporary:

@@ -50,6 +50,24 @@ while IFS= read -r patch_name; do
     target_path="${target_path#b/}"
     mkdir -p "$output_dir/$(dirname "$target_path")"
   done < <(sed -n 's#^+++ b/##p' "$patch_path")
+  # A deletion must name an object that exists in the tree at this point. This
+  # catches an empty/ghost deletion stanza before `git apply` consumers see a
+  # misleadingly replayable patch; deletions of files introduced by an earlier
+  # patch in the series remain valid because the check uses the live tree.
+  while IFS= read -r deleted_path; do
+    [[ -n "$deleted_path" ]] || continue
+    if [[ ! -e "$output_dir/$deleted_path" && ! -L "$output_dir/$deleted_path" ]]; then
+      die "补丁删除了当前源码树中不存在的文件：$patch_name:$deleted_path"
+    fi
+  done < <(
+    awk '
+      /^diff --git a\/[^ ]+ b\/[^ ]+$/ {
+        path = $3
+        sub(/^a\//, "", path)
+      }
+      /^deleted file mode / && path != "" { print path }
+    ' "$patch_path"
+  )
   (
     cd "$output_dir"
     patch --batch --forward --fuzz=0 -E -p1 < "$patch_path"

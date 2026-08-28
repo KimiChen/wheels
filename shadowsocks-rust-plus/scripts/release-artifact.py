@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -177,7 +178,53 @@ def _read_executable(path: Path, label: str) -> bytes:
     return payload
 
 
-def _build_metadata(args: argparse.Namespace) -> dict[str, Any]:
+def _reject_same_input(first: Path, second: Path, label: str) -> None:
+    """Require the two reproducibility inputs to be distinct filesystem inodes."""
+    try:
+        first_stat = os.stat(first, follow_symlinks=False)
+        second_stat = os.stat(second, follow_symlinks=False)
+    except OSError:
+        # Let _read_executable report the more specific missing/unsafe-path
+        # error below.
+        return
+    if os.path.samestat(first_stat, second_stat):
+        raise ArtifactError(f"{label} 两次独立构建必须来自不同文件")
+
+
+def _epoch_timestamp(epoch: int) -> str:
+    try:
+        return datetime.fromtimestamp(epoch, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (OverflowError, OSError, ValueError) as exc:
+        raise ArtifactError("--source-date-epoch 无法转换为 UTC 时间") from exc
+
+
+def _independent_build_metadata(
+    binaries: dict[str, bytes], independent_binaries: dict[str, bytes]
+) -> dict[str, Any]:
+    evidence: list[dict[str, Any]] = []
+    for name in MULTI_ARTIFACTS:
+        first = binaries[name]
+        second = independent_binaries[name]
+        if first != second:
+            raise ArtifactError(f"{name} 两次独立构建字节不一致")
+        # Published paths are logical artifact names rather than temporary
+        # checkout paths, which keeps the manifest deterministic while still
+        # binding both inputs to the packaged bytes.
+        evidence.append(
+            {
+                "name": name,
+                "first": {"path": f"build-a/{name}", "sha256": _sha256(first)},
+                "second": {"path": f"build-b/{name}", "sha256": _sha256(second)},
+            }
+        )
+    return {"count": 2, "artifacts": evidence}
+
+
+def _build_metadata(
+    args: argparse.Namespace,
+    binaries: dict[str, bytes],
+    independent_binaries: dict[str, bytes],
+) -> dict[str, Any]:
     if not VERSION_PATTERN.fullmatch(args.version):
         raise ArtifactError("--version 格式错误")
     for label, commit in (
@@ -194,7 +241,8 @@ def _build_metadata(args: argparse.Namespace) -> dict[str, Any]:
         "overlay_commit": args.overlay_commit,
         "target": TARGET,
         "source_date_epoch": args.source_date_epoch,
-        "independent_builds": 2,
+        "generated_at": _epoch_timestamp(args.source_date_epoch),
+        "independent_builds": _independent_build_metadata(binaries, independent_binaries),
     }
 
 
@@ -269,7 +317,15 @@ def _validate_multi_build_and_toolchain(value: dict[str, Any]) -> None:
         raise ArtifactError("multi manifest.build 必须是对象")
     _exact_keys(
         build,
-        {"version", "upstream_commit", "overlay_commit", "target", "source_date_epoch", "independent_builds"},
+        {
+            "version",
+            "upstream_commit",
+            "overlay_commit",
+            "target",
+            "source_date_epoch",
+            "generated_at",
+            "independent_builds",
+        },
         "manifest.build",
     )
     if not isinstance(build["version"], str) or not VERSION_PATTERN.fullmatch(build["version"]):
@@ -277,14 +333,46 @@ def _validate_multi_build_and_toolchain(value: dict[str, Any]) -> None:
     for field in ("upstream_commit", "overlay_commit"):
         if not isinstance(build[field], str) or not COMMIT_PATTERN.fullmatch(build[field]):
             raise ArtifactError(f"multi manifest build.{field} 格式错误")
-    if (
-        build["target"] != TARGET
-        or type(build["independent_builds"]) is not int
-        or build["independent_builds"] != 2
-    ):
-        raise ArtifactError("multi manifest build 字段错误")
+    if build["target"] != TARGET:
+        raise ArtifactError("multi manifest build.target 错误")
     if type(build["source_date_epoch"]) is not int or not 1 <= build["source_date_epoch"] <= 0xFFFFFFFF:
         raise ArtifactError("multi manifest source_date_epoch 格式错误")
+    if build["generated_at"] != _epoch_timestamp(build["source_date_epoch"]):
+        raise ArtifactError("multi manifest generated_at 与 source_date_epoch 不一致")
+    independent = build["independent_builds"]
+    if not isinstance(independent, dict):
+        raise ArtifactError("multi manifest independent_builds 必须是对象")
+    _exact_keys(independent, {"count", "artifacts"}, "manifest.build.independent_builds")
+    if type(independent["count"]) is not int or independent["count"] != 2:
+        raise ArtifactError("multi manifest independent_builds.count 必须为 2")
+    independent_artifacts = independent["artifacts"]
+    if not isinstance(independent_artifacts, list) or len(independent_artifacts) != len(MULTI_ARTIFACTS):
+        raise ArtifactError("multi manifest independent_builds.artifacts 必须包含两个对象")
+    artifact_by_name = {artifact["name"]: artifact for artifact in value["artifacts"]}
+    names: list[str] = []
+    for item in independent_artifacts:
+        if not isinstance(item, dict):
+            raise ArtifactError("multi manifest independent build artifact 必须是对象")
+        _exact_keys(item, {"name", "first", "second"}, "manifest.independent_build_artifact")
+        name = item["name"]
+        if name not in MULTI_ARTIFACTS or name in names:
+            raise ArtifactError("multi manifest independent build artifact.name 错误或重复")
+        names.append(name)
+        expected_artifact = artifact_by_name[name]
+        for phase in ("first", "second"):
+            evidence = item[phase]
+            if not isinstance(evidence, dict):
+                raise ArtifactError("multi manifest independent build evidence 必须是对象")
+            _exact_keys(evidence, {"path", "sha256"}, "manifest.independent_build_evidence")
+            expected_path = f"build-{ 'a' if phase == 'first' else 'b' }/{name}"
+            if evidence["path"] != expected_path:
+                raise ArtifactError("multi manifest independent build path 错误")
+            if not isinstance(evidence["sha256"], str) or not SHA256_PATTERN.fullmatch(evidence["sha256"]):
+                raise ArtifactError("multi manifest independent build SHA-256 格式错误")
+            if evidence["sha256"] != expected_artifact["sha256"]:
+                raise ArtifactError("multi manifest independent build SHA-256 与 artifact 不一致")
+    if names != list(MULTI_ARTIFACTS):
+        raise ArtifactError("multi manifest independent build artifact 顺序错误")
     toolchain = value.get("toolchain")
     if not isinstance(toolchain, dict):
         raise ArtifactError("multi manifest.toolchain 必须是对象")
@@ -318,11 +406,17 @@ def _validate_output_dir(path: Path) -> Path:
 
 
 def command_package_multi(args: argparse.Namespace) -> None:
-    build = _build_metadata(args)
+    _reject_same_input(args.binary, args.second_binary, "ssserver")
+    _reject_same_input(args.auditd_binary, args.second_auditd_binary, "shadowsocks-auditd")
     binaries = {
         "ssserver": _read_executable(args.binary, "ssserver"),
         "shadowsocks-auditd": _read_executable(args.auditd_binary, "shadowsocks-auditd"),
     }
+    independent_binaries = {
+        "ssserver": _read_executable(args.second_binary, "second ssserver"),
+        "shadowsocks-auditd": _read_executable(args.second_auditd_binary, "second shadowsocks-auditd"),
+    }
+    build = _build_metadata(args, binaries, independent_binaries)
     manifest_value = {
         "schema_version": 1,
         "artifacts": [
@@ -389,6 +483,11 @@ def _check_multi_expected(manifest: dict[str, Any], args: argparse.Namespace) ->
     for field, value in expected.items():
         if value is not None and build[field] != value:
             raise ArtifactError(f"multi manifest {field} 与期望值不一致")
+    if (
+        args.expected_source_date_epoch is not None
+        and build["source_date_epoch"] != args.expected_source_date_epoch
+    ):
+        raise ArtifactError("multi manifest source_date_epoch 与期望值不一致")
     toolchain = manifest["toolchain"]
     expected_toolchain = {
         "rustc_version": args.expected_rustc_version,
@@ -441,6 +540,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     package_multi.add_argument("--binary", required=True, type=Path)
     package_multi.add_argument("--auditd-binary", required=True, type=Path)
+    package_multi.add_argument("--second-binary", required=True, type=Path)
+    package_multi.add_argument("--second-auditd-binary", required=True, type=Path)
     package_multi.add_argument("--output-dir", required=True, type=Path)
     package_multi.add_argument("--version", required=True)
     package_multi.add_argument("--upstream-commit", required=True)
@@ -463,6 +564,7 @@ def build_parser() -> argparse.ArgumentParser:
     verify_multi.add_argument("--expected-version")
     verify_multi.add_argument("--expected-upstream-commit")
     verify_multi.add_argument("--expected-overlay-commit")
+    verify_multi.add_argument("--expected-source-date-epoch", type=int)
     verify_multi.add_argument("--expected-rustc-version")
     verify_multi.add_argument("--expected-rustc-commit")
     verify_multi.add_argument("--expected-cargo-version")

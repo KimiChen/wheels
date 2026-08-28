@@ -38,7 +38,11 @@ class AuditBenchmarkTest(unittest.TestCase):
         self.assertEqual(set(report["scenarios"]), set(MODULE.SCENARIOS))
         for scenario in report["scenarios"].values():
             self.assertEqual(scenario["proxy_errors"], 0)
+            self.assertTrue(scenario["proxy_path_gate"])
             self.assertTrue(scenario["gate"])
+        mutated = dict(report["scenarios"]["healthy"])
+        mutated["proxy_successes"] -= 1
+        self.assertFalse(MODULE._proxy_path_gate(mutated))
         self.assertEqual(report["scenarios"]["offline"]["queue_drops"], 0)
         self.assertEqual(report["scenarios"]["offline"]["spool_evictions"], 0)
         self.assertGreater(report["scenarios"]["queue_full"]["queue_drops"], 0)
@@ -69,7 +73,11 @@ class AuditBenchmarkTest(unittest.TestCase):
                         "process_peak_rss_kib_max": {"combined": 10_100},
                     },
                 },
-            ]
+            ],
+            "auditd": {
+                "peak_rss_kib": 20_000,
+                "proxy": {"attempts": 100, "successes": 100, "errors": 0},
+            },
         }
         with tempfile.TemporaryDirectory(prefix="ssrp-bench-test-") as directory:
             path = Path(directory) / "report.json"
@@ -78,6 +86,33 @@ class AuditBenchmarkTest(unittest.TestCase):
         self.assertTrue(metrics["throughput_gate"])
         self.assertTrue(metrics["cpu_gate"])
         self.assertTrue(metrics["ssserver_rss_gate"])
+        self.assertTrue(metrics["auditd_rss_gate"])
+        self.assertTrue(metrics["proxy_path_gate"])
+
+    def test_missing_auditd_measurements_remain_indeterminate(self) -> None:
+        report = {
+            "cases": [
+                {
+                    "name": "plus_compiled_runtime_disabled",
+                    "aggregate": {
+                        "bidirectional_mib_per_second": {"median": 100.0},
+                        "process_cpu_seconds_median": {"combined": 1.0},
+                        "process_peak_rss_kib_max": {"combined": 10_000},
+                    },
+                },
+                {
+                    "name": "plus_runtime_enabled",
+                    "aggregate": {
+                        "bidirectional_mib_per_second": {"median": 97.0},
+                        "process_cpu_seconds_median": {"combined": 1.05},
+                        "process_peak_rss_kib_max": {"combined": 10_100},
+                    },
+                },
+            ]
+        }
+        metrics = MODULE._evaluate_data_path(report)
+        self.assertIsNone(metrics["auditd_rss_gate"])
+        self.assertIsNone(metrics["proxy_path_gate"])
 
     def test_missing_measurements_cannot_pass_enforcement_gate(self) -> None:
         args = type(

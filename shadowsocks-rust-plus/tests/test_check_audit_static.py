@@ -23,7 +23,7 @@ class AuditStaticGuardTests(unittest.TestCase):
             path = root / "crates/shadowsocks-auditd/src/lib.rs"
             path.parent.mkdir(parents=True)
             path.write_text(source, encoding="utf-8")
-            return CHECKER.check(root)
+            return CHECKER.check(root, require_complete=False)
 
     def test_accepts_safe_fixed_array_indexes(self) -> None:
         findings = self.check_source(
@@ -123,7 +123,7 @@ fn production() {
                 'compile_error!("feature `user-audit` is supported on Linux only");\n',
                 encoding="utf-8",
             )
-            self.assertEqual(CHECKER.check(root), [])
+            self.assertEqual(CHECKER.check(root, require_complete=False), [])
 
     def test_rejects_missing_service_linux_feature_gate(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -131,7 +131,7 @@ fn production() {
             service_lib = root / "crates/shadowsocks-service/src/lib.rs"
             service_lib.parent.mkdir(parents=True)
             service_lib.write_text("pub fn run() {}\n", encoding="utf-8")
-            findings = CHECKER.check(root)
+            findings = CHECKER.check(root, require_complete=False)
             self.assertEqual(len(findings), 1)
             self.assertIn("missing Linux-only user-audit compile gate", findings[0])
 
@@ -141,6 +141,39 @@ fn production() {
             self.assertTrue(any("no audit production" in item for item in CHECKER.check(root)))
             missing = root / "missing"
             self.assertTrue(any("does not exist" in item for item in CHECKER.check(missing)))
+
+    def test_rejects_partial_prepared_source_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "Cargo.toml").write_text("[workspace]\n", encoding="utf-8")
+            path = root / "crates/shadowsocks-auditd/src/lib.rs"
+            path.parent.mkdir(parents=True)
+            path.write_text("pub fn run() {}\n", encoding="utf-8")
+            findings = CHECKER.check(root)
+            self.assertTrue(any("required audit production source is missing" in item for item in findings))
+
+    def test_scans_audit_relay_item_beyond_marker_line(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            service = root / "crates/shadowsocks-service/src"
+            service.mkdir(parents=True)
+            (service / "lib.rs").write_text(
+                '#[cfg(all(feature = "user-audit", not(target_os = "linux")))]\n'
+                'compile_error!("feature `user-audit` is supported on Linux only");\n',
+                encoding="utf-8",
+            )
+            relay = service / "server/tcprelay.rs"
+            relay.parent.mkdir(parents=True)
+            relay.write_text(
+                '#[cfg(feature = "user-audit")]\n'
+                'fn relay() {\n'
+                '    let value: Option<u8> = None;\n'
+                '    value.unwrap();\n'
+                '}\n',
+                encoding="utf-8",
+            )
+            findings = CHECKER.check(root, require_complete=False)
+            self.assertTrue(any(":4: forbidden panic path in user-audit wiring" in item for item in findings))
 
 
 if __name__ == "__main__":

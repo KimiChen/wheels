@@ -210,10 +210,10 @@ index 0000000000000000000000000000000000000000..4a4ba0194459f0c5876e9b00dc138024
 +thiserror = "2.0"
 diff --git a/crates/shadowsocks-audit-protocol/src/golden_vectors.json b/crates/shadowsocks-audit-protocol/src/golden_vectors.json
 new file mode 100644
-index 0000000000000000000000000000000000000000..88c019c3812186e33ed85ffe8fc5458d81d48b7a
+index 0000000000000000000000000000000000000000..74554b1adf41d2373414239742c34ea4d9604a78
 --- /dev/null
 +++ b/crates/shadowsocks-audit-protocol/src/golden_vectors.json
-@@ -0,0 +1,91 @@
+@@ -0,0 +1,119 @@
 +{
 +  "hmac_key_hex": "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
 +  "request": {
@@ -265,6 +265,10 @@ index 0000000000000000000000000000000000000000..88c019c3812186e33ed85ffe8fc5458d
 +      "canonical": "{\"schema_version\":1,\"record_type\":\"access\",\"event_type\":\"tcp_target_success\",\"event_id\":\"0123456789abcdef0123456789abcdef:42\",\"audit_sequence\":\"42\",\"occurred_at_unix_ms\":\"1787587200000\",\"runtime_monotonic_ms\":\"123456\",\"node_id\":\"node-example-01\",\"runtime_id\":\"0123456789abcdef0123456789abcdef\",\"server_id\":\"ss-entry-01\",\"server_generation\":1,\"identity_kind\":\"user\",\"identity_name\":\"user-example-01\",\"identity_generation\":1,\"transport\":\"tcp\",\"target\":{\"kind\":\"domain\",\"host\":\"Example.COM.\",\"normalized_host\":\"example.com\",\"port\":443,\"remote_ip\":\"192.0.2.10\"},\"success_evidence\":\"tcp_bidirectional_payload\"}",
 +      "sha256": "07fcd0d588d488a66786569f96353c5bb9f4927b03b16a69cbc8eac3bfa945e0"
 +    },
++    "tcp_access_null_normalized": {
++      "canonical": "{\"schema_version\":1,\"record_type\":\"access\",\"event_type\":\"tcp_target_success\",\"event_id\":\"0123456789abcdef0123456789abcdef:46\",\"audit_sequence\":\"46\",\"occurred_at_unix_ms\":\"1787587200003\",\"runtime_monotonic_ms\":\"123459\",\"node_id\":\"node-example-01\",\"runtime_id\":\"0123456789abcdef0123456789abcdef\",\"server_id\":\"ss-entry-01\",\"server_generation\":1,\"identity_kind\":\"user\",\"identity_name\":\"user-example-01\",\"identity_generation\":1,\"transport\":\"tcp\",\"target\":{\"kind\":\"domain\",\"host\":\"invalid..Example.\",\"normalized_host\":null,\"port\":443,\"remote_ip\":\"192.0.2.13\"},\"success_evidence\":\"tcp_bidirectional_payload\"}",
++      "sha256": "cf8aedf719d7e23bf30e22cce9d1cb3dca2ca295ff016992fa1c07663fd39948"
++    },
 +    "udp_access": {
 +      "canonical": "{\"schema_version\":1,\"record_type\":\"access\",\"event_type\":\"udp_target_success\",\"event_id\":\"0123456789abcdef0123456789abcdef:43\",\"audit_sequence\":\"43\",\"occurred_at_unix_ms\":\"1787587200500\",\"runtime_monotonic_ms\":\"123956\",\"node_id\":\"node-example-01\",\"runtime_id\":\"0123456789abcdef0123456789abcdef\",\"server_id\":\"ss-entry-01\",\"server_generation\":1,\"identity_kind\":\"user\",\"identity_name\":\"user-example-01\",\"identity_generation\":1,\"transport\":\"udp\",\"association_id\":\"abcdefabcdefabcdefabcdefabcdefab\",\"target\":{\"kind\":\"ip\",\"host\":\"192.0.2.53\",\"normalized_host\":\"192.0.2.53\",\"port\":53,\"remote_ip\":\"192.0.2.53\"},\"success_evidence\":\"udp_send_ok\"}",
 +      "sha256": "633ae7e2d1f92d36528c9805e978b39aac559154f79cb66cabe3f6280f7a0618"
@@ -273,6 +277,14 @@ index 0000000000000000000000000000000000000000..88c019c3812186e33ed85ffe8fc5458d
 +      "canonical": "{\"schema_version\":1,\"record_type\":\"diagnostic\",\"event_type\":\"producer_gap\",\"event_id\":\"0123456789abcdef0123456789abcdef:99\",\"audit_sequence\":\"99\",\"occurred_at_unix_ms\":\"1787587210000\",\"node_id\":\"node-example-01\",\"runtime_id\":\"0123456789abcdef0123456789abcdef\",\"reason\":\"queue_overflow\",\"permanent_nack_code\":null,\"dropped_events\":\"55\",\"first_dropped_sequence\":\"44\",\"last_dropped_sequence\":\"98\",\"first_seen_unix_ms\":\"1787587201000\",\"last_seen_unix_ms\":\"1787587209000\"}",
 +      "sha256": "5cff26feca4a7b8c4d83555363b614bd1deef5870c045a69781f8b0b1187e81c"
 +    },
++    "producer_gap_encode_error": {
++      "canonical": "{\"schema_version\":1,\"record_type\":\"diagnostic\",\"event_type\":\"producer_gap\",\"event_id\":\"0123456789abcdef0123456789abcdef:101\",\"audit_sequence\":\"101\",\"occurred_at_unix_ms\":\"1787587212001\",\"node_id\":\"node-example-01\",\"runtime_id\":\"0123456789abcdef0123456789abcdef\",\"reason\":\"encode_error\",\"permanent_nack_code\":null,\"dropped_events\":\"1\",\"first_dropped_sequence\":null,\"last_dropped_sequence\":null,\"first_seen_unix_ms\":\"1787587212000\",\"last_seen_unix_ms\":\"1787587212000\"}",
++      "sha256": "8d6024785174b33ece6b388fc3bb1fc7a152ae47174911df2ad95c5ddf726d10"
++    },
++    "producer_gap_permanent_nack": {
++      "canonical": "{\"schema_version\":1,\"record_type\":\"diagnostic\",\"event_type\":\"producer_gap\",\"event_id\":\"0123456789abcdef0123456789abcdef:102\",\"audit_sequence\":\"102\",\"occurred_at_unix_ms\":\"1787587213002\",\"node_id\":\"node-example-01\",\"runtime_id\":\"0123456789abcdef0123456789abcdef\",\"reason\":\"permanent_nack\",\"permanent_nack_code\":\"invalid_schema\",\"dropped_events\":\"2\",\"first_dropped_sequence\":\"100\",\"last_dropped_sequence\":\"101\",\"first_seen_unix_ms\":\"1787587213000\",\"last_seen_unix_ms\":\"1787587213001\"}",
++      "sha256": "50bc88ba95ef5d6fc0938dbec089cce18a73ab906dd6ebd4d714ab2cc9c13619"
++    },
 +    "udp_window_contention": {
 +      "canonical": "{\"schema_version\":1,\"record_type\":\"diagnostic\",\"event_type\":\"udp_window_contention\",\"event_id\":\"0123456789abcdef0123456789abcdef:100\",\"audit_sequence\":\"100\",\"occurred_at_unix_ms\":\"1787587211000\",\"node_id\":\"node-example-01\",\"runtime_id\":\"0123456789abcdef0123456789abcdef\",\"skipped_successful_datagrams\":\"17\",\"first_seen_unix_ms\":\"1787587201000\",\"last_seen_unix_ms\":\"1787587210000\"}",
 +      "sha256": "829ff3dbc21703384a94e8103d00f01b4c5da5b89d8827abda696fd49b668a8f"
@@ -280,6 +292,22 @@ index 0000000000000000000000000000000000000000..88c019c3812186e33ed85ffe8fc5458d
 +    "spool_gap": {
 +      "canonical": "{\"schema_version\":1,\"record_type\":\"diagnostic\",\"event_type\":\"spool_gap\",\"event_id\":\"spool:fedcba9876543210fedcba9876543210\",\"occurred_at_unix_ms\":\"1787587220000\",\"node_id\":\"node-example-01\",\"spool_epoch\":\"89abcdef0123456789abcdef01234567\",\"lost_spool_epoch\":\"89abcdef0123456789abcdef01234567\",\"reason\":\"capacity_eviction\",\"first_lost_spool_sequence\":\"1\",\"last_lost_spool_sequence\":\"1000\",\"lost_events\":\"1000\",\"lost_bytes\":\"4194304\",\"lost_batch_id\":\"fedcba9876543210fedcba9876543210\"}",
 +      "sha256": "c2a49d2a43eb1763fcc5dc27d85466f0a587a0e6921b24c050700fbbf3668cd9"
++    },
++    "spool_gap_min_free": {
++      "canonical": "{\"schema_version\":1,\"record_type\":\"diagnostic\",\"event_type\":\"spool_gap\",\"event_id\":\"spool:11111111111111111111111111111111\",\"occurred_at_unix_ms\":\"1787587230000\",\"node_id\":\"node-example-01\",\"spool_epoch\":\"89abcdef0123456789abcdef01234567\",\"lost_spool_epoch\":\"89abcdef0123456789abcdef01234567\",\"reason\":\"min_free_eviction\",\"first_lost_spool_sequence\":\"1001\",\"last_lost_spool_sequence\":\"1100\",\"lost_events\":\"100\",\"lost_bytes\":\"524288\",\"lost_batch_id\":\"11111111111111111111111111111111\"}",
++      "sha256": "1123a07ee00738eac4119cc2e2cb8e2121df5f3e7ab8e8f35fd8d94605fbcde5"
++    },
++    "spool_gap_quarantine": {
++      "canonical": "{\"schema_version\":1,\"record_type\":\"diagnostic\",\"event_type\":\"spool_gap\",\"event_id\":\"spool:22222222222222222222222222222222\",\"occurred_at_unix_ms\":\"1787587231000\",\"node_id\":\"node-example-01\",\"spool_epoch\":\"89abcdef0123456789abcdef01234567\",\"lost_spool_epoch\":\"89abcdef0123456789abcdef01234567\",\"reason\":\"quarantine_eviction\",\"first_lost_spool_sequence\":\"1101\",\"last_lost_spool_sequence\":\"1200\",\"lost_events\":\"100\",\"lost_bytes\":\"524288\",\"lost_batch_id\":\"22222222222222222222222222222222\"}",
++      "sha256": "69871594629e048d36b92903a174d63ffd9cdefaa8023d246c1362a02043be02"
++    },
++    "spool_gap_tail_truncation": {
++      "canonical": "{\"schema_version\":1,\"record_type\":\"diagnostic\",\"event_type\":\"spool_gap\",\"event_id\":\"spool:33333333333333333333333333333333\",\"occurred_at_unix_ms\":\"1787587232000\",\"node_id\":\"node-example-01\",\"spool_epoch\":\"89abcdef0123456789abcdef01234567\",\"lost_spool_epoch\":\"89abcdef0123456789abcdef01234567\",\"reason\":\"tail_truncation\",\"first_lost_spool_sequence\":null,\"last_lost_spool_sequence\":null,\"lost_events\":null,\"lost_bytes\":null,\"lost_batch_id\":null}",
++      "sha256": "9e943c60b82e2a0bfb82303ae8ca0433b42813400d1cd3150c2fc59c32a27f62"
++    },
++    "spool_gap_segment_corruption": {
++      "canonical": "{\"schema_version\":1,\"record_type\":\"diagnostic\",\"event_type\":\"spool_gap\",\"event_id\":\"spool:44444444444444444444444444444444\",\"occurred_at_unix_ms\":\"1787587233000\",\"node_id\":\"node-example-01\",\"spool_epoch\":\"89abcdef0123456789abcdef01234567\",\"lost_spool_epoch\":\"89abcdef0123456789abcdef01234567\",\"reason\":\"segment_corruption\",\"first_lost_spool_sequence\":\"1201\",\"last_lost_spool_sequence\":\"1205\",\"lost_events\":\"5\",\"lost_bytes\":\"4096\",\"lost_batch_id\":\"44444444444444444444444444444444\"}",
++      "sha256": "e762ba56bd8dd658066d898426180c79ad2f881a2c1c5d0a012fa19e3dc80fe7"
 +    },
 +    "unicode_access": {
 +      "canonical": "{\"schema_version\":1,\"record_type\":\"access\",\"event_type\":\"tcp_target_success\",\"event_id\":\"0123456789abcdef0123456789abcdef:44\",\"audit_sequence\":\"44\",\"occurred_at_unix_ms\":\"1787587200001\",\"runtime_monotonic_ms\":\"123457\",\"node_id\":\"node-example-01\",\"runtime_id\":\"0123456789abcdef0123456789abcdef\",\"server_id\":\"ss-entry-01\",\"server_generation\":1,\"identity_kind\":\"user\",\"identity_name\":\"user-example-01\",\"identity_generation\":1,\"transport\":\"tcp\",\"target\":{\"kind\":\"domain\",\"host\":\"BÜCHER.Example.\",\"normalized_host\":\"xn--bcher-kva.example\",\"port\":443,\"remote_ip\":\"192.0.2.11\"},\"success_evidence\":\"tcp_bidirectional_payload\"}",
@@ -307,10 +335,10 @@ index 0000000000000000000000000000000000000000..88c019c3812186e33ed85ffe8fc5458d
 +}
 diff --git a/crates/shadowsocks-audit-protocol/src/lib.rs b/crates/shadowsocks-audit-protocol/src/lib.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..25b519d8b424dc917448a6b8005432f319804c72
+index 0000000000000000000000000000000000000000..b8c6b8706b4624f89f3a938720af5ba6a1381ad6
 --- /dev/null
 +++ b/crates/shadowsocks-audit-protocol/src/lib.rs
-@@ -0,0 +1,3582 @@
+@@ -0,0 +1,3602 @@
 +//! Wire types and deterministic canonicalization for the node-local access audit.
 +//!
 +//! This crate deliberately contains no filesystem, socket, clock, or task code.  It
@@ -358,6 +386,7 @@ index 0000000000000000000000000000000000000000..25b519d8b424dc917448a6b8005432f3
 +pub const EXPORT_DEADLINE_SECONDS: u64 = 5;
 +pub const PRODUCER_IN_FLIGHT_LIMIT: usize = 256;
 +pub const PRODUCER_ACK_TIMEOUT_SECONDS: u64 = 3;
++pub const PRODUCER_DIAGNOSTIC_INTERVAL_SECONDS: u64 = 60;
 +pub const NONCE_CACHE_TTL_SECONDS: u64 = 600;
 +pub const NONCE_CACHE_CAPACITY: usize = 4096;
 +pub const EVENT_DEDUP_CAPACITY: usize = 65_536;
@@ -910,38 +939,41 @@ index 0000000000000000000000000000000000000000..25b519d8b424dc917448a6b8005432f3
 +    if host.is_empty() || host.len() > MAX_DOMAIN_BYTES {
 +        return Err(invalid("target.host", "must be non-empty and at most 255 bytes"));
 +    }
-+    // IDNA's strict DNS-length check treats a root-label terminator as an
-+    // invalid empty label.  The wire contract permits one terminal dot and
-+    // removes it before applying UTS #46/STD3 normalization.
-+    let input = host.strip_suffix('.').unwrap_or(host);
-+    if input.is_empty() {
-+        return Err(invalid("target.host", "must contain a non-empty label"));
-+    }
-+
 +    if host.is_ascii() {
 +        // ASCII names follow the wire rule literally: lower-case the spelling
-+        // and remove one terminal dot.  Do not run STD3 here; Shadowsocks can
++        // and remove one terminal dot. Do not run STD3 here; Shadowsocks can
 +        // carry useful ASCII pseudo-hosts such as `_service._tcp.example`.
++        let input = host.to_ascii_lowercase();
++        let input = input.strip_suffix('.').unwrap_or(&input);
++        if input.is_empty() {
++            return Err(invalid("target.host", "must contain a non-empty label"));
++        }
 +        if input.split('.').any(str::is_empty) {
 +            return Err(invalid("target.host", "domain contains an empty label"));
 +        }
-+        return Ok(input.to_ascii_lowercase());
++        return Ok(input.to_owned());
 +    }
 +
-+    // Unicode names use UTS #46 non-transitional + STD3 conversion.  More
-+    // than one terminal dot leaves a terminal dot in `input`; the explicit
-+    // post-conversion empty-label check below rejects that and any interior gap.
++    // Normalize the complete Unicode spelling first. UTS #46 maps the
++    // ideographic and full-width dot characters to ASCII dots, so stripping
++    // the terminator before conversion would miss valid trailing dot forms.
 +    let ascii = Uts46::new()
-+        .to_ascii(input.as_bytes(), AsciiDenyList::STD3, Hyphens::Allow, DnsLength::Ignore)
++        .to_ascii(host.as_bytes(), AsciiDenyList::STD3, Hyphens::Allow, DnsLength::Ignore)
 +        .map_err(|_| invalid("target.host", "UTS #46/STD3 normalization failed"))?
 +        .to_ascii_lowercase();
++    // The wire contract permits exactly one terminal dot. More than one
++    // leaves an empty label after this single removal and is rejected below.
++    let ascii = ascii.strip_suffix('.').unwrap_or(&ascii);
++    if ascii.is_empty() {
++        return Err(invalid("target.host", "must contain a non-empty label"));
++    }
 +    if ascii.split('.').any(str::is_empty) {
 +        return Err(invalid("target.host", "domain contains an empty label"));
 +    }
 +    if ascii.is_empty() || ascii.len() > MAX_DOMAIN_BYTES {
 +        return Err(invalid("target.normalized_host", "normalized domain is invalid"));
 +    }
-+    Ok(ascii)
++    Ok(ascii.to_owned())
 +}
 +
 +#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -3679,6 +3711,15 @@ index 0000000000000000000000000000000000000000..25b519d8b424dc917448a6b8005432f3
 +    }
 +
 +    #[test]
++    fn target_normalization_maps_unicode_terminal_dots() {
++        for host in ["例え.テスト。", "例え.テスト．", "例え.テスト｡"] {
++            assert_eq!(normalize_domain(host).unwrap(), "xn--r8jz45g.xn--zckzah");
++        }
++        assert!(normalize_domain("例え.テスト。。").is_err());
++        assert!(normalize_domain("例え.テスト。。。").is_err());
++    }
++
++    #[test]
 +    fn target_normalization_does_not_add_hyphen_or_dns_length_checks() {
 +        // UTS #46 STD3 controls the ASCII character set; CheckHyphens and
 +        // VerifyDnsLength are separate options and are intentionally disabled.
@@ -3804,10 +3845,17 @@ index 0000000000000000000000000000000000000000..25b519d8b424dc917448a6b8005432f3
 +            .collect::<std::collections::BTreeSet<_>>();
 +        let expected = [
 +            "tcp_access",
++            "tcp_access_null_normalized",
 +            "udp_access",
 +            "producer_gap",
++            "producer_gap_encode_error",
++            "producer_gap_permanent_nack",
 +            "udp_window_contention",
 +            "spool_gap",
++            "spool_gap_min_free",
++            "spool_gap_quarantine",
++            "spool_gap_tail_truncation",
++            "spool_gap_segment_corruption",
 +            "unicode_access",
 +            "escaping_access",
 +            "nullable_spool_gap",
@@ -3927,10 +3975,10 @@ index 0000000000000000000000000000000000000000..765bfee9c2ef4a0b304d77041870e684
 +tempfile = "3"
 diff --git a/crates/shadowsocks-auditd/src/config.rs b/crates/shadowsocks-auditd/src/config.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..8747395794da52af2c658d3d2fa426097a847efa
+index 0000000000000000000000000000000000000000..98323dd34a75994a328a28b7eca45376c270ea6f
 --- /dev/null
 +++ b/crates/shadowsocks-auditd/src/config.rs
-@@ -0,0 +1,1218 @@
+@@ -0,0 +1,1224 @@
 +use std::{
 +    ffi::CString,
 +    fs::{self, File, OpenOptions},
@@ -3958,14 +4006,13 @@ index 0000000000000000000000000000000000000000..8747395794da52af2c658d3d2fa42609
 +
 +// Wire-size limits live in the shared protocol crate.  Re-export aliases here
 +// for auditd callers without introducing a second independently drifting value.
++pub use wire::{
++    ACKED_RETENTION_SECONDS, EVENT_DEDUP_CAPACITY as MAX_DEDUP_ENTRIES,
++    EXPORT_MAX_CONNECTIONS as MAX_EXPORT_CONNECTIONS, INGEST_MAX_CONNECTIONS as MAX_INGEST_CONNECTIONS,
++    NONCE_CACHE_CAPACITY as MAX_NONCES, NONCE_CACHE_TTL_SECONDS as NONCE_TTL_SECONDS,
++    TOMBSTONE_CAPACITY as MAX_TOMBSTONES,
++};
 +pub use wire::{MAX_EVENT_BYTES, MAX_FRAME_BYTES};
-+pub const MAX_INGEST_CONNECTIONS: usize = 4;
-+pub const MAX_EXPORT_CONNECTIONS: usize = 4;
-+pub const MAX_NONCES: usize = 4096;
-+pub const NONCE_TTL_SECONDS: u64 = 600;
-+pub const MAX_DEDUP_ENTRIES: usize = 65_536;
-+pub const MAX_TOMBSTONES: usize = 4096;
-+pub const ACKED_RETENTION_SECONDS: u64 = 86_400;
 +
 +pub const DEFAULT_MAX_SPOOL_BYTES: u64 = 5_368_709_120;
 +pub const DEFAULT_MIN_FREE_BYTES: u64 = 1_073_741_824;
@@ -4267,9 +4314,19 @@ index 0000000000000000000000000000000000000000..8747395794da52af2c658d3d2fa42609
 +            DEFAULT_MAX_SPOOL_BYTES,
 +            "min_free_bytes",
 +        )?;
++        let protocol_minimum = wire::MAX_SPOOL_RECORD_BYTES
++            .checked_add(1)
++            .ok_or_else(|| ConfigError::Invalid("protocol spool record size overflow".to_owned()))?;
++        let protocol_minimum = u64::try_from(protocol_minimum)
++            .map_err(|_| ConfigError::Invalid("protocol spool record size exceeds u64".to_owned()))?;
++        // Keep both contracts visible: a segment must fit one complete wire
++        // record and must not be configured below the 16 KiB operational floor.
++        // Taking the maximum once avoids a misleading, unreachable intermediate
++        // boundary when the current protocol record limit is smaller.
++        let minimum_segment = 16_384u64.max(protocol_minimum);
 +        bounded(
 +            self.segment_max_bytes,
-+            16_384,
++            minimum_segment,
 +            DEFAULT_SEGMENT_MAX_BYTES,
 +            "segment_max_bytes",
 +        )?;
@@ -4289,14 +4346,6 @@ index 0000000000000000000000000000000000000000..8747395794da52af2c658d3d2fa42609
 +            return Err(ConfigError::Invalid(
 +                "export_max_response_bytes must be at least segment_max_bytes".to_owned(),
 +            ));
-+        }
-+        let minimum_segment = wire::MAX_SPOOL_RECORD_BYTES
-+            .checked_add(1)
-+            .ok_or_else(|| ConfigError::Invalid("protocol spool record size overflow".to_owned()))?;
-+        if usize::try_from(self.segment_max_bytes).unwrap_or(usize::MAX) < minimum_segment {
-+            return Err(ConfigError::Invalid(format!(
-+                "segment_max_bytes must be at least {minimum_segment} bytes"
-+            )));
 +        }
 +        Ok(())
 +    }
@@ -4944,9 +4993,14 @@ index 0000000000000000000000000000000000000000..8747395794da52af2c658d3d2fa42609
 +    #[test]
 +    fn segment_bound_includes_newline() {
 +        let mut config = AuditdConfig::default();
-+        config.segment_max_bytes = (wire::MAX_SPOOL_RECORD_BYTES as u64).saturating_add(1);
++        let protocol_minimum = wire::MAX_SPOOL_RECORD_BYTES
++            .checked_add(1)
++            .and_then(|value| u64::try_from(value).ok())
++            .expect("protocol record bound fits u64");
++        let configured_minimum = 16_384u64.max(protocol_minimum);
++        config.segment_max_bytes = configured_minimum;
 +        assert!(config.validate().is_ok());
-+        config.segment_max_bytes = wire::MAX_SPOOL_RECORD_BYTES as u64;
++        config.segment_max_bytes = configured_minimum - 1;
 +        assert!(config.validate().is_err());
 +    }
 +
@@ -5151,7 +5205,7 @@ index 0000000000000000000000000000000000000000..8747395794da52af2c658d3d2fa42609
 +}
 diff --git a/crates/shadowsocks-auditd/src/export.rs b/crates/shadowsocks-auditd/src/export.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..88cab06e1479018003c8064fb2a0ae1da67dccc8
+index 0000000000000000000000000000000000000000..f4c80e5e8971d72f7028ed7ca07d268c1b86ec2a
 --- /dev/null
 +++ b/crates/shadowsocks-auditd/src/export.rs
 @@ -0,0 +1,1373 @@
@@ -5188,7 +5242,7 @@ index 0000000000000000000000000000000000000000..88cab06e1479018003c8064fb2a0ae1d
 +    spool::{AckOutcome, BatchLease, Spool, SpoolError},
 +};
 +
-+const HTTP_DEADLINE: Duration = Duration::from_secs(5);
++const HTTP_DEADLINE: Duration = Duration::from_secs(wire::EXPORT_DEADLINE_SECONDS);
 +const MAX_REQUEST_LINE: usize = 1024;
 +const MAX_HEADER_BYTES: usize = 16 * 1024;
 +const MAX_HEADERS: usize = 32;
@@ -6530,10 +6584,10 @@ index 0000000000000000000000000000000000000000..88cab06e1479018003c8064fb2a0ae1d
 +}
 diff --git a/crates/shadowsocks-auditd/src/ingest.rs b/crates/shadowsocks-auditd/src/ingest.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..66464f561da3e83c9a62db4dbbde384b087f7e57
+index 0000000000000000000000000000000000000000..86e587cdd7531e669b7a57dff7d37120175f0bad
 --- /dev/null
 +++ b/crates/shadowsocks-auditd/src/ingest.rs
-@@ -0,0 +1,726 @@
+@@ -0,0 +1,752 @@
 +//! Unix-stream ingest endpoint used by the ssserver producer.
 +
 +use std::{
@@ -6563,7 +6617,7 @@ index 0000000000000000000000000000000000000000..66464f561da3e83c9a62db4dbbde384b
 +    spool::{EventAck, Spool, SpoolError},
 +};
 +
-+const IO_DEADLINE: Duration = Duration::from_secs(2);
++const IO_DEADLINE: Duration = Duration::from_secs(wire::INGEST_DEADLINE_SECONDS);
 +
 +#[derive(Debug, Error)]
 +pub enum IngestError {
@@ -6701,7 +6755,7 @@ index 0000000000000000000000000000000000000000..66464f561da3e83c9a62db4dbbde384b
 +        // Repeated hits can otherwise grow the history forever. Compact it
 +        // periodically while retaining exactly the newest token for each live
 +        // entry. This does not change LRU ordering or evict a current entry.
-+        let compact_at = self.capacity.saturating_mul(2).max(self.capacity.saturating_add(1));
++        let compact_at = self.capacity.saturating_add(1);
 +        if self.order.len() > compact_at {
 +            self.order.retain(|(event_id, token)| {
 +                self.entries
@@ -6863,9 +6917,7 @@ index 0000000000000000000000000000000000000000..66464f561da3e83c9a62db4dbbde384b
 +    // the specified `unauthorized_peer` NACK; malformed frames are still
 +    // closed without a response.
 +    let peer = peer_uid(&stream)?;
-+    let hello_frame = time::timeout(IO_DEADLINE, read_frame_initial(&mut stream))
-+        .await
-+        .map_err(|_| IngestError::Protocol("hello timeout".to_owned()))??;
++    let hello_frame = read_frame_initial(&mut stream).await?;
 +    let hello = match parse_hello(&hello_frame) {
 +        Ok(value) => value,
 +        Err(code) => {
@@ -7253,6 +7305,34 @@ index 0000000000000000000000000000000000000000..66464f561da3e83c9a62db4dbbde384b
 +    }
 +
 +    #[test]
++    fn default_dedup_capacity_keeps_touch_history_bounded() {
++        let mut cache = DedupCache::new();
++        for sequence in 0..MAX_DEDUP_ENTRIES {
++            let event_id = format!("default-id-{sequence}");
++            cache.insert(
++                event_id.clone(),
++                format!("default-digest-{sequence}"),
++                EventAck {
++                    event_id,
++                    spool_epoch: "0".repeat(32),
++                    spool_sequence: sequence as u64,
++                },
++            );
++        }
++        for _ in 0..(MAX_DEDUP_ENTRIES * 2) {
++            assert!(matches!(
++                cache.get("default-id-0", "default-digest-0"),
++                DedupLookup::Same(_)
++            ));
++        }
++        assert_eq!(cache.entries.len(), MAX_DEDUP_ENTRIES);
++        assert!(
++            cache.order.len() <= MAX_DEDUP_ENTRIES + 1,
++            "touch history exceeded the bounded compaction window"
++        );
++    }
++
++    #[test]
 +    fn hello_version_outside_u8_range_gets_unsupported_version_nack() {
 +        let raw = br#"{"protocol_version":256,"frame_type":"hello","node_id":"node","runtime_id":"0123456789abcdef0123456789abcdef"}"#;
 +        assert_eq!(parse_hello(raw), Err(Some(wire::HelloErrorCode::UnsupportedVersion)));
@@ -7471,9 +7551,6 @@ index 0000000000000000000000000000000000000000..9b98bdc92ab22650e1f6db54e3bd3a9a
 +        }
 +    }
 +}
-diff --git a/crates/shadowsocks-auditd/src/main.rs b/crates/shadowsocks-auditd/src/main.rs
-deleted file mode 100644
-index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..0000000000000000000000000000000000000000
 diff --git a/crates/shadowsocks-auditd/src/protocol.rs b/crates/shadowsocks-auditd/src/protocol.rs
 new file mode 100644
 index 0000000000000000000000000000000000000000..c570dac908e4344222ca38dd134be85b03850bf6
@@ -7636,10 +7713,10 @@ index 0000000000000000000000000000000000000000..c570dac908e4344222ca38dd134be85b
 +}
 diff --git a/crates/shadowsocks-auditd/src/spool.rs b/crates/shadowsocks-auditd/src/spool.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..0a829c8ceaa4cbd146cdc5a3efa4a08ae6860c5f
+index 0000000000000000000000000000000000000000..5b34bb724802029cc421294da83934ec0118b3c0
 --- /dev/null
 +++ b/crates/shadowsocks-auditd/src/spool.rs
-@@ -0,0 +1,5743 @@
+@@ -0,0 +1,5860 @@
 +//! Durable, node-local audit spool.
 +//!
 +//! The spool is deliberately synchronous.  Ingest and export perform their
@@ -8657,8 +8734,12 @@ index 0000000000000000000000000000000000000000..0a829c8ceaa4cbd146cdc5a3efa4a08a
 +                integrity_queue: VecDeque::new(),
 +                durable_gap_reasons: HashMap::new(),
 +                write_barrier_failed: false,
-+                last_spool_measurement: Instant::now() - INDEX_REBUILD_RETRY_INTERVAL,
-+                last_retention_sweep: Instant::now() - RETENTION_SWEEP_INTERVAL,
++                last_spool_measurement: Instant::now()
++                    .checked_sub(INDEX_REBUILD_RETRY_INTERVAL)
++                    .unwrap_or_else(Instant::now),
++                last_retention_sweep: Instant::now()
++                    .checked_sub(RETENTION_SWEEP_INTERVAL)
++                    .unwrap_or_else(Instant::now),
 +            }),
 +        };
 +
@@ -8667,6 +8748,9 @@ index 0000000000000000000000000000000000000000..0a829c8ceaa4cbd146cdc5a3efa4a08a
 +        // it without inventing a second gap ID.
 +        {
 +            let mut inner = lock(&spool.inner);
++            // Build durable gap indexes before any startup flush can consult
++            // them for idempotency.
++            spool.rebuild_runtime_indexes_locked(&mut inner);
 +            // A pending state reset owns the first sequence in its new epoch,
 +            // so materialize it before eviction/recovery diagnostics.
 +            // Do not let another gap consume a sequence when this barrier is
@@ -8764,7 +8848,8 @@ index 0000000000000000000000000000000000000000..0a829c8ceaa4cbd146cdc5a3efa4a08a
 +            mark_storage_rejection(&mut inner, true);
 +            return Err(error.into());
 +        }
-+        if inner.write_barrier_failed {
++        if inner.write_barrier_failed && self.try_clear_write_barrier_locked(&mut inner).is_err() {
++            inner.storage_rejected_attempts = saturating_inc(inner.storage_rejected_attempts);
 +            return Err(SpoolError::StorageUnavailable);
 +        }
 +        self.maybe_sweep_acked_locked(&mut inner);
@@ -8842,19 +8927,21 @@ index 0000000000000000000000000000000000000000..0a829c8ceaa4cbd146cdc5a3efa4a08a
 +            }
 +            return Err(error);
 +        }
-+        if (inner.open_meta.bytes >= self.config.segment_max_bytes
-+            || inner.open_meta.opened_at.elapsed().unwrap_or_default()
-+                >= Duration::from_secs(self.config.segment_max_age_seconds))
-+            && let Err(error) = self.seal_locked(&mut inner)
-+        {
-+            // The record and its next-sequence cursor were already durable
-+            // before this best-effort seal.  Returning the error would make
-+            // the producer retry and append the same event a second time.
-+            // Keep the durable ACK contract, mark health degraded, and let
-+            // the next lease/append retry sealing.
-+            inner.degraded = true;
-+            inner.non_gap_degraded = true;
-+            let _ = error;
++        let should_seal = inner.open_meta.bytes >= self.config.segment_max_bytes
++            || (inner.open_meta.event_count > 0
++                && inner.open_meta.opened_at.elapsed().unwrap_or_default()
++                    >= Duration::from_secs(self.config.segment_max_age_seconds));
++        if should_seal {
++            if let Err(error) = self.seal_locked(&mut inner) {
++                // The record and its next-sequence cursor were already durable
++                // before this best-effort seal.  Returning the error would make
++                // the producer retry and append the same event a second time.
++                // Keep the durable ACK contract, mark health degraded, and let
++                // the next lease/append retry sealing.
++                inner.degraded = true;
++                inner.non_gap_degraded = true;
++                let _ = error;
++            }
 +        }
 +        Ok(EventAck {
 +            event_id: event_id.to_owned(),
@@ -8871,7 +8958,8 @@ index 0000000000000000000000000000000000000000..0a829c8ceaa4cbd146cdc5a3efa4a08a
 +            mark_storage_rejection(&mut inner, true);
 +            return Err(error.into());
 +        }
-+        if inner.write_barrier_failed {
++        if inner.write_barrier_failed && self.try_clear_write_barrier_locked(&mut inner).is_err() {
++            inner.storage_rejected_attempts = saturating_inc(inner.storage_rejected_attempts);
 +            return Err(SpoolError::StorageUnavailable);
 +        }
 +        self.maybe_sweep_acked_locked(&mut inner);
@@ -9004,7 +9092,8 @@ index 0000000000000000000000000000000000000000..0a829c8ceaa4cbd146cdc5a3efa4a08a
 +            mark_storage_rejection(&mut inner, true);
 +            return Err(error.into());
 +        }
-+        if inner.write_barrier_failed {
++        if inner.write_barrier_failed && self.try_clear_write_barrier_locked(&mut inner).is_err() {
++            inner.storage_rejected_attempts = saturating_inc(inner.storage_rejected_attempts);
 +            return Err(SpoolError::StorageUnavailable);
 +        }
 +        if inner.leased_batch.as_deref() != Some(batch_id) {
@@ -9058,7 +9147,8 @@ index 0000000000000000000000000000000000000000..0a829c8ceaa4cbd146cdc5a3efa4a08a
 +            mark_storage_rejection(&mut inner, true);
 +            return Err(error.into());
 +        }
-+        if inner.write_barrier_failed {
++        if inner.write_barrier_failed && self.try_clear_write_barrier_locked(&mut inner).is_err() {
++            inner.storage_rejected_attempts = saturating_inc(inner.storage_rejected_attempts);
 +            return Err(SpoolError::StorageUnavailable);
 +        }
 +        self.maybe_sweep_acked_locked(&mut inner);
@@ -9428,6 +9518,16 @@ index 0000000000000000000000000000000000000000..0a829c8ceaa4cbd146cdc5a3efa4a08a
 +        }
 +    }
 +
++    fn open_contains_non_gap_locked(&self, inner: &SpoolInner) -> Result<bool, SpoolError> {
++        if inner.open_meta.event_count == 0 {
++            return Ok(false);
++        }
++        let body = read_regular_file(&self.root.join("open/current.ndjson"))?;
++        Ok(body
++            .split_inclusive(|byte| *byte == b'\n')
++            .any(|line| !line_is_spool_gap(line)))
++    }
++
 +    fn check_one_sealed_integrity_locked(&self, inner: &mut SpoolInner) {
 +        while let Some(batch_id) = inner.integrity_queue.pop_front() {
 +            let Some(path) = inner.sealed_paths.get(&batch_id).cloned() else {
@@ -9435,7 +9535,27 @@ index 0000000000000000000000000000000000000000..0a829c8ceaa4cbd146cdc5a3efa4a08a
 +            };
 +            match self.read_batch(&path, false) {
 +                Ok(Some(_)) => inner.integrity_queue.push_back(batch_id),
-+                Ok(None) | Err(_) => mark_storage_rejection(inner, true),
++                Ok(None)
++                | Err(SpoolError::Json(_))
++                | Err(SpoolError::Protocol(_))
++                | Err(SpoolError::InvalidState(_)) => {
++                    inner.degraded = true;
++                    mark_storage_rejection(inner, true);
++                    if self.quarantine_batch_locked(inner, &path, "batch-corrupt").is_err() {
++                        inner.integrity_queue.push_back(batch_id);
++                    }
++                }
++                Err(SpoolError::Io(_)) | Err(SpoolError::StorageUnavailable) => {
++                    mark_storage_rejection(inner, true);
++                    inner.integrity_queue.push_back(batch_id);
++                }
++                Err(_) => {
++                    inner.degraded = true;
++                    mark_storage_rejection(inner, true);
++                    if self.quarantine_batch_locked(inner, &path, "batch-corrupt").is_err() {
++                        inner.integrity_queue.push_back(batch_id);
++                    }
++                }
 +            }
 +            break;
 +        }
@@ -9756,6 +9876,13 @@ index 0000000000000000000000000000000000000000..0a829c8ceaa4cbd146cdc5a3efa4a08a
 +        // only after the complete write+sync barrier succeeds.
 +        Self::adjust_spool_bytes(inner, i128::from(wrapper.len() as u64));
 +        inner.stored_records = inner.stored_records.saturating_add(1);
++        // An empty open segment has no age.  Start the max-age timer at the
++        // first durable record rather than at daemon start (or the previous
++        // seal), otherwise a quiet node seals its first later event
++        // immediately after a long idle period.
++        if inner.open_meta.event_count == 0 {
++            inner.open_meta.opened_at = SystemTime::now();
++        }
 +        update_open_metadata(
 +            &mut inner.open_meta,
 +            sequence,
@@ -9801,6 +9928,14 @@ index 0000000000000000000000000000000000000000..0a829c8ceaa4cbd146cdc5a3efa4a08a
 +        result
 +    }
 +
++    fn try_clear_write_barrier_locked(&self, inner: &mut SpoolInner) -> Result<(), SpoolError> {
++        self.ensure_open_file_bound(inner)?;
++        self.refresh_spool_bytes_locked(inner)?;
++        self.persist_state_locked(inner, inner.pending_state_reset.clone())?;
++        inner.write_barrier_failed = false;
++        Ok(())
++    }
++
 +    fn ensure_open_file_bound(&self, inner: &mut SpoolInner) -> Result<(), SpoolError> {
 +        let path = self.root.join("open/current.ndjson");
 +        let opened = inner.open_file.metadata()?;
@@ -9828,9 +9963,38 @@ index 0000000000000000000000000000000000000000..0a829c8ceaa4cbd146cdc5a3efa4a08a
 +        file.sync_all()?;
 +        sync_dir(&self.root.join("open"))?;
 +        if file.metadata()?.len() != 0 {
-+            return Err(SpoolError::InvalidState(
-+                "replacement open segment is unexpectedly non-empty".to_owned(),
-+            ));
++            let orphan = self
++                .root
++                .join("quarantine")
++                .join(format!("orphan-open-{}", random_hex_id()?));
++            fs::rename(&path, &orphan)?;
++            sync_dir(&self.root.join("open"))?;
++            sync_dir(&self.root.join("quarantine"))?;
++            inner.degraded = true;
++            inner.non_gap_degraded = true;
++            let new_file = OpenOptions::new()
++                .create(true)
++                .read(true)
++                .append(true)
++                .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
++                .mode(0o600)
++                .open(&path)?;
++            set_file_mode(&path, 0o600)?;
++            inner.open_meta = OpenMetadata::empty();
++            inner.open_file = new_file;
++            let spec = GapSpec {
++                event_id: format!("{}{}", GAP_ID_PREFIX, random_hex_id()?),
++                occurred_at_unix_ms: unix_millis()?,
++                lost_spool_epoch: None,
++                reason: wire::SpoolGapReason::SegmentCorruption,
++                first_lost_spool_sequence: None,
++                last_lost_spool_sequence: None,
++                lost_events: None,
++                lost_bytes: None,
++                lost_batch_id: None,
++            };
++            self.write_gap_locked(inner, &spec)?;
++            return Ok(());
 +        }
 +        inner.open_file = file;
 +        Ok(())
@@ -10001,7 +10165,14 @@ index 0000000000000000000000000000000000000000..0a829c8ceaa4cbd146cdc5a3efa4a08a
 +        // Seal the active producer segment at most once per cleanup call. Any
 +        // gaps created by the eviction work below remain open and can never
 +        // feed a seal -> evict -> gap cycle in this same critical section.
-+        if !self.capacity_ok(inner, additional) && inner.open_meta.event_count > 0 {
++        let open_has_non_gap = match self.open_contains_non_gap_locked(inner) {
++            Ok(value) => value,
++            Err(error) => {
++                first_error.get_or_insert(error);
++                false
++            }
++        };
++        if !self.capacity_ok(inner, additional) && open_has_non_gap {
 +            if let Err(error) = self.seal_locked(inner) {
 +                first_error.get_or_insert(error);
 +                inner.degraded = true;
@@ -10043,14 +10214,14 @@ index 0000000000000000000000000000000000000000..0a829c8ceaa4cbd146cdc5a3efa4a08a
 +                let Some(info) = info else {
 +                    inner.degraded = true;
 +                    match self.quarantine_batch_locked(inner, &path, "acked-corrupt") {
-+                        Ok(()) => progressed = true,
++                        Ok(()) => progressed = inner.spool_bytes < candidate_start_bytes,
 +                        Err(error) => {
 +                            first_error.get_or_insert(error);
 +                            inner.storage_rejected_attempts = saturating_inc(inner.storage_rejected_attempts);
 +                        }
 +                    }
 +                    if self.capacity_ok(inner, additional) || inner.spool_bytes < candidate_start_bytes {
-+                        progressed = true;
++                        progressed = inner.spool_bytes < candidate_start_bytes;
 +                        break;
 +                    }
 +                    continue;
@@ -10111,9 +10282,7 @@ index 0000000000000000000000000000000000000000..0a829c8ceaa4cbd146cdc5a3efa4a08a
 +            for path in quarantine {
 +                let candidate_start_bytes = inner.spool_bytes;
 +                match self.evict_quarantine_locked(inner, &path) {
-+                    Ok(()) => {
-+                        progressed = true;
-+                    }
++                    Ok(()) => progressed = inner.spool_bytes < candidate_start_bytes,
 +                    Err(error) => {
 +                        first_error.get_or_insert(error);
 +                        inner.degraded = true;
@@ -10167,9 +10336,7 @@ index 0000000000000000000000000000000000000000..0a829c8ceaa4cbd146cdc5a3efa4a08a
 +            for (_, path) in sealed {
 +                let candidate_start_bytes = inner.spool_bytes;
 +                match self.evict_sealed_locked(inner, &path) {
-+                    Ok(()) => {
-+                        progressed = true;
-+                    }
++                    Ok(()) => progressed = inner.spool_bytes < candidate_start_bytes,
 +                    Err(error) => {
 +                        first_error.get_or_insert(error);
 +                        inner.degraded = true;
@@ -11774,8 +11941,8 @@ index 0000000000000000000000000000000000000000..0a829c8ceaa4cbd146cdc5a3efa4a08a
 +fn validate_segment_body(body: &[u8], info: &BatchInfo, node_id: &str) -> Result<(), SpoolError> {
 +    let mut count = 0_u64;
 +    let mut expected = info.first_spool_sequence;
-+    let mut first_received = None;
-+    let mut last_received = None;
++    let mut first_received: Option<u64> = None;
++    let mut last_received: Option<u64> = None;
 +    for line in body.split_inclusive(|byte| *byte == b'\n') {
 +        let record = wire::parse_spool_line(line).map_err(|error| SpoolError::Protocol(ProtocolError::from(error)))?;
 +        if record.spool_epoch != info.spool_epoch || record.spool_sequence.0 != expected {
@@ -11786,8 +11953,8 @@ index 0000000000000000000000000000000000000000..0a829c8ceaa4cbd146cdc5a3efa4a08a
 +            return Err(SpoolError::InvalidState("batch event node mismatch".to_owned()));
 +        }
 +        let received = record.received_at_unix_ms.0;
-+        first_received.get_or_insert(received);
-+        last_received = Some(received);
++        first_received = Some(first_received.map_or(received, |first| first.min(received)));
++        last_received = Some(last_received.map_or(received, |last| last.max(received)));
 +        count = count.saturating_add(1);
 +        expected = expected.checked_add(1).ok_or(SpoolError::SequenceExhausted)?;
 +    }
@@ -13342,6 +13509,33 @@ index 0000000000000000000000000000000000000000..0a829c8ceaa4cbd146cdc5a3efa4a08a
 +    }
 +
 +    #[test]
++    fn open_segment_max_age_starts_at_first_record() {
++        let dir = tempfile::tempdir().expect("tempdir");
++        let spool_config = Arc::new(AuditdConfig {
++            segment_max_age_seconds: 3_600,
++            ..(*config(dir.path())).clone()
++        });
++        let spool = Spool::open(spool_config).expect("spool");
++        {
++            let mut inner = lock(&spool.inner);
++            // Simulate an empty segment that has existed longer than the
++            // configured age. It must remain empty from the timer's point of
++            // view until the first durable append.
++            inner.open_meta.opened_at = SystemTime::UNIX_EPOCH;
++            assert_eq!(inner.open_meta.event_count, 0);
++        }
++
++        spool.append(&event(1), 1).expect("append");
++        let inner = lock(&spool.inner);
++        assert_eq!(inner.open_meta.event_count, 1);
++        assert_eq!(
++            inner.sealed_batches, 0,
++            "first event must not be sealed due to idle age"
++        );
++        assert!(inner.open_meta.opened_at > SystemTime::UNIX_EPOCH);
++    }
++
++    #[test]
 +    fn malformed_recovery_marker_is_counted_and_retained() {
 +        let dir = tempfile::tempdir().expect("tempdir");
 +        let suffix = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -13435,7 +13629,7 @@ index c8e1e4ac6be3892b26a4ec07ac34b6f76a7a3ca2..494bbbd6ae73e39d50ef0c9062b474f1
  
          trace!("REGEX-RULE {}", rule);
 diff --git a/crates/shadowsocks-service/src/config.rs b/crates/shadowsocks-service/src/config.rs
-index c281178a0d4b847dbde378884a3974830a92303d..813935fb9f743f7a69e44fc980d733fcef82f0fa 100644
+index c281178a0d4b847dbde378884a3974830a92303d..3ba6c143aecacdb197c2b11cdbe872f3ab3fdd05 100644
 --- a/crates/shadowsocks-service/src/config.rs
 +++ b/crates/shadowsocks-service/src/config.rs
 @@ -57,6 +57,9 @@ use std::{
@@ -13511,7 +13705,7 @@ index c281178a0d4b847dbde378884a3974830a92303d..813935fb9f743f7a69e44fc980d733fc
      let mut current = PathBuf::from("/");
      // SAFETY: `geteuid` has no preconditions and does not mutate process state.
      let effective_uid = unsafe { libc::geteuid() };
-@@ -221,7 +260,163 @@ pub(crate) fn canonical_user_stats_socket_path(
+@@ -221,7 +260,173 @@ pub(crate) fn canonical_user_stats_socket_path(
          ));
      }
  
@@ -13562,6 +13756,16 @@ index c281178a0d4b847dbde378884a3974830a92303d..813935fb9f743f7a69e44fc980d733fc
 +        return Err(io::Error::new(
 +            io::ErrorKind::InvalidInput,
 +            "audit socket path must be an absolute canonical path with a file name",
++        ));
++    }
++    // `Path::components()` normalizes `.` and `..`, so inspect the original
++    // spelling before walking ancestors.  This keeps producer validation
++    // symmetric with auditd and prevents a later path lookup from changing
++    // the configured target.
++    if text[1..].split('/').any(|component| matches!(component, "." | "..")) {
++        return Err(io::Error::new(
++            io::ErrorKind::InvalidInput,
++            "audit socket path must not contain '.' or '..' components",
 +        ));
 +    }
 +
@@ -13676,7 +13880,7 @@ index c281178a0d4b847dbde378884a3974830a92303d..813935fb9f743f7a69e44fc980d733fc
  }
  
  const fn default_user_stats_socket_mode() -> u32 {
-@@ -298,6 +493,19 @@ struct SSUserStatsConfig {
+@@ -298,6 +503,19 @@ struct SSUserStatsConfig {
      max_concurrent_clients: usize,
  }
  
@@ -13696,7 +13900,7 @@ index c281178a0d4b847dbde378884a3974830a92303d..813935fb9f743f7a69e44fc980d733fc
  #[derive(Serialize, Deserialize, Debug, Default)]
  struct SSConfig {
      #[serde(skip_serializing_if = "Option::is_none")]
-@@ -329,6 +537,9 @@ struct SSConfig {
+@@ -329,6 +547,9 @@ struct SSConfig {
      #[serde(skip_serializing_if = "Option::is_none")]
      user_stats: Option<SSUserStatsConfig>,
  
@@ -13706,7 +13910,7 @@ index c281178a0d4b847dbde378884a3974830a92303d..813935fb9f743f7a69e44fc980d733fc
      #[serde(skip_serializing_if = "Option::is_none")]
      password: Option<String>,
      #[serde(skip_serializing_if = "Option::is_none")]
-@@ -1441,6 +1652,38 @@ pub struct UserStatsConfig {
+@@ -1441,6 +1662,38 @@ pub struct UserStatsConfig {
      pub max_concurrent_clients: usize,
  }
  
@@ -13745,7 +13949,7 @@ index c281178a0d4b847dbde378884a3974830a92303d..813935fb9f743f7a69e44fc980d733fc
  impl UserStatsConfig {
      /// Create a configuration with safe defaults.
      pub fn new<N, P>(node_id: N, socket_path: P) -> Self
-@@ -1610,6 +1853,9 @@ pub struct Config {
+@@ -1610,6 +1863,9 @@ pub struct Config {
      /// EIH per-user traffic statistics exporter configuration.
      pub user_stats: Option<UserStatsConfig>,
  
@@ -13755,7 +13959,7 @@ index c281178a0d4b847dbde378884a3974830a92303d..813935fb9f743f7a69e44fc980d733fc
      /// Config is for Client or Server
      pub config_type: ConfigType,
  
-@@ -1752,6 +1998,8 @@ impl Config {
+@@ -1752,6 +2008,8 @@ impl Config {
  
              user_stats: None,
  
@@ -13764,7 +13968,23 @@ index c281178a0d4b847dbde378884a3974830a92303d..813935fb9f743f7a69e44fc980d733fc
              config_type,
  
              udp_timeout: None,
-@@ -1788,6 +2036,13 @@ impl Config {
+@@ -1775,6 +2033,15 @@ impl Config {
+     }
+ 
+     fn load_from_ssconfig(config: SSConfig, config_type: ConfigType) -> Result<Self, Error> {
++        #[cfg(not(feature = "user-audit"))]
++        if config.user_audit.is_some() {
++            return Err(Error::new(
++                ErrorKind::Invalid,
++                "`user_audit` requires a binary built with the `user-audit` feature",
++                None,
++            ));
++        }
++
+         let mut nconfig = Self::new(config_type);
+ 
+         nconfig.user_stats = config.user_stats.as_ref().map(|stats| UserStatsConfig {
+@@ -1788,6 +2055,13 @@ impl Config {
              max_identities: stats.max_identities,
              max_concurrent_clients: stats.max_concurrent_clients,
          });
@@ -13778,7 +13998,7 @@ index c281178a0d4b847dbde378884a3974830a92303d..813935fb9f743f7a69e44fc980d733fc
  
          // Client
          //
-@@ -2661,15 +2916,16 @@ impl Config {
+@@ -2661,15 +2935,16 @@ impl Config {
          // Security
          if let Some(sec) = config.security
              && let Some(replay_attack) = sec.replay_attack
@@ -13803,7 +14023,7 @@ index c281178a0d4b847dbde378884a3974830a92303d..813935fb9f743f7a69e44fc980d733fc
  
          if let Some(balancer) = config.balancer {
              nconfig.balancer = BalancerConfig {
-@@ -2874,8 +3130,8 @@ impl Config {
+@@ -2874,8 +3149,8 @@ impl Config {
  
      #[cfg(all(feature = "user-stats", unix))]
      pub(crate) fn check_user_stats_integrity(&self, stats: &UserStatsConfig) -> Result<(), Error> {
@@ -13813,7 +14033,7 @@ index c281178a0d4b847dbde378884a3974830a92303d..813935fb9f743f7a69e44fc980d733fc
  
          fn invalid(desc: &'static str, detail: Option<String>) -> Error {
              Error::new(ErrorKind::Invalid, desc, detail)
-@@ -3029,10 +3285,7 @@ impl Config {
+@@ -3029,10 +3304,7 @@ impl Config {
              for user in users.users_iter() {
                  check_identifier(user.name(), "servers[].users[].name")?;
                  if !user_names.insert(user.name()) {
@@ -13825,7 +14045,7 @@ index c281178a0d4b847dbde378884a3974830a92303d..813935fb9f743f7a69e44fc980d733fc
                  }
              }
          }
-@@ -3040,8 +3293,106 @@ impl Config {
+@@ -3040,8 +3312,123 @@ impl Config {
          Ok(())
      }
  
@@ -13903,14 +14123,6 @@ index c281178a0d4b847dbde378884a3974830a92303d..813935fb9f743f7a69e44fc980d733fc
 +
      /// Check if all required fields are already set
      pub fn check_integrity(&self) -> Result<(), Error> {
-+        if self.user_audit.is_some() && !self.config_type.is_server() {
-+            return Err(Error::new(
-+                ErrorKind::Invalid,
-+                "`user_audit` is only supported by server configurations",
-+                None,
-+            ));
-+        }
-+
 +        #[cfg(not(feature = "user-audit"))]
 +        if self.user_audit.is_some() {
 +            return Err(Error::new(
@@ -13929,10 +14141,35 @@ index c281178a0d4b847dbde378884a3974830a92303d..813935fb9f743f7a69e44fc980d733fc
 +            ));
 +        }
 +
++        if self.manager.is_some() {
++            if self.user_audit.is_some() {
++                return Err(Error::new(
++                    ErrorKind::Invalid,
++                    "`user_audit` is incompatible with manager mode",
++                    None,
++                ));
++            }
++            if self.user_stats.is_some() {
++                return Err(Error::new(
++                    ErrorKind::Invalid,
++                    "`user_stats` is incompatible with manager mode",
++                    None,
++                ));
++            }
++        }
++
++        if self.user_audit.is_some() && !self.config_type.is_server() {
++            return Err(Error::new(
++                ErrorKind::Invalid,
++                "`user_audit` is only supported by server configurations",
++                None,
++            ));
++        }
++
          if self.user_stats.is_some() && !self.config_type.is_server() {
              return Err(Error::new(
                  ErrorKind::Invalid,
-@@ -3073,6 +3424,11 @@ impl Config {
+@@ -3073,6 +3460,11 @@ impl Config {
              self.check_user_stats_integrity(stats)?;
          }
  
@@ -13944,7 +14181,7 @@ index c281178a0d4b847dbde378884a3974830a92303d..813935fb9f743f7a69e44fc980d733fc
          if self.config_type.is_local() {
              if self.local.is_empty() {
                  let err = Error::new(
-@@ -3089,16 +3445,18 @@ impl Config {
+@@ -3089,16 +3481,18 @@ impl Config {
  
              // Balancer related checks
              if let Some(rtt) = self.balancer.max_server_rtt
@@ -13971,7 +14208,7 @@ index c281178a0d4b847dbde378884a3974830a92303d..813935fb9f743f7a69e44fc980d733fc
          }
  
          if self.config_type.is_server() && self.server.is_empty() {
-@@ -3134,10 +3492,11 @@ impl Config {
+@@ -3134,10 +3528,11 @@ impl Config {
  
              // Plugin shouldn't be an empty string
              if let Some(plugin) = server.plugin()
@@ -13987,7 +14224,7 @@ index c281178a0d4b847dbde378884a3974830a92303d..813935fb9f743f7a69e44fc980d733fc
  
              // Server's domain name shouldn't be an empty string
              match server.addr() {
-@@ -3235,6 +3594,13 @@ impl fmt::Display for Config {
+@@ -3235,6 +3630,13 @@ impl fmt::Display for Config {
                  max_identities: stats.max_identities,
                  max_concurrent_clients: stats.max_concurrent_clients,
              }),
@@ -14001,7 +14238,7 @@ index c281178a0d4b847dbde378884a3974830a92303d..813935fb9f743f7a69e44fc980d733fc
              ..SSConfig::default()
          };
  
-@@ -3551,20 +3917,22 @@ impl fmt::Display for Config {
+@@ -3551,20 +3953,22 @@ impl fmt::Display for Config {
              }
  
              if jconf.method.is_none()
@@ -14027,15 +14264,15 @@ index c281178a0d4b847dbde378884a3974830a92303d..813935fb9f743f7a69e44fc980d733fc
 +                jconf.plugin = Some(p.plugin.clone());
 +                if let Some(ref o) = p.plugin_opts {
 +                    jconf.plugin_opts = Some(o.clone());
-                 }
++                }
 +                if !p.plugin_args.is_empty() {
 +                    jconf.plugin_args = Some(p.plugin_args.clone());
-+                }
+                 }
 +            }
          }
  
          if self.no_delay {
-@@ -3671,17 +4039,18 @@ impl fmt::Display for Config {
+@@ -3671,17 +4075,18 @@ impl fmt::Display for Config {
  /// It will return the original value if fails to read `${VAR_NAME}`.
  pub fn read_variable_field_value(value: &str) -> Cow<'_, str> {
      if let Some(left_over) = value.strip_prefix("${")
@@ -14063,7 +14300,7 @@ index c281178a0d4b847dbde378884a3974830a92303d..813935fb9f743f7a69e44fc980d733fc
  
      value.into()
  }
-@@ -3755,10 +4124,7 @@ mod user_stats_tests {
+@@ -3755,10 +4160,7 @@ mod user_stats_tests {
          assert_eq!(stats.max_request_bytes, USER_STATS_DEFAULT_MAX_REQUEST_BYTES);
          assert_eq!(stats.max_response_bytes, USER_STATS_DEFAULT_MAX_RESPONSE_BYTES);
          assert_eq!(stats.max_identities, USER_STATS_DEFAULT_MAX_IDENTITIES);
@@ -14075,7 +14312,45 @@ index c281178a0d4b847dbde378884a3974830a92303d..813935fb9f743f7a69e44fc980d733fc
  
          let serialized = config.to_string();
          let serialized_value: serde_json::Value = json5::from_str(&serialized).unwrap();
-@@ -3810,6 +4176,80 @@ mod user_stats_tests {
+@@ -3801,6 +4203,37 @@ mod user_stats_tests {
+         );
+     }
+ 
++    #[cfg(not(feature = "user-audit"))]
++    #[test]
++    fn configured_user_audit_is_rejected_during_load_and_integrity_without_feature() {
++        let source = r#"{
++            "user_audit": {
++                "ingest_socket_path": "/run/shadowsocks-audit/ingest.sock",
++                "auditd_user": "shadowsocks-audit"
++            }
++        }"#;
++        let error = Config::load_from_json_str(source, ConfigType::Server).unwrap_err();
++        assert_eq!(
++            error.desc,
++            "`user_audit` requires a binary built with the `user-audit` feature"
++        );
++
++        // Programmatic callers bypass the wire loader, so the same contract
++        // must be enforced by the explicit integrity check as well.
++        let mut config = Config::new(ConfigType::Server);
++        config.user_audit = Some(UserAuditConfig::new(
++            "/run/shadowsocks-audit/ingest.sock",
++            "shadowsocks-audit",
++        ));
++        let error = config
++            .check_integrity()
++            .expect_err("feature-off integrity check must reject user_audit");
++        assert_eq!(
++            error.desc,
++            "`user_audit` requires a binary built with the `user-audit` feature"
++        );
++    }
++
+     #[cfg(all(feature = "user-stats", unix))]
+     #[test]
+     fn valid_user_stats_configuration_passes_integrity_checks() {
+@@ -3810,19 +4243,121 @@ mod user_stats_tests {
          config.check_integrity().unwrap();
      }
  
@@ -14156,7 +14431,50 @@ index c281178a0d4b847dbde378884a3974830a92303d..813935fb9f743f7a69e44fc980d733fc
      #[cfg(all(feature = "user-stats", unix))]
      #[test]
      fn user_stats_rejects_builtin_and_standalone_manager_configurations() {
-@@ -3835,11 +4275,7 @@ mod user_stats_tests {
+         for mode in [ManagerServerMode::Builtin, ManagerServerMode::Standalone] {
+-            let mut config = Config::new(ConfigType::Manager);
++            let mut config = Config::new(ConfigType::Server);
+             let mut manager = ManagerConfig::new(ManagerAddr::from(PathBuf::from("/tmp/ss-manager.sock")));
+             manager.server_mode = mode;
+             config.manager = Some(manager);
+             config.user_stats = Some(UserStatsConfig::new("node-a", "/tmp/user-stats.sock"));
+ 
+             let error = config.check_integrity().unwrap_err();
+-            assert_eq!(error.desc, "`user_stats` is only supported by server configurations");
++            assert_eq!(error.desc, "`user_stats` is incompatible with manager mode");
++        }
++    }
++
++    #[cfg(all(feature = "user-audit", target_os = "linux"))]
++    #[test]
++    fn user_audit_rejects_builtin_and_standalone_manager_configurations() {
++        for mode in [ManagerServerMode::Builtin, ManagerServerMode::Standalone] {
++            let mut config = Config::new(ConfigType::Server);
++            let mut manager = ManagerConfig::new(ManagerAddr::from(PathBuf::from("/tmp/ss-manager.sock")));
++            manager.server_mode = mode;
++            config.manager = Some(manager);
++            config.user_audit = Some(UserAuditConfig::new("/run/shadowsocks-audit/ingest.sock", "root"));
++
++            let error = config.check_integrity().unwrap_err();
++            assert_eq!(error.desc, "`user_audit` is incompatible with manager mode");
+         }
++
++        let source = serde_json::json!({
++            "manager_address": "/tmp/ss-manager.sock",
++            "user_audit": {
++                "ingest_socket_path": "/run/shadowsocks-audit/ingest.sock",
++                "auditd_user": "root",
++            },
++        });
++        let config = Config::load_from_json_str(&source.to_string(), ConfigType::Server).unwrap();
++        assert_eq!(
++            config.check_integrity().unwrap_err().desc,
++            "`user_audit` is incompatible with manager mode"
++        );
+     }
+ 
+     #[cfg(all(feature = "user-stats", unix))]
+@@ -3835,11 +4370,7 @@ mod user_stats_tests {
          duplicate_servers["servers"]
              .as_array_mut()
              .unwrap()
@@ -14169,7 +14487,7 @@ index c281178a0d4b847dbde378884a3974830a92303d..813935fb9f743f7a69e44fc980d733fc
          let config = Config::load_from_json_str(&duplicate_servers.to_string(), ConfigType::Server).unwrap();
          assert_eq!(config.check_integrity().unwrap_err().desc, "duplicate server `id`");
  
-@@ -3858,10 +4294,7 @@ mod user_stats_tests {
+@@ -3858,10 +4389,7 @@ mod user_stats_tests {
              )],
          });
          let error = Config::load_from_json_str(&duplicate_users.to_string(), ConfigType::Server).unwrap_err();
@@ -14181,7 +14499,7 @@ index c281178a0d4b847dbde378884a3974830a92303d..813935fb9f743f7a69e44fc980d733fc
          assert!(error.detail.is_none());
  
          let duplicate_password = random_psk();
-@@ -3882,8 +4315,7 @@ mod user_stats_tests {
+@@ -3882,8 +4410,7 @@ mod user_stats_tests {
          let error = Config::load_from_json_str(&duplicate_passwords.to_string(), ConfigType::Server).unwrap_err();
          assert_eq!(error.desc, "duplicate user password in one server");
  
@@ -14191,7 +14509,7 @@ index c281178a0d4b847dbde378884a3974830a92303d..813935fb9f743f7a69e44fc980d733fc
          let duplicate_password = random_psk();
          let mut manager = ServerUserManager::new();
          manager.add_user(ServerUser::with_encoded_key("user-a", &duplicate_password).unwrap());
-@@ -3951,8 +4383,7 @@ mod user_stats_tests {
+@@ -3951,8 +4478,7 @@ mod user_stats_tests {
              "用户",
          ] {
              let mut wire = wire_config(&directory.path().join("user-stats.sock"));
@@ -14201,7 +14519,7 @@ index c281178a0d4b847dbde378884a3974830a92303d..813935fb9f743f7a69e44fc980d733fc
              let config = Config::load_from_json_str(&wire.to_string(), ConfigType::Server).unwrap();
              assert_eq!(
                  config.check_integrity().unwrap_err().desc,
-@@ -3961,8 +4392,7 @@ mod user_stats_tests {
+@@ -3961,8 +4487,7 @@ mod user_stats_tests {
          }
  
          let mut wire = wire_config(&directory.path().join("user-stats.sock"));
@@ -14211,7 +14529,7 @@ index c281178a0d4b847dbde378884a3974830a92303d..813935fb9f743f7a69e44fc980d733fc
          let config = Config::load_from_json_str(&wire.to_string(), ConfigType::Server).unwrap();
          assert_eq!(
              config.check_integrity().unwrap_err().desc,
-@@ -3970,14 +4400,12 @@ mod user_stats_tests {
+@@ -3970,14 +4495,12 @@ mod user_stats_tests {
          );
  
          let mut wire = wire_config(&directory.path().join("user-stats.sock"));
@@ -14228,7 +14546,7 @@ index c281178a0d4b847dbde378884a3974830a92303d..813935fb9f743f7a69e44fc980d733fc
          let config = Config::load_from_json_str(&wire.to_string(), ConfigType::Server).unwrap();
          assert_eq!(
              config.check_integrity().unwrap_err().desc,
-@@ -3985,8 +4413,7 @@ mod user_stats_tests {
+@@ -3985,8 +4508,7 @@ mod user_stats_tests {
          );
  
          let mut wire = wire_config(&directory.path().join("user-stats.sock"));
@@ -14611,7 +14929,7 @@ index 549174e1c368c361827bd2745bd612b171e6292a..0eecb47f3a3df6d9be15bbfc99baddd4
      }
  }
 diff --git a/crates/shadowsocks-service/src/server/context.rs b/crates/shadowsocks-service/src/server/context.rs
-index e00e53ada441f5f3356b3b8c554c238909de817d..e0894e1dd28a665c0e11de2a48aabc08b5441251 100644
+index e00e53ada441f5f3356b3b8c554c238909de817d..52beb3db37879d5343d401e323e561c59d332b35 100644
 --- a/crates/shadowsocks-service/src/server/context.rs
 +++ b/crates/shadowsocks-service/src/server/context.rs
 @@ -1,6 +1,14 @@
@@ -14630,12 +14948,12 @@ index e00e53ada441f5f3356b3b8c554c238909de817d..e0894e1dd28a665c0e11de2a48aabc08
  
  use shadowsocks::{
      config::ServerType,
-@@ -9,11 +17,185 @@ use shadowsocks::{
+@@ -9,11 +17,194 @@ use shadowsocks::{
      net::ConnectOpts,
      relay::Address,
  };
 +use tokio::{
-+    sync::{Notify, oneshot},
++    sync::{Notify, oneshot, watch},
 +    task::{AbortHandle, JoinHandle},
 +};
  
@@ -14656,7 +14974,7 @@ index e00e53ada441f5f3356b3b8c554c238909de817d..e0894e1dd28a665c0e11de2a48aabc08
 +    next_task_id: AtomicU64,
 +    active_tasks: AtomicUsize,
 +    tasks: Mutex<HashMap<u64, AbortHandle>>,
-+    accept_notify: Notify,
++    accept_shutdown: watch::Sender<bool>,
 +    relay_notify: Notify,
 +}
 +
@@ -14688,7 +15006,7 @@ index e00e53ada441f5f3356b3b8c554c238909de817d..e0894e1dd28a665c0e11de2a48aabc08
 +                next_task_id: AtomicU64::new(0),
 +                active_tasks: AtomicUsize::new(0),
 +                tasks: Mutex::new(HashMap::new()),
-+                accept_notify: Notify::new(),
++                accept_shutdown: watch::channel(false).0,
 +                relay_notify: Notify::new(),
 +            }),
 +        }
@@ -14704,7 +15022,10 @@ index e00e53ada441f5f3356b3b8c554c238909de817d..e0894e1dd28a665c0e11de2a48aabc08
 +        // registration would still be invisible to the shutdown snapshot.
 +        let _tasks = self.inner.tasks.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 +        self.inner.accepting.store(false, Ordering::Release);
-+        self.inner.accept_notify.notify_waiters();
++        // The atomic remains the hot-path state check. The watch channel is a
++        // durable edge-triggered wakeup for listeners that already registered
++        // a receiver, so no per-iteration Notify waiter is allocated.
++        let _ = self.inner.accept_shutdown.send(true);
 +    }
 +
 +    pub(crate) fn is_accepting(&self) -> bool {
@@ -14712,13 +15033,19 @@ index e00e53ada441f5f3356b3b8c554c238909de817d..e0894e1dd28a665c0e11de2a48aabc08
 +    }
 +
 +    pub(crate) async fn wait_until_stopped(&self) {
-+        loop {
-+            let notified = self.inner.accept_notify.notified();
-+            if !self.is_accepting() {
++        let mut receiver = self.shutdown_receiver();
++        if !self.is_accepting() || *receiver.borrow() {
++            return;
++        }
++        while receiver.changed().await.is_ok() {
++            if !self.is_accepting() || *receiver.borrow() {
 +                return;
 +            }
-+            notified.await;
 +        }
++    }
++
++    pub(crate) fn shutdown_receiver(&self) -> watch::Receiver<bool> {
++        self.inner.accept_shutdown.subscribe()
 +    }
 +
 +    /// Spawn a relay and retain an abort handle for coordinated shutdown.
@@ -14816,7 +15143,7 @@ index e00e53ada441f5f3356b3b8c554c238909de817d..e0894e1dd28a665c0e11de2a48aabc08
  /// Server Service Context
  #[derive(Clone)]
  pub struct ServiceContext {
-@@ -26,8 +208,12 @@ pub struct ServiceContext {
+@@ -26,8 +217,12 @@ pub struct ServiceContext {
      // Flow statistic report
      flow_stat: Arc<FlowStat>,
  
@@ -14829,7 +15156,7 @@ index e00e53ada441f5f3356b3b8c554c238909de817d..e0894e1dd28a665c0e11de2a48aabc08
  }
  
  impl Default for ServiceContext {
-@@ -37,8 +223,11 @@ impl Default for ServiceContext {
+@@ -37,8 +232,11 @@ impl Default for ServiceContext {
              connect_opts: ConnectOpts::default(),
              acl: None,
              flow_stat: Arc::new(FlowStat::new()),
@@ -14841,7 +15168,7 @@ index e00e53ada441f5f3356b3b8c554c238909de817d..e0894e1dd28a665c0e11de2a48aabc08
          }
      }
  }
-@@ -89,6 +278,25 @@ impl ServiceContext {
+@@ -89,6 +287,25 @@ impl ServiceContext {
          self.flow_stat.as_ref()
      }
  
@@ -14853,8 +15180,8 @@ index e00e53ada441f5f3356b3b8c554c238909de817d..e0894e1dd28a665c0e11de2a48aabc08
 +        self.data_shutdown.is_accepting()
 +    }
 +
-+    pub(crate) async fn wait_data_shutdown(&self) {
-+        self.data_shutdown.wait_until_stopped().await
++    pub(crate) fn data_shutdown_receiver(&self) -> watch::Receiver<bool> {
++        self.data_shutdown.shutdown_receiver()
 +    }
 +
 +    pub(crate) fn spawn_relay<F>(&self, future: F) -> JoinHandle<()>
@@ -14867,7 +15194,7 @@ index e00e53ada441f5f3356b3b8c554c238909de817d..e0894e1dd28a665c0e11de2a48aabc08
      #[cfg(feature = "user-stats")]
      pub(crate) fn set_user_stats(&mut self, user_stats: Arc<ServerStatsHandle>) {
          self.user_stats = Some(user_stats);
-@@ -108,6 +316,26 @@ impl ServiceContext {
+@@ -108,6 +325,26 @@ impl ServiceContext {
          self.user_stats.is_some()
      }
  
@@ -14894,7 +15221,7 @@ index e00e53ada441f5f3356b3b8c554c238909de817d..e0894e1dd28a665c0e11de2a48aabc08
      /// Set customized DNS resolver
      pub fn set_dns_resolver(&mut self, resolver: Arc<DnsResolver>) {
          let context = Arc::get_mut(&mut self.context).expect("cannot set DNS resolver on a shared context");
-@@ -147,3 +375,66 @@ impl ServiceContext {
+@@ -147,3 +384,66 @@ impl ServiceContext {
          context.set_replay_attack_policy(security.replay_attack.policy);
      }
  }
@@ -14950,10 +15277,10 @@ index e00e53ada441f5f3356b3b8c554c238909de817d..e0894e1dd28a665c0e11de2a48aabc08
 +    #[tokio::test]
 +    async fn relay_completion_does_not_broadcast_accept_shutdown() {
 +        let shutdown = DataShutdownHandle::default();
-+        let accept_notified = shutdown.inner.accept_notify.notified();
++        let mut accept_shutdown = shutdown.shutdown_receiver();
 +        shutdown.spawn_relay(async {}).await.expect("relay task");
 +        assert!(
-+            tokio::time::timeout(std::time::Duration::from_millis(20), accept_notified)
++            tokio::time::timeout(std::time::Duration::from_millis(20), accept_shutdown.changed())
 +                .await
 +                .is_err(),
 +            "relay completion woke the listener shutdown channel"
@@ -14962,7 +15289,7 @@ index e00e53ada441f5f3356b3b8c554c238909de817d..e0894e1dd28a665c0e11de2a48aabc08
 +    }
 +}
 diff --git a/crates/shadowsocks-service/src/server/mod.rs b/crates/shadowsocks-service/src/server/mod.rs
-index a2e23a55b4f50cc5d73d0cb15eabc717864133fd..dedd5c17cab89e4101f1e1c06cb05f6b5acc0b3d 100644
+index a2e23a55b4f50cc5d73d0cb15eabc717864133fd..e26b9f03007d901710ecf7cd1660e51afb43ff87 100644
 --- a/crates/shadowsocks-service/src/server/mod.rs
 +++ b/crates/shadowsocks-service/src/server/mod.rs
 @@ -1,6 +1,6 @@
@@ -15300,7 +15627,7 @@ index a2e23a55b4f50cc5d73d0cb15eabc717864133fd..dedd5c17cab89e4101f1e1c06cb05f6b
      let mut vfut = Vec::with_capacity(servers.len());
  
      for server in servers {
-@@ -273,12 +478,246 @@ pub async fn run(config: Config) -> io::Result<()> {
+@@ -273,12 +478,247 @@ pub async fn run(config: Config) -> io::Result<()> {
          vfut.push(exporter);
      }
  
@@ -15356,7 +15683,7 @@ index a2e23a55b4f50cc5d73d0cb15eabc717864133fd..dedd5c17cab89e4101f1e1c06cb05f6b
 +             queue_overflow_remaining={} encode_error_remaining={} permanent_nack_invalid_schema_remaining={} \
 +             permanent_nack_event_id_conflict_remaining={} permanent_nack_runtime_mismatch_remaining={} \
 +             contention_remaining={} invalid_ack={} encode_error_time_unknown={} diagnostic_time_unknown={} \
-+             udp_contention_time_unknown={} contention_saturated={} udp_window_poison_resets={} diagnostic_encode_errors={} \
++             udp_contention_time_unknown={} contention_saturated={} producer_gap_saturated={} udp_window_poison_resets={} diagnostic_encode_errors={} \
 +             diagnostic_permanent_nacks={} hello_nack_count={} hello_nack_degraded={} \
 +             sequence_exhausted_events={} sequence_exhausted={}",
 +            pending.queue,
@@ -15373,6 +15700,7 @@ index a2e23a55b4f50cc5d73d0cb15eabc717864133fd..dedd5c17cab89e4101f1e1c06cb05f6b
 +            health.diagnostic_time_unknown,
 +            health.udp_contention_time_unknown,
 +            health.contention_saturated,
++            health.producer_gap_saturated,
 +            health.udp_window_poison_resets,
 +            health.diagnostic_encode_errors,
 +            health.diagnostic_permanent_nacks,
@@ -15550,7 +15878,7 @@ index a2e23a55b4f50cc5d73d0cb15eabc717864133fd..dedd5c17cab89e4101f1e1c06cb05f6b
  }
  
  #[cfg(test)]
-@@ -302,10 +741,40 @@ mod tests {
+@@ -302,10 +742,40 @@ mod tests {
          assert_eq!(error.to_string(), "user statistics exporter stopped");
      }
  
@@ -15787,7 +16115,7 @@ index 5da6bfb244dafca6619ebf43daf40590cf1d682f..6e236a1912c12fd8d8cc51e8493fd822
      }
  }
 diff --git a/crates/shadowsocks-service/src/server/tcprelay.rs b/crates/shadowsocks-service/src/server/tcprelay.rs
-index 94e2768a80505279b6e5df01333569c9df9faf75..4e91967d0a4ec491610e195ede4223de318f51d4 100644
+index 94e2768a80505279b6e5df01333569c9df9faf75..5eac6344beb498167fad2a9aa50308d786002f21 100644
 --- a/crates/shadowsocks-service/src/server/tcprelay.rs
 +++ b/crates/shadowsocks-service/src/server/tcprelay.rs
 @@ -35,6 +35,8 @@ use tokio::io::ReadBuf;
@@ -15799,7 +16127,7 @@ index 94e2768a80505279b6e5df01333569c9df9faf75..4e91967d0a4ec491610e195ede4223de
  #[cfg(feature = "user-stats")]
  use super::user_stats::UserTrafficCounters;
  
-@@ -73,20 +75,32 @@ impl TcpServer {
+@@ -73,20 +75,33 @@ impl TcpServer {
  
      /// Start server's accept loop
      pub async fn run(self) -> io::Result<()> {
@@ -15821,6 +16149,7 @@ index 94e2768a80505279b6e5df01333569c9df9faf75..4e91967d0a4ec491610e195ede4223de
 +            ),
 +        }
  
++        let mut shutdown_rx = self.context.data_shutdown_receiver();
          loop {
 +            if !self.context.data_accepting() {
 +                return Ok(());
@@ -15835,14 +16164,14 @@ index 94e2768a80505279b6e5df01333569c9df9faf75..4e91967d0a4ec491610e195ede4223de
 +            let accept_fut = self.listener.accept_map(|s| MonProxyStream::from_stream(s, flow_stat));
 +            tokio::pin!(accept_fut);
 +            let accepted = tokio::select! {
-+                _ = self.context.wait_data_shutdown() => return Ok(()),
++                _ = shutdown_rx.changed() => return Ok(()),
 +                result = &mut accept_fut => result,
 +            };
 +            let (local_stream, peer_addr) = match accepted {
                  Ok(s) => s,
                  Err(err) => {
                      error!("tcp server accept failed with error: {}", err);
-@@ -108,7 +122,7 @@ impl TcpServer {
+@@ -108,7 +123,7 @@ impl TcpServer {
                  timeout: self.svr_cfg.timeout(),
              };
  
@@ -15851,7 +16180,7 @@ index 94e2768a80505279b6e5df01333569c9df9faf75..4e91967d0a4ec491610e195ede4223de
                  if let Err(err) = client.serve().await {
                      debug!("tcp server stream aborted with error: {}", err);
                  }
-@@ -147,15 +161,40 @@ struct TcpTrafficStream<S> {
+@@ -147,15 +162,40 @@ struct TcpTrafficStream<S> {
      inner: S,
      counters: Arc<UserTrafficCounters>,
      direction: TcpTrafficDirection,
@@ -15892,7 +16221,7 @@ index 94e2768a80505279b6e5df01333569c9df9faf75..4e91967d0a4ec491610e195ede4223de
          }
      }
  
-@@ -165,6 +204,17 @@ impl<S> TcpTrafficStream<S> {
+@@ -165,6 +205,17 @@ impl<S> TcpTrafficStream<S> {
              TcpTrafficDirection::Downlink => self.counters.add_tcp_downlink(amount),
          }
      }
@@ -15910,7 +16239,7 @@ index 94e2768a80505279b6e5df01333569c9df9faf75..4e91967d0a4ec491610e195ede4223de
  }
  
  #[cfg(feature = "user-stats")]
-@@ -186,6 +236,8 @@ where
+@@ -186,6 +237,8 @@ where
          match Pin::new(&mut self.inner).poll_write(cx, buf) {
              Poll::Ready(Ok(amount)) => {
                  self.record_write(amount);
@@ -15919,7 +16248,7 @@ index 94e2768a80505279b6e5df01333569c9df9faf75..4e91967d0a4ec491610e195ede4223de
                  Poll::Ready(Ok(amount))
              }
              result => result,
-@@ -212,6 +264,8 @@ where
+@@ -212,6 +265,8 @@ where
          match Pin::new(&mut self.inner).poll_write_vectored(cx, bufs) {
              Poll::Ready(Ok(amount)) => {
                  self.record_write(amount);
@@ -15928,7 +16257,7 @@ index 94e2768a80505279b6e5df01333569c9df9faf75..4e91967d0a4ec491610e195ede4223de
                  Poll::Ready(Ok(amount))
              }
              result => result,
-@@ -396,10 +450,45 @@ impl TcpServerClient {
+@@ -396,10 +451,45 @@ impl TcpServerClient {
              }
          };
  
@@ -15974,8 +16303,97 @@ index 94e2768a80505279b6e5df01333569c9df9faf75..4e91967d0a4ec491610e195ede4223de
              let mut remote_stream = TcpTrafficStream::new(&mut remote_stream, counters, TcpTrafficDirection::Uplink);
              return relay_connected_streams(
                  self.method,
+@@ -496,4 +586,88 @@ mod tests {
+         assert_eq!(user.tcp_uplink_bytes, 6);
+         assert_eq!(user.tcp_downlink_bytes, u64::try_from(vectored_written).unwrap());
+     }
++
++    #[cfg(feature = "user-audit")]
++    #[tokio::test]
++    async fn relay_wrappers_feed_one_shared_tcp_audit_tracker() {
++        use super::super::user_audit::{
++            AuditEmitter, AuditEventDraft, AuditIdentityHandle, AuditIdentityMetadata, AuditRuntimeMetadata,
++            AuditServerMetadata, AuditTargetDraft, TcpSuccessTracker,
++        };
++        use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
++
++        let (registry, _server, counters) = registered_counters();
++        let runtime = Arc::new(AuditRuntimeMetadata {
++            node_id: Arc::from("node-test"),
++            runtime_id: Arc::from("0123456789abcdef0123456789abcdef"),
++            runtime_started_at: std::time::Instant::now(),
++        });
++        let audit_config = crate::config::UserAuditConfig::new("/tmp/audit.sock", "auditd");
++        let emitter = AuditEmitter::new(runtime.clone(), &audit_config);
++        let identity = Arc::new(AuditIdentityHandle {
++            runtime,
++            server: Arc::new(AuditServerMetadata {
++                server_id: Arc::from("server"),
++                server_generation: 1,
++            }),
++            identity: Arc::new(AuditIdentityMetadata {
++                identity_name: Arc::from("user"),
++                identity_generation: 1,
++            }),
++        });
++        let target = AuditTargetDraft::ip_with_port("127.0.0.1".parse().unwrap(), 443, "192.0.2.1".parse().unwrap());
++        let tracker = TcpSuccessTracker::new(emitter.clone(), identity, target);
++
++        // Exercise the same two wrappers and direction assignments used by
++        // TcpServerClient::serve: client writes are uplink and remote writes
++        // are downlink. The duplex peers model the actual relay endpoints.
++        let (mut client_peer, client_stream) = duplex(256);
++        let (mut remote_peer, remote_stream) = duplex(256);
++        let relay = tokio::spawn(async move {
++            let mut client = TcpTrafficStream::with_tracker(
++                client_stream,
++                counters.clone(),
++                TcpTrafficDirection::Downlink,
++                Some(tracker.clone()),
++            );
++            let mut remote =
++                TcpTrafficStream::with_tracker(remote_stream, counters, TcpTrafficDirection::Uplink, Some(tracker));
++            let target = Address::SocketAddress("192.0.2.1:443".parse().unwrap());
++            let opts = ConnectOpts::default();
++            relay_connected_streams(
++                CipherKind::NONE,
++                "127.0.0.1:12345".parse().unwrap(),
++                &target,
++                &opts,
++                None,
++                &mut client,
++                &mut remote,
++            )
++            .await
++        });
++
++        client_peer.write_all(b"uplink-data").await.unwrap();
++        let mut uplink_seen = vec![0u8; 11];
++        remote_peer.read_exact(&mut uplink_seen).await.unwrap();
++        assert_eq!(&uplink_seen, b"uplink-data");
++
++        remote_peer.write_all(b"downlink-data").await.unwrap();
++        let mut downlink_seen = vec![0u8; 13];
++        client_peer.read_exact(&mut downlink_seen).await.unwrap();
++        assert_eq!(&downlink_seen, b"downlink-data");
++
++        // Closing both peers lets copy_bidirectional finish after both EOFs.
++        drop(client_peer);
++        drop(remote_peer);
++        relay.await.unwrap().unwrap();
++
++        let draft = emitter.queue.pop().expect("bidirectional writes emit access event");
++        assert!(matches!(draft, AuditEventDraft::Tcp { .. }));
++        assert!(emitter.queue.is_empty(), "tracker emits at most one access event");
++
++        let snapshot = registry.snapshot();
++        let user = &snapshot.servers[0].users[0];
++        assert_eq!(user.tcp_uplink_bytes, 11);
++        assert_eq!(user.tcp_downlink_bytes, 13);
++    }
+ }
 diff --git a/crates/shadowsocks-service/src/server/udprelay.rs b/crates/shadowsocks-service/src/server/udprelay.rs
-index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..19a485fa2c7cb857cbabf9971bedfde531f2580a 100644
+index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..b93b012685dd6612b8d78887119f576c56aa67af 100644
 --- a/crates/shadowsocks-service/src/server/udprelay.rs
 +++ b/crates/shadowsocks-service/src/server/udprelay.rs
 @@ -33,6 +33,9 @@ use crate::net::{
@@ -16025,7 +16443,7 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..19a485fa2c7cb857cbabf9971bedfde5
  
          let mut cleanup_timer = time::interval(self.time_to_live);
  
-@@ -280,16 +293,22 @@ impl UdpServer {
+@@ -280,16 +293,23 @@ impl UdpServer {
                  let otx = otx.clone();
                  let listener = self.listener.clone();
                  let context = self.context.clone();
@@ -16034,6 +16452,7 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..19a485fa2c7cb857cbabf9971bedfde5
 -                other_receivers.push(tokio::spawn(async move {
 +                other_receivers.push(context.spawn_relay(async move {
                      let mut buffer = [0u8; MAXIMUM_UDP_PAYLOAD_SIZE];
++                    let mut shutdown_rx = task_context.data_shutdown_receiver();
  
                      loop {
 -                        let (n, peer_addr, target_addr, control) =
@@ -16042,7 +16461,7 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..19a485fa2c7cb857cbabf9971bedfde5
 -                                None => continue,
 -                            };
 +                        let received = tokio::select! {
-+                            _ = task_context.wait_data_shutdown() => break,
++                            _ = shutdown_rx.changed() => break,
 +                            packet = Self::recv_one_packet(&task_context, &listener, &mut buffer) => packet,
 +                        };
 +                        let Some((n, peer_addr, target_addr, control)) = received else {
@@ -16054,7 +16473,7 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..19a485fa2c7cb857cbabf9971bedfde5
  
                          if (otx
                              .send((peer_addr, target_addr, control, Bytes::copy_from_slice(&buffer[..n])))
-@@ -323,13 +342,10 @@ impl UdpServer {
+@@ -323,32 +343,38 @@ impl UdpServer {
          type QueuedDataType = (SocketAddr, Address, Option<UdpSocketControlData>, Bytes);
  
          #[inline]
@@ -16070,11 +16489,13 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..19a485fa2c7cb857cbabf9971bedfde5
              }
          }
  
-@@ -338,17 +354,25 @@ impl UdpServer {
+         let mut buffer = [0u8; MAXIMUM_UDP_PAYLOAD_SIZE];
+         // Make a clone to self.listener to avoid borrowing self
          let listener = self.listener.clone();
++        let mut shutdown_rx = self.context.data_shutdown_receiver();
          loop {
              tokio::select! {
-+                _ = self.context.wait_data_shutdown() => {
++                _ = shutdown_rx.changed() => {
 +                    break Ok(());
 +                }
                  _ = cleanup_timer.tick() => {
@@ -16097,7 +16518,7 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..19a485fa2c7cb857cbabf9971bedfde5
                      let (n, peer_addr, target_addr, control) = match recv_result {
                          Some(s) => s,
                          None => continue,
-@@ -361,7 +385,13 @@ impl UdpServer {
+@@ -361,7 +387,13 @@ impl UdpServer {
                  }
  
                  recv_result = multicore_recv(&mut orx_opt), if orx_opt.is_some() => {
@@ -16112,7 +16533,7 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..19a485fa2c7cb857cbabf9971bedfde5
                      let data_len = data.len();
                      if let Err(err) = self.send_packet(&listener, peer_addr, target_addr, control, data).await {
                          self.log_packet_relay_error(peer_addr, data_len, &err);
-@@ -394,7 +424,7 @@ impl UdpServer {
+@@ -394,7 +426,7 @@ impl UdpServer {
          l: &MonProxySocket<InboundUdpSocket>,
          buffer: &mut [u8],
      ) -> Option<(usize, SocketAddr, Address, Option<UdpSocketControlData>)> {
@@ -16121,7 +16542,7 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..19a485fa2c7cb857cbabf9971bedfde5
              Ok(s) => s,
              Err(err) => {
                  error!("udp server recv packet failed. {}", err);
-@@ -402,14 +432,11 @@ impl UdpServer {
+@@ -402,14 +434,11 @@ impl UdpServer {
              }
          };
  
@@ -16141,7 +16562,7 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..19a485fa2c7cb857cbabf9971bedfde5
              return None;
          }
  
-@@ -570,6 +597,8 @@ struct ClientSessionContext {
+@@ -570,6 +599,8 @@ struct ClientSessionContext {
      client_session_id: u64,
      packet_window_filter: PacketWindowFilter,
      client_user: Option<Arc<ServerUser>>,
@@ -16150,7 +16571,7 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..19a485fa2c7cb857cbabf9971bedfde5
      #[cfg(feature = "user-stats")]
      session_key: SessionKey,
      #[cfg(feature = "user-stats")]
-@@ -598,6 +627,16 @@ impl ClientSessionContext {
+@@ -598,6 +629,16 @@ impl ClientSessionContext {
              None
          };
  
@@ -16167,7 +16588,7 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..19a485fa2c7cb857cbabf9971bedfde5
          Ok(Self {
              client_session_id: control.client_session_id,
              packet_window_filter: PacketWindowFilter::new(),
-@@ -605,6 +644,8 @@ impl ClientSessionContext {
+@@ -605,6 +646,8 @@ impl ClientSessionContext {
              client_user: None,
              #[cfg(feature = "user-stats")]
              client_user: if user_stats_enabled { control.user.clone() } else { None },
@@ -16176,7 +16597,7 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..19a485fa2c7cb857cbabf9971bedfde5
              #[cfg(feature = "user-stats")]
              session_key: SessionKey::from_control(control, user_stats_enabled)?,
              #[cfg(feature = "user-stats")]
-@@ -642,6 +683,8 @@ struct UdpAssociationContext {
+@@ -642,6 +685,8 @@ struct UdpAssociationContext {
      inbound: Arc<MonProxySocket<InboundUdpSocket>>,
      // AEAD 2022
      client_session: Option<ClientSessionContext>,
@@ -16185,20 +16606,23 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..19a485fa2c7cb857cbabf9971bedfde5
      server_session_id: u64,
      server_packet_id: u64,
      #[cfg(feature = "user-stats")]
-@@ -668,6 +711,12 @@ fn generate_server_session_id() -> u64 {
+@@ -668,6 +713,15 @@ fn generate_server_session_id() -> u64 {
      }
  }
  
 +#[cfg(feature = "user-audit")]
 +#[inline]
 +fn generate_association_id() -> [u8; 16] {
-+    CLIENT_SESSION_RNG.with(|rng| rng.borrow_mut().random())
++    // Association IDs are exposed in audit records and must not share the
++    // predictable stream used for protocol session IDs. `rand::random` uses
++    // the process thread RNG backed by the operating system CSPRNG.
++    rand::random()
 +}
 +
  impl UdpAssociationContext {
      fn create(
          context: Arc<ServiceContext>,
-@@ -682,6 +731,7 @@ impl UdpAssociationContext {
+@@ -682,6 +736,7 @@ impl UdpAssociationContext {
          // being OOM.
          let (sender, receiver) = mpsc::channel(UDP_ASSOCIATION_SEND_CHANNEL_SIZE);
  
@@ -16206,7 +16630,7 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..19a485fa2c7cb857cbabf9971bedfde5
          let mut assoc = Self {
              context,
              peer_addr,
-@@ -691,13 +741,15 @@ impl UdpAssociationContext {
+@@ -691,13 +746,15 @@ impl UdpAssociationContext {
              keepalive_flag: false,
              inbound,
              client_session,
@@ -16223,7 +16647,7 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..19a485fa2c7cb857cbabf9971bedfde5
  
          (handle, sender)
      }
-@@ -760,7 +812,11 @@ impl UdpAssociationContext {
+@@ -760,7 +817,11 @@ impl UdpAssociationContext {
                              #[cfg(all(feature = "aead-cipher-2022", feature = "user-stats"))]
                              Some(ref s) => NatKey::Session(s.session_key.clone()),
                              #[cfg(not(feature = "aead-cipher-2022"))]
@@ -16236,7 +16660,7 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..19a485fa2c7cb857cbabf9971bedfde5
                          };
  
                          if self.keepalive_tx.try_send(nat_key.clone()).is_err() {
-@@ -797,6 +853,9 @@ impl UdpAssociationContext {
+@@ -797,6 +858,9 @@ impl UdpAssociationContext {
          data: &[u8],
          control: &Option<UdpSocketControlData>,
      ) {
@@ -16246,7 +16670,7 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..19a485fa2c7cb857cbabf9971bedfde5
          #[cfg(not(feature = "user-stats"))]
          if let Some(ref mut session) = self.client_session
              && peer_addr != self.peer_addr
-@@ -873,7 +932,10 @@ impl UdpAssociationContext {
+@@ -873,7 +937,10 @@ impl UdpAssociationContext {
                      }
                  }
              }
@@ -16258,7 +16682,7 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..19a485fa2c7cb857cbabf9971bedfde5
  
              #[cfg(feature = "user-stats")]
              if session_context.user_stats_enabled && !session_context.matches_user(control.user.as_ref()) {
-@@ -912,41 +974,85 @@ impl UdpAssociationContext {
+@@ -912,41 +979,85 @@ impl UdpAssociationContext {
              }
          }
  
@@ -16363,7 +16787,7 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..19a485fa2c7cb857cbabf9971bedfde5
          #[cfg(feature = "user-stats")]
          let user_stats = match self.client_session.as_ref() {
              Some(session) => session.user_stats_counter()?,
-@@ -1012,7 +1118,10 @@ impl UdpAssociationContext {
+@@ -1012,7 +1123,10 @@ impl UdpAssociationContext {
                          data.len()
                      );
  
@@ -16375,7 +16799,7 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..19a485fa2c7cb857cbabf9971bedfde5
                      if user_stats.is_some() {
                          return Err(io::Error::from(io::ErrorKind::WriteZero));
                      }
-@@ -1023,7 +1132,7 @@ impl UdpAssociationContext {
+@@ -1023,7 +1137,7 @@ impl UdpAssociationContext {
                      counter.add_udp_uplink(n);
                  }
  
@@ -16384,7 +16808,7 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..19a485fa2c7cb857cbabf9971bedfde5
              }
              Err(err) => Err(err),
          }
-@@ -1041,9 +1150,10 @@ impl UdpAssociationContext {
+@@ -1041,9 +1155,10 @@ impl UdpAssociationContext {
          // But for some implementations, they may expect the target address to be IPv4, because
          // the peer address is IPv4 when calling `sendto`.
          if let Address::SocketAddress(SocketAddr::V6(ref v6)) = addr
@@ -16398,7 +16822,7 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..19a485fa2c7cb857cbabf9971bedfde5
  
          match self.client_session {
              None => {
-@@ -1340,4 +1450,39 @@ mod tests {
+@@ -1340,4 +1455,83 @@ mod tests {
              );
          }
      }
@@ -16437,13 +16861,57 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..19a485fa2c7cb857cbabf9971bedfde5
 +        assert_eq!(received.2, target);
 +        assert!(received.3.is_none());
 +    }
++}
++
++// Keep the zero-payload receive contract exercised in both feature-off and
++// feature-on builds. The broader session/statistics tests above intentionally
++// require `user-stats`, but an authenticated empty UDP payload must not change
++// behavior merely because the audit overlay is compiled in.
++#[cfg(test)]
++mod empty_udp_payload_tests {
++    use super::*;
++
++    #[tokio::test]
++    async fn zero_length_udp_payload_is_forwarded_equally_without_audit() {
++        let context = Arc::new(ServiceContext::new());
++        let config = ServerConfig::new(("127.0.0.1", 0), "", shadowsocks::crypto::CipherKind::NONE).unwrap();
++        let server = UdpServer::new(
++            context.clone(),
++            config,
++            Some(Duration::from_secs(1)),
++            Some(4),
++            AcceptOpts::default(),
++        )
++        .await
++        .unwrap();
++        let server_addr = server.local_addr().unwrap();
++
++        let sender = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
++        let target = Address::SocketAddress("127.0.0.1:53".parse().unwrap());
++        let mut packet = bytes::BytesMut::with_capacity(target.serialized_len());
++        target.write_to_buf(&mut packet);
++        sender.send_to(&packet, server_addr).await.unwrap();
++
++        let mut buffer = [0u8; MAXIMUM_UDP_PAYLOAD_SIZE];
++        let received = tokio::time::timeout(
++            Duration::from_secs(1),
++            UdpServer::recv_one_packet(&context, &server.listener, &mut buffer),
++        )
++        .await
++        .expect("zero-length datagram receive timed out");
++
++        let received = received.expect("a valid zero-length datagram was dropped");
++        assert_eq!(received.0, 0);
++        assert_eq!(received.2, target);
++        assert!(received.3.is_none());
++    }
  }
 diff --git a/crates/shadowsocks-service/src/server/user_audit.rs b/crates/shadowsocks-service/src/server/user_audit.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..ac97f3d4435bc6cf9c45b2cb7f84a48312502f7b
+index 0000000000000000000000000000000000000000..5afb31f3266af28d1c9c2c6bd9753e384b9ac827
 --- /dev/null
 +++ b/crates/shadowsocks-service/src/server/user_audit.rs
-@@ -0,0 +1,3714 @@
+@@ -0,0 +1,3792 @@
 +//! Non-blocking successful-target access auditing for the server data path.
 +//!
 +//! The relay only constructs a small draft and performs bounded atomic/cache
@@ -16451,6 +16919,7 @@ index 0000000000000000000000000000000000000000..ac97f3d4435bc6cf9c45b2cb7f84a483
 +//! supervisor task below.
 +
 +use std::{
++    borrow::Cow,
 +    collections::{HashMap, VecDeque},
 +    fmt, io,
 +    net::IpAddr,
@@ -16461,6 +16930,9 @@ index 0000000000000000000000000000000000000000..ac97f3d4435bc6cf9c45b2cb7f84a483
 +    },
 +    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 +};
++
++#[cfg(test)]
++use std::sync::OnceLock;
 +
 +#[cfg(target_os = "linux")]
 +use std::{
@@ -16481,22 +16953,37 @@ index 0000000000000000000000000000000000000000..ac97f3d4435bc6cf9c45b2cb7f84a483
 +};
 +
 +use shadowsocks_audit_protocol::{
-+    AccessEvent, AuditRecord, DecimalU64, EventNackCode, Hello, MAX_AUDIT_PAYLOAD_BYTES, PermanentNackCode,
-+    ProducerGap, ProducerGapReason, SuccessEvidence, Target, TargetKind, Transport, UdpWindowContention,
-+    normalize_domain, parse_canonical_record, parse_event_ack, parse_event_nack, parse_hello_ack, parse_hello_nack,
-+    serialize_canonical, serialize_canonical_record,
++    ACK_TIMEOUT_SECONDS, AccessEvent, AuditRecord, DecimalU64, EventNackCode, Hello, MAX_AUDIT_PAYLOAD_BYTES,
++    MAX_IN_FLIGHT, PRODUCER_DIAGNOSTIC_INTERVAL_SECONDS, PermanentNackCode, ProducerGap, ProducerGapReason,
++    SuccessEvidence, Target, TargetKind, Transport, UDP_COOLDOWN_SECONDS, UdpWindowContention, normalize_domain,
++    parse_canonical_record, parse_event_ack, parse_event_nack, parse_hello_ack, parse_hello_nack, serialize_canonical,
++    serialize_canonical_record,
 +};
 +
 +use crate::config::{USER_AUDIT_UDP_WINDOW_SHARDS, UserAuditConfig};
 +
 +const CLOSED_BIT: u64 = 1u64 << 63;
 +const ACTIVE_MASK: u64 = CLOSED_BIT - 1;
-+const UDP_COOLDOWN: Duration = Duration::from_secs(60);
-+const MAX_IN_FLIGHT: usize = 256;
-+const ACK_TIMEOUT: Duration = Duration::from_secs(3);
++const UDP_COOLDOWN: Duration = Duration::from_secs(UDP_COOLDOWN_SECONDS);
++const ACK_TIMEOUT: Duration = Duration::from_secs(ACK_TIMEOUT_SECONDS);
++const DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(PRODUCER_DIAGNOSTIC_INTERVAL_SECONDS);
 +const INITIAL_RECONNECT_BACKOFF: Duration = Duration::from_millis(100);
 +const MAX_RECONNECT_BACKOFF: Duration = Duration::from_secs(5);
 +const MAX_RECONNECT_JITTER_PERCENT: u32 = 20;
++
++// Test-only rendezvous for the lost-wakeup regression. It is intentionally
++// outside the production state machine: the hook lets the test pause exactly
++// after the idle waiter is registered, then enqueue an event without sending a
++// notify permit.
++#[cfg(test)]
++static IDLE_SESSION_WAIT_HOOK: OnceLock<Notify> = OnceLock::new();
++
++#[cfg(test)]
++fn notify_idle_session_wait_hook() {
++    if let Some(notify) = IDLE_SESSION_WAIT_HOOK.get() {
++        notify.notify_one();
++    }
++}
 +
 +/// Marker carried by the `io::Error` returned for a non-retryable hello NACK.
 +/// The wire contract gives this class a fixed five-second self-heal interval,
@@ -17233,7 +17720,7 @@ index 0000000000000000000000000000000000000000..ac97f3d4435bc6cf9c45b2cb7f84a483
 +    server_id: Arc<str>,
 +    association_id: [u8; 16],
 +    host: Arc<str>,
-+    kind: Arc<str>,
++    kind: Cow<'static, str>,
 +    port: u16,
 +}
 +
@@ -17243,7 +17730,11 @@ index 0000000000000000000000000000000000000000..ac97f3d4435bc6cf9c45b2cb7f84a483
 +            server_id: server_id.clone(),
 +            association_id,
 +            host: Arc::from(host),
-+            kind: Arc::from(kind),
++            kind: match kind {
++                "ip" => Cow::Borrowed("ip"),
++                "domain" => Cow::Borrowed("domain"),
++                other => Cow::Owned(other.to_owned()),
++            },
 +            port,
 +        }
 +    }
@@ -17592,14 +18083,12 @@ index 0000000000000000000000000000000000000000..ac97f3d4435bc6cf9c45b2cb7f84a483
 +        Ok(true)
 +    }
 +
-+    /// Fast-path UDP cooldown check used by the relay.  The shard lock is
-+    /// attempted before any owned key or domain normalization is constructed,
-+    /// so a `WouldBlock` result immediately returns to the relay.  The raw
-+    /// spelling is looked up first, so a normal cooldown hit does not
-+    /// construct or normalize an `AuditTargetDraft`.  On a miss the caller's
-+    /// closure builds the complete target; the regular canonical lookup then
-+    /// guarantees that case/Unicode-equivalent domain spellings cannot bypass
-+    /// the window.
++    /// Fast-path UDP cooldown check used by the relay.  Domain normalization is
++    /// completed before entering the shard critical section, and this function
++    /// performs exactly one non-blocking lock attempt per successful send. The
++    /// raw spelling is still checked first, so a normal cooldown hit does not
++    /// construct an `AuditTargetDraft`; the canonical lookup prevents
++    /// case/Unicode-equivalent spellings from bypassing the window.
 +    /// `Some(target)` means the send is eligible and returns the target built
 +    /// for the event; `None` means the cooldown suppressed it. The closure is
 +    /// evaluated at most once and only after the cache decision.
@@ -17619,25 +18108,11 @@ index 0000000000000000000000000000000000000000..ac97f3d4435bc6cf9c45b2cb7f84a483
 +        if self.per_shard == 0 || self.per_association == 0 {
 +            return Err(());
 +        }
-+        // The raw alias is cheap to build and lets the common hit path avoid
-+        // domain normalization. No normalization or index rewrite occurs
-+        // while the first shard guard is held.
++        // Build both lookup spellings before the one lock attempt.  A failed
++        // normalization deliberately falls back to the raw spelling: the
++        // event builder retains the original host and the window still
++        // suppresses exact repeats.
 +        let raw_key = UdpWindowKey::from_parts(server_id, association_id, kind, host, port);
-+        let mut shard = self.lock_shard(&association_id)?;
-+        if let Some(&slot) = shard.by_raw_key.get(&raw_key) {
-+            if let Some(eligible) = Self::refresh_existing(&mut shard, slot, now)? {
-+                if !eligible {
-+                    return Ok(None);
-+                }
-+                drop(shard);
-+                return Ok(Some(build_target()));
-+            }
-+        }
-+        // A raw spelling miss still needs a canonical lookup so that domain
-+        // case/Unicode variants cannot bypass the cooldown. Drop the shard
-+        // before normalization, then reacquire and recheck both indexes to
-+        // cover a concurrent insertion during that interval.
-+        drop(shard);
 +        let canonical_host = if kind == "domain" {
 +            normalize_domain(host).unwrap_or_else(|_| host.to_owned())
 +        } else {
@@ -17793,7 +18268,7 @@ index 0000000000000000000000000000000000000000..ac97f3d4435bc6cf9c45b2cb7f84a483
 +        // becomes available; only a failed encode/permanent NACK schedules a
 +        // 60-second retry (via `request_diagnostic_retry`).
 +        if bucket == DiagnosticBucket::Contention {
-+            self.diagnostic_next_due[bucket.index()] = now + Duration::from_secs(60);
++            self.diagnostic_next_due[bucket.index()] = now + DIAGNOSTIC_INTERVAL;
 +        }
 +        self.diagnostic_cursor = (bucket.index() + 1) % DIAGNOSTIC_BUCKETS.len();
 +    }
@@ -17814,7 +18289,7 @@ index 0000000000000000000000000000000000000000..ac97f3d4435bc6cf9c45b2cb7f84a483
 +            })
 +            .map(|bucket| self.diagnostic_next_due[bucket.index()].saturating_duration_since(now))
 +            .min()
-+            .unwrap_or(Duration::from_secs(60))
++            .unwrap_or(DIAGNOSTIC_INTERVAL)
 +    }
 +}
 +
@@ -17863,6 +18338,10 @@ index 0000000000000000000000000000000000000000..ac97f3d4435bc6cf9c45b2cb7f84a483
 +    /// its representable maximum. The corresponding wire count then means "at
 +    /// least u64::MAX" rather than an exact value.
 +    pub contention_saturated: bool,
++    /// Sticky saturation across all producer gap buckets. A saturated count
++    /// means the wire diagnostic is a lower bound even after its snapshot is
++    /// taken and cleared.
++    pub producer_gap_saturated: bool,
 +    pub udp_window_poison_resets: u64,
 +    pub diagnostic_encode_errors: u64,
 +    pub diagnostic_permanent_nacks: u64,
@@ -17890,6 +18369,7 @@ index 0000000000000000000000000000000000000000..ac97f3d4435bc6cf9c45b2cb7f84a483
 +            || self.diagnostic_time_unknown != 0
 +            || self.udp_contention_time_unknown != 0
 +            || self.contention_saturated
++            || self.producer_gap_saturated
 +            || self.udp_window_poison_resets != 0
 +            || self.diagnostic_encode_errors != 0
 +            || self.diagnostic_permanent_nacks != 0
@@ -18156,6 +18636,9 @@ index 0000000000000000000000000000000000000000..ac97f3d4435bc6cf9c45b2cb7f84a483
 +            diagnostic_time_unknown: self.diagnostic_time_unknown.load(Ordering::Acquire),
 +            udp_contention_time_unknown: self.udp_contention_time_unknown.load(Ordering::Acquire),
 +            contention_saturated: self.contention.saturated(),
++            producer_gap_saturated: self.queue_overflow.saturated()
++                || self.encode_error.saturated()
++                || self.permanent_nack.iter().any(GapAccumulator::saturated),
 +            udp_window_poison_resets: self.udp_windows.poison_reset_count(),
 +            diagnostic_encode_errors: self.diagnostic_encode_errors.load(Ordering::Acquire),
 +            diagnostic_permanent_nacks: self.diagnostic_permanent_nacks.load(Ordering::Acquire),
@@ -18194,6 +18677,12 @@ index 0000000000000000000000000000000000000000..ac97f3d4435bc6cf9c45b2cb7f84a483
 +    /// after recovery while the sticky flag remains set until a valid hello
 +    /// ACK proves that the producer session has recovered.
 +    fn record_hello_nack(&self) {
++        // A NACK received while the process is already closing belongs to the
++        // bounded shutdown attempt, not to normal runtime health. Do not let
++        // a failing socket fabricate a growing sticky count during teardown.
++        if self.lifecycle_state.load(Ordering::Acquire) & CLOSED_BIT != 0 {
++            return;
++        }
 +        saturating_add_atomic(&self.hello_nack_count, 1);
 +        self.hello_nack_degraded.store(true, Ordering::Release);
 +    }
@@ -18357,14 +18846,7 @@ index 0000000000000000000000000000000000000000..ac97f3d4435bc6cf9c45b2cb7f84a483
 +    }
 +
 +    fn record_encode_error(&self, sequence: u64) {
-+        let timestamp = wall_now();
-+        if timestamp.is_none() {
-+            self.encode_error_time_unknown
-+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
-+                    Some(value.saturating_add(1))
-+                })
-+                .ok();
-+        }
++        let timestamp = self.gap_observation_time();
 +        if self.diagnostics_frozen.load(Ordering::Acquire) {
 +            // The observation already owns a guard, but the shutdown freeze
 +            // crossed before its event could be encoded.  It cannot be
@@ -18373,9 +18855,23 @@ index 0000000000000000000000000000000000000000..ac97f3d4435bc6cf9c45b2cb7f84a483
 +        } else {
 +            // `0` is an internal unknown-time marker only.  It is converted to
 +            // a valid reporting time before a diagnostic reaches the wire.
-+            self.encode_error.add(1, Some(sequence), timestamp.unwrap_or(0));
++            self.encode_error.add(1, Some(sequence), timestamp);
 +        }
 +        self.notify.notify_one();
++    }
++
++    fn gap_observation_time(&self) -> u64 {
++        self.gap_observation_time_from(wall_now())
++    }
++
++    fn gap_observation_time_from(&self, timestamp: Option<u64>) -> u64 {
++        match timestamp {
++            Some(value) => value,
++            None => {
++                saturating_add_atomic(&self.encode_error_time_unknown, 1);
++                0
++            }
++        }
 +    }
 +
 +    fn try_push(&self, draft: AuditEventDraft) {
@@ -18632,7 +19128,8 @@ index 0000000000000000000000000000000000000000..ac97f3d4435bc6cf9c45b2cb7f84a483
 +                } else {
 +                    // first/last_seen describe when this permanent rejection
 +                    // was observed, not when the original access occurred.
-+                    self.accumulator(bucket).add(1, Some(sequence), wall_now().unwrap_or(0));
++                    let observed_at = self.gap_observation_time();
++                    self.accumulator(bucket).add(1, Some(sequence), observed_at);
 +                }
 +            }
 +        }
@@ -18737,7 +19234,7 @@ index 0000000000000000000000000000000000000000..ac97f3d4435bc6cf9c45b2cb7f84a483
 +    for bucket in DIAGNOSTIC_BUCKETS {
 +        if retry_bits & bucket.bit() != 0 {
 +            state.diagnostic_next_due[bucket.index()] =
-+                state.diagnostic_next_due[bucket.index()].max(now + Duration::from_secs(60));
++                state.diagnostic_next_due[bucket.index()].max(now + DIAGNOSTIC_INTERVAL);
 +            retry_deadline_applied |= bucket.bit();
 +        }
 +    }
@@ -18761,7 +19258,7 @@ index 0000000000000000000000000000000000000000..ac97f3d4435bc6cf9c45b2cb7f84a483
 +            let bit = bucket.bit();
 +            if retry_bits & bit != 0 && retry_deadline_applied & bit == 0 {
 +                state.diagnostic_next_due[bucket.index()] =
-+                    state.diagnostic_next_due[bucket.index()].max(now + Duration::from_secs(60));
++                    state.diagnostic_next_due[bucket.index()].max(now + DIAGNOSTIC_INTERVAL);
 +                retry_deadline_applied |= bit;
 +            }
 +        }
@@ -18816,7 +19313,7 @@ index 0000000000000000000000000000000000000000..ac97f3d4435bc6cf9c45b2cb7f84a483
 +                    // in this pass before the atomic retry notification is
 +                    // consumed at the next pass.
 +                    state.diagnostic_next_due[bucket.index()] =
-+                        state.diagnostic_next_due[bucket.index()].max(now + Duration::from_secs(60));
++                        state.diagnostic_next_due[bucket.index()].max(now + DIAGNOSTIC_INTERVAL);
 +                    emitter.decrement_pending();
 +                }
 +            }
@@ -18837,7 +19334,8 @@ index 0000000000000000000000000000000000000000..ac97f3d4435bc6cf9c45b2cb7f84a483
 +                if emitter.diagnostics_frozen.load(Ordering::Acquire) {
 +                    emitter.record_shutdown_diagnostic_drop(1);
 +                } else {
-+                    emitter.encode_error.add(1, Some(sequence), wall_now().unwrap_or(0));
++                    let observed_at = emitter.gap_observation_time();
++                    emitter.encode_error.add(1, Some(sequence), observed_at);
 +                }
 +                emitter.decrement_pending();
 +                emitter.notify.notify_one();
@@ -18865,8 +19363,9 @@ index 0000000000000000000000000000000000000000..ac97f3d4435bc6cf9c45b2cb7f84a483
 +
 +async fn run_supervisor(emitter: Arc<AuditEmitter>) {
 +    let mut state = SupervisorState::new();
-+    let mut last_error_log = Instant::now() - Duration::from_secs(60);
-+    let mut last_hello_nack_log = Instant::now() - Duration::from_secs(60);
++    let now = Instant::now();
++    let mut last_error_log = now.checked_sub(DIAGNOSTIC_INTERVAL).unwrap_or(now);
++    let mut last_hello_nack_log = now.checked_sub(DIAGNOSTIC_INTERVAL).unwrap_or(now);
 +    loop {
 +        fill_pending(&emitter, &mut state);
 +        if supervisor_drained(&emitter, &state) {
@@ -18887,7 +19386,7 @@ index 0000000000000000000000000000000000000000..ac97f3d4435bc6cf9c45b2cb7f84a483
 +                    .next_diagnostic_wait(&emitter, Instant::now())
 +                    .max(Duration::from_millis(10))
 +            } else {
-+                Duration::from_secs(60)
++                DIAGNOSTIC_INTERVAL
 +            };
 +            tokio::select! {
 +                _ = notified => {},
@@ -18910,27 +19409,26 @@ index 0000000000000000000000000000000000000000..ac97f3d4435bc6cf9c45b2cb7f84a483
 +            // A non-retryable hello NACK is a configuration/identity problem
 +            // rather than a transient outage. Keep the producer alive, but
 +            // expose the sticky degraded state and rate-limit its warning.
-+            if last_hello_nack_log.elapsed() >= Duration::from_secs(60) {
++            if last_hello_nack_log.elapsed() >= DIAGNOSTIC_INTERVAL {
 +                log::warn!("user audit producer degraded after non-retryable hello NACK; retrying hello every 5s");
 +                last_hello_nack_log = Instant::now();
 +            }
-+        } else if last_error_log.elapsed() >= Duration::from_secs(60) {
++        } else if last_error_log.elapsed() >= DIAGNOSTIC_INTERVAL {
 +            // This includes the defensive unexpected-Ok path above, giving it
 +            // the same warning and reconnect behavior as an explicit error.
 +            log::warn!("user audit ingest session unavailable: {error}");
 +            last_error_log = Instant::now();
 +        }
 +
++        if emitter.lifecycle_state.load(Ordering::Acquire) & CLOSED_BIT != 0 {
++            // Shutdown has no retry budget. Any pending frame is retained in
++            // the bounded pending snapshot for final journald reporting, and
++            // the root launcher owns the remaining drain deadline.
++            break;
++        }
++
 +        let base = state.backoff;
 +        let delay = reconnect_delay_for_error(&error, base);
-+        if emitter.lifecycle_state.load(Ordering::Acquire) & CLOSED_BIT != 0 {
-+            // Preflight the lifecycle before sleeping. A close that happened
-+            // before waiter registration must not inherit a stale 5-second
-+            // outage delay, but a small retry delay avoids a shutdown spin.
-+            state.backoff = INITIAL_RECONNECT_BACKOFF;
-+            time::sleep(INITIAL_RECONNECT_BACKOFF).await;
-+            continue;
-+        }
 +        // Queue traffic must not bypass transport backoff. The dedicated
 +        // lifecycle Notify retains the close permit across frame-I/O races.
 +        let shutdown_notified = emitter.shutdown_notify.notified();
@@ -19114,6 +19612,8 @@ index 0000000000000000000000000000000000000000..ac97f3d4435bc6cf9c45b2cb7f84a483
 +        // the session-side half of the lost-wakeup contract: drain may consume
 +        // an older Notify permit while a frame is in progress.
 +        let notified = emitter.notify.notified();
++        #[cfg(test)]
++        notify_idle_session_wait_hook();
 +        if !emitter.queue.is_empty() || emitter.diagnostic_shutdown_requested.load(Ordering::Acquire) {
 +            continue;
 +        }
@@ -19125,7 +19625,7 @@ index 0000000000000000000000000000000000000000..ac97f3d4435bc6cf9c45b2cb7f84a483
 +                .next_diagnostic_wait(emitter, Instant::now())
 +                .max(Duration::from_millis(10))
 +        } else {
-+            Duration::from_secs(60)
++            DIAGNOSTIC_INTERVAL
 +        };
 +        tokio::select! {
 +            _ = notified => {},
@@ -19445,10 +19945,11 @@ index 0000000000000000000000000000000000000000..ac97f3d4435bc6cf9c45b2cb7f84a483
 +        let canonical = shard.by_key.keys().next().expect("canonical index key");
 +        let raw = shard.by_raw_key.keys().next().expect("raw index key");
 +        assert!(Arc::ptr_eq(&entry.key.host, &canonical.host));
-+        assert!(Arc::ptr_eq(&entry.key.kind, &canonical.kind));
 +        assert!(Arc::ptr_eq(&entry.raw_key.host, &raw.host));
-+        assert!(Arc::ptr_eq(&entry.raw_key.kind, &raw.kind));
-+        assert!(Arc::ptr_eq(&entry.key.kind, &entry.raw_key.kind));
++        assert_eq!(entry.key.kind, canonical.kind);
++        assert_eq!(entry.raw_key.kind, raw.kind);
++        assert!(matches!(entry.key.kind, Cow::Borrowed("domain")));
++        assert!(matches!(entry.raw_key.kind, Cow::Borrowed("domain")));
 +    }
 +
 +    #[test]
@@ -19641,7 +20142,7 @@ index 0000000000000000000000000000000000000000..ac97f3d4435bc6cf9c45b2cb7f84a483
 +        // collapse the computed wait to zero while they are empty.
 +        emitter.contention.add(1, None, 1);
 +        state.diagnostic_next_due[DiagnosticBucket::Contention.index()] =
-+            now.checked_add(Duration::from_secs(60)).unwrap_or(now);
++            now.checked_add(DIAGNOSTIC_INTERVAL).unwrap_or(now);
 +        let wait = state.next_diagnostic_wait(&emitter, now);
 +        assert!(wait >= Duration::from_secs(59));
 +    }
@@ -19755,6 +20256,16 @@ index 0000000000000000000000000000000000000000..ac97f3d4435bc6cf9c45b2cb7f84a483
 +    }
 +
 +    #[test]
++    fn gap_observation_time_marks_unknown_wall_clock() {
++        let config = UserAuditConfig::new("/tmp/audit.sock", test_auditd_user());
++        let emitter = AuditEmitter::new(runtime(), &config);
++        assert_eq!(emitter.gap_observation_time_from(Some(42)), 42);
++        assert_eq!(emitter.encode_error_time_unknown.load(Ordering::Acquire), 0);
++        assert_eq!(emitter.gap_observation_time_from(None), 0);
++        assert_eq!(emitter.encode_error_time_unknown.load(Ordering::Acquire), 1);
++    }
++
++    #[test]
 +    fn contention_saturation_is_sticky_degraded_health() {
 +        let config = UserAuditConfig::new("/tmp/audit.sock", test_auditd_user());
 +        let emitter = AuditEmitter::new(runtime(), &config);
@@ -19763,6 +20274,20 @@ index 0000000000000000000000000000000000000000..ac97f3d4435bc6cf9c45b2cb7f84a483
 +        let _ = emitter.contention.take();
 +        assert!(emitter.health_snapshot().contention_saturated);
 +        assert!(emitter.health_snapshot().has_issue());
++    }
++
++    #[test]
++    fn producer_gap_saturation_is_aggregate_and_sticky_after_take() {
++        let config = UserAuditConfig::new("/tmp/audit.sock", test_auditd_user());
++        let emitter = AuditEmitter::new(runtime(), &config);
++        emitter.queue_overflow.add(u64::MAX, Some(1), 1);
++        let saturated = emitter.health_snapshot();
++        assert!(saturated.producer_gap_saturated);
++        assert!(saturated.has_issue());
++        let _ = emitter.queue_overflow.take();
++        let after_take = emitter.health_snapshot();
++        assert!(after_take.producer_gap_saturated);
++        assert!(after_take.has_issue());
 +    }
 +
 +    #[test]
@@ -19923,6 +20448,24 @@ index 0000000000000000000000000000000000000000..ac97f3d4435bc6cf9c45b2cb7f84a483
 +
 +    #[cfg(unix)]
 +    #[tokio::test]
++    async fn supervisor_stops_after_closed_session_error_without_retry_storm() {
++        let directory = tempdir().expect("temporary directory");
++        let socket_path = directory.path().join("missing-ingest.sock");
++        let config = UserAuditConfig::new(&socket_path, test_auditd_user());
++        let emitter = AuditEmitter::new(runtime(), &config);
++        emitter.try_push(tcp_draft(&emitter, 41));
++        let supervisor = emitter.spawn_supervisor();
++        emitter.close_emitter();
++
++        tokio::time::timeout(Duration::from_secs(1), supervisor)
++            .await
++            .expect("closed supervisor kept retrying")
++            .expect("supervisor task failed");
++        assert_eq!(emitter.health_snapshot().hello_nack_count, 0);
++    }
++
++    #[cfg(unix)]
++    #[tokio::test]
 +    async fn shutdown_flushes_final_producer_gap_and_access_queue() {
 +        let directory = tempdir().expect("temporary directory");
 +        let socket_path = directory.path().join("ingest.sock");
@@ -19990,6 +20533,7 @@ index 0000000000000000000000000000000000000000..ac97f3d4435bc6cf9c45b2cb7f84a483
 +        let directory = tempdir().expect("temporary directory");
 +        let socket_path = directory.path().join("ingest.sock");
 +        let listener = UnixListener::bind(&socket_path).expect("listener");
++        let idle_wait_hook = IDLE_SESSION_WAIT_HOOK.get_or_init(Notify::new);
 +        let config = UserAuditConfig::new(&socket_path, test_auditd_user());
 +        let emitter = AuditEmitter::new(runtime(), &config);
 +        let first = emitter.encode_pending(tcp_draft(&emitter, 31)).expect("first event");
@@ -20016,9 +20560,11 @@ index 0000000000000000000000000000000000000000..ac97f3d4435bc6cf9c45b2cb7f84a483
 +                let ack = serialize_canonical(&ack).expect("first ack");
 +                write_frame(&mut writer, &ack).await.expect("write first ack");
 +
-+                // Insert without a notification to model the exact state after
++                // Wait until the producer has registered its idle waiter. Then
++                // insert without a notification to model the exact state after
 +                // drain has consumed the sole permit left by a relay push. The
 +                // explicit queue recheck must still send this event promptly.
++                idle_wait_hook.notified().await;
 +                emitter.queue.push(tcp_draft(&emitter, 32)).expect("queue has capacity");
 +                let second = tokio::time::timeout(Duration::from_secs(1), read_frame(&mut reader))
 +                    .await
@@ -21172,10 +21718,10 @@ index 0000000000000000000000000000000000000000..154578ebf1a70784f742804eaea7147f
 +and fail on any panic, sanitizer report, or non-zero target exit.
 diff --git a/fuzz/fuzz_targets/audit_protocol.rs b/fuzz/fuzz_targets/audit_protocol.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..ed3714b66b7d03b155e3d624be939832f8ea5bde
+index 0000000000000000000000000000000000000000..e4e757101d27cd01b1277e88d389b7daae01d2f3
 --- /dev/null
 +++ b/fuzz/fuzz_targets/audit_protocol.rs
-@@ -0,0 +1,29 @@
+@@ -0,0 +1,34 @@
 +#![no_main]
 +
 +use libfuzzer_sys::fuzz_target;
@@ -21188,6 +21734,8 @@ index 0000000000000000000000000000000000000000..ed3714b66b7d03b155e3d624be939832
 +    let _ = wire::parse_record(data);
 +    let _ = wire::parse_canonical_record(data);
 +    let _ = wire::parse_json_exact::<serde_json::Value>(data);
++    let _ = wire::parse_json_document::<serde_json::Value>(data);
++    let _ = wire::parse_spool_record(data);
 +    let _ = wire::decode_frame(data);
 +    let _ = wire::decode_frame_prefix(data);
 +    let _ = wire::parse_spool_line(data);
@@ -21204,6 +21752,9 @@ index 0000000000000000000000000000000000000000..ed3714b66b7d03b155e3d624be939832
 +    let _ = wire::parse_ack_response(data);
 +    let _ = wire::parse_error_response(data);
 +    let _ = wire::parse_health_response(data);
++    if let Ok(host) = std::str::from_utf8(data) {
++        let _ = wire::normalize_domain(host);
++    }
 +});
 diff --git a/src/service/local.rs b/src/service/local.rs
 index 786f2ce5862f45828edbd67a591cfd01aaf403db..507d9e9136811875271fea1b645a93511a0a53d1 100644

@@ -35,7 +35,9 @@ printf '%s\n' 0001-eih-user-stats-http-unix-exporter.patch 0002-reproducible-bui
 
 `--no-renames` 用于把移动文件展开为明确的删除与新增，保证无 `.git` 源码树中的通用 `patch`
 可以重放。不得拼接补丁、手工忽略冲突或允许 fuzz；更新后必须运行 `scripts/verify.sh`。非 Linux
-主机必须先安装 `SHADOWSOCKS_AUDIT_CHECK_TARGET`（默认 `x86_64-unknown-linux-gnu`），脚本会在
-feature-off/protocol/mock 测试之外对 auditd 执行交叉 `cargo check --all-targets`，并在 target 缺失
-时失败。Linux 主机还必须运行 `cargo test --workspace --features user-audit` 和 auditd 原生测试；
-Linux runtime 路径不能由非 Linux 的交叉检查替代。
+主机可通过 `SHADOWSOCKS_AUDIT_CHECK_TARGET`（默认 `x86_64-unknown-linux-gnu`）启用 auditd 交叉
+`cargo check --all-targets`；target 缺失时脚本继续 feature-off/protocol/mock 检查并明确报告“未验证”，
+设置 `SHADOWSOCKS_REQUIRE_AUDIT_TARGET=1` 才会 fail-closed。`prepare-source.sh` 在每个补丁应用前
+还会检查删除 stanza 的目标在当前源码树中确实存在，以拦截幽灵删除项。Linux 主机仍必须运行
+`cargo test --workspace --features user-audit` 和 auditd 原生测试；Linux runtime 路径不能由非 Linux
+的交叉检查替代。

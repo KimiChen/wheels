@@ -53,8 +53,10 @@ cmp -s "$SHADOWSOCKS_RUST_PLUS_ROOT/tests/golden_vectors.json" "$protocol_vector
 target_dir="$SHADOWSOCKS_RUST_PLUS_ROOT/.cache/cargo-target"
 host_os="$(uname -s)"
 audit_native=0
+auditd_runtime_available=0
 if [[ "$host_os" == "Linux" ]]; then
   audit_native=1
+  auditd_runtime_available=1
 fi
 
 features=user-stats
@@ -98,11 +100,17 @@ if [[ "$run_audit" -eq 1 ]]; then
   else
     audit_target="${SHADOWSOCKS_AUDIT_CHECK_TARGET:-x86_64-unknown-linux-gnu}"
     audit_libdir="$(rustc --print target-libdir --target "$audit_target" 2>/dev/null || true)"
-    [[ -d "$audit_libdir" ]] || die "非 Linux 主机需要已安装 Rust target 以检查 Linux-only auditd：$audit_target"
-    printf '非 Linux 主机：auditd 使用 %s 做跨目标 cargo check（不运行 foreign test binary）。\n' "$audit_target" >&2
-    CARGO_TARGET_DIR="$target_dir" cargo check \
-      --manifest-path "$source_dir/Cargo.toml" \
-      --locked --target "$audit_target" -p shadowsocks-auditd --all-targets
+    if [[ -d "$audit_libdir" ]]; then
+      printf '非 Linux 主机：auditd 使用 %s 做跨目标 cargo check（不运行 foreign test binary）。\n' "$audit_target" >&2
+      CARGO_TARGET_DIR="$target_dir" cargo check \
+        --manifest-path "$source_dir/Cargo.toml" \
+        --locked --target "$audit_target" -p shadowsocks-auditd --all-targets
+    elif [[ "${SHADOWSOCKS_REQUIRE_AUDIT_TARGET:-0}" == 1 ]]; then
+      die "非 Linux 主机缺少 Rust target，且 SHADOWSOCKS_REQUIRE_AUDIT_TARGET=1：$audit_target"
+    else
+      printf '未验证：非 Linux 主机未安装 auditd 交叉检查 target %s；设置 SHADOWSOCKS_REQUIRE_AUDIT_TARGET=1 可将其升级为失败。\n' \
+        "$audit_target" >&2
+    fi
   fi
 fi
 
@@ -132,7 +140,7 @@ if [[ "$run_integration" -eq 1 ]]; then
     die "缺少真实数据面集成测试：tests/integration_user_stats.py"
   CARGO_TARGET_DIR="$target_dir" \
     python3 "$SHADOWSOCKS_RUST_PLUS_ROOT/tests/integration_user_stats.py" --source "$source_dir"
-  if [[ "$run_audit" -eq 1 ]]; then
+  if [[ "$run_audit" -eq 1 && "$auditd_runtime_available" -eq 1 ]]; then
     [[ -f "$SHADOWSOCKS_RUST_PLUS_ROOT/tests/integration_audit.py" ]] || \
       die "缺少 auditd 真实集成测试：tests/integration_audit.py"
     CARGO_TARGET_DIR="$target_dir" \
@@ -141,4 +149,8 @@ if [[ "$run_integration" -eq 1 ]]; then
   fi
 fi
 
-printf '测试通过。\n'
+if [[ "$run_audit" -eq 1 && "$auditd_runtime_available" -eq 0 ]]; then
+  printf '测试通过（auditd Linux runtime 未在当前主机执行）。\n'
+else
+  printf '测试通过。\n'
+fi

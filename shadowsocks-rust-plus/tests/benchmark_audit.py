@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import collections
 import json
+import math
 import os
 import platform
 import statistics
@@ -43,6 +44,25 @@ class BoundedQueue:
                 self.items.popleft()
                 self.drops += 1
             self.items.append(value)
+
+
+def _proxy_path_gate(item: dict[str, Any]) -> bool:
+    """Check the data-plane invariant independently of audit bookkeeping.
+
+    These synthetic scenarios model audit degradation while the proxy itself
+    remains available. Keep that contract explicit and verify the reported
+    counters are internally consistent so a mutated failure cannot pass just
+    because ``proxy_errors`` was derived from the same value.
+    """
+
+    attempts = item.get("proxy_attempts")
+    successes = item.get("proxy_successes")
+    errors = item.get("proxy_errors")
+    if not all(isinstance(value, int) for value in (attempts, successes, errors)):
+        return False
+    if attempts < 0 or successes < 0 or errors < 0 or successes > attempts:
+        return False
+    return successes == attempts and errors == attempts - successes
 
 
 def _run_queue(feature_on: bool, events: int, producers: int, capacity: int) -> dict[str, Any]:
@@ -161,17 +181,25 @@ def _run_scenarios(events: int, queue_capacity: int, spool_capacity: int) -> dic
                 and evicted == expected_evictions
                 and gap_records == expected_evictions
             )
-        item["gate"] = proxy_errors == 0 and gate
+        item["proxy_path_gate"] = _proxy_path_gate(item)
+        item["gate"] = item["proxy_path_gate"] and gate
         result[scenario] = item
     return result
 
 
-def _read_data_path_report(path: Path) -> dict[str, Any]:
+def _read_json_report(path: Path, label: str) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
-        raise RuntimeError(f"无法读取 data-path benchmark 报告：{error}") from error
-    if not isinstance(value, dict) or not isinstance(value.get("cases"), list):
+        raise RuntimeError(f"无法读取 {label} 报告：{error}") from error
+    if not isinstance(value, dict):
+        raise RuntimeError(f"{label} benchmark 报告必须是 JSON 对象")
+    return value
+
+
+def _read_data_path_report(path: Path) -> dict[str, Any]:
+    value = _read_json_report(path, "data-path")
+    if not isinstance(value.get("cases"), list):
         raise RuntimeError("data-path benchmark 报告缺少 cases")
     return value
 
@@ -185,11 +213,51 @@ def _case(report: dict[str, Any], name: str) -> dict[str, Any]:
     raise RuntimeError(f"data-path 报告缺少 case：{name}")
 
 
-def _evaluate_data_path(report: dict[str, Any]) -> dict[str, Any]:
+def _finite_number(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
+def _integer(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def _measurement_object(report: dict[str, Any]) -> dict[str, Any] | None:
+    """Find the independently collected auditd measurement object.
+
+    The preferred shape is ``{"auditd": { ... }}`` in the data-path report;
+    ``--auditd-report`` may supply the same object separately for runners that
+    keep daemon RSS/health evidence in a restricted file.
+    """
+
+    value = report.get("auditd")
+    return value if isinstance(value, dict) else None
+
+
+def _extract_proxy_measurement(value: dict[str, Any] | None) -> tuple[int | None, int | None, int | None]:
+    if value is None:
+        return None, None, None
+    proxy = value.get("proxy")
+    if not isinstance(proxy, dict):
+        proxy = value
+    return (
+        _integer(proxy.get("attempts", proxy.get("proxy_attempts"))),
+        _integer(proxy.get("successes", proxy.get("proxy_successes"))),
+        _integer(proxy.get("errors", proxy.get("proxy_errors"))),
+    )
+
+
+def _evaluate_data_path(report: dict[str, Any], auditd_report: dict[str, Any] | None = None) -> dict[str, Any]:
     off = _case(report, "plus_compiled_runtime_disabled")
     on = _case(report, "plus_runtime_enabled")
-    off_tp = float(off["bidirectional_mib_per_second"]["median"])
-    on_tp = float(on["bidirectional_mib_per_second"]["median"])
+    off_tp = _finite_number(off.get("bidirectional_mib_per_second", {}).get("median"))
+    on_tp = _finite_number(on.get("bidirectional_mib_per_second", {}).get("median"))
+    if off_tp is None or on_tp is None:
+        raise RuntimeError("data-path 报告缺少有限的吞吐 median")
     off_cpu = off["process_cpu_seconds_median"].get("combined")
     on_cpu = on["process_cpu_seconds_median"].get("combined")
     off_rss = off["process_peak_rss_kib_max"].get("combined")
@@ -203,13 +271,43 @@ def _evaluate_data_path(report: dict[str, Any]) -> dict[str, Any]:
         "cpu_gate": None,
         "ssserver_rss_delta_kib": None,
         "ssserver_rss_gate": None,
+        "auditd_peak_rss_kib": None,
+        "auditd_rss_gate": None,
+        "proxy_attempts": None,
+        "proxy_successes": None,
+        "proxy_errors": None,
+        "proxy_path_gate": None,
     }
-    if isinstance(off_cpu, (int, float)) and isinstance(on_cpu, (int, float)) and off_cpu > 0:
+    off_cpu = _finite_number(off_cpu)
+    on_cpu = _finite_number(on_cpu)
+    if off_cpu is not None and on_cpu is not None and off_cpu > 0:
         metrics["cpu_increase_ratio"] = (on_cpu - off_cpu) / off_cpu
         metrics["cpu_gate"] = metrics["cpu_increase_ratio"] <= CPU_INCREASE_LIMIT
-    if isinstance(off_rss, int) and isinstance(on_rss, int):
+    off_rss = _integer(off_rss)
+    on_rss = _integer(on_rss)
+    if off_rss is not None and on_rss is not None:
         metrics["ssserver_rss_delta_kib"] = on_rss - off_rss
         metrics["ssserver_rss_gate"] = metrics["ssserver_rss_delta_kib"] <= SSSERVER_RSS_LIMIT_KIB
+
+    measured = auditd_report if auditd_report is not None else _measurement_object(report)
+    if measured is not None:
+        peak = _integer(
+            measured.get("peak_rss_kib", measured.get("auditd_peak_rss_kib"))
+        )
+        if peak is not None:
+            metrics["auditd_peak_rss_kib"] = peak
+            metrics["auditd_rss_gate"] = peak <= AUDITD_RSS_LIMIT_KIB
+        attempts, successes, errors = _extract_proxy_measurement(measured)
+        metrics["proxy_attempts"] = attempts
+        metrics["proxy_successes"] = successes
+        metrics["proxy_errors"] = errors
+        if attempts is not None and successes is not None and errors is not None:
+            metrics["proxy_path_gate"] = (
+                attempts > 0
+                and successes + errors == attempts
+                and successes > 0
+                and errors == 0
+            )
     return metrics
 
 
@@ -247,7 +345,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "native_linux_required": True,
     }
     if args.data_path_report is not None:
-        report["data_path"] = _evaluate_data_path(_read_data_path_report(args.data_path_report))
+        data_path_report = _read_data_path_report(args.data_path_report)
+        auditd_report = None
+        auditd_path = getattr(args, "auditd_report", None)
+        if auditd_path is not None:
+            auditd_report = _read_json_report(auditd_path, "auditd")
+        report["data_path"] = _evaluate_data_path(data_path_report, auditd_report)
         report["queue_microbenchmark"]["threshold_status"] = "diagnostic_only"
     if args.require_linux and platform.system() != "Linux":
         raise RuntimeError("--require-linux 只能在 Linux 主机执行")
@@ -258,8 +361,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             data_path.get("throughput_gate"),
             data_path.get("cpu_gate"),
             data_path.get("ssserver_rss_gate"),
+            data_path.get("auditd_rss_gate"),
+            data_path.get("proxy_path_gate"),
         )
-        report["gate"] = scenario_gate and all(value is True for value in measured_gates)
+        # Missing measurements remain indeterminate instead of becoming a
+        # passing boolean. ``--enforce`` turns that indeterminate state into a
+        # hard failure below.
+        if all(isinstance(value, bool) for value in measured_gates):
+            report["gate"] = scenario_gate and all(value is True for value in measured_gates)
     return report
 
 
@@ -267,6 +376,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Run bounded user-audit performance and failure-mode gates")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--data-path-report", type=Path)
+    parser.add_argument(
+        "--auditd-report",
+        type=Path,
+        help="独立 auditd RSS/代理计数报告（也可嵌入 data-path 报告的 auditd 字段）",
+    )
     parser.add_argument("--events", type=int, default=20_000)
     parser.add_argument("--producers", type=int, default=8)
     parser.add_argument("--queue-capacity", type=int, default=4096)

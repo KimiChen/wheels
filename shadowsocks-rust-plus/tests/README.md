@@ -48,7 +48,8 @@
 auditd，并把 workspace feature 降为 `user-stats`；producer 的 `user-audit` 单元测试不会在宿主
 运行。协议单元测试仍会执行，auditd 则对已安装的 `SHADOWSOCKS_AUDIT_CHECK_TARGET`（默认
 `x86_64-unknown-linux-gnu`）做 `cargo check --all-targets`。先运行
-`rustup target add x86_64-unknown-linux-gnu`（或安装所选 target）；未安装时脚本明确失败。auditd
+`rustup target add x86_64-unknown-linux-gnu`（或安装所选 target）即可启用该检查；未安装时脚本继续
+其余检查并明确打印“未验证”，设置 `SHADOWSOCKS_REQUIRE_AUDIT_TARGET=1` 才会失败。auditd
 运行时测试、producer feature-on 测试和完整 workspace 回归必须在 Linux 主机执行并作为发布硬门禁。
 
 不准备上游源码、也不访问网络时，可单独运行新增的纯本地工具测试：
@@ -238,6 +239,36 @@ CPU 增幅”的通过阈值，生产候选报告必须在目标
 
 两套 benchmark 都只使用 loopback 和运行时随机密钥，不产生公网代理流量。输出路径应放在临时
 或发布证据目录，不要把含机器信息的临时报告无审查提交到公开仓库。
+
+## 性能门禁
+
+[`benchmark_audit.py`](benchmark_audit.py) 提供跨平台的故障场景预检，并可消费
+[`benchmark_data_path.py`](benchmark_data_path.py) 生成的真实数据面报告。没有真实报告时，输出中的
+`gate` 必须为 `null`，合成队列吞吐只作诊断，不能作为发布通过依据：
+
+```bash
+python3 tests/benchmark_audit.py \
+  --output /tmp/shadowsocks-rust-plus-audit-preflight.json
+```
+
+在 Linux 目标机上，先完成 upstream、feature-off plus 和 feature-on plus 三组回环测量，并让报告同时
+提供 `auditd` 的峰值 RSS 与健康场景代理成功/错误计数，再执行真实门禁：
+
+```bash
+python3 tests/benchmark_data_path.py \
+  --upstream-source /tmp/shadowsocks-rust-plus-benchmark/upstream \
+  --plus-source /tmp/shadowsocks-rust-plus-benchmark/plus \
+  --output /tmp/shadowsocks-rust-plus-data-path.json
+python3 tests/benchmark_audit.py \
+  --data-path-report /tmp/shadowsocks-rust-plus-data-path.json \
+  --auditd-report /tmp/shadowsocks-rust-plus-auditd.json \
+  --require-linux --enforce \
+  --output /tmp/shadowsocks-rust-plus-audit-gate.json
+```
+
+`auditd` 报告至少包含 `peak_rss_kib` 和 `proxy` 对象（其中有 `attempts`、`successes`、`errors`，
+且三者由独立采集器记录）；它也可以直接嵌入 data-path JSON 的 `auditd` 字段。`--enforce` 会在缺少真实 data-path、auditd RSS、代理计数或任一阈值失败时退出非零；目标机实跑、
+Linux auditd runtime、sanitizer fuzz 和生产并发压测的证据需单独归档，不能用合成预检替代。
 
 ## 已知上游基线问题
 

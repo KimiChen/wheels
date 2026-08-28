@@ -80,10 +80,17 @@ class MockCollectorProtocolTest(unittest.TestCase):
             set(records),
             {
                 "tcp_access",
+                "tcp_access_null_normalized",
                 "udp_access",
                 "producer_gap",
+                "producer_gap_encode_error",
+                "producer_gap_permanent_nack",
                 "udp_window_contention",
                 "spool_gap",
+                "spool_gap_min_free",
+                "spool_gap_quarantine",
+                "spool_gap_tail_truncation",
+                "spool_gap_segment_corruption",
                 "unicode_access",
                 "escaping_access",
                 "nullable_spool_gap",
@@ -226,6 +233,18 @@ class MockCollectorProtocolTest(unittest.TestCase):
         bad = wrapper.replace(b'"spool_sequence":"1"', b'"spool_sequence":"2"')
         with self.assertRaises(CollectorError):
             parse_lease(bad, metadata)
+
+    def test_lease_parser_matches_decimal_u64_bounds_for_received_at(self) -> None:
+        event_bytes = vectors()["records"]["tcp_access"]["canonical"].encode("utf-8")
+        zero_timestamp = wrapper_bytes(event_bytes, 1, received_at=0)
+        self.assertEqual(
+            len(parse_lease(zero_timestamp, lease_metadata(zero_timestamp, "0" * 32, 1, 1, 1))),
+            1,
+        )
+
+        overflowing = wrapper_bytes(event_bytes, 1, received_at=2**64)
+        with self.assertRaisesRegex(CollectorError, "u64 range"):
+            parse_lease(overflowing, lease_metadata(overflowing, "1" * 32, 1, 1, 1))
 
     def test_lease_parser_rejects_noncanonical_wrapper_and_event_escaping(self) -> None:
         event = b'{"event_id":"' + (b"0" * 32) + b':1","label":"a"}'

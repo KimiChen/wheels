@@ -4,12 +4,13 @@ set -euo pipefail
 source "$(dirname "$0")/lib.sh"
 
 usage() {
-  printf '用法：%s [--debug] [--source <已准备源码目录>] [--without-audit]\n' "$(basename "$0")" >&2
+  printf '用法：%s [--debug] [--source <已准备源码目录>] [--without-audit] [--output-dir <目录>]\n' "$(basename "$0")" >&2
 }
 
 profile=release
 source_dir=""
 build_audit=1
+output_dir="$SHADOWSOCKS_RUST_PLUS_ROOT/.cache/dev-dist"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --debug)
@@ -25,6 +26,11 @@ while [[ $# -gt 0 ]]; do
       build_audit=0
       shift
       ;;
+    --output-dir)
+      [[ $# -ge 2 ]] || { usage; exit 2; }
+      output_dir="$2"
+      shift 2
+      ;;
     *)
       usage
       exit 2
@@ -34,6 +40,29 @@ done
 
 require_command cargo
 require_command shasum
+
+# Development artifacts must not share a directory with signed release files.
+# Resolve the requested path before preparing or building source so a bad
+# destination fails fast.
+if [[ "$output_dir" != /* ]]; then
+  output_dir="$PWD/$output_dir"
+fi
+[[ ! -L "$output_dir" ]] || die "开发构建输出目录不能是符号链接：$output_dir"
+if [[ -e "$output_dir" ]]; then
+  output_dir="$(cd "$output_dir" && pwd -P)" || die "无法解析开发产物目录：$output_dir"
+else
+  mkdir -p "$(dirname "$output_dir")"
+  output_parent="$(cd "$(dirname "$output_dir")" && pwd -P)" || die "无法解析开发产物父目录：$output_dir"
+  output_dir="$output_parent/$(basename "$output_dir")"
+fi
+release_dir="$SHADOWSOCKS_RUST_PLUS_ROOT/dist"
+if [[ "$output_dir" == "$release_dir" || "$output_dir" == "$release_dir"/* ]]; then
+  die "开发构建不得写入 release 目录：$output_dir"
+fi
+if [[ -e "$output_dir/release-manifest.json" || -L "$output_dir/release-manifest.json" || \
+  -e "$output_dir/release-manifest.sig" || -L "$output_dir/release-manifest.sig" ]]; then
+  die "开发构建目标已包含 release manifest/signature，拒绝覆盖：$output_dir"
+fi
 
 temp_dir=""
 if [[ -z "$source_dir" ]]; then
@@ -61,15 +90,14 @@ CARGO_TARGET_DIR="$target_dir" cargo build --manifest-path "$source_dir/Cargo.to
 binary_path="$target_dir/$profile/ssserver"
 [[ -x "$binary_path" ]] || die "构建完成但未找到 ssserver：$binary_path"
 
-dist_dir="$SHADOWSOCKS_RUST_PLUS_ROOT/dist"
 artifact_name=ssserver
 if [[ "$profile" == debug ]]; then
   artifact_name=ssserver-debug
 fi
-mkdir -p "$dist_dir"
-install -m 0755 "$binary_path" "$dist_dir/$artifact_name"
+mkdir -p "$output_dir"
+install -m 0755 "$binary_path" "$output_dir/$artifact_name"
 (
-  cd "$dist_dir"
+  cd "$output_dir"
   shasum -a 256 "$artifact_name" > "$artifact_name.sha256"
 )
 
@@ -87,16 +115,16 @@ if [[ "$build_audit" -eq 1 ]]; then
   if [[ "$profile" == debug ]]; then
     audit_artifact=shadowsocks-auditd-debug
   fi
-  install -m 0755 "$audit_binary" "$dist_dir/$audit_artifact"
+  install -m 0755 "$audit_binary" "$output_dir/$audit_artifact"
   (
-    cd "$dist_dir"
+    cd "$output_dir"
     shasum -a 256 "$audit_artifact" > "$audit_artifact.sha256"
   )
 fi
 
-printf '构建完成：%s\n' "$dist_dir/$artifact_name"
-printf '校验文件：%s\n' "$dist_dir/$artifact_name.sha256"
+printf '构建完成：%s\n' "$output_dir/$artifact_name"
+printf '校验文件：%s\n' "$output_dir/$artifact_name.sha256"
 if [[ "$build_audit" -eq 1 ]]; then
-  printf '构建完成：%s\n' "$dist_dir/$audit_artifact"
-  printf '校验文件：%s\n' "$dist_dir/$audit_artifact.sha256"
+  printf '构建完成：%s\n' "$output_dir/$audit_artifact"
+  printf '校验文件：%s\n' "$output_dir/$audit_artifact.sha256"
 fi

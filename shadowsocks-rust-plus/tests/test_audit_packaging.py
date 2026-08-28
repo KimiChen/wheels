@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -104,10 +106,17 @@ class AuditPackagingTest(unittest.TestCase):
             set(vectors["records"]),
             {
                 "tcp_access",
+                "tcp_access_null_normalized",
                 "udp_access",
                 "producer_gap",
+                "producer_gap_encode_error",
+                "producer_gap_permanent_nack",
                 "udp_window_contention",
                 "spool_gap",
+                "spool_gap_min_free",
+                "spool_gap_quarantine",
+                "spool_gap_tail_truncation",
+                "spool_gap_segment_corruption",
                 "unicode_access",
                 "escaping_access",
                 "nullable_spool_gap",
@@ -150,6 +159,41 @@ class AuditPackagingTest(unittest.TestCase):
             self.assertIn("x86_64-unknown-linux-gnu", text)
         self.assertIn("rustup target add x86_64-unknown-linux-gnu", readme)
         self.assertIn("rustup target add x86_64-unknown-linux-gnu", tests_readme)
+        for text in (readme, tests_readme, patches_readme):
+            self.assertIn("SHADOWSOCKS_REQUIRE_AUDIT_TARGET=1", text)
+            self.assertIn("未验证", text)
+
+    def test_prepare_source_extracts_real_deleted_path_from_git_diff_header(self) -> None:
+        script = (ROOT / "scripts/prepare-source.sh").read_text(encoding="utf-8")
+        match = re.search(
+            r"done < <\(\n(?P<program>\s+awk '\n.*?\n\s+' \"\$patch_path\")\n\s+\)",
+            script,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(match, "prepare-source deletion stanza parser not found")
+        assert match is not None
+        program = match.group("program").strip().removesuffix(' "$patch_path"')
+        fixture = """\
+diff --git a/kept.txt b/kept.txt
+index 1111111..2222222 100644
+--- a/kept.txt
++++ b/kept.txt
+diff --git a/removed.txt b/removed.txt
+deleted file mode 100644
+index 3333333..0000000
+--- a/removed.txt
++++ /dev/null
+"""
+        with tempfile.TemporaryDirectory(prefix="ssrp-delete-parser-") as directory:
+            patch = Path(directory) / "fixture.patch"
+            patch.write_text(fixture, encoding="utf-8")
+            result = subprocess.run(
+                ["bash", "-c", f"{program} \"$1\"", "bash", str(patch)],
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+        self.assertEqual(result.stdout.splitlines(), ["removed.txt"])
 
 
 if __name__ == "__main__":

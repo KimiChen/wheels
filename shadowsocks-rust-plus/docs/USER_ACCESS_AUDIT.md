@@ -3382,3 +3382,64 @@ crash/capacity runtime 测试；Linux 上完整 `cargo test --workspace --featur
    `x86_64-unknown-linux-gnu` target 与 `.cache/audit-work-source` 的创建步骤写进验证清单。
 8. Linux runtime 实跑、fuzz sanitizer 实跑、§14.5 目标机压测仍为发布前置，且在 1-3 修完之前
    无法开始。
+
+## 25. 第六轮整改记录（2026-08-29）
+
+本节记录对 §24 发现的整改结果，不改变 §1–16 的合同。源码先在
+`.cache/audit-work-source` 中重放锁定上游与 `0001`/`0002`，再由 `0003-user-audit.patch` 导出；本节
+的“已修复”表示当前源码与可执行回归护栏已闭合，不替代 Linux 原生发布验收。
+
+### 25.1 Critical、Major 与回归护栏
+
+| 条目 | 整改结果 |
+| --- | --- |
+| C-6、M-41、M-42 | supervisor 与 spool 的启动时间计算改为不下溢的 checked 算术；启动时先建立 durable gap 索引再 flush reset；segment 边界测试改为分别验证协议记录上限和 16 KiB 运行下限。 |
+| M-43、M-44、M-45 | sealed/open 元数据与 body 使用同一 min/max 语义；cleanup 以真实释放字节和有界迭代判据停止，不把 quarantine 搬移当作净释放，也不让自产 gap 触发清理自激。 |
+| M-46、M-47 | write-barrier 冻结路径在重新确认 open inode、容量和 state durability 后可恢复；空 open 与路径失配会隔离孤儿文件、写入 `segment_corruption` gap 并重建可写 open 段。 |
+| M-48、M-49 | shutdown 等待者改为 `watch` 接收器，移出 TCP accept/UDP 收包热路径；producer 与 auditd 对绝对 socket 路径都做词法 dot-segment 校验。 |
+| M-50、M-51 | 重新生成的 patch 不含幽灵删除 stanza；`verify.sh` 与 `prepare-source.sh` 拒绝无实际内容的删除项；idle-session 回归通过 test-only rendezvous 确实覆盖 queue 复检。 |
+
+### 25.2 Minor、协议与交付工具
+
+- `m-143`–`m-161`：整理 segment 最小值计算，修正 UTS #46 末尾全角句点、decimal `u64` 值域、空
+  open age、sealed integrity 轮转、诊断时间/饱和计数、UDP cooldown 分配与 association 随机源；补齐
+  默认 dedup 容量的历史压实断言、feature-off 配置互斥测试、TCP wrapper 与空 UDP payload 的端到端
+  回归。
+- `m-162`–`m-165`：静态护栏扫描完整 relay/context 审计接线并拒绝 partial source tree；benchmark
+  独立校验代理成功/错误计数，缺少真实 data-path 或 auditd RSS 时保持 `gate=null`，不会伪造通过。
+- `m-166`–`m-169`：开发构建与签名发布使用隔离输出目录；发布构建清理额外环境变量并要求两套独立二进制
+  字节一致；manifest 绑定两次构建、source epoch 和 patch series；测试文档补充性能门禁命令与验收边界。
+- protocol golden vectors 已扩展并同步 Rust 与 Python；fuzz target 覆盖 canonical/document/spool
+  parser、frame parser 和 `normalize_domain`。`.cache`、Cargo target、fuzz corpus 与 Python 缓存仍由
+  `.gitignore` 排除。
+
+### 25.3 当前验证结果与边界
+
+本机为 macOS，当前已安装 `x86_64-unknown-linux-gnu` Rust target。以下检查已实际通过：
+
+```text
+python3 tests/test_mock_collector.py                 # 17 passed
+python3 tests/test_audit_packaging.py               # 9 passed
+python3 tests/test_release_artifact.py              # 10 passed
+python3 tests/test_benchmark_audit.py               # 4 passed
+python3 tests/test_check_audit_static.py            # 12 passed
+python3 tests/test_fuzz_target.py --source ...      # 2 passed
+python3 tests/test_http_unix.py                     # 14 passed
+python3 tests/test_integration_audit.py             # 3 passed
+cargo fmt --all -- --check
+cargo test --locked -p shadowsocks-audit-protocol  # 23 passed
+cargo test --locked -p shadowsocks-service --no-default-features --features server --lib # 12 passed
+cargo check --locked --target x86_64-unknown-linux-gnu -p shadowsocks-auditd --all-targets
+python3 tests/check_audit_static.py --source .cache/audit-work-source
+./scripts/verify.sh                                 # 完整通过；auditd Linux runtime 未执行
+```
+
+`cargo test -p shadowsocks-auditd` 与完整 `user-audit` workspace runtime 不能在 macOS 执行（auditd
+明确是 Linux-only）；交叉 `cargo check` 只证明目标 cfg 可编译，不证明 `SO_PEERCRED`、UDS 权限、signal、
+crash/capacity 恢复或真实 producer runtime。`cargo-fuzz` sanitizer 实跑、Linux runtime 集成和 §14.5
+目标机吞吐/CPU/RSS/长时间压测仍是发布前置，合成 benchmark 预检不能替代这些证据。
+
+`verify.sh` 会先通过 `scripts/prepare-source.sh` 创建临时源码树；若直接运行源码级 Rust 命令，必须先执行
+`scripts/prepare-source.sh .cache/audit-work-source`。本轮 patch 已用
+`git apply --check --binary --whitespace=error-all` 和 `patch --dry-run --fuzz=0 -p1` 在包含
+`0001`/`0002` 的干净基线验证，并与准备源码树逐文件核对。

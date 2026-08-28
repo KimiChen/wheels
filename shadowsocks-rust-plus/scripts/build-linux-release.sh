@@ -31,6 +31,25 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# Refuse a destination that already contains release metadata before spending
+# time on the four reproducibility builds.  A signed directory is immutable;
+# publishing a new candidate must use a fresh directory.
+if [[ "$output_dir" != /* ]]; then
+  output_dir="$PWD/$output_dir"
+fi
+[[ ! -L "$output_dir" ]] || die "发布输出目录不能是符号链接：$output_dir"
+if [[ -e "$output_dir" ]]; then
+  output_dir="$(cd "$output_dir" && pwd -P)" || die "无法解析发布产物目录：$output_dir"
+else
+  mkdir -p "$(dirname "$output_dir")"
+  output_parent="$(cd "$(dirname "$output_dir")" && pwd -P)" || die "无法解析发布产物父目录：$output_dir"
+  output_dir="$output_parent/$(basename "$output_dir")"
+fi
+for release_marker in release-manifest.json release-manifest.sig; do
+  [[ ! -e "$output_dir/$release_marker" && ! -L "$output_dir/$release_marker" ]] || \
+    die "发布目录已包含 ${release_marker}，拒绝覆盖：${output_dir}"
+done
+
 require_command cargo
 require_command cargo-zigbuild
 require_command cmp
@@ -82,6 +101,11 @@ unset CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS
 unset CARGO_PROFILE_RELEASE_CODEGEN_UNITS CARGO_PROFILE_RELEASE_DEBUG
 unset CARGO_PROFILE_RELEASE_LTO CARGO_PROFILE_RELEASE_OPT_LEVEL
 unset CARGO_PROFILE_RELEASE_PANIC CARGO_PROFILE_RELEASE_RPATH CARGO_PROFILE_RELEASE_STRIP
+unset CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS
+unset RUSTC_BOOTSTRAP
+unset CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_CC
+unset CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_CFLAGS
+unset CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_AR
 
 temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/shadowsocks-rust-plus.XXXXXX")"
 trap 'safe_remove_temp_dir "$temp_dir"' EXIT
@@ -215,6 +239,8 @@ output_dir="$(cd "$output_dir" && pwd -P)"
 "$SHADOWSOCKS_RUST_PLUS_ROOT/scripts/release-artifact.py" package-multi \
   --binary "$binary_a" \
   --auditd-binary "$auditd_binary_a" \
+  --second-binary "$binary_b" \
+  --second-auditd-binary "$auditd_binary_b" \
   --output-dir "$output_dir" \
   --version "$(lock_value tag)" \
   --upstream-commit "$(lock_value commit)" \

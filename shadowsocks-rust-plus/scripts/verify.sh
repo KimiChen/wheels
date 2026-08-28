@@ -45,6 +45,30 @@ for patch_path in "$SHADOWSOCKS_RUST_PLUS_ROOT"/patches/*.patch; do
   patch_name="$(basename "$patch_path")"
   grep -Fxq "$patch_name" "$SHADOWSOCKS_RUST_PLUS_ROOT/patches/series" || \
     die "补丁未列入 series：$patch_name"
+  # A deletion stanza without a hunk (or a binary payload) is a ghost entry:
+  # `git apply` rejects it even when the patch(1) replay path silently skips
+  # it. Keep the overlay consumable by both replay implementations.
+  if ! awk '
+    function finish() {
+      if (deleted && !body) {
+        invalid = 1
+      }
+    }
+    /^diff --git / {
+      finish()
+      deleted = 0
+      body = 0
+    }
+    /^deleted file mode / { deleted = 1 }
+    /^@@ / { if (deleted) body = 1 }
+    /^GIT binary patch$/ { if (deleted) body = 1 }
+    END {
+      finish()
+      exit invalid ? 1 : 0
+    }
+  ' "$patch_path"; then
+    die "补丁包含没有实际内容的删除 stanza：$patch_name"
+  fi
 done
 
 grep -Fxq "0003-user-audit.patch" "$SHADOWSOCKS_RUST_PLUS_ROOT/patches/series" || \

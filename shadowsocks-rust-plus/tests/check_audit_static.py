@@ -24,6 +24,23 @@ SERVICE_WIRING_FILES = (
     "crates/shadowsocks-service/src/lib.rs",
     "crates/shadowsocks-service/src/server/mod.rs",
 )
+SERVICE_RELAY_WIRING_FILES = (
+    "crates/shadowsocks-service/src/server/tcprelay.rs",
+    "crates/shadowsocks-service/src/server/udprelay.rs",
+    "crates/shadowsocks-service/src/server/context.rs",
+)
+REQUIRED_PRODUCTION_FILES = (
+    "crates/shadowsocks-audit-protocol/src/lib.rs",
+    "crates/shadowsocks-auditd/src/lib.rs",
+    "crates/shadowsocks-auditd/src/spool.rs",
+    "crates/shadowsocks-service/src/server/user_audit.rs",
+    "crates/shadowsocks-service/src/server/tcprelay.rs",
+    "crates/shadowsocks-service/src/server/udprelay.rs",
+    "crates/shadowsocks-service/src/server/context.rs",
+)
+AUDIT_MARKER = re.compile(
+    r"\b(?:user_audit|audit_emitter|AuditEmitter|AuditTarget|AuditRecord|audit_event|user-audit)\b"
+)
 FIXED_ARRAY_DECLARATION = (
     r"\b{name}\s*:\s*&?\s*(?:mut\s+)?\[[^\]\n;]+;\s*(?P<typed_len>[A-Z_][A-Z0-9_]*(?:\.len\(\))?|[0-9]+)\]"
     r"|\blet\s+(?:mut\s+)?{name}\s*=\s*\[[^\]\n;]*;\s*(?P<literal_len>[A-Z_][A-Z0-9_]*|[0-9]+)\]"
@@ -89,8 +106,11 @@ def _test_only_lines(lines: list[str]) -> set[int]:
         depth = 0
         saw_brace = False
         comment_depth = 0
+        raw_hashes: int | None = None
         while cursor < len(lines):
-            structural, comment_depth = _structural_characters(lines[cursor], comment_depth)
+            structural, comment_depth, raw_hashes = _structural_characters_for_item(
+                lines[cursor], comment_depth, raw_hashes
+            )
             depth += structural.count("{") - structural.count("}")
             saw_brace = saw_brace or "{" in structural
             cursor += 1
@@ -100,6 +120,76 @@ def _test_only_lines(lines: list[str]) -> set[int]:
                 break
         skipped.update(range(start, cursor))
     return skipped
+
+
+def _structural_characters_for_item(
+    line: str, block_comment_depth: int, raw_hashes: int | None
+) -> tuple[str, int, int | None]:
+    """Count braces for cfg(test) items while ignoring multiline raw strings."""
+
+    result: list[str] = []
+    index = 0
+    quote: str | None = None
+    while index < len(line):
+        if raw_hashes is not None:
+            closing = '"' + ("#" * raw_hashes)
+            end = line.find(closing, index)
+            if end < 0:
+                return "".join(result), block_comment_depth, raw_hashes
+            raw_hashes = None
+            index = end + len(closing)
+            continue
+        current = line[index]
+        following = line[index + 1] if index + 1 < len(line) else ""
+        if block_comment_depth:
+            if current == "/" and following == "*":
+                block_comment_depth += 1
+                index += 2
+            elif current == "*" and following == "/":
+                block_comment_depth -= 1
+                index += 2
+            else:
+                index += 1
+            continue
+        if quote is not None:
+            if current == "\\":
+                index += 2
+            elif current == quote:
+                quote = None
+                index += 1
+            else:
+                index += 1
+            continue
+        if current == "/" and following == "/":
+            break
+        if current == "/" and following == "*":
+            block_comment_depth = 1
+            index += 2
+            continue
+        # Raw strings may be prefixed with `b`; consume the complete delimiter
+        # and carry its hash count across lines.
+        raw_start = index
+        if current == "b" and following == "r":
+            raw_start += 1
+        if current == "r" or (current == "b" and following == "r"):
+            marker = raw_start + 1
+            while marker < len(line) and line[marker] == "#":
+                marker += 1
+            if marker < len(line) and line[marker] == '"':
+                raw_hashes = marker - (raw_start + 1)
+                index = marker + 1
+                continue
+        char_literal = current == "'" and (
+            (index + 2 < len(line) and line[index + 2] == "'")
+            or (following == "\\" and "'" in line[index + 2:index + 7])
+        )
+        if current == '"' or char_literal:
+            quote = current
+            index += 1
+            continue
+        result.append(current)
+        index += 1
+    return "".join(result), block_comment_depth, raw_hashes
 
 
 def _fixed_array_length(lines: list[str], line_index: int, name: str) -> int | None:
@@ -217,8 +307,155 @@ def _check_file(path: Path) -> list[str]:
     return findings
 
 
+def _check_wiring_file_functions(path: Path) -> list[str]:
+    """Check complete functions that contain user-audit relay wiring.
+
+    Looking only at the marker line misses a panic or an unchecked index on the
+    following line.  We first identify the enclosing Rust function for every
+    marker, then apply the same structural checks used for dedicated audit
+    files to that whole function.  Unrelated upstream functions remain out of
+    scope, keeping this guard useful on the large relay modules.
+    """
+
+    findings: list[str] = []
+    lines = path.read_text(encoding="utf-8").splitlines()
+    test_only = _test_only_lines(lines)
+    structural_lines: list[str] = []
+    comment_depth = 0
+    for line in lines:
+        structural, comment_depth = _structural_characters(line, comment_depth)
+        structural_lines.append(structural)
+
+    depth_before: list[int] = []
+    depth = 0
+    for structural in structural_lines:
+        depth_before.append(depth)
+        depth += structural.count("{") - structural.count("}")
+
+    function_starts = [
+        index
+        for index, structural in enumerate(structural_lines)
+        if re.search(r"\b(?:async\s+)?fn\s+[A-Za-z_][A-Za-z0-9_]*", structural)
+    ]
+    audited_lines: set[int] = set()
+    for marker_index, structural in enumerate(structural_lines):
+        if AUDIT_MARKER.search(structural) is None:
+            continue
+        candidates = [
+            start
+            for start in function_starts
+            if start <= marker_index and depth_before[start] <= depth_before[marker_index]
+        ]
+        start = candidates[-1] if candidates else marker_index
+        baseline_depth = depth_before[start]
+        saw_brace = False
+        end = start
+        for cursor in range(start, len(structural_lines)):
+            current = structural_lines[cursor]
+            saw_brace = saw_brace or "{" in current
+            end = cursor
+            if saw_brace and depth_before[cursor] <= baseline_depth and cursor > start:
+                break
+        # A marker in an attribute/closure without a discoverable function is
+        # still checked locally instead of silently escaping the guard.
+        if not candidates:
+            start = max(0, marker_index - 8)
+            end = min(len(lines) - 1, marker_index + 8)
+        audited_lines.update(range(start, end + 1))
+
+    for line_index in sorted(audited_lines):
+        if line_index in test_only:
+            continue
+        structural = structural_lines[line_index]
+        number = line_index + 1
+        if FORBIDDEN.search(structural):
+            findings.append(f"{path}:{number}: forbidden panic path in user-audit wiring")
+        for match in INDEX.finditer(structural):
+            if not _index_is_proven_safe(structural_lines, line_index, match):
+                findings.append(f"{path}:{number}: direct index in user-audit wiring")
+    return findings
+
+
+def _check_relay_wiring_file(path: Path) -> list[str]:
+    """Audit complete ``cfg(user-audit)`` items in relay/context modules.
+
+    Relay modules contain a large amount of unrelated upstream code with
+    deliberate indexing patterns. Feature attributes provide a precise
+    boundary for audit-specific items; checking each complete item catches a
+    panic or unchecked index introduced after the attribute line.
+    """
+
+    findings: list[str] = []
+    lines = path.read_text(encoding="utf-8").splitlines()
+    test_only = _test_only_lines(lines)
+    structural_lines: list[str] = []
+    comment_depth = 0
+    for line in lines:
+        structural, comment_depth = _structural_characters(line, comment_depth)
+        structural_lines.append(structural)
+
+    audited_lines: set[int] = set()
+    cursor = 0
+    while cursor < len(lines):
+        attribute = lines[cursor].strip()
+        if attribute not in {
+            '#[cfg(feature = "user-audit")]',
+            '#[cfg(all(feature = "user-audit", target_os = "linux"))]',
+        }:
+            cursor += 1
+            continue
+        start = cursor
+        cursor += 1
+        # A cfg attribute can guard a struct field or a local binding rather
+        # than a whole function. Stop at its comma/semicolon so a later
+        # function brace cannot make the selected range span the enclosing item.
+        while cursor < len(lines) and not structural_lines[cursor].strip():
+            cursor += 1
+        first_item = structural_lines[cursor].strip() if cursor < len(lines) else ""
+        item_has_body = bool(re.search(r"\b(?:fn|struct|enum|impl|trait|mod)\b", first_item)) or "{" in first_item
+        if not item_has_body:
+            while cursor < len(lines):
+                current = structural_lines[cursor]
+                cursor += 1
+                if ";" in current or "," in current:
+                    break
+            audited_lines.update(range(start, cursor))
+            continue
+        depth = 0
+        saw_brace = False
+        while cursor < len(lines):
+            current = structural_lines[cursor]
+            depth += current.count("{") - current.count("}")
+            saw_brace = saw_brace or "{" in current
+            cursor += 1
+            if saw_brace and depth == 0:
+                break
+            if not saw_brace and ";" in current:
+                break
+        audited_lines.update(range(start, cursor))
+
+    # Some call sites are inside a larger feature-gated function without a
+    # nested cfg attribute. Include a short neighborhood around explicit audit
+    # markers so a newly added unchecked operation cannot hide on the next line.
+    for index, structural in enumerate(structural_lines):
+        if AUDIT_MARKER.search(structural) is not None:
+            audited_lines.update(range(max(0, index - 2), min(len(lines), index + 3)))
+
+    for line_index in sorted(audited_lines):
+        if line_index in test_only:
+            continue
+        structural = structural_lines[line_index]
+        number = line_index + 1
+        if FORBIDDEN.search(structural):
+            findings.append(f"{path}:{number}: forbidden panic path in user-audit wiring")
+        for match in INDEX.finditer(structural):
+            if not _index_is_proven_safe(structural_lines, line_index, match):
+                findings.append(f"{path}:{number}: direct index in user-audit wiring")
+    return findings
+
+
 def _check_wiring_file(path: Path) -> list[str]:
-    """Check the feature wiring statements without auditing unrelated upstream code."""
+    """Check only lines that explicitly contain the audit feature wiring."""
 
     findings: list[str] = []
     lines = path.read_text(encoding="utf-8").splitlines()
@@ -238,7 +475,7 @@ def _check_wiring_file(path: Path) -> list[str]:
     return findings
 
 
-def check(root: Path) -> list[str]:
+def check(root: Path, *, require_complete: bool = True) -> list[str]:
     findings: list[str] = []
     if not root.is_dir():
         return [f"{root}: source root does not exist or is not a directory"]
@@ -260,8 +497,17 @@ def check(root: Path) -> list[str]:
         if service_file.is_file():
             findings.extend(_check_wiring_file(service_file))
             scanned.add(service_file)
+    for relative in SERVICE_RELAY_WIRING_FILES:
+        service_file = root / relative
+        if service_file.is_file():
+            findings.extend(_check_relay_wiring_file(service_file))
+            scanned.add(service_file)
     if not scanned:
         findings.append(f"{root}: no audit production Rust sources found")
+    if require_complete:
+        for relative in REQUIRED_PRODUCTION_FILES:
+            if not (root / relative).is_file():
+                findings.append(f"{root / relative}: required audit production source is missing")
     # `user-audit` is a Linux-only feature even when a consumer depends on
     # shadowsocks-service directly (the root crate's auditd dependency is not
     # present in that use case). Keep the compile gate in the prepared source
@@ -279,8 +525,13 @@ def check(root: Path) -> list[str]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", type=Path, required=True)
+    parser.add_argument(
+        "--allow-partial",
+        action="store_true",
+        help="仅用于单元测试的最小临时树；正式检查默认拒绝缺失源文件",
+    )
     args = parser.parse_args()
-    findings = check(args.source.resolve())
+    findings = check(args.source.resolve(), require_complete=not args.allow_partial)
     if findings:
         for finding in findings:
             print(finding)

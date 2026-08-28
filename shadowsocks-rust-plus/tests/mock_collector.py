@@ -32,6 +32,7 @@ HEX32 = re.compile(r"[0-9a-f]{32}\Z")
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 DECIMAL = re.compile(r"0|[1-9][0-9]*\Z")
 POSITIVE_DECIMAL = re.compile(r"[1-9][0-9]*\Z")
+U64_MAX = 2**64 - 1
 IDENTIFIER = re.compile(r"[!-~]{1,128}\Z")
 
 
@@ -269,7 +270,17 @@ def _exact_keys(value: dict[str, Any], expected: set[str], label: str) -> None:
 
 
 def _strict_decimal(value: Any, *, positive: bool = False) -> str:
-    return _field(value, POSITIVE_DECIMAL if positive else DECIMAL, "decimal")
+    text = _field(value, POSITIVE_DECIMAL if positive else DECIMAL, "decimal")
+    # Python integers are unbounded; keep the mock collector's acceptance
+    # range identical to protocol::DecimalU64 instead of accepting values
+    # that cannot be represented on the Rust side.
+    try:
+        number = int(text)
+    except ValueError as exc:  # The regex above normally makes this unreachable.
+        raise CollectorError("invalid decimal") from exc
+    if number > U64_MAX:
+        raise CollectorError("decimal is outside the u64 range")
+    return text
 
 
 def parse_lease(body: bytes, metadata: ResponseMetadata) -> ParsedLease:
@@ -329,7 +340,7 @@ def parse_lease(body: bytes, metadata: ResponseMetadata) -> ParsedLease:
         if previous is not None and sequence_int != previous + 1:
             raise CollectorError("spool sequence is not contiguous")
         previous = sequence_int
-        _strict_decimal(record["received_at_unix_ms"], positive=True)
+        _strict_decimal(record["received_at_unix_ms"])
         payload_hash = _field(record["event_payload_sha256"], HEX64, "event payload digest")
         event = record["event"]
         if not isinstance(event, dict):

@@ -49,6 +49,10 @@
       "canonical": "{\"schema_version\":1,\"record_type\":\"access\",\"event_type\":\"tcp_target_success\",\"event_id\":\"0123456789abcdef0123456789abcdef:42\",\"audit_sequence\":\"42\",\"occurred_at_unix_ms\":\"1787587200000\",\"runtime_monotonic_ms\":\"123456\",\"node_id\":\"node-example-01\",\"runtime_id\":\"0123456789abcdef0123456789abcdef\",\"server_id\":\"ss-entry-01\",\"server_generation\":1,\"identity_kind\":\"user\",\"identity_name\":\"user-example-01\",\"identity_generation\":1,\"transport\":\"tcp\",\"target\":{\"kind\":\"domain\",\"host\":\"Example.COM.\",\"normalized_host\":\"example.com\",\"port\":443,\"remote_ip\":\"192.0.2.10\"},\"success_evidence\":\"tcp_bidirectional_payload\"}",
       "sha256": "07fcd0d588d488a66786569f96353c5bb9f4927b03b16a69cbc8eac3bfa945e0"
     },
+    "tcp_access_null_normalized": {
+      "canonical": "{\"schema_version\":1,\"record_type\":\"access\",\"event_type\":\"tcp_target_success\",\"event_id\":\"0123456789abcdef0123456789abcdef:46\",\"audit_sequence\":\"46\",\"occurred_at_unix_ms\":\"1787587200003\",\"runtime_monotonic_ms\":\"123459\",\"node_id\":\"node-example-01\",\"runtime_id\":\"0123456789abcdef0123456789abcdef\",\"server_id\":\"ss-entry-01\",\"server_generation\":1,\"identity_kind\":\"user\",\"identity_name\":\"user-example-01\",\"identity_generation\":1,\"transport\":\"tcp\",\"target\":{\"kind\":\"domain\",\"host\":\"invalid..Example.\",\"normalized_host\":null,\"port\":443,\"remote_ip\":\"192.0.2.13\"},\"success_evidence\":\"tcp_bidirectional_payload\"}",
+      "sha256": "cf8aedf719d7e23bf30e22cce9d1cb3dca2ca295ff016992fa1c07663fd39948"
+    },
     "udp_access": {
       "canonical": "{\"schema_version\":1,\"record_type\":\"access\",\"event_type\":\"udp_target_success\",\"event_id\":\"0123456789abcdef0123456789abcdef:43\",\"audit_sequence\":\"43\",\"occurred_at_unix_ms\":\"1787587200500\",\"runtime_monotonic_ms\":\"123956\",\"node_id\":\"node-example-01\",\"runtime_id\":\"0123456789abcdef0123456789abcdef\",\"server_id\":\"ss-entry-01\",\"server_generation\":1,\"identity_kind\":\"user\",\"identity_name\":\"user-example-01\",\"identity_generation\":1,\"transport\":\"udp\",\"association_id\":\"abcdefabcdefabcdefabcdefabcdefab\",\"target\":{\"kind\":\"ip\",\"host\":\"192.0.2.53\",\"normalized_host\":\"192.0.2.53\",\"port\":53,\"remote_ip\":\"192.0.2.53\"},\"success_evidence\":\"udp_send_ok\"}",
       "sha256": "633ae7e2d1f92d36528c9805e978b39aac559154f79cb66cabe3f6280f7a0618"
@@ -57,6 +61,14 @@
       "canonical": "{\"schema_version\":1,\"record_type\":\"diagnostic\",\"event_type\":\"producer_gap\",\"event_id\":\"0123456789abcdef0123456789abcdef:99\",\"audit_sequence\":\"99\",\"occurred_at_unix_ms\":\"1787587210000\",\"node_id\":\"node-example-01\",\"runtime_id\":\"0123456789abcdef0123456789abcdef\",\"reason\":\"queue_overflow\",\"permanent_nack_code\":null,\"dropped_events\":\"55\",\"first_dropped_sequence\":\"44\",\"last_dropped_sequence\":\"98\",\"first_seen_unix_ms\":\"1787587201000\",\"last_seen_unix_ms\":\"1787587209000\"}",
       "sha256": "5cff26feca4a7b8c4d83555363b614bd1deef5870c045a69781f8b0b1187e81c"
     },
+    "producer_gap_encode_error": {
+      "canonical": "{\"schema_version\":1,\"record_type\":\"diagnostic\",\"event_type\":\"producer_gap\",\"event_id\":\"0123456789abcdef0123456789abcdef:101\",\"audit_sequence\":\"101\",\"occurred_at_unix_ms\":\"1787587212001\",\"node_id\":\"node-example-01\",\"runtime_id\":\"0123456789abcdef0123456789abcdef\",\"reason\":\"encode_error\",\"permanent_nack_code\":null,\"dropped_events\":\"1\",\"first_dropped_sequence\":null,\"last_dropped_sequence\":null,\"first_seen_unix_ms\":\"1787587212000\",\"last_seen_unix_ms\":\"1787587212000\"}",
+      "sha256": "8d6024785174b33ece6b388fc3bb1fc7a152ae47174911df2ad95c5ddf726d10"
+    },
+    "producer_gap_permanent_nack": {
+      "canonical": "{\"schema_version\":1,\"record_type\":\"diagnostic\",\"event_type\":\"producer_gap\",\"event_id\":\"0123456789abcdef0123456789abcdef:102\",\"audit_sequence\":\"102\",\"occurred_at_unix_ms\":\"1787587213002\",\"node_id\":\"node-example-01\",\"runtime_id\":\"0123456789abcdef0123456789abcdef\",\"reason\":\"permanent_nack\",\"permanent_nack_code\":\"invalid_schema\",\"dropped_events\":\"2\",\"first_dropped_sequence\":\"100\",\"last_dropped_sequence\":\"101\",\"first_seen_unix_ms\":\"1787587213000\",\"last_seen_unix_ms\":\"1787587213001\"}",
+      "sha256": "50bc88ba95ef5d6fc0938dbec089cce18a73ab906dd6ebd4d714ab2cc9c13619"
+    },
     "udp_window_contention": {
       "canonical": "{\"schema_version\":1,\"record_type\":\"diagnostic\",\"event_type\":\"udp_window_contention\",\"event_id\":\"0123456789abcdef0123456789abcdef:100\",\"audit_sequence\":\"100\",\"occurred_at_unix_ms\":\"1787587211000\",\"node_id\":\"node-example-01\",\"runtime_id\":\"0123456789abcdef0123456789abcdef\",\"skipped_successful_datagrams\":\"17\",\"first_seen_unix_ms\":\"1787587201000\",\"last_seen_unix_ms\":\"1787587210000\"}",
       "sha256": "829ff3dbc21703384a94e8103d00f01b4c5da5b89d8827abda696fd49b668a8f"
@@ -64,6 +76,22 @@
     "spool_gap": {
       "canonical": "{\"schema_version\":1,\"record_type\":\"diagnostic\",\"event_type\":\"spool_gap\",\"event_id\":\"spool:fedcba9876543210fedcba9876543210\",\"occurred_at_unix_ms\":\"1787587220000\",\"node_id\":\"node-example-01\",\"spool_epoch\":\"89abcdef0123456789abcdef01234567\",\"lost_spool_epoch\":\"89abcdef0123456789abcdef01234567\",\"reason\":\"capacity_eviction\",\"first_lost_spool_sequence\":\"1\",\"last_lost_spool_sequence\":\"1000\",\"lost_events\":\"1000\",\"lost_bytes\":\"4194304\",\"lost_batch_id\":\"fedcba9876543210fedcba9876543210\"}",
       "sha256": "c2a49d2a43eb1763fcc5dc27d85466f0a587a0e6921b24c050700fbbf3668cd9"
+    },
+    "spool_gap_min_free": {
+      "canonical": "{\"schema_version\":1,\"record_type\":\"diagnostic\",\"event_type\":\"spool_gap\",\"event_id\":\"spool:11111111111111111111111111111111\",\"occurred_at_unix_ms\":\"1787587230000\",\"node_id\":\"node-example-01\",\"spool_epoch\":\"89abcdef0123456789abcdef01234567\",\"lost_spool_epoch\":\"89abcdef0123456789abcdef01234567\",\"reason\":\"min_free_eviction\",\"first_lost_spool_sequence\":\"1001\",\"last_lost_spool_sequence\":\"1100\",\"lost_events\":\"100\",\"lost_bytes\":\"524288\",\"lost_batch_id\":\"11111111111111111111111111111111\"}",
+      "sha256": "1123a07ee00738eac4119cc2e2cb8e2121df5f3e7ab8e8f35fd8d94605fbcde5"
+    },
+    "spool_gap_quarantine": {
+      "canonical": "{\"schema_version\":1,\"record_type\":\"diagnostic\",\"event_type\":\"spool_gap\",\"event_id\":\"spool:22222222222222222222222222222222\",\"occurred_at_unix_ms\":\"1787587231000\",\"node_id\":\"node-example-01\",\"spool_epoch\":\"89abcdef0123456789abcdef01234567\",\"lost_spool_epoch\":\"89abcdef0123456789abcdef01234567\",\"reason\":\"quarantine_eviction\",\"first_lost_spool_sequence\":\"1101\",\"last_lost_spool_sequence\":\"1200\",\"lost_events\":\"100\",\"lost_bytes\":\"524288\",\"lost_batch_id\":\"22222222222222222222222222222222\"}",
+      "sha256": "69871594629e048d36b92903a174d63ffd9cdefaa8023d246c1362a02043be02"
+    },
+    "spool_gap_tail_truncation": {
+      "canonical": "{\"schema_version\":1,\"record_type\":\"diagnostic\",\"event_type\":\"spool_gap\",\"event_id\":\"spool:33333333333333333333333333333333\",\"occurred_at_unix_ms\":\"1787587232000\",\"node_id\":\"node-example-01\",\"spool_epoch\":\"89abcdef0123456789abcdef01234567\",\"lost_spool_epoch\":\"89abcdef0123456789abcdef01234567\",\"reason\":\"tail_truncation\",\"first_lost_spool_sequence\":null,\"last_lost_spool_sequence\":null,\"lost_events\":null,\"lost_bytes\":null,\"lost_batch_id\":null}",
+      "sha256": "9e943c60b82e2a0bfb82303ae8ca0433b42813400d1cd3150c2fc59c32a27f62"
+    },
+    "spool_gap_segment_corruption": {
+      "canonical": "{\"schema_version\":1,\"record_type\":\"diagnostic\",\"event_type\":\"spool_gap\",\"event_id\":\"spool:44444444444444444444444444444444\",\"occurred_at_unix_ms\":\"1787587233000\",\"node_id\":\"node-example-01\",\"spool_epoch\":\"89abcdef0123456789abcdef01234567\",\"lost_spool_epoch\":\"89abcdef0123456789abcdef01234567\",\"reason\":\"segment_corruption\",\"first_lost_spool_sequence\":\"1201\",\"last_lost_spool_sequence\":\"1205\",\"lost_events\":\"5\",\"lost_bytes\":\"4096\",\"lost_batch_id\":\"44444444444444444444444444444444\"}",
+      "sha256": "e762ba56bd8dd658066d898426180c79ad2f881a2c1c5d0a012fa19e3dc80fe7"
     },
     "unicode_access": {
       "canonical": "{\"schema_version\":1,\"record_type\":\"access\",\"event_type\":\"tcp_target_success\",\"event_id\":\"0123456789abcdef0123456789abcdef:44\",\"audit_sequence\":\"44\",\"occurred_at_unix_ms\":\"1787587200001\",\"runtime_monotonic_ms\":\"123457\",\"node_id\":\"node-example-01\",\"runtime_id\":\"0123456789abcdef0123456789abcdef\",\"server_id\":\"ss-entry-01\",\"server_generation\":1,\"identity_kind\":\"user\",\"identity_name\":\"user-example-01\",\"identity_generation\":1,\"transport\":\"tcp\",\"target\":{\"kind\":\"domain\",\"host\":\"BÜCHER.Example.\",\"normalized_host\":\"xn--bcher-kva.example\",\"port\":443,\"remote_ip\":\"192.0.2.11\"},\"success_evidence\":\"tcp_bidirectional_payload\"}",
