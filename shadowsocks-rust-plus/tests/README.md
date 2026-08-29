@@ -58,7 +58,12 @@ auditd，并把 workspace feature 降为 `user-stats`；producer 的 `user-audit
 python3 tests/test_cluster_users.py
 python3 tests/test_release_artifact.py
 python3 tests/test_mock_collector.py
+python3 tests/test_benchmark_data_path.py
 ```
+
+`test_benchmark_data_path.py` 覆盖数据面 benchmark 中不依赖 root、Linux 和真实 auditd 的部分：
+工作负载对多个 UDP 目标的轮转、每个目标一条 tunnel local 的配置生成、签名 health 增量证据的
+逐条否定用例，以及统计快照与聚合的取数。`scripts/test.sh` 会固定执行它。
 
 凭据工具测试会实际生成 205 个正式账号和 4 个测试账号，确认 kind 区分及剥离、每个 iPSK/uPSK
 都是 16 字节标准 Base64、用户名和 uPSK 唯一、输出精确 `0600`、禁止覆盖、拒绝仓库内未 ignore 目标，并覆盖规范排序、五配置完全
