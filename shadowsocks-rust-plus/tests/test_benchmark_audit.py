@@ -296,6 +296,54 @@ class AuditBenchmarkTest(unittest.TestCase):
         self.assertIsNone(report["data_path"]["audit_ingest_gate"])
         self.assertIsNone(report["data_path"]["native_evidence_gate"])
 
+    def test_auditd_run_id_must_match_the_benchmark_run(self) -> None:
+        evidence = self._native_report()
+        auditd = evidence["auditd"]
+        assert isinstance(auditd, dict)
+        auditd["run_id"] = "9" * 32
+        report = self._run_with_data_path(evidence)
+        self.assertIsNone(report["data_path"]["native_evidence_gate"])
+        self.assertIn(
+            "auditd measurement run_id does not match benchmark",
+            report["data_path"]["evidence_issues"],
+        )
+
+    def test_auditd_rss_must_be_a_live_process_sample(self) -> None:
+        evidence = self._native_report()
+        auditd = evidence["auditd"]
+        assert isinstance(auditd, dict)
+        auditd["measurement_source"] = "self_reported"
+        report = self._run_with_data_path(evidence)
+        self.assertIsNone(report["data_path"]["native_evidence_gate"])
+        self.assertIn(
+            "auditd RSS is not identified as a live process sample",
+            report["data_path"]["evidence_issues"],
+        )
+
+    def test_three_service_identities_must_be_distinct(self) -> None:
+        # Collapse each of the three UIDs onto one of the others in turn: the
+        # gate must refuse evidence that cannot prove three separate accounts.
+        for field, collision in (
+            ("uid", 1003),
+            ("producer_uid", 1003),
+            ("export_uid", 1001),
+        ):
+            with self.subTest(field=field):
+                evidence = self._native_report()
+                auditd = evidence["auditd"]
+                assert isinstance(auditd, dict)
+                auditd[field] = collision
+                if field == "producer_uid":
+                    cases = evidence["cases"]
+                    assert isinstance(cases, list) and isinstance(cases[2], dict)
+                    cases[2]["producer_uid"] = collision
+                report = self._run_with_data_path(evidence)
+                self.assertIsNone(report["data_path"]["native_evidence_gate"])
+                self.assertIn(
+                    "auditd, producer and export identities are not independently bound",
+                    report["data_path"]["evidence_issues"],
+                )
+
     def test_ingest_socket_inode_is_required(self) -> None:
         evidence = self._native_report()
         auditd = evidence["auditd"]
