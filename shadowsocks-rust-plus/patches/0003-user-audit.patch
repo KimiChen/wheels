@@ -7813,10 +7813,10 @@ index 0000000000000000000000000000000000000000..6cf8d005dfef917c852be4f611d5b945
 +}
 diff --git a/crates/shadowsocks-auditd/src/spool.rs b/crates/shadowsocks-auditd/src/spool.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..30848bcbc62ed22a7a5c01b2e1978d4cb2c6112d
+index 0000000000000000000000000000000000000000..e0642fae8219ef19144e622d388a0dd589aa17b1
 --- /dev/null
 +++ b/crates/shadowsocks-auditd/src/spool.rs
-@@ -0,0 +1,6837 @@
+@@ -0,0 +1,6992 @@
 +//! Durable, node-local audit spool.
 +//!
 +//! The spool is deliberately synchronous.  Ingest and export perform their
@@ -7862,6 +7862,11 @@ index 0000000000000000000000000000000000000000..30848bcbc62ed22a7a5c01b2e1978d4c
 +const LEGACY_RECOVERY_GAP_MARKER_SCHEMA: u8 = 1;
 +const RECOVERY_GAP_MARKER_PREFIX: &str = ".recovery-gap-";
 +const ORPHAN_OPEN_SOURCE_PREFIX: &str = "orphan-open:";
++// Recovery gaps derived from a damaged spool object are bound to that exact
++// object.  Without such a binding two independent damaged objects whose
++// metadata is unreadable both produce an all-null gap and collapse into a
++// single event ID, hiding every loss but the first.
++const RECOVERY_SOURCE_PREFIX: &str = "recovery-source:";
 +// Pending eviction/quarantine transactions get their own private marker in
 +// addition to the aggregate tombstone ledger.  The ledger is intentionally a
 +// compact, replace-in-place document; a crash while replacing it must not be
@@ -8188,6 +8193,7 @@ index 0000000000000000000000000000000000000000..30848bcbc62ed22a7a5c01b2e1978d4c
 +    if let Some(fingerprint) = spec.source_fingerprint.as_deref() {
 +        let valid = fingerprint
 +            .strip_prefix(ORPHAN_OPEN_SOURCE_PREFIX)
++            .or_else(|| fingerprint.strip_prefix(RECOVERY_SOURCE_PREFIX))
 +            .is_some_and(|suffix| is_hex(suffix, 64));
 +        if !valid {
 +            return Err(SpoolError::InvalidState(
@@ -8568,7 +8574,7 @@ index 0000000000000000000000000000000000000000..30848bcbc62ed22a7a5c01b2e1978d4c
 +    }
 +}
 +
-+fn corruption_gap_spec(hint: Option<&BatchInfo>) -> Result<GapSpec, SpoolError> {
++fn corruption_gap_spec(hint: Option<&BatchInfo>, source_fingerprint: Option<String>) -> Result<GapSpec, SpoolError> {
 +    Ok(GapSpec {
 +        event_id: format!("{}{}", GAP_ID_PREFIX, random_hex_id()?),
 +        occurred_at_unix_ms: unix_millis()?,
@@ -8579,8 +8585,36 @@ index 0000000000000000000000000000000000000000..30848bcbc62ed22a7a5c01b2e1978d4c
 +        lost_events: hint.map(|value| value.event_count),
 +        lost_bytes: hint.map(|value| value.raw_bytes),
 +        lost_batch_id: hint.map(|value| value.batch_id.clone()),
-+        source_fingerprint: None,
++        source_fingerprint,
 +    })
++}
++
++/// Identify the damaged object a recovery gap was derived from.  The relative
++/// pathname keeps two distinct objects apart even when neither of them yields
++/// readable batch metadata, and the inode identity additionally prevents a
++/// later object created at the same pathname from inheriting a stale gap ID.
++/// `None` (a path outside the spool root) deliberately forces a fresh random
++/// gap ID: an unidentifiable source must never be treated as "the same one".
++fn recovery_source_fingerprint(node_id: &str, root: &Path, path: &Path) -> Option<String> {
++    let relative = path.strip_prefix(root).ok()?;
++    let mut hasher = Sha256::new();
++    hasher.update(b"shadowsocks-auditd/recovery-source/v1\0");
++    hasher.update(node_id.as_bytes());
++    hasher.update([0]);
++    hasher.update(relative.as_os_str().as_bytes());
++    hasher.update([0]);
++    match fs::symlink_metadata(path) {
++        Ok(metadata) => {
++            hasher.update([1]);
++            hasher.update(metadata.dev().to_be_bytes());
++            hasher.update(metadata.ino().to_be_bytes());
++            hasher.update(metadata.len().to_be_bytes());
++            hasher.update(metadata.mtime().to_be_bytes());
++            hasher.update(metadata.mtime_nsec().to_be_bytes());
++        }
++        Err(_) => hasher.update([0]),
++    }
++    Some(format!("{RECOVERY_SOURCE_PREFIX}{}", hex::encode(hasher.finalize())))
 +}
 +
 +fn orphan_open_source_fingerprint(node_id: &str, metadata: &fs::Metadata) -> String {
@@ -8641,37 +8675,40 @@ index 0000000000000000000000000000000000000000..30848bcbc62ed22a7a5c01b2e1978d4c
 +        .cloned()
 +}
 +
-+fn corruption_gap_spec_or_existing(queue: &VecDeque<GapSpec>, hint: Option<&BatchInfo>) -> Result<GapSpec, SpoolError> {
-+    let candidates: Vec<_> = queue
-+        .iter()
-+        .filter(|spec| {
++fn corruption_gap_spec_or_existing(
++    queue: &VecDeque<GapSpec>,
++    hint: Option<&BatchInfo>,
++    source_fingerprint: Option<String>,
++) -> Result<GapSpec, SpoolError> {
++    // Reuse is bound to the source object, never to the (frequently absent)
++    // batch details.  Matching `None == None` made every unreadable object
++    // adopt the first null-detail gap ID, so N damaged objects produced one
++    // gap and N-1 losses disappeared without evidence.
++    if let Some(fingerprint) = source_fingerprint.as_deref()
++        && let Some(existing) = queue.iter().find(|spec| {
 +            spec.reason == wire::SpoolGapReason::SegmentCorruption
-+                && spec.source_fingerprint.is_none()
-+                && spec.lost_batch_id.as_deref() == hint.map(|value| value.batch_id.as_str())
-+                && spec.lost_spool_epoch.as_deref() == hint.map(|value| value.spool_epoch.as_str())
++                && spec.source_fingerprint.as_deref() == Some(fingerprint)
 +        })
-+        .collect();
-+    if candidates.len() == 1 {
-+        let existing = candidates[0];
++    {
 +        // A marker may have survived before the source rename. Reuse its
 +        // stable ID and payload instead of creating a second gap on restart.
 +        return Ok(existing.clone());
 +    }
-+    corruption_gap_spec(hint)
++    corruption_gap_spec(hint, source_fingerprint)
 +}
 +
 +fn tail_truncation_gap_spec_or_existing(
 +    queue: &VecDeque<GapSpec>,
 +    lost_spool_epoch: Option<&str>,
++    source_fingerprint: Option<String>,
 +) -> Result<GapSpec, SpoolError> {
-+    let candidates: Vec<_> = queue
-+        .iter()
-+        .filter(|spec| {
-+            spec.reason == wire::SpoolGapReason::TailTruncation && spec.lost_spool_epoch.as_deref() == lost_spool_epoch
++    if let Some(fingerprint) = source_fingerprint.as_deref()
++        && let Some(existing) = queue.iter().find(|spec| {
++            spec.reason == wire::SpoolGapReason::TailTruncation
++                && spec.source_fingerprint.as_deref() == Some(fingerprint)
 +        })
-+        .collect();
-+    if candidates.len() == 1 {
-+        return Ok(candidates[0].clone());
++    {
++        return Ok(existing.clone());
 +    }
 +    Ok(GapSpec {
 +        event_id: format!("{}{}", GAP_ID_PREFIX, random_hex_id()?),
@@ -8683,7 +8720,7 @@ index 0000000000000000000000000000000000000000..30848bcbc62ed22a7a5c01b2e1978d4c
 +        lost_events: None,
 +        lost_bytes: None,
 +        lost_batch_id: None,
-+        source_fingerprint: None,
++        source_fingerprint,
 +    })
 +}
 +
@@ -9997,7 +10034,7 @@ index 0000000000000000000000000000000000000000..30848bcbc62ed22a7a5c01b2e1978d4c
 +                }
 +            }
 +        } else {
-+            corruption_gap_spec(hint.as_ref())?
++            corruption_gap_spec(hint.as_ref(), None)?
 +        };
 +        let pending = existing_pending.unwrap_or_else(|| {
 +            let mut pending = wire::QuarantinePending::new(
@@ -11837,6 +11874,10 @@ index 0000000000000000000000000000000000000000..30848bcbc62ed22a7a5c01b2e1978d4c
 +    }
 +    let mut maxima: HashMap<String, u64> = HashMap::new();
 +    let mut sequence_ranges: Vec<(String, u64, u64)> = Vec::new();
++    // Every recovery gap below describes one concrete damaged object.  Binding
++    // the gap to that object keeps two independent losses apart even when
++    // neither object yields a readable batch hint.
++    let source_fingerprint = |path: &Path| recovery_source_fingerprint(node_id, root, path);
 +
 +    // Finish or isolate interrupted seal directories before examining the
 +    // high-water mark.  A complete temp batch can safely be promoted.
@@ -11880,7 +11921,7 @@ index 0000000000000000000000000000000000000000..30848bcbc62ed22a7a5c01b2e1978d4c
 +                } else {
 +                    degraded = true;
 +                    history_untrusted = true;
-+                    let spec = corruption_gap_spec_or_existing(&recovery_gaps, Some(&info))?;
++                    let spec = corruption_gap_spec_or_existing(&recovery_gaps, Some(&info), source_fingerprint(&path))?;
 +                    enqueue_recovery_gap(root, &mut recovery_gaps, spec, &mut degraded)?;
 +                    quarantine_recovery_path(
 +                        root,
@@ -11895,7 +11936,7 @@ index 0000000000000000000000000000000000000000..30848bcbc62ed22a7a5c01b2e1978d4c
 +                degraded = true;
 +                history_untrusted = true;
 +                let hint = read_meta_hint(&path, node_id);
-+                let spec = corruption_gap_spec_or_existing(&recovery_gaps, hint.as_ref())?;
++                let spec = corruption_gap_spec_or_existing(&recovery_gaps, hint.as_ref(), source_fingerprint(&path))?;
 +                enqueue_recovery_gap(root, &mut recovery_gaps, spec, &mut degraded)?;
 +                quarantine_recovery_path(
 +                    root,
@@ -11928,7 +11969,8 @@ index 0000000000000000000000000000000000000000..30848bcbc62ed22a7a5c01b2e1978d4c
 +                    degraded = true;
 +                    history_untrusted = true;
 +                    let hint = read_meta_hint(&path, node_id);
-+                    let spec = corruption_gap_spec_or_existing(&recovery_gaps, hint.as_ref())?;
++                    let spec =
++                        corruption_gap_spec_or_existing(&recovery_gaps, hint.as_ref(), source_fingerprint(&path))?;
 +                    enqueue_recovery_gap(root, &mut recovery_gaps, spec, &mut degraded)?;
 +                    quarantine_recovery_path(
 +                        root,
@@ -11982,7 +12024,7 @@ index 0000000000000000000000000000000000000000..30848bcbc62ed22a7a5c01b2e1978d4c
 +            Err(_) if open_is_symlink => {
 +                degraded = true;
 +                history_untrusted = true;
-+                let spec = corruption_gap_spec_or_existing(&recovery_gaps, None)?;
++                let spec = corruption_gap_spec_or_existing(&recovery_gaps, None, source_fingerprint(&open_path))?;
 +                enqueue_recovery_gap(root, &mut recovery_gaps, spec, &mut degraded)?;
 +                quarantine_recovery_path(
 +                    root,
@@ -12002,7 +12044,7 @@ index 0000000000000000000000000000000000000000..30848bcbc62ed22a7a5c01b2e1978d4c
 +                // silently discarding the inode.
 +                degraded = true;
 +                history_untrusted = true;
-+                let spec = corruption_gap_spec_or_existing(&recovery_gaps, None)?;
++                let spec = corruption_gap_spec_or_existing(&recovery_gaps, None, source_fingerprint(&open_path))?;
 +                enqueue_recovery_gap(root, &mut recovery_gaps, spec, &mut degraded)?;
 +                quarantine_recovery_path(
 +                    root,
@@ -12020,7 +12062,7 @@ index 0000000000000000000000000000000000000000..30848bcbc62ed22a7a5c01b2e1978d4c
 +        Err(_) => {
 +            degraded = true;
 +            history_untrusted = true;
-+            let spec = corruption_gap_spec_or_existing(&recovery_gaps, None)?;
++            let spec = corruption_gap_spec_or_existing(&recovery_gaps, None, source_fingerprint(&open_path))?;
 +            enqueue_recovery_gap(root, &mut recovery_gaps, spec, &mut degraded)?;
 +            if !open_bytes.is_empty() {
 +                quarantine_recovery_path(
@@ -12055,7 +12097,11 @@ index 0000000000000000000000000000000000000000..30848bcbc62ed22a7a5c01b2e1978d4c
 +            .iter()
 +            .rposition(|byte| *byte == b'\n')
 +            .map_or(0, |index| index + 1);
-+        let spec = tail_truncation_gap_spec_or_existing(&recovery_gaps, open_scan.epoch.as_deref())?;
++        let spec = tail_truncation_gap_spec_or_existing(
++            &recovery_gaps,
++            open_scan.epoch.as_deref(),
++            source_fingerprint(&open_path),
++        )?;
 +        enqueue_recovery_gap(root, &mut recovery_gaps, spec, &mut degraded)?;
 +        truncate_open(&open_path, retained)?;
 +    }
@@ -14087,6 +14133,115 @@ index 0000000000000000000000000000000000000000..30848bcbc62ed22a7a5c01b2e1978d4c
 +                bytes
 +            );
 +        }
++    }
++
++    #[test]
++    fn each_batch_with_unreadable_meta_gets_its_own_recovery_gap() {
++        let dir = tempfile::tempdir().expect("tempdir");
++        let spool = Spool::open(config(dir.path())).expect("spool");
++        for sequence in 1..=3 {
++            spool.append(&event(sequence), sequence).expect("append");
++            spool.lease().expect("lease").expect("sealed batch");
++        }
++        drop(spool);
++
++        let sealed: Vec<PathBuf> = fs::read_dir(dir.path().join("sealed"))
++            .expect("sealed dir")
++            .filter_map(Result::ok)
++            .map(|entry| entry.path())
++            .filter(|path| path.is_dir())
++            .collect();
++        assert_eq!(sealed.len(), 3, "three independent sealed batches");
++        for path in &sealed {
++            // An unreadable meta.json is exactly the case in which no batch
++            // hint can be recovered, so every gap would otherwise be all-null.
++            fs::write(path.join("meta.json"), b"{not json").expect("corrupt meta");
++        }
++
++        let spool = Spool::open(config(dir.path())).expect("recover");
++        let gaps: Vec<_> = drain_records(&spool)
++            .into_iter()
++            .filter_map(|record| match record {
++                wire::AuditRecord::SpoolGap(gap) if gap.reason == wire::SpoolGapReason::SegmentCorruption => Some(gap),
++                _ => None,
++            })
++            .collect();
++        assert_eq!(
++            gaps.len(),
++            3,
++            "each damaged batch needs its own gap; one shared gap hides every loss but the first"
++        );
++        let unique: HashSet<String> = gaps.iter().map(|gap| gap.event_id.clone()).collect();
++        assert_eq!(unique.len(), 3, "damaged objects must not share one gap ID");
++        assert_eq!(
++            fs::read_dir(dir.path().join("quarantine"))
++                .expect("quarantine")
++                .filter_map(Result::ok)
++                .count(),
++            3,
++            "every damaged batch is isolated"
++        );
++    }
++
++    #[test]
++    fn recovery_gap_reuse_requires_a_matching_source_fingerprint() {
++        let fingerprint = |byte: char| Some(format!("{RECOVERY_SOURCE_PREFIX}{}", String::from_iter([byte; 64])));
++        let corruption = GapSpec {
++            event_id: "spool:33333333333333333333333333333333".to_owned(),
++            occurred_at_unix_ms: 7,
++            lost_spool_epoch: None,
++            reason: wire::SpoolGapReason::SegmentCorruption,
++            first_lost_spool_sequence: None,
++            last_lost_spool_sequence: None,
++            lost_events: None,
++            lost_bytes: None,
++            lost_batch_id: None,
++            source_fingerprint: fingerprint('a'),
++        };
++        let truncation = GapSpec {
++            event_id: "spool:44444444444444444444444444444444".to_owned(),
++            reason: wire::SpoolGapReason::TailTruncation,
++            source_fingerprint: fingerprint('c'),
++            ..corruption.clone()
++        };
++        let mut queue = VecDeque::new();
++        queue.push_back(corruption.clone());
++        queue.push_back(truncation.clone());
++
++        assert_eq!(
++            corruption_gap_spec_or_existing(&queue, None, fingerprint('a'))
++                .expect("same source")
++                .event_id,
++            corruption.event_id,
++            "the same damaged object must reuse its durable gap ID"
++        );
++        assert_ne!(
++            corruption_gap_spec_or_existing(&queue, None, fingerprint('b'))
++                .expect("other source")
++                .event_id,
++            corruption.event_id,
++            "a second damaged object must not adopt the first gap ID"
++        );
++        assert_ne!(
++            corruption_gap_spec_or_existing(&queue, None, None)
++                .expect("unidentified source")
++                .event_id,
++            corruption.event_id,
++            "an unidentifiable object must always receive a fresh gap ID"
++        );
++        assert_eq!(
++            tail_truncation_gap_spec_or_existing(&queue, None, fingerprint('c'))
++                .expect("same truncation source")
++                .event_id,
++            truncation.event_id
++        );
++        assert_ne!(
++            tail_truncation_gap_spec_or_existing(&queue, None, None)
++                .expect("unidentified truncation source")
++                .event_id,
++            truncation.event_id,
++            "truncation gaps must not collapse on a missing fingerprint either"
++        );
 +    }
 +
 +    #[test]
