@@ -448,9 +448,12 @@ def canonical_json(value: Any) -> bytes:
 
     try:
         encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
-    except (TypeError, ValueError) as exc:
+        # A lone surrogate decoded from a \uD800 escape survives json.dumps but
+        # has no UTF-8 encoding.  Keep the failure on the CollectorError path so
+        # callers still take the error route that never echoes a body.
+        return encoded.encode("utf-8")
+    except (TypeError, ValueError) as exc:  # UnicodeEncodeError is a ValueError
         raise CollectorError("event cannot be encoded") from exc
-    return encoded.encode("utf-8")
 
 
 def _canonical_event(event: dict[str, Any]) -> bytes:

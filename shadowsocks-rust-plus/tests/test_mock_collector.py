@@ -218,6 +218,22 @@ class MockCollectorProtocolTest(unittest.TestCase):
         self.assertEqual(parsed[0]["event"]["server_id"], 'server"quoted\\path')
         self.assertIsNone(parsed[1]["event"]["lost_spool_epoch"])
 
+    def test_unencodable_text_stays_on_the_collector_error_path(self) -> None:
+        # A lone surrogate is valid JSON input but has no UTF-8 encoding.  The
+        # CLI only catches CollectorError/OSError, so a raw UnicodeEncodeError
+        # would bypass the "never echo a body" error path.
+        lone_surrogate = strict_json(b'{"value":"\\ud800"}')
+        with self.assertRaisesRegex(CollectorError, "cannot be encoded"):
+            canonical_json(lone_surrogate)
+        body = (
+            b'{"spool_schema_version":1,"spool_epoch":"\\ud800",'
+            b'"spool_sequence":"1","received_at_unix_ms":"1","event_payload_sha256":"'
+            + b"a" * 64
+            + b'","event":{}}\n'
+        )
+        with self.assertRaisesRegex(CollectorError, "cannot be encoded"):
+            parse_lease(body, lease_metadata(body, "b" * 32, 1, 1, 1))
+
     def test_strict_json_rejects_duplicate_and_nonfinite_values(self) -> None:
         with self.assertRaises(CollectorError):
             strict_json(b'{"schema_version":1,"schema_version":1}')
