@@ -115,5 +115,48 @@ class TestScriptDocsTests(unittest.TestCase):
         self.assertIn("--without-audit", self.readme)
 
 
+class ProducerHealthDocsTests(unittest.TestCase):
+    """producer health counter 的运维描述必须与其真实暴露面一致。"""
+
+    SERVICE_MOD = "crates/shadowsocks-service/src/server/mod.rs"
+    PRODUCER = "crates/shadowsocks-service/src/server/user_audit.rs"
+    RUNTIME_WARNINGS = (
+        "user audit sequence exhausted",
+        "user audit ingest session unavailable",
+    )
+
+    def setUp(self) -> None:
+        self.added = patch_added_lines()
+        self.operations = read(DOCS / "OPERATIONS.md")
+
+    def test_health_counters_are_only_read_by_the_final_shutdown_log(self) -> None:
+        callers = {
+            path
+            for path, lines in self.added.items()
+            if any("emitter.health_snapshot()" in line for line in lines)
+        }
+        self.assertEqual(callers, {self.SERVICE_MOD, self.PRODUCER})
+        lines = self.added[self.SERVICE_MOD]
+        hits = [index for index, line in enumerate(lines) if "emitter.health_snapshot()" in line]
+        self.assertEqual(len(hits), 1, "mod.rs 出现了新的 health 读取点，文档需同步")
+        owner = max(index for index, line in enumerate(lines[: hits[0]]) if line.startswith("fn "))
+        self.assertIn("fn log_final_shutdown_skipped(", lines[owner])
+
+    def test_operations_describes_shutdown_only_exposure(self) -> None:
+        operations = flat(self.operations)
+        self.assertIn(flat("没有运行期暴露面"), operations)
+        self.assertIn(flat("user audit shutdown drain_completed="), operations)
+        self.assertFalse(
+            flat("`sequence_exhausted` 或 producer health counter 饱和") in operations,
+            "OPERATIONS.md 仍把 producer health counter 列为可轮询的告警项",
+        )
+        for message in self.RUNTIME_WARNINGS:
+            self.assertTrue(
+                any(message in line for lines in self.added.values() for line in lines),
+                message,
+            )
+            self.assertIn(flat(message), operations)
+
+
 if __name__ == "__main__":
     unittest.main()

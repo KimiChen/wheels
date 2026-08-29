@@ -449,7 +449,15 @@ upstream 断开时不会自动重试 lease/ACK。任何会重新序列化 ACK JS
 - `storage_rejected_attempts`、`evicted_unacked_records`、任一 gap 或 `udp_window_contention` 增长；
 - lease digest/MAC、epoch/sequence 连续性或 ACK 幂等校验失败；
 - spool bytes 接近 5 GiB、文件系统可用空间低于 1 GiB、acked retention 超期未清理；
-- ssserver `shutdown_skipped_observations`、`sequence_exhausted` 或 producer health counter 饱和。
+- ssserver journald 中出现 `user audit sequence exhausted`、`user audit producer degraded after
+  non-retryable hello NACK` 或 `user audit ingest session unavailable` 这三条限频 warn。
+
+ssserver 侧的 producer health counter（`shutdown_skipped_observations`、`sequence_exhausted`、
+queue/encode/NACK/contention 等）当前**没有运行期暴露面**：它们不进入 user-stats 快照，也没有独立的
+HTTP、信号或文件接口，只在进程退出、全部 relay join 之后由一条聚合 journald warn
+（`user audit shutdown drain_completed=… skipped_observations=…`）打印一次。因此不能把它们配置成周期
+轮询的告警指标；运行期只能依赖上面三条限频 journald warn 和 auditd 侧 health，而退出时的那条聚合
+记录应在每次重启后解析并归档为该运行周期的最终审计缺口证据。
 
 ## 计划重启与升级屏障
 
