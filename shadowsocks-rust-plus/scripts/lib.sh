@@ -65,7 +65,9 @@ absolute_path() {
 
   parent_path="$(dirname "$input_path")"
   base_name="$(basename "$input_path")"
-  mkdir -p "$parent_path"
+  # Resolving a path must stay side-effect free: creating the parent here made
+  # every rejected `--output` leave directories behind on the release host.
+  [[ -d "$parent_path" ]] || die "路径的父目录不存在：$parent_path"
   parent_path="$(cd "$parent_path" && pwd -P)"
   printf '%s/%s\n' "$parent_path" "$base_name"
 }

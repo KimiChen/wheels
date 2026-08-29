@@ -612,6 +612,39 @@ with open(fixture_root / ("environment-" + source_root.name + ".json"), "w", enc
             )
             self.assertIn("toolchain.zig_version", wrong_toolchain.stderr)
 
+    def test_path_resolution_has_no_side_effects(self) -> None:
+        """`absolute_path` 只做校验：被拒绝的路径不得在发布主机上留下目录。"""
+        library = PROJECT_ROOT / "scripts" / "lib.sh"
+        with tempfile.TemporaryDirectory(prefix="ssrp-release-abspath-") as temporary:
+            root = Path(temporary)
+            missing = root / "missing-parent" / "release-manifest.sig"
+            rejected = self.run_command(
+                [
+                    "bash",
+                    "-c",
+                    f"source {shlex.quote(str(library))}\n"
+                    f"absolute_path {shlex.quote(str(missing))}\n",
+                ],
+                success=False,
+            )
+            self.assertIn("父目录不存在", rejected.stderr)
+            self.assertFalse(missing.parent.exists())
+
+            existing = root / "existing"
+            existing.mkdir()
+            accepted = self.run_command(
+                [
+                    "bash",
+                    "-c",
+                    f"source {shlex.quote(str(library))}\n"
+                    f"absolute_path {shlex.quote(str(existing / 'release-manifest.sig'))}\n",
+                ]
+            )
+            self.assertEqual(
+                accepted.stdout.strip(),
+                str(existing.resolve() / "release-manifest.sig"),
+            )
+
     def test_packaging_refuses_overwrite_and_preserves_artifacts(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ssrp-release-") as temporary:
             root = Path(temporary)
