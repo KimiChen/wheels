@@ -24672,7 +24672,7 @@ index 0000000000000000000000000000000000000000..4a5d39945fa2689df5f3cd97703cfbf4
 +    }
 +}
 diff --git a/crates/shadowsocks-service/src/server/user_stats.rs b/crates/shadowsocks-service/src/server/user_stats.rs
-index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..62346f15767ab727647b14f762d77f74ebaa655f 100644
+index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..449e871aab28f9ed7d38ef5cf452778be7769966 100644
 --- a/crates/shadowsocks-service/src/server/user_stats.rs
 +++ b/crates/shadowsocks-service/src/server/user_stats.rs
 @@ -11,11 +11,16 @@ use std::{
@@ -24926,7 +24926,19 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..62346f15767ab727647b14f762d77f74
          if !self.record.active.load(Ordering::Relaxed)
              || self.record.current_lifecycle.load(Ordering::Acquire) != self.lifecycle
              || !state
-@@ -1403,8 +1516,7 @@ mod exporter {
+@@ -749,6 +862,11 @@ mod exporter {
+     const ACCEPT_ERROR_RETRY_DELAY: Duration = Duration::from_secs(1);
+     const BUSY_RESPONSE_WRITE_TIMEOUT: Duration = Duration::from_millis(100);
+     const MAX_BUSY_RESPONSE_WORKERS: usize = 32;
++    /// Upper bound on the input drained during a lingering close: one further
++    /// maximum-sized request beyond whatever the response path already read.
++    const LINGERING_CLOSE_MAX_BYTES: usize = USER_STATS_MAX_REQUEST_BYTES;
++    /// Upper bound on the time spent draining input during a lingering close.
++    const LINGERING_CLOSE_TIMEOUT: Duration = Duration::from_millis(100);
+ 
+     pub(super) const HEALTH_OK: &[u8] = b"{\"schema_version\":1,\"status\":\"ok\"}\n";
+     pub(super) const HEALTH_UNHEALTHY: &[u8] = b"{\"schema_version\":1,\"status\":\"unhealthy\"}\n";
+@@ -1403,8 +1521,7 @@ mod exporter {
          }
  
          let suffix = &value[host.len()..];
@@ -24936,7 +24948,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..62346f15767ab727647b14f762d77f74
      }
  
      fn request_has_one_valid_host(request: &Request<Incoming>) -> bool {
-@@ -1547,10 +1659,9 @@ mod exporter {
+@@ -1547,10 +1664,9 @@ mod exporter {
              let (status, body) = match error {
                  ReadHeadError::Invalid => (StatusCode::BAD_REQUEST, ERROR_INVALID_REQUEST),
                  ReadHeadError::TooLarge => (StatusCode::PAYLOAD_TOO_LARGE, ERROR_REQUEST_TOO_LARGE),
@@ -24950,7 +24962,120 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..62346f15767ab727647b14f762d77f74
              };
              write_direct_json(&mut stream, config.write_timeout, status, body).await;
              return Ok(());
-@@ -1669,10 +1780,7 @@ mod tests {
+@@ -1588,17 +1704,52 @@ mod exporter {
+         response
+     }
+ 
++    /// Close the write half and then drain whatever the client still has queued.
++    ///
++    /// Linux resets an `AF_UNIX` stream socket whose receive queue is still
++    /// non-empty when the socket is closed (`unix_release_sock` sets `ECONNRESET`
++    /// on the peer). Every direct error response is produced without reading the
++    /// rest of the request — `PAYLOAD_TOO_LARGE` stops mid-request by design and
++    /// `TOO_MANY_REQUESTS` never reads at all — so closing straight away makes the
++    /// client's read fail with `ECONNRESET` even though the response bytes were
++    /// already delivered. Draining the queue first lets the peer observe the
++    /// response followed by a clean end of stream. The drain is bounded in both
++    /// bytes and time so a client cannot use it to pin a permit.
++    async fn lingering_close(stream: &mut UnixStream, timeout: Duration) {
++        let _ = stream.shutdown().await;
++        let drain_timeout = timeout.min(LINGERING_CLOSE_TIMEOUT);
++        let _ = time::timeout(drain_timeout, async {
++            let mut scratch = [0u8; 1_024];
++            let mut drained = 0usize;
++            while drained < LINGERING_CLOSE_MAX_BYTES {
++                let read_len = LINGERING_CLOSE_MAX_BYTES
++                    .saturating_sub(drained)
++                    .min(scratch.len());
++                match stream.read(&mut scratch[..read_len]).await {
++                    Ok(0) | Err(..) => break,
++                    Ok(count) => drained = drained.saturating_add(count),
++                }
++            }
++        })
++        .await;
++    }
++
+     async fn write_direct_json(stream: &mut UnixStream, timeout: Duration, status: StatusCode, body: &[u8]) {
+         let response = direct_json_response(status, body);
+         let _ = time::timeout(timeout, async { stream.write_all(&response).await }).await;
+-        let _ = stream.shutdown().await;
++        lingering_close(stream, timeout).await;
+     }
+ 
+     #[cfg(test)]
+     pub(super) mod tests {
+         use std::{fs, os::unix::fs::PermissionsExt};
+ 
+-        use super::{set_socket_permissions_nofollow, verify_open_file_path};
++        use tokio::io::{AsyncReadExt, AsyncWriteExt};
++
++        use super::{
++            ERROR_REQUEST_TOO_LARGE, StatusCode, UnixStream, set_socket_permissions_nofollow, verify_open_file_path,
++            write_direct_json,
++        };
+ 
+         pub(crate) const BUSY_RESPONSE_WORKERS: usize = super::MAX_BUSY_RESPONSE_WORKERS;
+         pub(crate) const SNAPSHOT_REQUEST: &[u8] = b"GET /v1/snapshot HTTP/1.1\r\nHost: localhost\r\n\r\n";
+@@ -1638,6 +1789,57 @@ mod exporter {
+             drop(socket);
+         }
+ 
++        /// Reads whatever is still queued on `fd` without consuming it.
++        fn queued_input_bytes(fd: std::os::fd::RawFd) -> usize {
++            let mut pending: libc::c_int = -1;
++            // SAFETY: `fd` is an open socket owned by the caller and `pending` is a
++            // valid `c_int` for the duration of the call.
++            let result = unsafe { libc::ioctl(fd, libc::FIONREAD, &mut pending) };
++            assert_eq!(result, 0, "FIONREAD failed: {}", std::io::Error::last_os_error());
++            usize::try_from(pending).expect("FIONREAD must not report a negative count")
++        }
++
++        /// A direct error response must leave no unread input behind.
++        ///
++        /// Linux resets an `AF_UNIX` peer when a socket with a non-empty receive
++        /// queue is closed, which drops an already-written response. Asserting on
++        /// the drained queue rather than on the peer's error keeps this bound on
++        /// platforms whose close semantics hide the defect.
++        #[tokio::test]
++        async fn direct_error_response_drains_unread_request_input() {
++            let (mut client, mut server) = UnixStream::pair().unwrap();
++            // Small enough to fit in the socket buffer, so the whole request is
++            // queued before the response path runs — the shape of a request that
++            // trips the size limit and is answered without being read to the end.
++            client.write_all(&[b'x'; 4_096]).await.unwrap();
++            client.shutdown().await.unwrap();
++            let server_fd = std::os::fd::AsRawFd::as_raw_fd(&server);
++            assert_eq!(
++                queued_input_bytes(server_fd),
++                4_096,
++                "the request must be queued before the response path runs"
++            );
++
++            write_direct_json(
++                &mut server,
++                std::time::Duration::from_secs(5),
++                StatusCode::PAYLOAD_TOO_LARGE,
++                ERROR_REQUEST_TOO_LARGE,
++            )
++            .await;
++
++            assert_eq!(
++                queued_input_bytes(server_fd),
++                0,
++                "the response path must drain the request bytes it never read"
++            );
++
++            let mut response = Vec::new();
++            client.read_to_end(&mut response).await.unwrap();
++            assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 413 "));
++            assert!(response.ends_with(ERROR_REQUEST_TOO_LARGE));
++        }
++
+         #[test]
+         fn lock_path_verification_rejects_an_inode_replacement() {
+             let directory = tempfile::tempdir().unwrap();
+@@ -1669,10 +1871,7 @@ mod tests {
          T: Send + 'static,
          F: FnOnce() -> T + Send + 'static,
      {
@@ -24962,7 +25087,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..62346f15767ab727647b14f762d77f74
          let (started_tx, started_rx) = std::sync::mpsc::channel();
          let (result_tx, result_rx) = std::sync::mpsc::channel();
          let worker = std::thread::spawn(move || {
-@@ -1791,7 +1899,10 @@ mod tests {
+@@ -1791,7 +1990,10 @@ mod tests {
              assert_eq!(prior.servers[0].server_id, snapshot.servers[0].server_id);
              assert_eq!(prior.servers[0].generation, snapshot.servers[0].generation);
              assert_eq!(prior.servers[0].users[0].name, snapshot.servers[0].users[0].name);
@@ -24974,7 +25099,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..62346f15767ab727647b14f762d77f74
          }
          assert!(active_snapshot.servers[0].active);
          assert_eq!(active_snapshot.servers[0].users[0].tcp_uplink_bytes, 7);
-@@ -2038,10 +2149,7 @@ mod tests {
+@@ -2038,10 +2240,7 @@ mod tests {
              response.headers.get("cache-control").map(String::as_str),
              Some("no-store")
          );
@@ -24986,7 +25111,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..62346f15767ab727647b14f762d77f74
          assert!(!response.headers.contains_key("transfer-encoding"));
          assert_eq!(
              response.headers["content-length"].parse::<usize>().unwrap(),
-@@ -2123,8 +2231,7 @@ mod tests {
+@@ -2123,8 +2322,7 @@ mod tests {
          assert_eq!(response.body, exporter::ERROR_INVALID_REQUEST);
  
          for declared_body in [
@@ -24996,7 +25121,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..62346f15767ab727647b14f762d77f74
              b"GET /v1/snapshot HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: gzip\r\n\r\n".as_slice(),
              b"GET /v1/snapshot HTTP/1.1\r\nHost: localhost\r\nContent-Length: nope\r\n\r\n".as_slice(),
              b"GET /v1/snapshot HTTP/1.1\r\nHost: localhost\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\n"
-@@ -2158,7 +2265,10 @@ mod tests {
+@@ -2158,7 +2356,10 @@ mod tests {
              .unwrap()
              .unwrap();
          assert_eq!(
@@ -25008,7 +25133,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..62346f15767ab727647b14f762d77f74
              1
          );
          let response = parse_response(bytes);
-@@ -2207,8 +2317,7 @@ mod tests {
+@@ -2207,8 +2408,7 @@ mod tests {
          }
  
          for unsupported_version in ["HTTP/1.0", "HTTP/1.2", "HTTP/2.0"] {
@@ -25018,7 +25143,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..62346f15767ab727647b14f762d77f74
              let response = request(&path, request_bytes.as_bytes()).await;
              assert_eq!(response.status, 505);
              assert_eq!(response.body, exporter::ERROR_HTTP_VERSION_NOT_SUPPORTED);
-@@ -2218,13 +2327,7 @@ mod tests {
+@@ -2218,13 +2418,7 @@ mod tests {
          assert_eq!(response.status, 400);
          assert_eq!(response.body, exporter::ERROR_INVALID_REQUEST);
  
@@ -25033,7 +25158,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..62346f15767ab727647b14f762d77f74
              let request_bytes = format!("GET /healthz HTTP/1.1\r\nHost: {valid_host}\r\n\r\n");
              let response = request(&path, request_bytes.as_bytes()).await;
              assert_eq!(response.status, 200);
-@@ -2258,11 +2361,7 @@ mod tests {
+@@ -2258,11 +2452,7 @@ mod tests {
          let exporter = UserStatsExporter::bind(exporter_config(&path), registry.clone()).unwrap();
          let task = tokio::spawn(exporter.run());
  
@@ -25046,7 +25171,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..62346f15767ab727647b14f762d77f74
          let response = split_response(bytes);
          assert_eq!(response.status, 405);
          assert_eq!(response.headers.get("allow").map(String::as_str), Some("GET"));
-@@ -2274,10 +2373,7 @@ mod tests {
+@@ -2274,10 +2464,7 @@ mod tests {
              response.headers.get("cache-control").map(String::as_str),
              Some("no-store")
          );
@@ -25058,6 +25183,34 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..62346f15767ab727647b14f762d77f74
          assert_eq!(
              response.headers["content-length"].parse::<usize>().unwrap(),
              exporter::ERROR_METHOD_NOT_ALLOWED.len()
+@@ -2508,10 +2695,23 @@ mod tests {
+         let mut overflow = UnixStream::connect(&path).await.unwrap();
+         overflow.write_all(exporter::tests::HEALTH_REQUEST).await.unwrap();
+         let mut overflow_response = Vec::new();
+-        tokio::time::timeout(Duration::from_secs(1), overflow.read_to_end(&mut overflow_response))
+-            .await
+-            .expect("connection above the busy-response bound must be dropped promptly")
+-            .unwrap();
++        // Past the bound the exporter drops the connection without reading it or
++        // answering it. Draining the queued request first is exactly the work the
++        // bound exists to avoid, so on Linux the peer is reset instead of being
++        // closed gracefully (`unix_release_sock` sets `ECONNRESET` when a socket is
++        // closed with queued input). Both endings are conformant; what the bound
++        // guarantees is that no response is produced.
++        let overflow_result =
++            tokio::time::timeout(Duration::from_secs(1), overflow.read_to_end(&mut overflow_response))
++                .await
++                .expect("connection above the busy-response bound must be dropped promptly");
++        if let Err(error) = overflow_result {
++            assert_eq!(
++                error.kind(),
++                std::io::ErrorKind::ConnectionReset,
++                "the dropped connection must end in EOF or a reset, not {error}"
++            );
++        }
+         assert!(overflow_response.is_empty());
+ 
+         release_busy_responses.add_permits(exporter::tests::BUSY_RESPONSE_WORKERS);
 diff --git a/crates/shadowsocks/src/config.rs b/crates/shadowsocks/src/config.rs
 index f31f16b93b7595ded06addda0fd2755eb429e1f9..d8f1614b08502757c2ac3010f7494bcb773de259 100644
 --- a/crates/shadowsocks/src/config.rs
