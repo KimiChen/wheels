@@ -4322,3 +4322,45 @@ cargo-zigbuild 0.23.0、Python 3.14.6（Debian 自带 3.13.5，被 lock 拒绝�
 **仍未执行**：README 第 1–2 步的两次独立发布构建与签名验签（阶段 3b 未完成）；第 4–5 步的
 ssserver 配置注入与数据面启动；`tests/integration_audit.py` 端到端；fuzz sanitizer；§14.5 压测。
 因此本节仍**不构成 §16 发布验收**，只证明 §11 权限模型与三条 packaging critical 的修复在真机成立。
+
+### 30.6 阶段 5：README 第 4–5 步与端到端门禁
+
+**第 4 步（配置注入）通过。** `cluster-users.py generate` 生成 200 正式 + 4 测试账号的私有凭据源
+（`0600`，不输出密钥），`render-users` 渲染 204 条 `users[]`，构造 5 份节点配置后
+`verify-five --expected-formal-users 200 --expected-test-users 4` **验证通过**：共享 iPSK、
+`users[]` 内容与顺序、`node_id`/`server id` 唯一性、`2022-blake3-aes-128-gcm` 全部一致。
+本节点配置安装为 `/etc/shadowsocks-rust-plus/server.json`（目录 `0750 root:shadowsocks`、
+文件 `0640 root:shadowsocks`），含 `user_stats` 与 `user_audit` 两段。
+
+**第 5 步（数据面启动）通过。** 安装 `shadowsocks-rust-plus.service` 并 `daemon-reload` 后启动，
+ssserver 在 `0.0.0.0:19991` 同时监听 TCP 与 UDP，auditd 保持 active。spool 初始化为
+`pending_state_reset: null`、`next_spool_sequence: 1`——真机确认全新节点不再伪造 `state_reset`
+gap（`m-43`/`m-111` 的修复成立）。
+
+- **M-67 `tests/integration_audit.py` 的两处缺陷使 §14.4 的 Linux 端到端门禁必然失败。**
+  该测试此前从未在任何机器上执行过。首次真机运行连续暴露两处问题，**均为测试自身缺陷，
+  实现无误**：
+  1. **spool 目录从未创建。** 代码只把 `spool = root / "spool"` 写进配置却不 `mkdir`；auditd 以
+     `shadowsocks-audit` 降权运行，而外层临时目录是 `root:root 0755`，它无权在其中创建自己的
+     spool，启动即 `configuration file I/O failed: Permission denied`。
+  2. **水位取自生产示例配置。** 测试特意把 spool 放在 `/run`（tmpfs，本机 772 MiB）以满足
+     auditd 的父路径检查，却沿用 `auditd.example.json` 的 `min_free_bytes = 1 GiB`，超过该文件
+     系统总容量，auditd 直接判
+     `min_free_bytes must be less than the spool filesystem total capacity`。
+  按 §11 预建 spool 并 chown/chmod、按 §5.3「自动化测试可以使用更小值」改用允许区间下端
+  （64 MiB / 256 MiB）后，**实测通过**。（§14.4 §11 §5.3）
+
+**端到端门禁首次通过。** 修复后 `integration_audit.py` 在 Debian 13 上 `RC=0`，输出
+「auditd health 签名集成测试通过。」，实际覆盖：
+
+- auditd 以真实专用账号与专用组启动；
+- producer 经 ingest socket 完成 hello + event，取得带 `spool_epoch`/`spool_sequence` 的 ACK
+  （即 §8.2/§8.3 的 `SO_PEERCRED` 校验与 ACK 语义在真机成立）；
+- 错误身份的 hello 被按预期 `hello_nack` 拒绝；
+- 以 `audit-exporter` 身份经 export socket 发出的 **HMAC 签名 health 请求**返回合法且 healthy
+  的响应（§10.1/§10.2 的签名链路在真机成立）。
+
+**环境前提（文档待补）**：该测试会以三个非特权账号重新执行自身，因此**解释器、脚本、
+`config/auditd.example.json` 模板都必须位于这些账号可读可执行的路径**。放在 `/root`
+（Debian 默认 `0550`）下会得到一串难以定位的 `PermissionError`——以 root 身份工作时这是很自然的
+放法。`tests/README.md` 与 `packaging/README.md` 均未说明这一点。
