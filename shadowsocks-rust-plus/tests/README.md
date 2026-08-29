@@ -159,8 +159,10 @@ node_id + server_id + server_generation + identity_name
 
 [`mock_collector.py`](mock_collector.py) 是仅用于开发和协议互通测试的无第三方依赖 collector。它在
 解析 lease body 前验证响应 body SHA-256、节点标识和 HMAC，逐行校验 wrapper 的 spool epoch/sequence、
-事件 payload digest 与连续范围，再把 `(node_id, event_id)` 和 `(node_id, batch_id)` 的幂等状态写入可选
-的 `0600` JSON 状态文件。冲突只被记录到隔离列表，不覆盖已有事件。固定请求/响应 HMAC vectors 与
+事件 payload digest 与连续范围，再把 `(node_id, event_id)` 和 `(node_id, batch_id)` 的幂等状态写入
+`--state` 指定的 `0600` JSON 状态文件。`--socket`、`--node`、`--key-file` 和 `--state` 四个参数都是
+必填的：工具没有无状态模式，缺任何一个都会由 argparse 直接退出。冲突只被记录到隔离列表，不覆盖
+已有事件。固定请求/响应 HMAC vectors 与
 重复 key、非有限数字、BOM、NDJSON 缺行等拒绝用例见 [`test_mock_collector.py`](test_mock_collector.py)。
 
 对运行中的 auditd 做一次本机采集（不会输出 event body 或 key）：

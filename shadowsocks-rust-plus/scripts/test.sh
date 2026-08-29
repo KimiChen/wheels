@@ -123,6 +123,7 @@ python3 "$SHADOWSOCKS_RUST_PLUS_ROOT/tests/test_panic_abort.py" --source "$sourc
 python3 "$SHADOWSOCKS_RUST_PLUS_ROOT/tests/test_benchmark_audit.py"
 python3 "$SHADOWSOCKS_RUST_PLUS_ROOT/tests/test_benchmark_data_path.py"
 python3 "$SHADOWSOCKS_RUST_PLUS_ROOT/tests/test_integration_audit.py"
+python3 "$SHADOWSOCKS_RUST_PLUS_ROOT/tests/test_docs_consistency.py"
 python3 "$SHADOWSOCKS_RUST_PLUS_ROOT/tests/benchmark_audit.py" \
   --events 2000 --producers 4 --queue-capacity 128 --spool-capacity 256 >/dev/null
 
