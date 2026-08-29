@@ -19238,10 +19238,10 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..5b0ebb7924e76785c6e14e5826db6b88
  }
 diff --git a/crates/shadowsocks-service/src/server/user_audit.rs b/crates/shadowsocks-service/src/server/user_audit.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..b45e8e455265eb42e3a98ccb946299fece7ea953
+index 0000000000000000000000000000000000000000..df115466fe5cdf8ad0b088b1cf26edf6708dd3d5
 --- /dev/null
 +++ b/crates/shadowsocks-service/src/server/user_audit.rs
-@@ -0,0 +1,4073 @@
+@@ -0,0 +1,4098 @@
 +//! Non-blocking successful-target access auditing for the server data path.
 +//!
 +//! The relay only constructs a small draft and performs bounded atomic/cache
@@ -20725,7 +20725,7 @@ index 0000000000000000000000000000000000000000..b45e8e455265eb42e3a98ccb946299fe
 +        // becomes available; only a failed encode/permanent NACK schedules a
 +        // 60-second retry (via `request_diagnostic_retry`).
 +        if bucket == DiagnosticBucket::Contention {
-+            self.diagnostic_next_due[bucket.index()] = now + DIAGNOSTIC_INTERVAL;
++            self.diagnostic_next_due[bucket.index()] = deadline_after(now, DIAGNOSTIC_INTERVAL);
 +        }
 +        self.diagnostic_cursor = (bucket.index() + 1) % DIAGNOSTIC_BUCKETS.len();
 +    }
@@ -21698,6 +21698,14 @@ index 0000000000000000000000000000000000000000..b45e8e455265eb42e3a98ccb946299fe
 +        .and_then(|value| value.as_millis().try_into().ok())
 +}
 +
++/// Deadline arithmetic for the diagnostic cadence.  `Instant + Duration`
++/// panics on overflow; a rate-limit deadline must degrade to "due now" instead
++/// of aborting the producer.  This is the additive counterpart of the C-6
++/// `checked_sub` guard.
++fn deadline_after(now: Instant, interval: Duration) -> Instant {
++    now.checked_add(interval).unwrap_or(now)
++}
++
 +/// Convert an accumulator snapshot into the required inclusive time range.
 +/// Zero is the internal marker for an unknown boundary; it must never escape
 +/// as an invented wire timestamp.  An unknown first boundary is conservatively
@@ -21729,7 +21737,7 @@ index 0000000000000000000000000000000000000000..b45e8e455265eb42e3a98ccb946299fe
 +    for bucket in DIAGNOSTIC_BUCKETS {
 +        if retry_bits & bucket.bit() != 0 {
 +            state.diagnostic_next_due[bucket.index()] =
-+                state.diagnostic_next_due[bucket.index()].max(now + DIAGNOSTIC_INTERVAL);
++                state.diagnostic_next_due[bucket.index()].max(deadline_after(now, DIAGNOSTIC_INTERVAL));
 +            retry_deadline_applied |= bucket.bit();
 +        }
 +    }
@@ -21753,7 +21761,7 @@ index 0000000000000000000000000000000000000000..b45e8e455265eb42e3a98ccb946299fe
 +            let bit = bucket.bit();
 +            if retry_bits & bit != 0 && retry_deadline_applied & bit == 0 {
 +                state.diagnostic_next_due[bucket.index()] =
-+                    state.diagnostic_next_due[bucket.index()].max(now + DIAGNOSTIC_INTERVAL);
++                    state.diagnostic_next_due[bucket.index()].max(deadline_after(now, DIAGNOSTIC_INTERVAL));
 +                retry_deadline_applied |= bit;
 +            }
 +        }
@@ -21808,7 +21816,7 @@ index 0000000000000000000000000000000000000000..b45e8e455265eb42e3a98ccb946299fe
 +                    // in this pass before the atomic retry notification is
 +                    // consumed at the next pass.
 +                    state.diagnostic_next_due[bucket.index()] =
-+                        state.diagnostic_next_due[bucket.index()].max(now + DIAGNOSTIC_INTERVAL);
++                        state.diagnostic_next_due[bucket.index()].max(deadline_after(now, DIAGNOSTIC_INTERVAL));
 +                    emitter.decrement_pending();
 +                }
 +            }
@@ -22755,6 +22763,23 @@ index 0000000000000000000000000000000000000000..b45e8e455265eb42e3a98ccb946299fe
 +            now.checked_add(DIAGNOSTIC_INTERVAL).unwrap_or(now);
 +        let wait = state.next_diagnostic_wait(&emitter, now);
 +        assert!(wait >= Duration::from_secs(59));
++    }
++
++    #[test]
++    fn diagnostic_deadline_is_checked_against_overflow() {
++        let now = Instant::now();
++        assert!(deadline_after(now, DIAGNOSTIC_INTERVAL) > now);
++        // An interval this clock cannot represent must saturate to "due now"
++        // instead of panicking; plain `now + interval` aborts here.
++        assert_eq!(deadline_after(now, Duration::MAX), now);
++        // Contention is the only bucket that reschedules itself and must route
++        // through the checked helper.
++        let mut state = SupervisorState::new();
++        state.mark_diagnostic_attempt(DiagnosticBucket::Contention, now);
++        assert_eq!(
++            state.diagnostic_next_due[DiagnosticBucket::Contention.index()],
++            deadline_after(now, DIAGNOSTIC_INTERVAL)
++        );
 +    }
 +
 +    #[test]
