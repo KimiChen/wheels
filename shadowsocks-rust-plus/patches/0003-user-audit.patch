@@ -7813,10 +7813,10 @@ index 0000000000000000000000000000000000000000..6cf8d005dfef917c852be4f611d5b945
 +}
 diff --git a/crates/shadowsocks-auditd/src/spool.rs b/crates/shadowsocks-auditd/src/spool.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..b82ff42ef0a425a13f98f0e45c7053bb5c4e3413
+index 0000000000000000000000000000000000000000..e40c8d5aea70cc98e546d507a7ea086cab6fc3e8
 --- /dev/null
 +++ b/crates/shadowsocks-auditd/src/spool.rs
-@@ -0,0 +1,7484 @@
+@@ -0,0 +1,7548 @@
 +//! Durable, node-local audit spool.
 +//!
 +//! The spool is deliberately synchronous.  Ingest and export perform their
@@ -10090,6 +10090,9 @@ index 0000000000000000000000000000000000000000..b82ff42ef0a425a13f98f0e45c7053bb
 +        // The source batch left sealed/ before the gap write. Keep the health
 +        // index aligned even if the subsequent diagnostic append hits ENOSPC;
 +        // the durable pending marker will make that gap retryable.
++        let from_trusted_dir = path
++            .parent()
++            .is_some_and(|parent| parent.ends_with("sealed") || parent.ends_with("acked"));
 +        if let Some(info) = hint.as_ref() {
 +            if path.parent().is_some_and(|parent| parent.ends_with("sealed")) {
 +                Self::remove_sealed_index(inner, info);
@@ -10098,12 +10101,19 @@ index 0000000000000000000000000000000000000000..b82ff42ef0a425a13f98f0e45c7053bb
 +            // corrupt ACKed batch is still counted by the startup metadata
 +            // scan until this quarantine transaction removes it from the
 +            // trusted set.
-+            if path
-+                .parent()
-+                .is_some_and(|parent| parent.ends_with("sealed") || parent.ends_with("acked"))
-+            {
++            if from_trusted_dir {
 +                inner.stored_records = inner.stored_records.saturating_sub(info.event_count);
 +            }
++        } else if from_trusted_dir {
++            // An unparsable meta.json is the main quarantine trigger, so the
++            // index update must never be gated on the hint.  Without this the
++            // sealed indexes and `stored_records` keep a ghost entry for an
++            // object that no longer exists: `oldest_unacked_at_unix_ms` never
++            // returns to null (§10.1) and the next integrity sweep publishes a
++            // second, empty `segment_corruption` gap for the vanished batch.
++            // Recovery remeasures the same way when a moved source carries no
++            // trustworthy metadata.
++            self.rebuild_runtime_indexes_locked(inner);
 +        }
 +        // The source/target directory barriers are part of quarantine_path.
 +        // Now the fixed gap can be written even when ordinary capacity is at
@@ -14952,6 +14962,60 @@ index 0000000000000000000000000000000000000000..b82ff42ef0a425a13f98f0e45c7053bb
 +        let sequence_before = inner.next_sequence;
 +        let _ = spool.cleanup_locked(&mut inner, 1);
 +        assert!(inner.next_sequence <= sequence_before.saturating_add(1));
++    }
++
++    /// M-56: the metadata hint is unavailable on exactly the path that puts a
++    /// batch into quarantine (an unparsable meta.json), so gating the index
++    /// removal on it leaves a ghost sealed batch behind: health keeps counting
++    /// it, `oldest_unacked_at_unix_ms` never clears, and the next integrity
++    /// sweep publishes a second, content-free corruption gap for it.
++    #[test]
++    fn quarantine_of_a_meta_corrupt_batch_clears_the_sealed_index() {
++        let dir = tempfile::tempdir().expect("tempdir");
++        let spool = Spool::open(config(dir.path())).expect("spool");
++        let gap_count = |reason: &str| -> usize {
++            let body = fs::read(dir.path().join("open/current.ndjson")).expect("open segment");
++            let needle = format!("\"reason\":\"{reason}\"").into_bytes();
++            body.split_inclusive(|byte| *byte == b'\n')
++                .filter(|line| line.windows(needle.len()).any(|window| window == needle.as_slice()))
++                .count()
++        };
++        spool.append(&event(1), 1).expect("append");
++        {
++            let mut inner = lock(&spool.inner);
++            spool.seal_locked(&mut inner).expect("seal");
++        }
++        assert_eq!(spool.health().sealed_batches, 1);
++        let sealed = list_batch_dirs(&dir.path().join("sealed")).expect("sealed");
++        assert_eq!(sealed.len(), 1);
++        fs::write(sealed[0].join("meta.json"), b"{").expect("corrupt meta");
++
++        assert!(
++            spool.lease().expect("lease").is_none(),
++            "the corrupt batch must be isolated instead of exported"
++        );
++        let health = spool.health();
++        assert_eq!(
++            health.sealed_batches, 0,
++            "a quarantined batch must leave the sealed index even without a metadata hint"
++        );
++        assert_eq!(
++            health.oldest_unacked_at_unix_ms, None,
++            "§10.1: no sealed unacked batch remains after the quarantine"
++        );
++        assert_eq!(
++            health.stored_records, 1,
++            "only the corruption gap remains; the vanished batch must stop counting"
++        );
++        // Two more health polls run the integrity sweep; a ghost index entry
++        // would turn into a second, content-free corruption gap.
++        spool.health();
++        spool.health();
++        assert_eq!(
++            gap_count("segment_corruption"),
++            1,
++            "one isolated object must produce exactly one corruption gap"
++        );
 +    }
 +
 +    #[test]
