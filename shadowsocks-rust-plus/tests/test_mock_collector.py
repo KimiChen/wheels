@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import socket
@@ -12,19 +13,28 @@ from pathlib import Path
 
 from mock_collector import (
     CollectorError,
+    MAX_BODY_BYTES,
+    MAX_REQUEST_BYTES,
     MockCollector,
+    ParsedLease,
     ResponseMetadata,
     U64_MAX,
     _canonical_event,
+    _raw_object_field,
+    _read_key,
     _strict_decimal,
+    _utf8_length,
     canonical_json,
     canonical_request,
     canonical_response,
     _parse_http_response,
     parse_lease,
+    parse_response_metadata,
     request_mac,
     sha256_hex,
     strict_json,
+    unix_http_request,
+    verify_response,
 )
 
 
@@ -919,6 +929,292 @@ class WireResponseTest(unittest.TestCase):
             with self.subTest(body=body):
                 with self.assertRaisesRegex(CollectorError, "did not acknowledge"):
                     self.collect([lease, (200, {"Content-Type": "application/json"}, body)])
+
+
+class ProtocolValidationTest(unittest.TestCase):
+    """One targeted case per protocol check, matched on its own message.
+
+    The regexes matter: they are what makes a case fail when the rule it names
+    is removed but some later rule still rejects the same input.
+    """
+
+    def reject(self, message: str):
+        return self.assertRaisesRegex(CollectorError, message)
+
+    def wrapper_line(
+        self,
+        event: bytes,
+        sequence: int,
+        *,
+        epoch: str = "c" * 32,
+        schema: int = 1,
+        received_at: str = "1",
+        digest: str | None = None,
+    ) -> bytes:
+        return (
+            canonical_json(
+                {
+                    "spool_schema_version": schema,
+                    "spool_epoch": epoch,
+                    "spool_sequence": str(sequence),
+                    "received_at_unix_ms": received_at,
+                    "event_payload_sha256": sha256_hex(event) if digest is None else digest,
+                    "event": strict_json(event),
+                }
+            )
+            + b"\n"
+        )
+
+    def test_strict_json_reports_each_decoding_failure(self) -> None:
+        with self.reject("payload is not UTF-8"):
+            strict_json(b"\xff")
+        with self.reject("BOM is not permitted"):
+            strict_json(b"\xef\xbb\xbf{}")
+        with self.reject("invalid JSON"):
+            strict_json(b"{")
+        with self.reject("duplicate JSON key"):
+            strict_json(b'{"a":1,"a":2}')
+
+    def test_parsed_lease_requires_one_hash_per_record(self) -> None:
+        with self.reject("wrapper hash count mismatch"):
+            ParsedLease([{"event": {}}], [])
+
+    def test_request_signing_rejects_malformed_targets_and_fields(self) -> None:
+        digest = sha256_hex(b"")
+        for method, path in (("PUT", "/v1/audit/ack"), ("POST", "v1/audit/ack"), ("POST", "/v1/audit/ack?x=1")):
+            with self.subTest(method=method, path=path), self.reject("invalid request target"):
+                canonical_request(method, path, NODE, "1", NONCE, digest)
+        with self.reject("contains CR/LF"):
+            canonical_request("POST", "/v1/audit/ack", "node\nid", "1", NONCE, digest)
+        with self.reject("invalid node"):
+            canonical_request("POST", "/v1/audit/ack", "", "1", NONCE, digest)
+        with self.reject("HMAC key must be 32 bytes"):
+            request_mac(b"short", b"canonical")
+
+    def test_response_signing_and_header_extraction(self) -> None:
+        headers = signed_response_headers(200, b"body", NONCE)
+        with self.reject("missing or duplicate header"):
+            parse_response_metadata(200, {name: value for name, value in headers.items() if "Node" not in name}, NONCE)
+        with self.reject("duplicate response header"):
+            parse_response_metadata(200, {**headers, "content-type": "a", "Content-Type": "b"}, NONCE)
+        metadata = parse_response_metadata(200, headers, NONCE)
+        with self.reject("contains CR/LF"):
+            canonical_response(dataclasses.replace(metadata, content_type="text/plain\r\n"))
+
+    def test_response_verification_rejects_every_mismatch(self) -> None:
+        body = b"body"
+        headers = signed_response_headers(200, body, NONCE)
+        self.assertEqual(
+            verify_response(KEY, status=200, headers=headers, body=body, request_nonce=NONCE, expected_node=NODE).status,
+            200,
+        )
+        with self.reject("response node mismatch"):
+            verify_response(
+                KEY, status=200, headers=headers, body=body, request_nonce=NONCE, expected_node="node-other"
+            )
+        with self.reject("response body digest mismatch"):
+            verify_response(
+                KEY, status=200, headers=headers, body=b"other", request_nonce=NONCE, expected_node=NODE
+            )
+        with self.reject("response MAC mismatch"):
+            verify_response(
+                KEY,
+                status=200,
+                headers={**headers, "X-Shadowsocks-Audit-Response-MAC": "f" * 64},
+                body=body,
+                request_nonce=NONCE,
+                expected_node=NODE,
+            )
+        with self.reject("lease response lacks body digest"):
+            verify_response(
+                KEY,
+                status=200,
+                headers=headers,
+                body=body,
+                request_nonce=NONCE,
+                expected_node=NODE,
+                require_lease_body_digest=True,
+            )
+        mismatched = signed_response_headers(
+            200, body, NONCE, headers={"X-Shadowsocks-Audit-Body-SHA256": sha256_hex(b"other")}
+        )
+        with self.reject("lease body digest mismatch"):
+            verify_response(
+                KEY,
+                status=200,
+                headers=mismatched,
+                body=body,
+                request_nonce=NONCE,
+                expected_node=NODE,
+                require_lease_body_digest=True,
+            )
+
+    def test_lease_metadata_rules(self) -> None:
+        body = wrapper_bytes(access_event(1), 1)
+        metadata = lease_metadata(body, "b" * 32, 1, 1, 1)
+        with self.reject("not HTTP 200"):
+            parse_lease(body, dataclasses.replace(metadata, status=204))
+        with self.reject("content type mismatch"):
+            parse_lease(body, dataclasses.replace(metadata, content_type="application/json"))
+        with self.reject("schema mismatch"):
+            parse_lease(body, dataclasses.replace(metadata, schema="2"))
+        with self.reject("event count mismatch"):
+            parse_lease(body, dataclasses.replace(metadata, event_count="2"))
+        with self.reject("first sequence mismatch"):
+            parse_lease(body, dataclasses.replace(metadata, first_sequence="2", last_sequence="1"))
+        with self.reject("last sequence mismatch"):
+            parse_lease(body, dataclasses.replace(metadata, last_sequence="2"))
+        with self.reject("spool epoch mismatch"):
+            parse_lease(body, dataclasses.replace(metadata, spool_epoch="d" * 32))
+        oversized = b"x" * (MAX_BODY_BYTES + 1)
+        with self.reject("exceeds size limit"):
+            parse_lease(oversized, lease_metadata(oversized, "b" * 32, 1, 1, 1))
+        for truncated in (b"", body[:-1]):
+            with self.subTest(body=truncated[-8:]), self.reject("newline terminated"):
+                parse_lease(truncated, lease_metadata(truncated, "b" * 32, 1, 1, 1))
+
+    def test_ndjson_wrapper_rules(self) -> None:
+        event = access_event(1)
+        cases = (
+            ("invalid NDJSON line ending", self.wrapper_line(event, 1)[:-1] + b"\r\n"),
+            ("non-canonical whitespace", b" " + self.wrapper_line(event, 1)),
+            ("lease record must be an object", b"[]\n"),
+            ("unsupported spool schema", self.wrapper_line(event, 1, schema=2)),
+            ("payload digest mismatch", self.wrapper_line(event, 1, digest="a" * 64)),
+            ("event must be an object", self.wrapper_line(b"1", 1)),
+        )
+        for message, body in cases:
+            with self.subTest(message=message), self.reject(message):
+                parse_lease(body, lease_metadata(body, "b" * 32, 1, 1, 1))
+        gapped = self.wrapper_line(event, 1) + self.wrapper_line(access_event(3), 3)
+        with self.reject("not contiguous"):
+            parse_lease(gapped, lease_metadata(gapped, "b" * 32, 1, 3, 2))
+
+    def test_raw_object_field_rejects_malformed_wrappers(self) -> None:
+        cases = (
+            ("wrapper is not UTF-8", b"\xff"),
+            ("wrapper is not an object", b"[]"),
+            ("invalid wrapper key", b"{,}"),
+            ("wrapper key is not a string", b"{1:2}"),
+            ("wrapper key lacks colon", b'{"event" 1}'),
+            ("invalid wrapper value", b'{"event":}'),
+            ("duplicate wrapper event field", b'{"event":1,"event":2}'),
+            ("invalid wrapper delimiter", b'{"event":1;}'),
+            ("wrapper event field missing", b'{"other":1}'),
+            ("wrapper event field missing", b'{"event":1} trailing'),
+        )
+        for message, raw in cases:
+            with self.subTest(raw=raw), self.reject(message):
+                _raw_object_field(raw, "event")
+
+    def test_event_type_must_be_a_string(self) -> None:
+        with self.reject("must be present as a string"):
+            _canonical_event({"event_type": 1})
+
+    def test_unicode_target_normalization_is_checked_structurally(self) -> None:
+        for normalized in (1, "XN--BCHER-KVA.EXAMPLE", "xn--bcher-kva.example.", "xn--bcher-kva..example"):
+            event = golden_event("unicode_access")
+            event["target"]["normalized_host"] = normalized
+            with self.subTest(normalized_host=normalized), self.reject("invalid target.normalized_host"):
+                _canonical_event(event)
+        event = golden_event("tcp_access")
+        event["target"]["remote_ip"] = "2001:0db8::0001"
+        with self.reject("invalid target.remote_ip"):
+            _canonical_event(event)
+        with self.reject("invalid target.host"):
+            _utf8_length("\ud800", "target.host")
+
+    def test_collector_identity_and_gap_kinds(self) -> None:
+        for node in ("", "node\nid"):
+            with self.subTest(node=node), self.reject("invalid node id"):
+                MockCollector(node, KEY)
+        with self.reject("HMAC key must be 32 bytes"):
+            MockCollector(NODE, KEY[:31])
+        with self.reject("invalid gap kind"):
+            MockCollector(NODE, KEY).record_gap("not_a_gap")
+
+    def test_durable_state_members_are_typed(self) -> None:
+        base = {
+            "schema_version": 1,
+            "node_id": NODE,
+            "events": {},
+            "batches": {},
+            "conflicts": [],
+            "sequences": {},
+            "diagnostics": [],
+            "gaps": [],
+            "isolated_batches": {},
+            "isolated_wrappers": [],
+        }
+        cases = (
+            ("state must be an object", []),
+            ("identity mismatch", {**base, "schema_version": 2}),
+            ("identity mismatch", {**base, "node_id": "node-other"}),
+            ("maps are invalid", {**base, "events": []}),
+            ("maps are invalid", {**base, "batches": []}),
+            ("event state is invalid", {**base, "events": {"e": {"hash": "a"}}}),
+            ("batch state is invalid", {**base, "batches": {"b": {"hash": "a"}}}),
+            ("sequence state is invalid", {**base, "sequences": {"s": 1}}),
+            ("conflict state is invalid", {**base, "conflicts": {}}),
+            ("isolated batch state is invalid", {**base, "isolated_batches": []}),
+            ("isolated wrapper state is invalid", {**base, "isolated_wrappers": [1]}),
+            ("diagnostics state is invalid", {**base, "diagnostics": 1}),
+            ("gaps state is invalid", {**base, "gaps": [1]}),
+        )
+        with tempfile.TemporaryDirectory(prefix="ssrp-collector-typed-") as directory:
+            state = Path(directory) / "collector.json"
+            for message, value in cases:
+                state.write_bytes(canonical_json(value))
+                with self.subTest(message=message), self.reject(message):
+                    MockCollector(NODE, KEY, state)
+
+    def test_accept_records_validates_its_input(self) -> None:
+        body = wrapper_bytes(access_event(1), 1)
+        metadata = lease_metadata(body, "b" * 32, 1, 1, 1)
+        wrapper = strict_json(body[:-1])
+        collector = MockCollector(NODE, KEY)
+
+        class _Records(list):
+            pass
+
+        records = _Records([wrapper])
+        records.wrapper_hashes = ()
+        with self.reject("wrapper hash count mismatch"):
+            collector.accept_records(records, metadata)
+        with self.reject("event must be an object"):
+            collector.accept_records([{**wrapper, "event": 1}], metadata)
+        with self.reject("event has no event_id"):
+            collector.accept_records([{**wrapper, "event": {}}], metadata)
+
+    def test_request_and_response_framing_limits(self) -> None:
+        collector = MockCollector(NODE, KEY)
+        with self.reject("request body exceeds limit"):
+            collector.build_request("POST", "/v1/audit/ack", b"x" * (MAX_REQUEST_BYTES + 1))
+        with self.reject("request exceeds collector limit"):
+            unix_http_request(Path("/does/not/matter.sock"), b"x" * (MAX_REQUEST_BYTES + 2049))
+        cases = (
+            ("response headers are incomplete", b"HTTP/1.1 200 OK\r\n"),
+            ("response is not HTTP/1.1", b"HTTP/1.0 200 OK\r\n\r\n"),
+            ("invalid HTTP status", b"HTTP/1.1 OK\r\n\r\n"),
+            ("invalid response header", b"HTTP/1.1 200 OK\r\nContent-Length:2\r\n\r\n{}"),
+            ("duplicate response header", b"HTTP/1.1 200 OK\r\nA: 1\r\na: 2\r\nContent-Length: 0\r\n\r\n"),
+            ("invalid Content-Length", b"HTTP/1.1 200 OK\r\nContent-Length: two\r\n\r\n{}"),
+            ("response body length mismatch", b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\n{}"),
+            ("response lacks Content-Length", b"HTTP/1.1 200 OK\r\nA: 1\r\n\r\n{}"),
+        )
+        for message, payload in cases:
+            with self.subTest(message=message), self.reject(message):
+                _parse_http_response(payload)
+
+    def test_key_file_must_be_64_lowercase_hex(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ssrp-collector-key-") as directory:
+            path = Path(directory) / "audit.key"
+            path.write_bytes(b"a" * 64 + b"\n")
+            self.assertEqual(_read_key(path), bytes.fromhex("a" * 64))
+            for payload in (b"a" * 63, b"A" * 64, b"z" * 64):
+                path.write_bytes(payload)
+                with self.subTest(payload=payload[:2]), self.reject("64 lowercase hex"):
+                    _read_key(path)
 
 
 if __name__ == "__main__":
