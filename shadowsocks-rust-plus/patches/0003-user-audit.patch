@@ -19238,10 +19238,10 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..5b0ebb7924e76785c6e14e5826db6b88
  }
 diff --git a/crates/shadowsocks-service/src/server/user_audit.rs b/crates/shadowsocks-service/src/server/user_audit.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..193209edb407583c5815a33e6fb1ea71e7ab627c
+index 0000000000000000000000000000000000000000..99bff33446efc48033881cfd089e09698b32ad37
 --- /dev/null
 +++ b/crates/shadowsocks-service/src/server/user_audit.rs
-@@ -0,0 +1,4264 @@
+@@ -0,0 +1,4304 @@
 +//! Non-blocking successful-target access auditing for the server data path.
 +//!
 +//! The relay only constructs a small draft and performs bounded atomic/cache
@@ -22653,6 +22653,46 @@ index 0000000000000000000000000000000000000000..193209edb407583c5815a33e6fb1ea71
 +            shard
 +                .by_key
 +                .contains_key(&UdpWindowKey::new(&server_id, association_c, &c))
++        );
++    }
++
++    #[test]
++    fn udp_cooldown_anchors_on_the_last_eligible_attempt() {
++        let cache = UdpAuditWindowCache::new(4, USER_AUDIT_UDP_WINDOW_SHARDS * 4);
++        let server_id: Arc<str> = Arc::from("server-a");
++        let association = [9u8; 16];
++        let address: IpAddr = "203.0.113.9".parse().expect("target address");
++        let host = UdpAuditHost::Ip(address);
++        let build = || AuditTargetDraft::ip_with_port(address, 53, address);
++        let start = Instant::now();
++
++        // The first successful datagram opens the window and is eligible.
++        assert!(
++            cache
++                .eligible_lazy(&server_id, association, host, 53, start, build)
++                .expect("cache available")
++                .is_some()
++        );
++
++        // A datagram inside the cooldown is suppressed and, per section 6.4,
++        // must NOT refresh `last_audit_attempt_at`: the window stays anchored
++        // on the last eligible attempt, not on the last successful send.
++        let inside = start + Duration::from_secs(UDP_COOLDOWN_SECONDS - 1);
++        assert!(
++            cache
++                .eligible_lazy(&server_id, association, host, 53, inside, build)
++                .expect("cache available")
++                .is_none()
++        );
++
++        // Exactly one cooldown after the eligible attempt the next access event
++        // is due.  A sliding window would push it out by another 59 seconds.
++        let due = start + UDP_COOLDOWN;
++        assert!(
++            cache
++                .eligible_lazy(&server_id, association, host, 53, due, build)
++                .expect("cache available")
++                .is_some()
 +        );
 +    }
 +
