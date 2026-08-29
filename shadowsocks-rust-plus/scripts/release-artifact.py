@@ -538,12 +538,31 @@ def _validate_recipe(recipe: Any, source_date_epoch: int) -> None:
             raise ArtifactError(f"build receipt recipe.environment.{key} 必须是非空字符串")
 
 
+def _absolute_tool_path(candidate: Path) -> Path:
+    """Absolutise a PATH hit without collapsing a proxy symlink.
+
+    `Path.resolve()` would rewrite rustup's `bin/cargo -> rustup` link to the
+    proxy binary, and the proxy picks its behaviour from argv[0]; executing the
+    resolved path runs `rustup` instead of `cargo`.  Only the directory part is
+    resolved so the result stays absolute and symlinked *directories* still
+    cannot hide the tool.
+    """
+
+    if candidate.is_absolute():
+        return candidate.parent.resolve(strict=True) / candidate.name
+    return candidate.resolve(strict=True)
+
+
 def _resolve_cargo_zigbuild(environment: dict[str, str]) -> Path:
     resolved = shutil.which("cargo-zigbuild", path=environment.get("PATH"))
     if resolved is None:
         raise ArtifactError("PATH 中找不到 cargo-zigbuild")
     try:
-        executable = Path(resolved).resolve(strict=True)
+        # Keep the PATH spelling: rustup ships `cargo`/`rustc` as symlinks to the
+        # `rustup` proxy, which decides which tool to be from argv[0].  Collapsing
+        # the link would execute `rustup` itself.  `stat()` still follows the link,
+        # so the regular-file, exec-bit and inode checks describe the real target.
+        executable = _absolute_tool_path(Path(resolved))
         metadata = executable.stat()
     except OSError as exc:
         raise ArtifactError(f"无法解析 cargo-zigbuild：{exc}") from exc
@@ -597,7 +616,9 @@ def _resolve_build_tool(name: str, environment: dict[str, str]) -> Path:
     if resolved is None:
         raise ArtifactError(f"PATH 中找不到 {name}")
     try:
-        executable = Path(resolved).resolve(strict=True)
+        # See _resolve_cargo_zigbuild: preserve the invoked name so rustup proxies
+        # dispatch correctly, while stat() still describes the real target.
+        executable = _absolute_tool_path(Path(resolved))
         metadata = executable.stat()
     except OSError as exc:
         raise ArtifactError(f"无法解析 {name}：{exc}") from exc

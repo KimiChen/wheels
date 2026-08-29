@@ -2089,6 +2089,45 @@ raise SystemExit(90)
             )
             self.assertIn("签名验证失败", failed.stderr)
 
+    def test_tool_resolution_keeps_rustup_proxy_symlink(self) -> None:
+        """M-63: rustup ships bin/cargo as a symlink to the `rustup` proxy.
+
+        The proxy decides which tool to be from argv[0], so collapsing the link
+        makes the release build execute `rustup -V` and reject its own pinned
+        toolchain.  Resolution must keep the invoked name while still proving
+        the real target is a regular executable file.
+        """
+
+        module = self.load_artifact_module()
+        with tempfile.TemporaryDirectory() as directory:
+            binary_dir = Path(directory) / "bin"
+            binary_dir.mkdir()
+            proxy = binary_dir / "rustup"
+            proxy.write_text("#!/bin/sh\nexec echo \"cargo 1.97.0 (deadbeef 2026-01-01)\"\n", encoding="utf-8")
+            proxy.chmod(0o755)
+            (binary_dir / "cargo").symlink_to("rustup")
+            environment = {"PATH": str(binary_dir)}
+
+            resolved = module._resolve_build_tool("cargo", environment)
+            self.assertEqual(resolved.name, "cargo", "must not collapse the proxy symlink")
+            self.assertEqual(resolved, binary_dir.resolve() / "cargo")
+            self.assertTrue(resolved.is_absolute())
+
+            # The regular-file / exec-bit guarantees still describe the target.
+            metadata = resolved.stat()
+            self.assertTrue(stat.S_ISREG(metadata.st_mode))
+            self.assertTrue(metadata.st_mode & 0o111)
+
+    def test_tool_resolution_rejects_non_regular_target(self) -> None:
+        module = self.load_artifact_module()
+        with tempfile.TemporaryDirectory() as directory:
+            binary_dir = Path(directory) / "bin"
+            binary_dir.mkdir()
+            (binary_dir / "cargo").symlink_to(binary_dir)  # directory target
+            with self.assertRaises(Exception):
+                module._resolve_build_tool("cargo", {"PATH": str(binary_dir)})
+
+
 
 if __name__ == "__main__":
     unittest.main()
