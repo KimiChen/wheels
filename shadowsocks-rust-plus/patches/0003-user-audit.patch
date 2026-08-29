@@ -4100,10 +4100,10 @@ index 0000000000000000000000000000000000000000..545e7c98d95df717caaa40147af26158
 +tokio = { version = "1.38", features = ["macros", "rt", "test-util"] }
 diff --git a/crates/shadowsocks-auditd/src/config.rs b/crates/shadowsocks-auditd/src/config.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..bb6d17adea85cc5498c671ded6bc76c113c021d1
+index 0000000000000000000000000000000000000000..9b7b6915b9ca57d03e51de997c9071967769692e
 --- /dev/null
 +++ b/crates/shadowsocks-auditd/src/config.rs
-@@ -0,0 +1,1227 @@
+@@ -0,0 +1,1302 @@
 +use std::{
 +    ffi::CString,
 +    fs::{self, File, OpenOptions},
@@ -4115,6 +4115,7 @@ index 0000000000000000000000000000000000000000..bb6d17adea85cc5498c671ded6bc76c1
 +        net::UnixStream as StdUnixStream,
 +    },
 +    path::{Component, Path, PathBuf},
++    time::Duration,
 +};
 +
 +use serde::{Deserialize, Serialize};
@@ -4170,6 +4171,48 @@ index 0000000000000000000000000000000000000000..bb6d17adea85cc5498c671ded6bc76c1
 +        error.raw_os_error(),
 +        Some(libc::EMFILE | libc::ENFILE | libc::ENOBUFS | libc::ENOMEM)
 +    )
++}
++
++/// Transient-accept backoff shared by both listeners.  A listener that hits
++/// descriptor or buffer exhaustion must neither spin nor stay at its first
++/// delay forever, so the delay doubles up to a bounded ceiling and is reset by
++/// the next successful accept.
++pub(crate) const ACCEPT_BACKOFF_INITIAL: Duration = Duration::from_millis(50);
++pub(crate) const ACCEPT_BACKOFF_MAX: Duration = Duration::from_secs(2);
++const ACCEPT_DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(60);
++
++pub(crate) fn escalated_accept_backoff(current: Duration) -> Duration {
++    current.saturating_mul(2).min(ACCEPT_BACKOFF_MAX)
++}
++
++/// Wait out one transient accept failure on either listener: emit a
++/// rate-limited diagnostic, sleep for the current backoff while remaining
++/// responsive to shutdown, then escalate that backoff.  Returns `false` when
++/// shutdown was observed, in which case the caller must stop serving instead
++/// of accepting again.
++pub(crate) async fn wait_before_accept_retry(
++    listener: &str,
++    error: &io::Error,
++    backoff: &mut Duration,
++    last_diagnostic: &mut Option<tokio::time::Instant>,
++    shutdown: &mut tokio::sync::watch::Receiver<bool>,
++) -> bool {
++    let now = tokio::time::Instant::now();
++    if last_diagnostic.is_none_or(|last| now.duration_since(last) >= ACCEPT_DIAGNOSTIC_INTERVAL) {
++        eprintln!(
++            "shadowsocks-auditd: {listener} accept temporarily unavailable: {error}; retrying in {} ms",
++            backoff.as_millis()
++        );
++        *last_diagnostic = Some(now);
++    }
++    let delay = tokio::time::sleep(*backoff);
++    tokio::pin!(delay);
++    let serving = tokio::select! {
++        _ = &mut delay => true,
++        changed = shutdown.changed() => changed.is_ok() && !*shutdown.borrow(),
++    };
++    *backoff = escalated_accept_backoff(*backoff);
++    serving
 +}
 +
 +#[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -5312,6 +5355,38 @@ index 0000000000000000000000000000000000000000..bb6d17adea85cc5498c671ded6bc76c1
 +        assert!(path.exists());
 +    }
 +
++    #[test]
++    fn accept_backoff_escalates_up_to_a_bounded_ceiling() {
++        assert_eq!(
++            escalated_accept_backoff(ACCEPT_BACKOFF_INITIAL),
++            ACCEPT_BACKOFF_INITIAL * 2
++        );
++        let mut delay = ACCEPT_BACKOFF_INITIAL;
++        for _ in 0..16 {
++            delay = escalated_accept_backoff(delay);
++        }
++        assert_eq!(delay, ACCEPT_BACKOFF_MAX);
++        assert_eq!(escalated_accept_backoff(Duration::MAX), ACCEPT_BACKOFF_MAX);
++    }
++
++    #[tokio::test]
++    async fn transient_accept_retry_waits_escalates_and_honors_shutdown() {
++        let error = io::Error::from_raw_os_error(libc::EMFILE);
++        let (sender, mut receiver) = tokio::sync::watch::channel(false);
++        let mut backoff = ACCEPT_BACKOFF_INITIAL;
++        let mut diagnostic = None;
++
++        let started = std::time::Instant::now();
++        assert!(wait_before_accept_retry("test", &error, &mut backoff, &mut diagnostic, &mut receiver).await);
++        assert!(started.elapsed() >= ACCEPT_BACKOFF_INITIAL, "retry must not spin");
++        assert_eq!(backoff, ACCEPT_BACKOFF_INITIAL * 2);
++        assert!(diagnostic.is_some(), "the first failure must be reported");
++
++        // Shutdown must interrupt the wait instead of serving again.
++        sender.send(true).expect("shutdown");
++        assert!(!wait_before_accept_retry("test", &error, &mut backoff, &mut diagnostic, &mut receiver).await);
++    }
++
 +    #[cfg(target_os = "linux")]
 +    #[test]
 +    fn secure_bound_socket_sets_mode_and_group_on_fixed_inode() {
@@ -5333,10 +5408,10 @@ index 0000000000000000000000000000000000000000..bb6d17adea85cc5498c671ded6bc76c1
 +}
 diff --git a/crates/shadowsocks-auditd/src/export.rs b/crates/shadowsocks-auditd/src/export.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..e10bcde625993b6c39a03f263e11f26da61c5ce6
+index 0000000000000000000000000000000000000000..52ffdc64619377471d67e0830c0aa26177e0bf83
 --- /dev/null
 +++ b/crates/shadowsocks-auditd/src/export.rs
-@@ -0,0 +1,1414 @@
+@@ -0,0 +1,1444 @@
 +//! Strict HTTP/1.1 export endpoint for the node-local audit spool.
 +
 +use std::{
@@ -5364,8 +5439,8 @@ index 0000000000000000000000000000000000000000..e10bcde625993b6c39a03f263e11f26d
 +
 +use crate::{
 +    config::{
-+        AuditdConfig, MAX_EXPORT_CONNECTIONS, MAX_NONCES, NONCE_TTL_SECONDS, SocketLock, SocketRole,
-+        is_transient_accept_error,
++        ACCEPT_BACKOFF_INITIAL, AuditdConfig, MAX_EXPORT_CONNECTIONS, MAX_NONCES, NONCE_TTL_SECONDS, SocketLock,
++        SocketRole, is_transient_accept_error, wait_before_accept_retry,
 +    },
 +    spool::{AckOutcome, BatchLease, Spool, SpoolError},
 +};
@@ -5515,6 +5590,8 @@ index 0000000000000000000000000000000000000000..e10bcde625993b6c39a03f263e11f26d
 +        let semaphore = Arc::new(Semaphore::new(MAX_EXPORT_CONNECTIONS));
 +        let mut tasks = JoinSet::new();
 +        let mut shutdown = self.shutdown;
++        let mut accept_backoff = ACCEPT_BACKOFF_INITIAL;
++        let mut last_accept_diagnostic: Option<time::Instant> = None;
 +        let loop_result = loop {
 +            // The lock pathname is expected to remain bound to the inode on
 +            // which acquisition succeeded.  If it is replaced, stop serving
@@ -5536,11 +5613,39 @@ index 0000000000000000000000000000000000000000..e10bcde625993b6c39a03f263e11f26d
 +                }
 +                accepted = listener.accept() => {
 +                    let (stream, _) = match accepted {
-+                        Ok(value) => value,
++                        Ok(value) => {
++                            accept_backoff = ACCEPT_BACKOFF_INITIAL;
++                            last_accept_diagnostic = None;
++                            value
++                        }
++                        Err(error)
++                            if matches!(
++                                error.kind(),
++                                io::ErrorKind::Interrupted
++                                    | io::ErrorKind::WouldBlock
++                                    | io::ErrorKind::ConnectionAborted
++                                    | io::ErrorKind::ConnectionReset
++                            ) =>
++                        {
++                            // These errors concern one accept attempt or one
++                            // already-aborted peer, not listener exhaustion.
++                            continue;
++                        }
 +                        Err(error) if is_transient_accept_error(&error) => {
-+                            // Keep the export listener alive across transient
-+                            // descriptor/buffer exhaustion without spinning.
-+                            time::sleep(Duration::from_millis(50)).await;
++                            // Descriptor/buffer exhaustion: keep the export
++                            // listener alive with the same escalating backoff
++                            // and rate-limited diagnostic as ingest.
++                            if !wait_before_accept_retry(
++                                "export",
++                                &error,
++                                &mut accept_backoff,
++                                &mut last_accept_diagnostic,
++                                &mut shutdown,
++                            )
++                            .await
++                            {
++                                break Ok(());
++                            }
 +                            continue;
 +                        }
 +                        Err(error) => break Err(ExportError::Io(error)),
@@ -6753,10 +6858,10 @@ index 0000000000000000000000000000000000000000..e10bcde625993b6c39a03f263e11f26d
 +}
 diff --git a/crates/shadowsocks-auditd/src/ingest.rs b/crates/shadowsocks-auditd/src/ingest.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..e036ec45192b8b9bcc657fb1734fd6e0fff7d121
+index 0000000000000000000000000000000000000000..b9ec9b18758431fda9568e94075cda8bc707495c
 --- /dev/null
 +++ b/crates/shadowsocks-auditd/src/ingest.rs
-@@ -0,0 +1,859 @@
+@@ -0,0 +1,852 @@
 +//! Unix-stream ingest endpoint used by the ssserver producer.
 +
 +use std::{
@@ -6781,7 +6886,10 @@ index 0000000000000000000000000000000000000000..e036ec45192b8b9bcc657fb1734fd6e0
 +};
 +
 +use crate::{
-+    config::{AuditdConfig, MAX_DEDUP_ENTRIES, MAX_INGEST_CONNECTIONS, SocketRole, is_transient_accept_error},
++    config::{
++        ACCEPT_BACKOFF_INITIAL, AuditdConfig, MAX_DEDUP_ENTRIES, MAX_INGEST_CONNECTIONS, SocketRole,
++        is_transient_accept_error, wait_before_accept_retry,
++    },
 +    protocol,
 +    spool::{EventAck, Spool, SpoolError},
 +};
@@ -6980,7 +7088,7 @@ index 0000000000000000000000000000000000000000..e036ec45192b8b9bcc657fb1734fd6e0
 +        let semaphore = Arc::new(Semaphore::new(MAX_INGEST_CONNECTIONS));
 +        let mut tasks = JoinSet::new();
 +        let mut shutdown = self.shutdown;
-+        let mut accept_backoff = Duration::from_millis(50);
++        let mut accept_backoff = ACCEPT_BACKOFF_INITIAL;
 +        let mut last_accept_diagnostic: Option<time::Instant> = None;
 +        let loop_result = loop {
 +            tokio::select! {
@@ -6998,7 +7106,7 @@ index 0000000000000000000000000000000000000000..e036ec45192b8b9bcc657fb1734fd6e0
 +                accepted = listener.accept() => {
 +                    let (stream, _) = match accepted {
 +                        Ok(value) => {
-+                            accept_backoff = Duration::from_millis(50);
++                            accept_backoff = ACCEPT_BACKOFF_INITIAL;
 +                            last_accept_diagnostic = None;
 +                            value
 +                        }
@@ -7016,27 +7124,17 @@ index 0000000000000000000000000000000000000000..e036ec45192b8b9bcc657fb1734fd6e0
 +                            continue;
 +                        }
 +                        Err(error) if is_transient_accept_error(&error) => {
-+                            let now = time::Instant::now();
-+                            if last_accept_diagnostic
-+                                .is_none_or(|last| now.duration_since(last) >= Duration::from_secs(60))
++                            if !wait_before_accept_retry(
++                                "ingest",
++                                &error,
++                                &mut accept_backoff,
++                                &mut last_accept_diagnostic,
++                                &mut shutdown,
++                            )
++                            .await
 +                            {
-+                                eprintln!(
-+                                    "shadowsocks-auditd: ingest accept temporarily unavailable: {error}; retrying in {} ms",
-+                                    accept_backoff.as_millis()
-+                                );
-+                                last_accept_diagnostic = Some(now);
++                                break Ok(());
 +                            }
-+                            let delay = time::sleep(accept_backoff);
-+                            tokio::pin!(delay);
-+                            tokio::select! {
-+                                _ = &mut delay => {}
-+                                changed = shutdown.changed() => {
-+                                    if changed.is_err() || *shutdown.borrow() {
-+                                        break Ok(());
-+                                    }
-+                                }
-+                            }
-+                            accept_backoff = accept_backoff.saturating_mul(2).min(Duration::from_secs(2));
 +                            continue;
 +                        }
 +                        Err(error) => break Err(IngestError::Io(error)),
@@ -7973,10 +8071,10 @@ index 0000000000000000000000000000000000000000..6cf8d005dfef917c852be4f611d5b945
 +}
 diff --git a/crates/shadowsocks-auditd/src/spool.rs b/crates/shadowsocks-auditd/src/spool.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..9cd73a0c431e340f795f2ed7d2a7a7c078416c47
+index 0000000000000000000000000000000000000000..f5f66f5d50d67b5c92cbf8111d31e8ed8ea8876d
 --- /dev/null
 +++ b/crates/shadowsocks-auditd/src/spool.rs
-@@ -0,0 +1,7934 @@
+@@ -0,0 +1,7970 @@
 +//! Durable, node-local audit spool.
 +//!
 +//! The spool is deliberately synchronous.  Ingest and export perform their
@@ -10000,6 +10098,12 @@ index 0000000000000000000000000000000000000000..9cd73a0c431e340f795f2ed7d2a7a7c0
 +                }
 +            }
 +            Err(_) => mark_storage_rejection(inner, true),
++        }
++        // Sealed-batch integrity must not depend on a controller health poll:
++        // advance the same bounded one-batch check from the periodic sweep.
++        // Once a write barrier is ambiguous every path stays read-only.
++        if !inner.durability_uncertain {
++            self.check_one_sealed_integrity_locked(inner);
 +        }
 +    }
 +
@@ -15561,6 +15665,36 @@ index 0000000000000000000000000000000000000000..9cd73a0c431e340f795f2ed7d2a7a7c0
 +            gap_count("segment_corruption"),
 +            1,
 +            "one isolated object must produce exactly one corruption gap"
++        );
++    }
++
++    #[test]
++    fn periodic_sweep_detects_sealed_corruption_without_health_polling() {
++        let dir = tempfile::tempdir().expect("tempdir");
++        let spool = Spool::open(config(dir.path())).expect("spool");
++        spool.append(&event(1), 1).expect("append");
++        let lease = spool.lease().expect("lease").expect("sealed batch");
++        let corrupt_path = lease.info.path.clone();
++        fs::write(corrupt_path.join("segment.ndjson"), b"corrupt\n").expect("corrupt body");
++        // Nothing polls health in this test: the controller may be offline for
++        // hours, and the integrity check must still make progress.
++        {
++            let mut inner = lock(&spool.inner);
++            inner.last_retention_sweep = Instant::now()
++                .checked_sub(RETENTION_SWEEP_INTERVAL)
++                .expect("sweep deadline");
++        }
++        spool.append(&event(2), 2).expect("append after corruption");
++        assert!(
++            !corrupt_path.exists(),
++            "the periodic sweep must remove the damaged batch from sealed rotation"
++        );
++        assert!(
++            fs::read_dir(dir.path().join("quarantine"))
++                .expect("quarantine")
++                .filter_map(Result::ok)
++                .any(|entry| entry.path().is_dir()),
++            "damaged bytes must remain isolated for operator recovery"
 +        );
 +    }
 +
