@@ -49,7 +49,7 @@ auditd，并把 workspace feature 降为 `user-stats`；producer 的 `user-audit
 运行。协议单元测试仍会执行，auditd 则对已安装的 `SHADOWSOCKS_AUDIT_CHECK_TARGET`（默认
 `x86_64-unknown-linux-gnu`）做 `cargo check --all-targets`。先运行
 `rustup target add x86_64-unknown-linux-gnu`（或安装所选 target）即可启用该检查；未安装时脚本继续
-其余检查并明确打印“未验证”，设置 `SHADOWSOCKS_REQUIRE_AUDIT_TARGET=1` 才会失败。auditd
+其余检查并明确打印“未验证”，该降级需显式设置 `SHADOWSOCKS_REQUIRE_AUDIT_TARGET=0`；默认缺失 target 即失败。auditd
 运行时测试、producer feature-on 测试和完整 workspace 回归必须在 Linux 主机执行并作为发布硬门禁。
 
 不准备上游源码、也不访问网络时，可单独运行新增的纯本地工具测试：

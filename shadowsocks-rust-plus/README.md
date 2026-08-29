@@ -94,7 +94,7 @@ Linux 主机直接运行完整开发路径：
 macOS 等非 Linux 主机的 auditd 静态交叉检查使用默认 `x86_64-unknown-linux-gnu` target，也可通过
 `SHADOWSOCKS_AUDIT_CHECK_TARGET` 选择另一个 target。推荐先安装该 target；未安装时
 `verify.sh`/`test.sh` 会继续执行其余检查并明确打印“未验证”，设置
-`SHADOWSOCKS_REQUIRE_AUDIT_TARGET=1` 才会把缺失 target 升级为失败。非 Linux 开发构建仍必须显式
+缺失 target 默认即为失败（fail-closed）；确知要放弃该覆盖面时用 `SHADOWSOCKS_REQUIRE_AUDIT_TARGET=0` 显式降级。非 Linux 开发构建仍必须显式
 关闭 auditd：
 
 ```bash
@@ -116,7 +116,7 @@ feature 的开发用 `ssserver` 与 `shadowsocks-auditd`；该 feature 在非 Li
 由于 `shadowsocks-auditd` 明确是 Linux-only，非 Linux 主机上的 `verify.sh` 会运行 feature-off
 workspace、service/协议测试，并在 target 已安装时对上述 Linux target 执行 auditd
 `cargo check --all-targets`；target 缺失时只报告未验证，使用
-`SHADOWSOCKS_REQUIRE_AUDIT_TARGET=1` 可启用 fail-closed 门禁。auditd 原生单元/集成测试和完整
+该门禁默认 fail-closed，`SHADOWSOCKS_REQUIRE_AUDIT_TARGET=0` 才显式降级为“未验证”。auditd 原生单元/集成测试和完整
 `user-audit` feature workspace 回归只能在 Linux 主机执行，且仍是发布前置硬条件。
 
 ### 2. Linux x86_64 可复现发布包与验签

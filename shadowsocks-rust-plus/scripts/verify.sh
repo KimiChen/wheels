@@ -87,4 +87,8 @@ fi
 
 bash "$SHADOWSOCKS_RUST_PLUS_ROOT/scripts/check-sensitive.sh"
 
-printf '验证完成：锁定版本、零 fuzz 补丁重放、测试与敏感信息扫描均通过。\n'
+if [[ "${SHADOWSOCKS_REQUIRE_AUDIT_TARGET:-1}" == 1 ]]; then
+  printf '验证完成：锁定版本、零 fuzz 补丁重放、测试与敏感信息扫描均通过。\n'
+else
+  printf '验证完成（覆盖面不完整）：锁定版本、零 fuzz 补丁重放与敏感信息扫描通过；auditd 交叉检查已被 SHADOWSOCKS_REQUIRE_AUDIT_TARGET=0 显式降级。\n'
+fi

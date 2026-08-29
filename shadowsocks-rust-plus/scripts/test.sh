@@ -53,6 +53,7 @@ cmp -s "$SHADOWSOCKS_RUST_PLUS_ROOT/tests/golden_vectors.json" "$protocol_vector
 target_dir="$SHADOWSOCKS_RUST_PLUS_ROOT/.cache/cargo-target"
 host_os="$(uname -s)"
 audit_native=0
+auditd_crate_checked=1
 auditd_runtime_available=0
 if [[ "$host_os" == "Linux" ]]; then
   audit_native=1
@@ -105,10 +106,11 @@ if [[ "$run_audit" -eq 1 ]]; then
       CARGO_TARGET_DIR="$target_dir" cargo check \
         --manifest-path "$source_dir/Cargo.toml" \
         --locked --target "$audit_target" -p shadowsocks-auditd --all-targets
-    elif [[ "${SHADOWSOCKS_REQUIRE_AUDIT_TARGET:-0}" == 1 ]]; then
-      die "非 Linux 主机缺少 Rust target，且 SHADOWSOCKS_REQUIRE_AUDIT_TARGET=1：$audit_target"
+    elif [[ "${SHADOWSOCKS_REQUIRE_AUDIT_TARGET:-1}" == 1 ]]; then
+      die "非 Linux 主机缺少 auditd 交叉检查 target：$audit_target（\`rustup target add $audit_target\` 安装；确知要放弃该覆盖面时用 SHADOWSOCKS_REQUIRE_AUDIT_TARGET=0 显式降级）"
     else
-      printf '未验证：非 Linux 主机未安装 auditd 交叉检查 target %s；设置 SHADOWSOCKS_REQUIRE_AUDIT_TARGET=1 可将其升级为失败。\n' \
+      auditd_crate_checked=0
+      printf '未验证（已被 SHADOWSOCKS_REQUIRE_AUDIT_TARGET=0 显式降级）：auditd crate 与 user_audit.rs 在本次运行中一行都没有被编译；缺少 target %s。\n' \
         "$audit_target" >&2
     fi
   fi
@@ -149,8 +151,10 @@ if [[ "$run_integration" -eq 1 ]]; then
   fi
 fi
 
-if [[ "$run_audit" -eq 1 && "$auditd_runtime_available" -eq 0 ]]; then
-  printf '测试通过（auditd Linux runtime 未在当前主机执行）。\n'
+if [[ "$run_audit" -eq 1 && "$auditd_crate_checked" -eq 0 ]]; then
+  printf '测试通过，但覆盖面不完整：auditd crate 与 user_audit.rs 未编译，auditd Linux runtime 未执行。\n'
+elif [[ "$run_audit" -eq 1 && "$auditd_runtime_available" -eq 0 ]]; then
+  printf '测试通过（auditd crate 已交叉检查；auditd Linux runtime 未在当前主机执行）。\n'
 else
   printf '测试通过。\n'
 fi

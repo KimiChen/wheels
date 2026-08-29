@@ -225,7 +225,7 @@ class AuditPackagingTest(unittest.TestCase):
         self.assertIn("rustup target add x86_64-unknown-linux-gnu", readme)
         self.assertIn("rustup target add x86_64-unknown-linux-gnu", tests_readme)
         for text in (readme, tests_readme, patches_readme):
-            self.assertIn("SHADOWSOCKS_REQUIRE_AUDIT_TARGET=1", text)
+            self.assertIn("SHADOWSOCKS_REQUIRE_AUDIT_TARGET=0", text)
             self.assertIn("未验证", text)
 
     def test_patch_deletion_guard_is_shared_by_both_replay_paths(self) -> None:
