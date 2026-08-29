@@ -30,7 +30,8 @@
 ./scripts/test.sh --source /path/to/prepared-shadowsocks-rust --no-integration
 ```
 
-跳过全部 user-audit 相关检查（协议/auditd 单元测试与非 Linux 上的交叉 target check）：
+跳过 Linux-only 的 user-audit feature/runtime 检查及 protocol/auditd Rust 检查（feature-off
+workspace 与静态、文档和 Python 工具门禁仍会执行）：
 
 ```bash
 ./scripts/test.sh --source /path/to/prepared-shadowsocks-rust --without-audit
@@ -39,8 +40,12 @@
 `scripts/test.sh` 无条件执行（不受 `--no-integration` 影响）的检查是：
 
 1. 仓库 `tests/golden_vectors.json` 与源码内 protocol golden vectors 逐字节一致；
-2. Linux 上运行 workspace lib/bin 的 `user-audit` Rust 单元测试；非 Linux 上改跑 `user-stats`
-   feature-off 路径并排除 Linux-only auditd；
+2. 运行收窄的 workspace lib/bin 回归：
+   `cargo test --locked --workspace --lib --bins --features user-stats --no-fail-fast --exclude shadowsocks-auditd`；
+   Linux 且未给出 `--without-audit` 时再运行
+   `cargo test --locked --workspace --lib --bins --features user-audit --no-fail-fast`。
+   `--lib --bins` 有意不选择任何 workspace integration target，避免锁定上游的公网 HTTP/1.0
+   断言进入 §16 全绿判据；overlay 的 `tcp_eih_user` 由独立命令显式运行；
 3. core 的 AEAD-2022 TCP EIH 认证用户透传测试；
 4. service 只启用普通 `server`、不启用 `user-stats` 的独立 `cargo check`，防止 Cargo workspace
    feature 合并掩盖 gating 错误；
@@ -78,7 +83,15 @@ auditd，并把 workspace feature 降为 `user-stats`；producer 的 `user-audit
 `x86_64-unknown-linux-gnu`）做 `cargo check --all-targets`。先运行
 `rustup target add x86_64-unknown-linux-gnu`（或安装所选 target）即可启用该检查；未安装时脚本继续
 其余检查并明确打印“未验证”，该降级需显式设置 `SHADOWSOCKS_REQUIRE_AUDIT_TARGET=0`；默认缺失 target 即失败。auditd
-运行时测试、producer feature-on 测试和完整 workspace 回归必须在 Linux 主机执行并作为发布硬门禁。
+运行时测试、producer feature-on 测试和上述收窄 workspace 回归必须在 Linux 主机执行并作为发布硬门禁。
+
+§16 的 Rust workspace 门禁只选择 lib/bin 目标，并单独运行 overlay 新增的
+`cargo test --locked --no-fail-fast -p shadowsocks --test tcp_eih_user --features aead-cipher-2022,user-stats`。
+其余 workspace integration targets 也不属于该 workspace 门禁；本项目的真实 TCP/UDP 数据面
+由本脚本的本机集成检查覆盖。锁定上游 v1.24.0 的公网 targets（`crates/shadowsocks/tests/{tcp,tcp_tfo}.rs`、
+`tests/{socks4,socks5,tunnel}.rs`）会请求 `www.example.com` 并断言过时的 HTTP/1.0 状态行，
+因此不属于 §16 门禁；需要复现上游基线时按 [`docs/UPSTREAM_BASELINE.md`](../docs/UPSTREAM_BASELINE.md)
+单独运行并记录，不能把它们的失败计入 overlay 失败。
 
 不准备上游源码、也不访问网络时，可单独运行新增的纯本地工具测试：
 

@@ -39,5 +39,11 @@ printf '%s\n' 0001-eih-user-stats-http-unix-exporter.patch 0002-reproducible-bui
 `cargo check --all-targets`；target 缺失时默认 fail-closed；设置 `SHADOWSOCKS_REQUIRE_AUDIT_TARGET=0` 才会降级为继续执行其余检查
 并明确报告“未验证”。`prepare-source.sh` 在每个补丁应用前
 还会检查删除 stanza 的目标在当前源码树中确实存在，以拦截幽灵删除项。Linux 主机仍必须运行
-`cargo test --workspace --features user-audit` 和 auditd 原生测试；Linux runtime 路径不能由非 Linux
-的交叉检查替代。
+`scripts/test.sh` 中的 §16 收窄门禁：
+`cargo test --locked --workspace --lib --bins --features user-stats --no-fail-fast --exclude shadowsocks-auditd`
+和
+`cargo test --locked --workspace --lib --bins --features user-audit --no-fail-fast`，再运行
+`cargo test --locked --no-fail-fast -p shadowsocks --test tcp_eih_user --features aead-cipher-2022,user-stats`
+及 auditd 原生测试。`--lib --bins` 明确排除所有 workspace integration targets；overlay 的
+`tcp_eih_user` 已在上面单独运行，其余上游公网 targets 只作为 `docs/UPSTREAM_BASELINE.md` 中的
+基线诊断，Linux runtime 路径不能由非 Linux 的交叉检查替代。

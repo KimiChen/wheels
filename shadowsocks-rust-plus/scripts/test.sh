@@ -60,24 +60,28 @@ if [[ "$host_os" == "Linux" ]]; then
   auditd_runtime_available=1
 fi
 
-features=user-stats
+workspace_args=(--workspace --lib --bins --no-fail-fast)
+run_workspace_tests() {
+  local feature_set="$1"
+  shift
+  CARGO_TARGET_DIR="$target_dir" cargo test \
+    --manifest-path "$source_dir/Cargo.toml" \
+    --locked "${workspace_args[@]}" --features "$feature_set" "$@"
+}
+
+# `--lib --bins` is deliberate.  The locked upstream integration targets make
+# public-network assumptions (including a stale HTTP/1.0 response assertion),
+# so they are a separate upstream-baseline diagnostic rather than this gate.
+# Keep the feature-off regression independent from Cargo feature unification;
+# on Linux the audit-enabled workspace is then run as a second, explicit gate.
+run_workspace_tests user-stats --exclude shadowsocks-auditd
 if [[ "$run_audit" -eq 1 && "$audit_native" -eq 1 ]]; then
-  features=user-audit
+  run_workspace_tests user-audit
 fi
-workspace_args=(--workspace --lib --bins --features "$features")
-if [[ "$audit_native" -eq 0 ]]; then
-  # The auditd crate has an intentional Linux-only compile gate.  Keep the
-  # cross-platform workspace regression useful by excluding that member from
-  # the host test run; it is checked below for a Linux target instead.
-  workspace_args+=(--exclude shadowsocks-auditd)
-fi
-CARGO_TARGET_DIR="$target_dir" cargo test \
-  --manifest-path "$source_dir/Cargo.toml" \
-  --locked "${workspace_args[@]}"
 
 CARGO_TARGET_DIR="$target_dir" cargo test \
   --manifest-path "$source_dir/Cargo.toml" \
-  --locked -p shadowsocks --test tcp_eih_user \
+  --locked --no-fail-fast -p shadowsocks --test tcp_eih_user \
   --features aead-cipher-2022,user-stats
 
 # Compile the normal server path independently so a feature-gating mistake cannot

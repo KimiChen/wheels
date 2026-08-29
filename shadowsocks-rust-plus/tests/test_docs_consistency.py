@@ -115,6 +115,72 @@ class TestScriptDocsTests(unittest.TestCase):
         self.assertIn("--without-audit", self.readme)
 
 
+class WorkspaceGateDocsTests(unittest.TestCase):
+    """§16 的收窄 workspace 命令必须和测试入口、维护文档保持一致。"""
+
+    FEATURE_OFF_COMMAND = (
+        "cargo test --locked --workspace --lib --bins --features user-stats "
+        "--no-fail-fast --exclude shadowsocks-auditd"
+    )
+    FEATURE_ON_COMMAND = (
+        "cargo test --locked --workspace --lib --bins --features user-audit --no-fail-fast"
+    )
+    OVERLAY_INTEGRATION_COMMAND = (
+        "cargo test --locked --no-fail-fast -p shadowsocks --test tcp_eih_user "
+        "--features aead-cipher-2022,user-stats"
+    )
+    LEGACY_WIDE_COMMAND = "cargo test --workspace --features user-audit"
+
+    def setUp(self) -> None:
+        self.script = read(ROOT / "scripts" / "test.sh")
+        self.spec = read(DOCS / "USER_ACCESS_AUDIT.md")
+        self.v2 = read(DOCS / "USER_ACCESS_AUDIT_V2.md")
+        self.readme = read(ROOT / "README.md")
+        self.tests_readme = read(TESTS / "README.md")
+        self.patches_readme = read(ROOT / "patches" / "README.md")
+        self.upstream_baseline = read(DOCS / "UPSTREAM_BASELINE.md")
+
+    def section(self, heading: str, next_heading: str) -> str:
+        self.assertIn(heading, self.spec)
+        start = self.spec.index(heading)
+        end = self.spec.index(next_heading, start)
+        return self.spec[start:end]
+
+    def test_script_selects_only_narrow_workspace_targets(self) -> None:
+        self.assertIn("workspace_args=(--workspace --lib --bins --no-fail-fast)", self.script)
+        self.assertIn("run_workspace_tests user-stats --exclude shadowsocks-auditd", self.script)
+        self.assertIn("run_workspace_tests user-audit", self.script)
+        self.assertIn("--no-fail-fast -p shadowsocks --test tcp_eih_user", self.script)
+        self.assertNotIn(self.LEGACY_WIDE_COMMAND, self.script)
+
+    def test_spec_v7_binds_the_narrow_commands(self) -> None:
+        self.assertIn("规范版本：7", self.spec)
+        section = flat(self.section("## 16. 最终验收清单", "## 17."))
+        for command in (
+            self.FEATURE_OFF_COMMAND,
+            self.FEATURE_ON_COMMAND,
+            self.OVERLAY_INTEGRATION_COMMAND,
+        ):
+            self.assertIn(flat(command), section, command)
+        self.assertIn(flat("不属于 §16 全绿判据"), section)
+        self.assertNotIn(flat(self.LEGACY_WIDE_COMMAND + " 全绿"), section)
+
+    def test_active_docs_use_the_same_narrow_gate(self) -> None:
+        for document in (
+            self.v2,
+            self.readme,
+            self.tests_readme,
+            self.patches_readme,
+            self.upstream_baseline,
+        ):
+            normalized = flat(document)
+            self.assertIn("--lib--bins", normalized, document)
+        self.assertIn(flat("选择收窄命令（已实施，规范升版到 v7）"), flat(self.v2))
+        self.assertIn(flat("tcp_eih_user"), flat(self.tests_readme))
+        self.assertIn(flat("所有 workspace integration targets"), flat(self.patches_readme))
+        self.assertIn(flat("所有锁定上游的 workspace integration targets"), flat(self.upstream_baseline))
+
+
 class ProducerHealthDocsTests(unittest.TestCase):
     """producer health counter 的运维描述必须与其真实暴露面一致。"""
 

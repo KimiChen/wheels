@@ -1,6 +1,6 @@
 # shadowsocks-rust-plus 用户成功访问审计实现规格
 
-> **本文件为历史文档。** 它保存本功能的规范合同（v6，第 1–16 节）与第 1–8 轮代码审计、
+> **本文件为历史文档。** 它保存本功能的规范合同（v7，第 1–16 节）与第 1–8 轮代码审计、
 > 历次整改及 Linux 节点实装验收的完整过程记录（第 17–30 节），作为可追溯的审计档案保留，
 > 内容不再随新发现滚动更新。
 >
@@ -14,9 +14,9 @@
 >
 > 目标读者：独立负责 `shadowsocks-rust-plus` 节点侧审计功能的开发同事
 >
-> 规范版本：6
+> 规范版本：7
 >
-> 最后决策日期：2026-08-29
+> 最后决策日期：2026-08-30
 >
 > 版本沿革：
 >
@@ -38,6 +38,9 @@
 >   新增一条，要求根 crate 以 `--no-default-features` 加显式集合构建，不再依赖默认 `full`。发布产物
 >   只服务 `ssserver` 与 `shadowsocks-auditd`，因此不再包含 `local`/`local-*`、`manager`、`service`、
 >   `utility` 所引入的依赖；`ssserver` 自身的生产能力不变。
+> - v7（2026-08-30）：按 `USER_ACCESS_AUDIT_V2.md` 第 5 节第 4 项的决策收窄 §16 的 Rust 工作区门禁。
+>   feature-off 与 Linux feature-on 均只选择 `--lib --bins` 目标，并以 `tcp_eih_user` 单独运行
+>   overlay 自有集成目标；锁定上游的公网 HTTP/1.0 集成用例不再被误报为本项目门禁失败。
 
 本文是节点侧成功访问审计的规范性合同。实现者不需要再决定产品语义、组件边界、失败策略、
 存储上限或协议形态。文中的“必须”“不得”“应当”分别对应 MUST、MUST NOT、SHOULD。
@@ -1634,7 +1637,18 @@ SHA-256、两份 build receipt、artifact SHA 和 detached signature。
 
 只有同时满足以下条件，节点侧交付才算完成：
 
-- feature-off 的现有 Shadowsocks 和 user-stats 全量回归通过；
+- feature-off 回归与 Linux feature-on 回归均通过下列**收窄的 Rust 门禁**（workspace 命令用
+  `--lib --bins`，明确不选择任何 workspace integration target）：
+  `cargo test --locked --workspace --lib --bins --features user-stats --no-fail-fast --exclude shadowsocks-auditd`
+  （feature-off），以及 Linux 上的
+  `cargo test --locked --workspace --lib --bins --features user-audit --no-fail-fast`
+  （feature-on）；另须运行 overlay 自有集成目标
+  `cargo test --locked --no-fail-fast -p shadowsocks --test tcp_eih_user --features aead-cipher-2022,user-stats`。
+  其余 workspace integration targets 也不属于 §16 全绿判据或这两个 workspace 命令的全绿判据；本项目的
+  `tcp_eih_user` 已作为上面的显式例外单独运行，真实 TCP/UDP 数据面由本脚本的本机集成门禁覆盖。
+  上游 v1.24.0 的公网 targets（`crates/shadowsocks/tests/{tcp,tcp_tfo}.rs`、
+  `tests/{socks4,socks5,tunnel}.rs`）仍可按 `docs/UPSTREAM_BASELINE.md` 的原始命令单独复现并记录，
+  但不得计入本项目门禁。
 - 两类成功事件的生成时机与本文件逐字一致；
 - 合法配置下所有可处理的运行时审计故障均不会拒绝或等待代理流量；审计路径 panic 视为发布缺陷；
 - queue、UDP cache、dedup、nonce cache、segment 和 spool 均有硬上限；

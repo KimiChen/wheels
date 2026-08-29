@@ -4,11 +4,11 @@
 >
 > 与 [`USER_ACCESS_AUDIT.md`](USER_ACCESS_AUDIT.md) 的关系：
 >
-> - 那份是**历史文档**，保存规范合同（v6，第 1–16 节）与第 1–8 轮审计、整改及 Linux 实装验收的
+> - 那份是**历史文档**，保存规范合同（v7，第 1–16 节）与第 1–8 轮审计、整改及 Linux 实装验收的
 >   完整过程记录（第 17–30 节）。合同条文仍以那份为准，本文不复制、不改写合同。
 > - 本文只列**尚未闭合**的条目。已闭合项不再重复，只在需要时引用其出处小节。
 >
-> 基线：overlay `main`，规范版本 v6，`patches/0003-user-audit.patch` 与
+> 基线：overlay `main`，规范版本 v7，`patches/0003-user-audit.patch` 与
 > `upstream.lock` 的 `prepared_tree_sha256` 一致（`7f57d709…`）。
 
 ## 1. 当前真机验收状态（背景）
@@ -34,11 +34,11 @@
 
 ## 3. 待执行的验证
 
-以下为发布前置。第一项已首次执行（结论见表下），其余三项**从未在任何机器上执行过**：
+以下为发布前置。第一项已经按第 5 节决策收窄，原始宽命令的失败记录见表下；其余三项**从未在任何机器上执行过**：
 
 | 项目 | 说明 | 阻塞因素 |
 | --- | --- | --- |
-| `cargo test --workspace --features user-audit`（Linux 全绿） | §16 验收项 | 已首次执行：overlay 自有目标全绿，但 **9 条上游联网用例必然失败**，该命令按字面无法全绿 |
+| §16 收窄 Rust 门禁（`--workspace --lib --bins`，并单跑 `tcp_eih_user`） | §16 验收项 | 已决策并实施（规范 v6 → v7）；原始宽命令的 9 条上游联网用例不属于该门禁 |
 | `cargo-fuzz` sanitizer 实跑 | §3.2/§14.4 要求交付并运行 fuzz target | 无，尚未安排 |
 | §14.5 目标机压测 | 吞吐 ≤5%、CPU ≤10%、ssserver RSS ≤64 MiB、auditd RSS ≤128 MiB，及离线/队列满/慢 ACK/spool 满四类专项 | 需目标机与真实数据面负载 |
 | 真实流量端到端审计事件 | 经 ssserver 转发真实 TCP/UDP 流量后，验证 access event 落入 spool 并可经 lease 导出 | `integration_audit.py` 覆盖的是 ingest/export 协议链路，**不含**真实代理流量 |
@@ -57,9 +57,9 @@
 `tests/socks5.rs` 一个文件里两条用例正好互证：期望 `HTTP/1.1` 的那条通过，期望 `HTTP/1.0`
 的那条失败——既不是网络问题，也与本功能无关，是上游用例自身过时。
 
-由此得到一个此前没暴露过的结论：**只要 overlay 继续原样携带上游 v1.24.0，§16 那条
+由此得到一个此前没暴露过的结论：**只要 overlay 继续原样携带上游 v1.24.0，旧的
 「`cargo test --workspace --features user-audit` 全绿」按字面在任何主机上都不可能成立。**
-处理方式需决策，见第 5 节。
+现已按第 5 节第 4 项选择收窄命令；当前合同命令和排除边界以历史文档 v7 §16 为准。
 
 第四项值得单独强调：目前**没有任何一次验证**证明过「真实用户流量 → 产生 access event →
 写入 spool → 被 collector 取走」这条完整链路。§6 的两类成功事件语义在真机上仍未被端到端验证。
@@ -76,20 +76,17 @@
 | D-7 | `tests/integration_audit.py` 会以三个非特权账号重新执行自身，因此**解释器、脚本与 `config/auditd.example.json` 模板都必须位于这些账号可读可执行的路径**。放在 `/root`（Debian 默认 `0550`）下只会得到难以定位的 `PermissionError` | `tests/README.md` |
 | D-8 | `cluster-users.py verify-five` 要求**待校验的配置文件不得有 group/other 权限**（`0600`），而安装后的 `/etc/shadowsocks-rust-plus/server.json` 是 `0640`。两者不矛盾（不同阶段不同文件），但 README 第 4 步未说明 | `packaging/README.md` |
 
-## 5. 需要决策的事项
+## 5. 决策记录
 
-此前列出的三项均已决策并落实，结论见第 6 节：
+此前列出的四项均已决策并落实，结论见第 6 节：
 
 1. `M-66` 的归属 → 并入 `0003`（已修复）；
 2. `D-5` 是否收窄发布构建的 feature 集 → 收窄（已实施，规范升版到 v6）；
 3. 实装节点的处置 → 清理（`10.0.1.3`、`10.0.2.3` 均已回到基线）。
-
-**新增一项待决**（由 §3.1 的首次执行暴露）：
-
-4. **§16 的工作区测试判据如何收口**。三个可选方向：（a）把 §16 的命令收窄到 overlay 自有目标
-   （按 `-p` 列举四个 crate，或排除上游联网集成用例），（b）在 overlay 里加一个补丁把上游那 5 个
-   文件的 `HTTP/1.0` 期望改对——但这会扩大 overlay 对上游测试的改动面，且每次跟版都要重做，
-   （c）在 §16 明确豁免这 9 条并记录豁免理由。此项属合同层面，落实需再次升版。
+4. **§16 的工作区测试判据如何收口** → 选择收窄命令（已实施，规范升版到 v7）：
+   workspace 命令只运行 `--lib --bins` 的 feature-off/feature-on 目标，再单独运行 overlay 自有的
+   `tcp_eih_user` 集成目标；其余 workspace integration targets 不纳入这两个 workspace 命令，
+   上游公网 targets 保留为基线诊断，不改写、不纳入 §16 全绿判据。
 
 ## 6. 变更记录
 
@@ -116,3 +113,8 @@
   tokio-util、rustls-native-certs 等）；`webpki-roots` 保留，DoT/DoH 根证书来源不变。
   **更正 D-5 原文的一处事实错误**：`reqwest`/`web-sys` 并不在该 target 的依赖图中——
   `local-online-config` 拉入的是 `mime`/`flate2`/`brotli`/`zstd`，收窄真正移除的是上述这批。
+- 2026-08-30：**§16 工作区测试判据已收窄**（overlay 本轮修订，规范升版 v6 → v7）。
+  `scripts/test.sh` 固定运行 `--workspace --lib --bins --no-fail-fast` 的 feature-off 回归，
+  Linux 再运行 feature-on `user-audit` 回归，并显式运行 `tcp_eih_user`；其余 workspace
+  integration targets 不再进入这两个 workspace 命令，锁定上游的公网 HTTP/1.0 targets
+  不再阻塞本项目 §16 全绿判据。

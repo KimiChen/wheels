@@ -27,5 +27,7 @@ cargo test --workspace --all-targets
 `HTTP/1.1 200 OK`，但固定上游测试在第 144 行只接受 `HTTP/1.0 200 OK`。
 
 这是依赖公网 `www.example.com` 响应格式的上游基线问题，不由本项目补丁修改或隐藏。
-本项目验证脚本运行所有 workspace 库和二进制单元测试，并使用完全本机化的 EIH
-TCP/UDP 集成测试替代该公网断言。上游升级时仍应再次运行完整原始命令并记录结果。
+本项目验证脚本运行收窄的 workspace `--lib --bins` 库和二进制单元测试，并单独运行 overlay 的 EIH 及本机化
+TCP/UDP 数据面集成测试替代该公网断言；所有锁定上游的 workspace integration targets 都不属于
+§16 workspace 门禁的全绿判据。
+上游升级时仍应再次运行完整原始命令并记录结果。
