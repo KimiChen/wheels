@@ -3509,3 +3509,139 @@ benchmark gate 10 项、packaging 11 项、static 13 项、mock collector 17 项
 macOS 上的 Linux target `cargo check --all-targets` 不能替代 Linux runtime。完整
 `SO_PEERCRED`/UDS/signal/crash-capacity 集成、sanitizer fuzz、§14.5 目标机长压，以及固定工具链的两次
 musl release 构建和最终签名验签仍是发布前置，不得由合成 benchmark 或交叉编译结果替代。
+
+## 27. 第七轮代码审计记录（2026-08-29）
+
+> 本节是对第六轮整改（commit `b5f139a` 与 `76f80fc`，§25/§26）的对抗性验证记录，不改变合同条文。
+> 新增问题编号接续：major 自 `M-52` 起，minor 自 `m-170` 起；本轮无新 critical。行号基于当前
+> `.cache/audit-work-source`（与 `patches/0003-user-audit.patch` 逐字一致，48 个文件
+> `patch --dry-run -R -p1 --fuzz=0` 与 `git apply --check --binary --whitespace=error-all` 均通过）。
+
+### 27.1 审计范围与方法
+
+- 对象：第六轮整改后的全部交付物；重点是 §25/§26 每条声明的代码证据、整改 diff 引入的回归，
+  以及前轮遗留项的关闭情况。
+- 方法：四路并行对抗性验证（producer / auditd / 协议与测试工具 / 发布与一致性）；延续 §24 的
+  "真正执行代码"方法——auditd/producer 在 /tmp 桩本（去 compile_error!、libc shim）实测复现，
+  关键修复做变异检验（回退修复看测试是否变红）；M-52、M-53、m-171 等关键发现由编排者亲自复核
+  源码确认。所有实验副本事后删除，审计树逐字还原。
+- 本机（macOS）实跑：protocol 23、workspace user-stats 308、feature-off service lib 14、
+  打桩 feature-on 99、EIH 4、Python 套件（mock 17、release 21、packaging 11、static 13、
+  benchmark 10、integration 3、fuzz 2）全绿；交叉 `cargo check --target
+  x86_64-unknown-linux-gnu -p shadowsocks-auditd --all-targets` 零警告；`cargo fmt --check` 通过。
+  例外：`test_http_unix.py` 5 项失败与 `check-sensitive.sh`/`verify.sh` 失败关闭，全部精确落在
+  当前机器缺 `rg` 的依赖点（m-180）。
+- 未做：Linux runtime 实跑、fuzz sanitizer 实跑、§14.5 压测、两次 musl 实建实签。
+
+### 27.2 总体结论
+
+§25/§26 的修复声明**逐条基本属实且经得起实测**：C-6（两进程四处 `Instant` 下溢）、M-41（索引
+前移到 flush 块之前）、M-42/M-43/M-44（§21/§24 复现场景重放全部有界退出且无自指 gap）、M-46
+（sticky fatal 状态机逐行核对一致）、M-47（orphan marker 九场景 fault-injection 测试真实）、
+M-48（变异检验实测通过）、M-50（幽灵 stanza 剔除且双工具重放均通过）等均确认闭合。交付一致性
+三项核查（补丁逐字同步、合同文本无夹带、§26.4 数字复跑 13 项中 10 项逐数一致）通过。
+
+本轮无新 critical，但有 **2 个新 major**：`M-52`（m-157 修复把 dedup 压实改成 O(n²)，且使
+`cargo test -p shadowsocks-auditd` 在默认 debug profile 下事实上不可运行——发布门禁的可观测性
+反而退步）与 `M-53`（静态护栏对多行签名函数整体失效，m-162 的原始复现依旧漏报）。另有
+M-45 残留（部分修复）与 §24 M-51 点名的"同名不绑定"测试模式在 M-41/M-44 上重现（m-173）。
+
+### 27.3 Major
+
+- **M-52 dedup 压实阈值改为 `capacity + 1`，把摊还 O(1) 退化为每次命中 O(n)，重放风暴下为
+  O(n²)，并使其 shipped 测试在 debug 下不可运行。** `ingest.rs:168-175`：命中每次向 `order`
+  追加一个 token 项，`order.len() > capacity + 1` 即对 65536 项做全量 `retain`（含逐项 HashMap
+  查询）——压实测得每 2 次命中触发一次全量扫描。桩本实测：真实容量回归测试
+  （`ingest.rs:717-743`）release 46.8 秒、debug 超 120 秒被终止；同负载换回旧阈值 0.02 秒
+  （约 2300 倍差）。运行期影响：dedup 查询在每事件热路径（`ingest.rs:399-405`），producer
+  重连重放（in-flight 256 + queue 4096）全部命中，一次重放风暴额外消耗秒级 CPU 且持有 dedup 锁。
+  连带：发布前置命令 `cargo test -p shadowsocks-auditd` 在默认 debug profile 会在该用例上挂住
+  数十分钟级，M-42 修复的"套件绿"在默认工程实践中仍不可观测。修复：恢复滞后阈值（如
+  `2 × capacity`）或更换数据结构（侵入式 LRU 链表），而非把阈值压到 capacity+1。（§8.3 §14.5）
+- **M-53 静态护栏的函数范围判定对多行签名函数整体失效，m-162 原始复现依旧漏报；另有一条
+  新增死代码扫描器。** `tests/check_audit_static.py:373-378`：`saw_brace` 置真后的结束条件
+  `depth_before[cursor] <= baseline_depth` 在多行签名的结束行即成立，审计范围只剩签名行，
+  **连审计标记行本身都不在范围内**。实测（/tmp 副本）：在 UDP 审计热路径（`udprelay.rs`
+  `dispatch_received_packet` 内）注入 `.unwrap()` 与必然越界下标，检查器仍输出"静态审计通过"
+  rc=0——即 m-162 的原始复现；对照注入单行签名函数则正确报错。量化：三个 relay/context 文件中
+  40 个审计标记有 17 个落空。本轮新增的两条 relay 单测只用单行签名 fixture（M-51 式
+  "同名不绑定"再现）；另 `_check_relay_wiring_file`（`check_audit_static.py:399-474`）定义后
+  从未被 `check()` 调用，是死代码。修复：结束条件改为"开括号之后深度回落到 baseline"，补多行
+  签名 fixture 的回归测试，接线或删除死扫描器。（§14.4 §7.3 panic-free 护栏）
+
+### 27.4 §25/§26 声明验证结果汇总
+
+- **已修复（逐条证实，多数带真实/变异绑定测试）**：C-6（producer 与 auditd 四处全部改
+  `checked_sub`，全树同类模式清零）、M-41（代码）、M-42（含 m-143 死代码整理）、M-43（桩本
+  双场景实测）、M-44（代码；三场景重放有界退出）、M-46/§26.1（fatal 状态机、health 可观测、
+  watch 退出链、不复用游标）、M-47/§26.1（marker schema 2 + source_fingerprint、九场景测试）、
+  M-48（watch 移出三个热循环，变异检验实测变红）、M-49（词法 dot 校验，独立 rustc 复算六种
+  拼写全拒）、M-50（幽灵 stanza 剔除 + check-patch-deletions.py + 双工具重放实测 rc=0）、
+  M-51（rendezvous 绑定，删复检实测变红）、m-144（UTS #46 顺序修正，全角尾点实测一致）、
+  m-145（15 条 record + 2 条 NDJSON + 3 条 HMAC 向量独立重算全对）、m-146（fuzz 入口 22 项、
+  清单改存在性断言）、m-147（decimal 值域双侧差分实测一致）、m-148、m-149、m-150、m-151、
+  m-152、m-153、m-154、m-155、m-156、m-158、m-160、m-161、m-163、m-164（三态门禁实测）、
+  m-165、m-166、m-167、m-169。
+- **部分修复**：M-45（per-candidate 判据已区分搬移/释放，但迭代级判据把 gap 写入成本计入
+  "无进展"，§24 场景仍需两次 cleanup；m-174）；m-157（真实容量测试存在但引入 M-52 回归）；
+  m-159（残留 TOMBSTONE_RETENTION_SECONDS 双定义，m-178）；m-162（机制落地但对主要目标失效，
+  升级为 M-53）。
+- **无回归抽查**：M-30/M-31/M-32/M-33/M-36/M-37、C-5 四要件、m-89/m-90/m-92/m-99、
+  m-95/m-122/m-123、m-40/m-41(§21) 均成立。
+- **遗留未修（未被 §25/§26 声称）**：§23.7 两项规格文本（v4 未升版）；m-139（§10.3 中介细则
+  未落文档）；m-142（Instant 下溢静态护栏）；m-129、m-132、m-140 原样保留。
+
+### 27.5 Minor
+
+| 编号 | 位置 | 问题 |
+| --- | --- | --- |
+| m-170 | `user_audit.rs:2610-2611`、`spool.rs:1159-1162` | C-6 修复无单测；`Instant - Duration` 下溢模式未加入 check_audit_static.py（§23 m-142 建议未实施），同类回归无护栏 |
+| m-171 | `user_audit.rs:1304-1350` | m-91 部分回归：m-151 的单次 try_lock 修复以把 `normalize_domain` 搬回 shard 临界区为代价（≥3 种交替拼写时每包锁内规范化+alternate 替换；两槽 alias 使 ≤2 种拼写零分配命中）；§25.2/§26.2 未披露该权衡，m-91 结论应降为"以 alias 缓存收窄、规范化回到锁内" |
+| m-172 | `user_audit.rs:3796-3810` | m-150 后半条无直接测试：`hello_nack_count==0` 断言被平凡满足（mock socket 不存在，走不到 hello NACK 路径）；需先 hello NACK 再 close 的用例 |
+| m-173 | `spool.rs` 测试集 | M-41/M-44 两条关键修复均无可绑定的回归测试：变异检验实测（索引挪回 flush 之后/删除自激守卫）shipped 71 项全绿；§23.9 点名的"启动时 gap 已 durable"与 C-5 迭代上限用例仍未交付（§24 M-51 模式重现） |
+| m-174 | `spool.rs:2836`（同构 2799/2890） | M-45 残留：迭代级判据 `spool_bytes >= iteration_start_bytes` 把第一条 corruption gap 的写入成本计入"无进展"，§24 场景（1 损坏 acked + 2 健康 sealed）仍需两次 cleanup；建议改跟踪"累计释放字节" |
+| m-175 | `spool.rs:2757-2761` | corrupt-acked 分支 break 前把 `progressed` 重算为字节比较（必为 false），与同构分支不一致；cleanup 中途外部释放磁盘时可多驱逐一个 quarantine 对象（有界、方向保守） |
+| m-176 | `spool.rs`（durable_gap_reasons） | m-132 残留仍在：索引只增不删，靠 rebuild 清零；建议删除 segment 时剔除或注释界限 |
+| m-177 | `spool.rs:190-203` | orphan recovery marker（schema 2 + source_fingerprint）是私有 on-disk 格式，未进协议 crate、无跨栈 golden vector；严格性由 parse_canonical + deny_unknown_fields 提供 |
+| m-178 | `spool.rs:36`、`audit-protocol/lib.rs:53` | m-159 残留：`TOMBSTONE_RETENTION_SECONDS` 与 `RECEIPT_RETENTION_SECONDS` 仍是同一 §5.4 常量的两份定义 |
+| m-179 | `tests/test_benchmark_audit.py` | 缺负向单测：三 UID 互异、auditd measurement_source/run_id 不一致——删除这些绑定校验不会有测试变红 |
+| m-180 | 环境/记录 | `rg` 环境事实第三次翻转（§23 缺→§24.4 有→本轮缺）：§26.4 的 http_unix 14、check-sensitive、verify.sh 三项当前不可复现（均 fail-closed，无假绿）；建议验证记录写入前当日实跑确认环境前提 |
+| m-181 | `docs/PERFORMANCE.md:62` | 仍写 feature-off/on 两案口径，与 tests/README 已改的三案方法论（upstream 原始/runtime-off/runtime-on）不同步（非合同文档，应同步） |
+| m-182 | `docs/OPERATIONS.md:306-328,388-444` | m-139 遗留未修：§10.3 三条细则（endpoint↔node 一一映射、转发前拒绝 >4096 bytes body、access log 不记 Authorization/MAC 头）未落文档；user-stats nginx 块仍无就地"不可照抄"标注 |
+| m-183 | `context.rs`（DataShutdownState） | 关机协调代码无审计标记也无 cfg 属性，脱离静态护栏范围；未来在其中引入 unwrap 不会报警 |
+| m-184 | `user_audit.rs:2130` | queue_overflow 观测路径墙钟失败用 `unwrap_or(0)` 且不计 `encode_error_time_unknown`，与另两条 gap 路径不一致（实际不可达，记录不一致性） |
+| m-185 | `user_audit.rs:2589-2593` | m-129 残留：force-final 完成条件不可达原样保留 |
+
+### 27.6 需规格处理的文本项
+
+1. §23.7 第 1 条（§7.3"合法 ACK 重置"收紧为"合法 event ACK"）与第 2 条（§9.5
+   `quarantine_pending` reason 枚举补 `segment_corruption`）仍未落实，合同维持 v4；
+2. §5.1 的 TOML 片段未列本轮新增的 `dep:hashbrown`（根与 service Cargo.toml 已实际引入），
+   升版时需补记；
+3. 以上随下次升版一并处理；处理前实现与合同文本的偏差以本节与 §23.7 的记录为准。
+
+### 27.7 交付一致性核查
+
+- 补丁↔源码树：48 文件 `patch --dry-run -R -p1 --fuzz=0` 与 `git apply --check --binary
+  --whitespace=error-all` 均 rc=0；幽灵删除 stanza 已剔除（`deleted file mode` 计数 0）；
+  fresh 重放树 SHA-256 与 `upstream.lock` 的 `prepared_tree_sha256` 逐字一致。
+- 合同文本：`b5f139a`/`76f80fc` 对 §1–16 零改动；头部版本沿革链完整。
+- §26.4 清单复跑：13 项中 10 项逐数一致（308/23/21/10/11/13/17/14/3/2）；3 项因当前机器
+  缺 `rg` 不可复现（m-180，fail-closed 无假绿）。"state commit uncertainty 定向用例在
+  Debian x86_64 原生通过"为可信声明（用例真实存在于 spool.rs 测试模块），本机不可复现。
+- 敏感信息：tracked 文件零命中；git 工作树干净；`.gitignore` 覆盖新增生成物（fuzz
+  corpus/artifacts、dist、tests/audit-runtime 等）；无孤儿测试文件。
+- verify.sh 的 `STRICT_FMT` 默认关闭项是有意弱化（上游 v1.24.0 与现版 rustfmt 不兼容，
+  有注释说明），非静默跳过。
+
+### 27.8 验收建议
+
+1. **先修 M-52**（恢复滞后压实阈值或换侵入式 LRU），否则发布前置命令
+   `cargo test -p shadowsocks-auditd` 在 debug 下挂住数十分钟级，门禁不可观测；
+2. **修 M-53**（函数范围结束条件 + 多行签名 fixture + 接线/删除死扫描器），否则 relay 热路径
+   的 panic 护栏形同虚设；
+3. 补 m-173 的两个变异可绑定用例（M-41 启动幂等、M-44 自激守卫/C-5 迭代上限），并落实
+   m-170 的 Instant 下溢静态规则；
+4. m-174（M-45 残留）改为跟踪累计释放字节；m-171 的锁内规范化权衡在 §25/§26 记录中补披露；
+5. 规格文本项（27.6）随下次升版处理；m-180/m-181/m-182 排期；
+6. Linux runtime 完整实跑、fuzz sanitizer、两次 musl 实建实签、§14.5 目标机压测仍为发布前置。
