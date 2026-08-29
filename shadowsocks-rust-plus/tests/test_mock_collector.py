@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import socket
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -745,5 +747,137 @@ class EventValidationTest(unittest.TestCase):
         )
 
 
-if __name__ == "__main__":
-    unittest.main()
+def signed_response_headers(
+    status: int,
+    body: bytes,
+    nonce: str,
+    *,
+    node: str = NODE,
+    headers: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Return response headers whose MAC covers exactly what is being sent."""
+
+    headers = dict(headers or {})
+    digest = sha256_hex(body)
+    metadata = ResponseMetadata(
+        status=status,
+        content_type=headers.get("Content-Type", ""),
+        schema=headers.get("X-Shadowsocks-Audit-Schema", ""),
+        lease_body_sha256=headers.get("X-Shadowsocks-Audit-Body-SHA256", ""),
+        node_id=node,
+        batch_id=headers.get("X-Shadowsocks-Audit-Batch-Id", ""),
+        spool_epoch=headers.get("X-Shadowsocks-Audit-Spool-Epoch", ""),
+        first_sequence=headers.get("X-Shadowsocks-Audit-First-Sequence", ""),
+        last_sequence=headers.get("X-Shadowsocks-Audit-Last-Sequence", ""),
+        event_count=headers.get("X-Shadowsocks-Audit-Event-Count", ""),
+        response_sha256=digest,
+        response_mac="",
+        request_nonce=nonce,
+    )
+    headers["X-Shadowsocks-Audit-Node"] = node
+    headers["X-Shadowsocks-Audit-Response-SHA256"] = digest
+    headers["X-Shadowsocks-Audit-Response-MAC"] = request_mac(KEY, canonical_response(metadata))
+    return headers
+
+
+class _CannedAuditd(threading.Thread):
+    """Serve correctly signed canned export responses over a UDS.
+
+    The MAC is computed over exactly the headers each canned response sends, so
+    the collector reaches its own protocol checks instead of failing on the MAC.
+    """
+
+    def __init__(self, path: Path, responses: list[tuple[int, dict[str, str], bytes]]) -> None:
+        super().__init__(daemon=True)
+        self.responses = list(responses)
+        self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.listener.bind(str(path))
+        self.listener.listen(len(self.responses) + 1)
+
+    def run(self) -> None:
+        for status, headers, body in self.responses:
+            connection, _ = self.listener.accept()
+            with connection:
+                request = b""
+                while b"\r\n\r\n" not in request:
+                    chunk = connection.recv(4096)
+                    if not chunk:
+                        break
+                    request += chunk
+                connection.sendall(self._signed(request, status, headers, body))
+        self.listener.close()
+
+    @staticmethod
+    def _signed(request: bytes, status: int, headers: dict[str, str], body: bytes) -> bytes:
+        head = request.split(b"\r\n\r\n", 1)[0].decode("ascii")
+        nonce = ""
+        for line in head.split("\r\n")[1:]:
+            name, _, value = line.partition(": ")
+            if name.lower() == "x-shadowsocks-audit-nonce":
+                nonce = value
+        signed = signed_response_headers(status, body, nonce, headers=headers)
+        lines = [f"HTTP/1.1 {status} STATUS", "Connection: close", "Cache-Control: no-store"]
+        lines.extend(f"{name}: {value}" for name, value in signed.items())
+        if status != 204:
+            lines.append(f"Content-Length: {len(body)}")
+        return ("\r\n".join(lines) + "\r\n\r\n").encode("ascii") + body
+
+
+class WireResponseTest(unittest.TestCase):
+    """§10.1 response rules that only the wire-facing path can exercise."""
+
+    def collect(self, responses: list[tuple[int, dict[str, str], bytes]]) -> int:
+        with tempfile.TemporaryDirectory(prefix="ssrp-collector-wire-") as directory:
+            socket_path = Path(directory) / "export.sock"
+            server = _CannedAuditd(socket_path, responses)
+            server.start()
+            try:
+                collector = MockCollector(NODE, KEY, Path(directory) / "state" / "collector.json")
+                return collector.collect_once(socket_path)
+            finally:
+                server.join(timeout=5)
+
+    def lease_response(self) -> tuple[bytes, tuple[int, dict[str, str], bytes]]:
+        body = wrapper_bytes(access_event(1), 1)
+        headers = {
+            "Content-Type": "application/x-ndjson",
+            "X-Shadowsocks-Audit-Schema": "1",
+            "X-Shadowsocks-Audit-Body-SHA256": sha256_hex(body),
+            "X-Shadowsocks-Audit-Batch-Id": "b" * 32,
+            "X-Shadowsocks-Audit-Spool-Epoch": "c" * 32,
+            "X-Shadowsocks-Audit-First-Sequence": "1",
+            "X-Shadowsocks-Audit-Last-Sequence": "1",
+            "X-Shadowsocks-Audit-Event-Count": "1",
+        }
+        return body, (200, headers, body)
+
+    def test_empty_lease_accepts_only_a_bare_204(self) -> None:
+        self.assertEqual(self.collect([(204, {}, b"")]), 0)
+
+    def test_empty_lease_rejects_signed_batch_metadata(self) -> None:
+        for name, value in (
+            ("X-Shadowsocks-Audit-Batch-Id", "b" * 32),
+            ("X-Shadowsocks-Audit-Spool-Epoch", "c" * 32),
+            ("X-Shadowsocks-Audit-First-Sequence", "1"),
+            ("X-Shadowsocks-Audit-Last-Sequence", "1"),
+            ("X-Shadowsocks-Audit-Event-Count", "1"),
+            ("X-Shadowsocks-Audit-Schema", "1"),
+            ("X-Shadowsocks-Audit-Body-SHA256", sha256_hex(b"")),
+            ("Content-Type", "application/x-ndjson"),
+        ):
+            with self.subTest(header=name):
+                with self.assertRaisesRegex(CollectorError, "lease metadata"):
+                    self.collect([(204, {name: value}, b"")])
+
+    def test_ack_body_must_match_the_fixed_bytes(self) -> None:
+        _, lease = self.lease_response()
+        acked = b'{"schema_version":1,"status":"acked"}'
+        self.assertEqual(self.collect([lease, (200, {"Content-Type": "application/json"}, acked)]), 1)
+        for body in (
+            b'{"status":"acked","schema_version":1}',
+            b'{"schema_version": 1, "status": "acked"}',
+            acked + b"\n",
+        ):
+            with self.subTest(body=body):
+                with self.assertRaisesRegex(CollectorError, "did not acknowledge"):
+                    self.collect([lease, (200, {"Content-Type": "application/json"}, body)])

@@ -29,6 +29,8 @@ from typing import Any, Iterable
 SCHEMA_VERSION = 1
 MAX_BODY_BYTES = 8 * 1024 * 1024
 MAX_REQUEST_BYTES = 4096
+# The §10.1 ACK body is a fixed raw byte string without a trailing LF.
+ACK_RESPONSE_BODY = b'{"schema_version":1,"status":"acked"}'
 HEX32 = re.compile(r"[0-9a-f]{32}\Z")
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 DECIMAL = re.compile(r"0|[1-9][0-9]*\Z")
@@ -1130,6 +1132,23 @@ class MockCollector:
             require_lease_body_digest=(status == 200),
         )
         if status == 204:
+            # §10.1: an empty lease omits the body, the Content-Type and every
+            # batch metadata header.  They are covered by the response MAC, so
+            # accepting them would accept a signed batch description that no
+            # NDJSON body backs.
+            if body or any(
+                (
+                    metadata.content_type,
+                    metadata.schema,
+                    metadata.lease_body_sha256,
+                    metadata.batch_id,
+                    metadata.spool_epoch,
+                    metadata.first_sequence,
+                    metadata.last_sequence,
+                    metadata.event_count,
+                )
+            ):
+                raise CollectorError("empty lease response carries lease metadata")
             return 0
         records = parse_lease(body, metadata)
         self.accept_records(records, metadata)
@@ -1145,7 +1164,9 @@ class MockCollector:
             request_nonce=ack_nonce,
             expected_node=self.node_id,
         )
-        if ack_status != 200 or strict_json(ack_response) != {"schema_version": 1, "status": "acked"}:
+        # §10.1 fixes the ACK body to these exact raw bytes, so compare the
+        # bytes instead of a semantic value that also accepts other spellings.
+        if ack_status != 200 or ack_response != ACK_RESPONSE_BODY:
             raise CollectorError("auditd did not acknowledge batch")
         return len(records)
 
