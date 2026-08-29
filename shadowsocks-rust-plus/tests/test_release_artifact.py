@@ -1162,6 +1162,192 @@ with open(fixture_root / ("environment-" + source_root.name + ".json"), "w", enc
             verifier,
         )
 
+    def package_multi_arguments(self, root: Path, **overrides: Path) -> list[str]:
+        """package-multi 的完整输入，便于逐项替换成非法值。"""
+        values: dict[str, Path] = {
+            "--binary": root / "target-a" / TARGET / "release" / "ssserver",
+            "--auditd-binary": root / "target-a" / TARGET / "release" / "shadowsocks-auditd",
+            "--second-binary": root / "target-b" / TARGET / "release" / "ssserver",
+            "--second-auditd-binary": root
+            / "target-b"
+            / TARGET
+            / "release"
+            / "shadowsocks-auditd",
+            "--first-build-receipt": root / "target-a" / "build-receipt.json",
+            "--second-build-receipt": root / "target-b" / "build-receipt.json",
+            "--first-source-root": root / "source-a",
+            "--second-source-root": root / "source-b",
+            "--first-target-root": root / "target-a",
+            "--second-target-root": root / "target-b",
+        }
+        for name, path in overrides.items():
+            flag = "--" + name.replace("_", "-")
+            self.assertIn(flag, values)
+            values[flag] = path
+        arguments: list[str] = []
+        for flag, path in values.items():
+            arguments += [flag, str(path)]
+        return arguments
+
+    def run_package_multi(
+        self,
+        root: Path,
+        output: Path,
+        *,
+        success: bool = False,
+        **overrides: Path,
+    ) -> subprocess.CompletedProcess[str]:
+        return self.run_command(
+            [
+                sys.executable,
+                str(ARTIFACT_TOOL),
+                "package-multi",
+                *self.package_multi_arguments(root, **overrides),
+                "--output-dir",
+                str(output),
+                *self.metadata_arguments(root / "source-a"),
+            ],
+            success=success,
+        )
+
+    def test_package_binds_every_declared_independence_check(self) -> None:
+        """§26.3 声明的独立性/权限/位置校验必须逐条有绑定用例。"""
+        with tempfile.TemporaryDirectory(prefix="ssrp-release-bindings-") as temporary:
+            root = Path(temporary)
+            server, _auditd = self.fake_release_binaries(root)
+            output = root / "output"
+            output.mkdir()
+
+            result = self.run_package_multi(root, output, second_binary=server)
+            self.assertIn("必须来自不同文件", result.stderr)
+
+            divergent = root / "divergent"
+            divergent.mkdir()
+            self.fake_elf(divergent, "other-ssserver")
+            result = self.run_package_multi(
+                root, output, second_binary=divergent / "other-ssserver"
+            )
+            self.assertIn("字节不一致", result.stderr)
+
+            result = self.run_package_multi(
+                root, output, second_build_receipt=root / "target-a" / "build-receipt.json"
+            )
+            self.assertIn("必须来自不同文件", result.stderr)
+
+            stray_receipt = root / "stray-receipt.json"
+            shutil.copyfile(root / "target-b" / "build-receipt.json", stray_receipt)
+            os.chmod(stray_receipt, 0o644)
+            result = self.run_package_multi(root, output, second_build_receipt=stray_receipt)
+            self.assertIn("不位于声明的 live target root", result.stderr)
+
+            receipt_b = root / "target-b" / "build-receipt.json"
+            os.chmod(receipt_b, 0o664)
+            result = self.run_package_multi(root, output)
+            self.assertIn("receipt 权限必须为 0644", result.stderr)
+            os.chmod(receipt_b, 0o644)
+
+            result = self.run_package_multi(
+                root, output, second_source_root=root / "source-a"
+            )
+            self.assertIn("互不重叠", result.stderr)
+
+            linked_source = root / "linked-source-b"
+            linked_source.symlink_to(root / "source-b")
+            result = self.run_package_multi(root, output, second_source_root=linked_source)
+            self.assertIn("不能是符号链接", result.stderr)
+
+            self.assertEqual(list(output.iterdir()), [])
+            self.run_package_multi(root, output, success=True)
+
+    def test_build_receipt_binds_tool_identity_and_source_tree_stability(self) -> None:
+        """§26.3 的“工具 inode 绑定”与“构建不得修改准备源码树”必须有绑定用例。"""
+        with tempfile.TemporaryDirectory(prefix="ssrp-release-live-tools-") as temporary:
+            root = Path(temporary)
+            source = root / "source-a"
+            source.mkdir()
+            (source / "Cargo.toml").write_text(
+                '[workspace]\nresolver = "2"\n', encoding="utf-8"
+            )
+            (source / "Cargo.lock").write_text("version = 4\n", encoding="utf-8")
+            fake_bin = self.write_fake_cargo_zigbuild(root)
+            environment = os.environ.copy()
+            environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
+
+            def build(name: str) -> subprocess.CompletedProcess[str]:
+                cargo_home = root / f"cargo-home-{name}"
+                cargo_home.mkdir()
+                return self.run_command(
+                    [
+                        sys.executable,
+                        str(ARTIFACT_TOOL),
+                        "build-and-receipt",
+                        "--build-id",
+                        "build-a",
+                        "--source-root",
+                        str(source),
+                        "--target-root",
+                        str(root / f"target-{name}"),
+                        "--cargo-home",
+                        str(cargo_home),
+                        *self.metadata_arguments(source),
+                    ],
+                    success=False,
+                    env=environment,
+                )
+
+            cargo_zigbuild = fake_bin / "cargo-zigbuild"
+            cargo_zigbuild.write_text(
+                cargo_zigbuild.read_text(encoding="utf-8")
+                + "\n"
+                + "marker = Path(__file__).with_name('sabotage')\n"
+                + "sabotage = marker.read_text().strip() if marker.exists() else ''\n"
+                + "if sabotage == 'replace-rustc':\n"
+                + "    victim = Path(__file__).with_name('rustc')\n"
+                + "    replacement = victim.with_name('rustc.replacement')\n"
+                + "    replacement.write_bytes(victim.read_bytes())\n"
+                + "    replacement.chmod(0o755)\n"
+                + "    replacement.replace(victim)\n"
+                + "if sabotage == 'touch-source':\n"
+                + "    (source_root / 'injected.rs').write_text('// injected\\n')\n",
+                encoding="utf-8",
+            )
+            os.chmod(cargo_zigbuild, 0o755)
+
+            marker = fake_bin / "sabotage"
+            marker.write_text("replace-rustc\n", encoding="utf-8")
+            replaced = build("replaced-tool")
+            self.assertIn("构建工具在构建期间被替换", replaced.stderr)
+            self.assertFalse((root / "target-replaced-tool" / "build-receipt.json").exists())
+
+            marker.write_text("touch-source\n", encoding="utf-8")
+            drifted = build("drifted-source")
+            self.assertIn("修改了准备源码树", drifted.stderr)
+            self.assertFalse((root / "target-drifted-source" / "build-receipt.json").exists())
+            (source / "injected.rs").unlink()
+
+            marker.unlink()
+            cargo_zigbuild.write_text(
+                f"""#!{sys.executable}
+from pathlib import Path
+import sys
+
+executable = Path(__file__)
+replacement = executable.with_name("cargo-zigbuild.replacement")
+replacement.write_bytes(executable.read_bytes())
+replacement.chmod(0o755)
+replacement.replace(executable)
+if sys.argv[1:] == ["--version"]:
+    print("cargo-zigbuild 0.23.0")
+    raise SystemExit(0)
+raise SystemExit(90)
+""",
+                encoding="utf-8",
+            )
+            os.chmod(cargo_zigbuild, 0o755)
+            swapped = build("swapped-tool")
+            self.assertIn("cargo-zigbuild 在版本校验期间被替换", swapped.stderr)
+            self.assertFalse((root / "target-swapped-tool" / "build-receipt.json").exists())
+
     def test_verifier_rejects_binary_tampering(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ssrp-release-") as temporary:
             root = Path(temporary)
