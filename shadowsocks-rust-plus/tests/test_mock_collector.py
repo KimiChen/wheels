@@ -565,6 +565,44 @@ class EventValidationTest(unittest.TestCase):
             with self.subTest(record=name):
                 self.assertEqual(len(self.parse_one(golden_event(name))), 1)
 
+    def test_every_golden_record_parses_in_one_ndjson_lease(self) -> None:
+        names = list(_GOLDEN_VECTORS["records"])
+        body = b"".join(
+            wrapper_bytes(canonical_json(golden_event(name)), index + 1) for index, name in enumerate(names)
+        )
+        parsed = parse_lease(body, lease_metadata(body, "a" * 32, 1, len(names), len(names)))
+        self.assertEqual(
+            [record["event"]["event_type"] for record in parsed],
+            [golden_event(name)["event_type"] for name in names],
+        )
+
+    def test_canonical_member_order_is_bound_for_every_variant(self) -> None:
+        # Once the field set matches, the per-variant order table is the only
+        # thing pinning member order, so every variant needs a transposition
+        # case that turns red when its row drifts.
+        for name in _GOLDEN_VECTORS["records"]:
+            event = golden_event(name)
+            self.assertEqual(len(self.parse_one(event)), 1, name)
+            transpositions: list[tuple[dict, str]] = []
+            keys = list(event)
+            for index in range(len(keys) - 1):
+                order = keys[:]
+                order[index], order[index + 1] = order[index + 1], order[index]
+                transpositions.append(({key: event[key] for key in order}, keys[index]))
+            target = event.get("target")
+            if isinstance(target, dict):
+                target_keys = list(target)
+                for index in range(len(target_keys) - 1):
+                    order = target_keys[:]
+                    order[index], order[index + 1] = order[index + 1], order[index]
+                    moved = dict(event)
+                    moved["target"] = {key: target[key] for key in order}
+                    transpositions.append((moved, f"target.{target_keys[index]}"))
+            for mutant, moved in transpositions:
+                with self.subTest(record=name, moved=moved):
+                    with self.assertRaisesRegex(CollectorError, "embedded event is not canonical"):
+                        self.parse_one(mutant)
+
     def test_unknown_or_missing_event_type_is_rejected(self) -> None:
         for value in ("tcp_target_failure", "", "TCP_TARGET_SUCCESS", 1, None, REMOVE):
             with self.subTest(event_type=repr(value)):
