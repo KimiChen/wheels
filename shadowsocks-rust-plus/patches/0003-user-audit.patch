@@ -19355,10 +19355,10 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..fe9b793919b2c697acb463dce34c012d
  }
 diff --git a/crates/shadowsocks-service/src/server/user_audit.rs b/crates/shadowsocks-service/src/server/user_audit.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..274c2463c39cd23a82492b5675989363707b83c8
+index 0000000000000000000000000000000000000000..1c80c5aab0fb51141c84418c10c7b42afa1e29ec
 --- /dev/null
 +++ b/crates/shadowsocks-service/src/server/user_audit.rs
-@@ -0,0 +1,4548 @@
+@@ -0,0 +1,4786 @@
 +//! Non-blocking successful-target access auditing for the server data path.
 +//!
 +//! The relay only constructs a small draft and performs bounded atomic/cache
@@ -19369,7 +19369,7 @@ index 0000000000000000000000000000000000000000..274c2463c39cd23a82492b5675989363
 +    borrow::Cow,
 +    collections::{HashMap, VecDeque, hash_map::RandomState},
 +    fmt,
-+    hash::{Hash, Hasher},
++    hash::{BuildHasher, Hash, Hasher},
 +    io,
 +    net::IpAddr,
 +    path::PathBuf,
@@ -19391,7 +19391,7 @@ index 0000000000000000000000000000000000000000..274c2463c39cd23a82492b5675989363
 +};
 +
 +use crossbeam_queue::ArrayQueue;
-+use hashbrown::{Equivalent, HashMap as BorrowingHashMap};
++use hashbrown::HashTable;
 +use tokio::{
 +    io::{AsyncReadExt, AsyncWriteExt},
 +    net::{UnixStream, unix::OwnedReadHalf, unix::OwnedWriteHalf},
@@ -20217,36 +20217,9 @@ index 0000000000000000000000000000000000000000..274c2463c39cd23a82492b5675989363
 +    }
 +}
 +
-+impl Hash for UdpWindowHost {
-+    fn hash<H: Hasher>(&self, state: &mut H) {
-+        self.borrowed().hash(state);
-+    }
-+}
-+
-+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-+struct UdpWindowKey {
-+    server_id: Arc<str>,
-+    association_id: [u8; 16],
-+    host: UdpWindowHost,
-+    port: u16,
-+}
-+
-+impl UdpWindowKey {
-+    fn from_parts(server_id: &Arc<str>, association_id: [u8; 16], host: UdpAuditHost<'_>, port: u16) -> Self {
-+        Self {
-+            server_id: server_id.clone(),
-+            association_id,
-+            host: UdpWindowHost::from_borrowed(host),
-+            port,
-+        }
-+    }
-+
-+    #[cfg(test)]
-+    fn new(server_id: &Arc<str>, association_id: [u8; 16], target: &AuditTargetDraft) -> Self {
-+        Self::from_parts(server_id, association_id, target.audit_host(true), target.port)
-+    }
-+}
-+
++/// Borrowed view of one window key. Lookups, index rehashing and eviction all
++/// go through this type, so a window key is never materialized just to be
++/// stored a second time inside an index.
 +#[derive(Clone, Copy)]
 +struct UdpWindowLookup<'a> {
 +    server_id: &'a Arc<str>,
@@ -20264,23 +20237,17 @@ index 0000000000000000000000000000000000000000..274c2463c39cd23a82492b5675989363
 +            port,
 +        }
 +    }
-+}
 +
-+impl Hash for UdpWindowLookup<'_> {
-+    fn hash<H: Hasher>(&self, state: &mut H) {
-+        self.server_id.hash(state);
-+        self.association_id.hash(state);
-+        self.host.hash(state);
-+        self.port.hash(state);
-+    }
-+}
-+
-+impl Equivalent<UdpWindowKey> for UdpWindowLookup<'_> {
-+    fn equivalent(&self, key: &UdpWindowKey) -> bool {
-+        self.server_id.as_ref() == key.server_id.as_ref()
-+            && self.association_id == key.association_id
-+            && self.host == key.host.borrowed()
-+            && self.port == key.port
++    /// Hash of the logical window key.  Entries and probes hash through this
++    /// single function, which is what lets the indexes store a slot reference
++    /// instead of a copy of the key.
++    fn hash_with(&self, hasher: &RandomState) -> u64 {
++        let mut state = hasher.build_hasher();
++        self.server_id.as_ref().hash(&mut state);
++        self.association_id.hash(&mut state);
++        self.host.hash(&mut state);
++        self.port.hash(&mut state);
++        state.finish()
 +    }
 +}
 +
@@ -20290,25 +20257,72 @@ index 0000000000000000000000000000000000000000..274c2463c39cd23a82492b5675989363
 +    association_id: [u8; 16],
 +}
 +
++/// One index item for a cached alias spelling: the arena slot plus which of
++/// the entry's two alias hosts it describes.
++#[derive(Clone, Copy, Eq, PartialEq)]
++struct AliasRef {
++    slot: u32,
++    index: u8,
++}
++
 +struct UdpWindowEntry {
-+    key: UdpWindowKey,
++    /// Key material shared by the canonical spelling and every alias: an alias
++    /// only ever differs in the host, so server/association/port are stored
++    /// once per window instead of once per spelling.
++    server_id: Arc<str>,
++    association_id: [u8; 16],
++    port: u16,
++    host: UdpWindowHost,
 +    /// The primary relay spelling and one replaceable alternate share the
 +    /// canonical entry. Hits for those two cached spellings construct no owned
 +    /// key, while further equivalent spellings replace only the alternate.
-+    raw_keys: [Option<UdpWindowKey>; 2],
++    raw_hosts: [Option<UdpWindowHost>; 2],
 +    last_attempt: Instant,
 +    previous: Option<usize>,
 +    next: Option<usize>,
 +}
 +
++impl UdpWindowEntry {
++    fn canonical_lookup(&self) -> UdpWindowLookup<'_> {
++        UdpWindowLookup::new(&self.server_id, self.association_id, self.host.borrowed(), self.port)
++    }
++
++    fn raw_lookup(&self, index: usize) -> Option<UdpWindowLookup<'_>> {
++        let host = self.raw_hosts.get(index)?.as_ref()?;
++        UdpWindowLookup::new(&self.server_id, self.association_id, host.borrowed(), self.port).into()
++    }
++
++    fn shares_association(&self, lookup: &UdpWindowLookup<'_>) -> bool {
++        self.server_id.as_ref() == lookup.server_id.as_ref()
++            && self.association_id == lookup.association_id
++            && self.port == lookup.port
++    }
++
++    fn matches(&self, lookup: &UdpWindowLookup<'_>) -> bool {
++        self.shares_association(lookup) && self.host.borrowed() == lookup.host
++    }
++
++    fn raw_matches(&self, index: usize, lookup: &UdpWindowLookup<'_>) -> bool {
++        self.shares_association(lookup)
++            && self
++                .raw_hosts
++                .get(index)
++                .and_then(Option::as_ref)
++                .is_some_and(|host| host.borrowed() == lookup.host)
++    }
++}
++
 +struct AuditWindowShard {
 +    // `by_key` makes the hot hit path O(1).  Entries themselves live in a
 +    // bounded slot arena, linked in LRU order, so touching a key never scans
-+    // the shard or allocates an unbounded history of queue nodes.
++    // the shard or allocates an unbounded history of queue nodes.  Both
++    // indexes hold only a reference into that arena and resolve the key
++    // material through it, so no window key is ever stored twice (§14.5).
 +    entries: Vec<Option<UdpWindowEntry>>,
 +    free_slots: Vec<usize>,
-+    by_key: BorrowingHashMap<UdpWindowKey, usize, RandomState>,
-+    by_raw_key: BorrowingHashMap<UdpWindowKey, usize, RandomState>,
++    by_key: HashTable<u32>,
++    by_raw_key: HashTable<AliasRef>,
++    hasher: RandomState,
 +    lru_head: Option<usize>,
 +    lru_tail: Option<usize>,
 +    association_counts: HashMap<UdpAssociationKey, usize>,
@@ -20319,8 +20333,9 @@ index 0000000000000000000000000000000000000000..274c2463c39cd23a82492b5675989363
 +        Self {
 +            entries: Vec::new(),
 +            free_slots: Vec::new(),
-+            by_key: BorrowingHashMap::with_hasher(RandomState::new()),
-+            by_raw_key: BorrowingHashMap::with_hasher(RandomState::new()),
++            by_key: HashTable::new(),
++            by_raw_key: HashTable::new(),
++            hasher: RandomState::new(),
 +            lru_head: None,
 +            lru_tail: None,
 +            association_counts: HashMap::new(),
@@ -20399,15 +20414,56 @@ index 0000000000000000000000000000000000000000..274c2463c39cd23a82492b5675989363
 +        }
 +    }
 +
-+    fn association_key(key: &UdpWindowKey) -> UdpAssociationKey {
++    fn entry(&self, slot: usize) -> Option<&UdpWindowEntry> {
++        self.entries.get(slot).and_then(Option::as_ref)
++    }
++
++    /// Slot holding the canonical spelling of `lookup`, if any.
++    fn find_canonical(&self, lookup: &UdpWindowLookup<'_>) -> Option<usize> {
++        let hash = lookup.hash_with(&self.hasher);
++        let slot = self.by_key.find(hash, |candidate| {
++            self.entry(*candidate as usize)
++                .is_some_and(|entry| entry.matches(lookup))
++        })?;
++        Some(*slot as usize)
++    }
++
++    /// Slot holding `lookup` as one of its cached alias spellings, if any.
++    fn find_alias(&self, lookup: &UdpWindowLookup<'_>) -> Option<usize> {
++        let hash = lookup.hash_with(&self.hasher);
++        let alias = self.by_raw_key.find(hash, |candidate| {
++            self.entry(candidate.slot as usize)
++                .is_some_and(|entry| entry.raw_matches(candidate.index as usize, lookup))
++        })?;
++        Some(alias.slot as usize)
++    }
++
++    fn canonical_hash_of(entries: &[Option<UdpWindowEntry>], hasher: &RandomState, slot: u32) -> u64 {
++        entries
++            .get(slot as usize)
++            .and_then(Option::as_ref)
++            .map(|entry| entry.canonical_lookup().hash_with(hasher))
++            .unwrap_or(0)
++    }
++
++    fn alias_hash_of(entries: &[Option<UdpWindowEntry>], hasher: &RandomState, alias: AliasRef) -> u64 {
++        entries
++            .get(alias.slot as usize)
++            .and_then(Option::as_ref)
++            .and_then(|entry| entry.raw_lookup(alias.index as usize))
++            .map(|lookup| lookup.hash_with(hasher))
++            .unwrap_or(0)
++    }
++
++    fn association_key(entry: &UdpWindowEntry) -> UdpAssociationKey {
 +        UdpAssociationKey {
-+            server_id: key.server_id.clone(),
-+            association_id: key.association_id,
++            server_id: entry.server_id.clone(),
++            association_id: entry.association_id,
 +        }
 +    }
 +
-+    fn decrement_association(&mut self, key: &UdpWindowKey) {
-+        let association = Self::association_key(key);
++    fn decrement_association(&mut self, entry: &UdpWindowEntry) {
++        let association = Self::association_key(entry);
 +        if let Some(count) = self.association_counts.get_mut(&association) {
 +            *count = count.saturating_sub(1);
 +            if *count == 0 {
@@ -20417,47 +20473,138 @@ index 0000000000000000000000000000000000000000..274c2463c39cd23a82492b5675989363
 +    }
 +
 +    fn remove_slot(&mut self, slot: usize) -> Option<UdpWindowEntry> {
-+        let entry = self.entries.get(slot).and_then(Option::as_ref)?;
-+        let key = entry.key.clone();
-+        let raw_keys = entry.raw_keys.clone();
++        let slot_ref = u32::try_from(slot).ok()?;
 +        self.detach(slot);
-+        self.by_key.remove(&key);
-+        for raw_key in raw_keys.iter().flatten() {
-+            if self.by_raw_key.get(raw_key) == Some(&slot) {
-+                self.by_raw_key.remove(raw_key);
++        // The entry leaves the arena first: the index items are then removed
++        // by the exact (slot, alias) reference they were inserted under, so a
++        // hash collision between two spellings of the same window cannot leave
++        // one of them behind.
++        let removed = self.entries.get_mut(slot).and_then(Option::take)?;
++        self.free_slots.push(slot);
++        let canonical_hash = removed.canonical_lookup().hash_with(&self.hasher);
++        if let Ok(occupied) = self
++            .by_key
++            .find_entry(canonical_hash, |candidate| *candidate == slot_ref)
++        {
++            occupied.remove();
++        }
++        for index in 0..removed.raw_hosts.len() {
++            let Some(hash) = removed.raw_lookup(index).map(|lookup| lookup.hash_with(&self.hasher)) else {
++                continue;
++            };
++            if let Ok(occupied) = self.by_raw_key.find_entry(hash, |candidate| {
++                candidate.slot == slot_ref && usize::from(candidate.index) == index
++            }) {
++                occupied.remove();
 +            }
 +        }
-+        let removed = self.entries.get_mut(slot).and_then(Option::take);
-+        if removed.is_some() {
-+            self.free_slots.push(slot);
-+            self.decrement_association(&key);
-+        }
-+        removed
++        self.decrement_association(&removed);
++        Some(removed)
 +    }
 +
-+    fn add_raw_alias(&mut self, slot: usize, raw_key: UdpWindowKey) -> Result<(), ()> {
-+        let replaced = {
-+            let entry = self.entries.get_mut(slot).and_then(Option::as_mut).ok_or(())?;
-+            if entry.raw_keys.iter().flatten().any(|existing| existing == &raw_key) {
++    /// Index the canonical spelling and the primary alias of a freshly filled
++    /// slot.
++    fn index_new_slot(&mut self, slot: usize) -> Result<(), ()> {
++        let slot_ref = u32::try_from(slot).map_err(|_| ())?;
++        let Self {
++            entries,
++            by_key,
++            by_raw_key,
++            hasher,
++            ..
++        } = self;
++        let entries = &*entries;
++        let hasher = &*hasher;
++        let entry = entries.get(slot).and_then(Option::as_ref).ok_or(())?;
++        let canonical_hash = entry.canonical_lookup().hash_with(hasher);
++        let raw_hash = entry.raw_lookup(0).ok_or(())?.hash_with(hasher);
++        by_key.insert_unique(canonical_hash, slot_ref, |candidate| {
++            Self::canonical_hash_of(entries, hasher, *candidate)
++        });
++        by_raw_key.insert_unique(
++            raw_hash,
++            AliasRef {
++                slot: slot_ref,
++                index: 0,
++            },
++            |candidate| Self::alias_hash_of(entries, hasher, *candidate),
++        );
++        Ok(())
++    }
++
++    fn add_raw_alias(&mut self, slot: usize, raw_host: UdpWindowHost) -> Result<(), ()> {
++        let slot_ref = u32::try_from(slot).map_err(|_| ())?;
++        let (index, replaced_hash) = {
++            let Self { entries, hasher, .. } = &mut *self;
++            let hasher = &*hasher;
++            let entry = entries.get_mut(slot).and_then(Option::as_mut).ok_or(())?;
++            if entry.raw_hosts.iter().flatten().any(|existing| *existing == raw_host) {
 +                return Ok(());
 +            }
-+            let index = entry.raw_keys.iter().position(Option::is_none).unwrap_or(1);
-+            entry.raw_keys[index].replace(raw_key.clone())
++            let index = entry.raw_hosts.iter().position(Option::is_none).unwrap_or(1);
++            // Hash the alias that is about to be replaced while it is still
++            // reachable; its index item must leave with it.
++            let replaced_hash = entry.raw_lookup(index).map(|lookup| lookup.hash_with(hasher));
++            entry.raw_hosts[index] = Some(raw_host);
++            (index, replaced_hash)
 +        };
-+        if let Some(replaced) = replaced
-+            && self.by_raw_key.get(&replaced) == Some(&slot)
++        if let Some(hash) = replaced_hash
++            && let Ok(occupied) = self.by_raw_key.find_entry(hash, |candidate| {
++                candidate.slot == slot_ref && usize::from(candidate.index) == index
++            })
 +        {
-+            self.by_raw_key.remove(&replaced);
++            occupied.remove();
 +        }
-+        self.by_raw_key.insert(raw_key, slot);
++        let alias = AliasRef {
++            slot: slot_ref,
++            index: u8::try_from(index).map_err(|_| ())?,
++        };
++        let Self {
++            entries,
++            by_raw_key,
++            hasher,
++            ..
++        } = self;
++        let entries = &*entries;
++        let hasher = &*hasher;
++        let hash = Self::alias_hash_of(entries, hasher, alias);
++        by_raw_key.insert_unique(hash, alias, |candidate| {
++            Self::alias_hash_of(entries, hasher, *candidate)
++        });
 +        Ok(())
++    }
++
++    /// Bytes this shard keeps resident: the slot arena, both index tables, the
++    /// association counters and every distinct host allocation.  Shared host
++    /// allocations are counted once, which is what §14.5 budgets.
++    #[cfg(test)]
++    fn footprint_bytes(&self) -> usize {
++        let mut bytes = self.entries.capacity() * size_of::<Option<UdpWindowEntry>>()
++            + self.free_slots.capacity() * size_of::<usize>()
++            + self.by_key.allocation_size()
++            + self.by_raw_key.allocation_size()
++            + self.association_counts.capacity() * (size_of::<(UdpAssociationKey, usize)>() + 1);
++        let mut counted: Vec<*const u8> = Vec::new();
++        for entry in self.entries.iter().flatten() {
++            for host in std::iter::once(&entry.host).chain(entry.raw_hosts.iter().flatten()) {
++                let UdpWindowHost::Domain(domain) = host else { continue };
++                let pointer = Arc::as_ptr(domain).cast::<u8>();
++                if counted.contains(&pointer) {
++                    continue;
++                }
++                counted.push(pointer);
++                // `Arc<str>`: strong and weak counters plus the string bytes.
++                bytes += 2 * size_of::<usize>() + domain.len();
++            }
++        }
++        bytes
 +    }
 +
 +    fn oldest_for_association(&self, association: &UdpAssociationKey) -> Option<usize> {
 +        let mut cursor = self.lru_head;
 +        while let Some(slot) = cursor {
 +            let entry = self.entries.get(slot).and_then(Option::as_ref)?;
-+            if Self::association_key(&entry.key) == *association {
++            if Self::association_key(entry) == *association {
 +                return Some(slot);
 +            }
 +            cursor = entry.next;
@@ -20532,10 +20679,12 @@ index 0000000000000000000000000000000000000000..274c2463c39cd23a82492b5675989363
 +        }
 +    }
 +
-+    fn owned_key(&self, lookup: UdpWindowLookup<'_>) -> UdpWindowKey {
++    /// Materialize the owned host of a key.  This is the only allocation on
++    /// the cache path, so the hit paths are counted against it in tests.
++    fn owned_host(&self, host: UdpAuditHost<'_>) -> UdpWindowHost {
 +        #[cfg(test)]
 +        self.owned_key_constructions.fetch_add(1, Ordering::Relaxed);
-+        UdpWindowKey::from_parts(lookup.server_id, lookup.association_id, lookup.host, lookup.port)
++        UdpWindowHost::from_borrowed(host)
 +    }
 +
 +    fn refresh_existing(shard: &mut AuditWindowShard, slot: usize, now: Instant) -> Result<Option<bool>, ()> {
@@ -20554,13 +20703,15 @@ index 0000000000000000000000000000000000000000..274c2463c39cd23a82492b5675989363
 +        Ok(Some(eligible))
 +    }
 +
++    #[allow(clippy::too_many_arguments)]
 +    fn insert_entry(
 +        &self,
 +        shard: &mut AuditWindowShard,
-+        key: UdpWindowKey,
-+        raw_key: UdpWindowKey,
++        host: UdpWindowHost,
++        raw_host: UdpWindowHost,
 +        association_id: [u8; 16],
 +        server_id: &Arc<str>,
++        port: u16,
 +        now: Instant,
 +    ) -> Result<(), ()> {
 +        let association_key = UdpAssociationKey {
@@ -20581,8 +20732,11 @@ index 0000000000000000000000000000000000000000..274c2463c39cd23a82492b5675989363
 +        }
 +        let slot = shard.allocate_slot();
 +        let entry = UdpWindowEntry {
-+            key: key.clone(),
-+            raw_keys: [Some(raw_key.clone()), None],
++            server_id: server_id.clone(),
++            association_id,
++            port,
++            host,
++            raw_hosts: [Some(raw_host), None],
 +            last_attempt: now,
 +            previous: None,
 +            next: None,
@@ -20593,8 +20747,7 @@ index 0000000000000000000000000000000000000000..274c2463c39cd23a82492b5675989363
 +            return Err(());
 +        };
 +        *place = Some(entry);
-+        shard.by_key.insert(key, slot);
-+        shard.by_raw_key.insert(raw_key, slot);
++        shard.index_new_slot(slot)?;
 +        shard.attach_tail(slot);
 +        *shard.association_counts.entry(association_key).or_insert(0) += 1;
 +        Ok(())
@@ -20615,19 +20768,10 @@ index 0000000000000000000000000000000000000000..274c2463c39cd23a82492b5675989363
 +
 +        let raw_host = target.audit_host(false);
 +        let canonical_host = target.audit_host(true);
-+        let raw_key = self.owned_key(UdpWindowLookup::new(server_id, association_id, raw_host, target.port));
-+        let key = if raw_host == canonical_host {
-+            raw_key.clone()
-+        } else {
-+            self.owned_key(UdpWindowLookup::new(
-+                server_id,
-+                association_id,
-+                canonical_host,
-+                target.port,
-+            ))
-+        };
++        let raw_lookup = UdpWindowLookup::new(server_id, association_id, raw_host, target.port);
++        let canonical_lookup = UdpWindowLookup::new(server_id, association_id, canonical_host, target.port);
 +        let mut shard = self.lock_shard(&association_id)?;
-+        if let Some(&slot) = shard.by_key.get(&key) {
++        if let Some(slot) = shard.find_canonical(&canonical_lookup) {
 +            if let Some(eligible) = Self::refresh_existing(&mut shard, slot, now)? {
 +                return Ok(eligible);
 +            }
@@ -20636,12 +20780,26 @@ index 0000000000000000000000000000000000000000..274c2463c39cd23a82492b5675989363
 +        // absent but whose raw alias still points at an entry (for example
 +        // after a normalization variant was observed).  Honor that alias
 +        // before allocating a new slot.
-+        if let Some(&slot) = shard.by_raw_key.get(&raw_key) {
++        if let Some(slot) = shard.find_alias(&raw_lookup) {
 +            if let Some(eligible) = Self::refresh_existing(&mut shard, slot, now)? {
 +                return Ok(eligible);
 +            }
 +        }
-+        self.insert_entry(&mut shard, key, raw_key, association_id, server_id, now)?;
++        let owned_raw = self.owned_host(raw_host);
++        let owned_canonical = if raw_host == canonical_host {
++            owned_raw.clone()
++        } else {
++            self.owned_host(canonical_host)
++        };
++        self.insert_entry(
++            &mut shard,
++            owned_canonical,
++            owned_raw,
++            association_id,
++            server_id,
++            target.port,
++            now,
++        )?;
 +        Ok(true)
 +    }
 +
@@ -20670,7 +20828,7 @@ index 0000000000000000000000000000000000000000..274c2463c39cd23a82492b5675989363
 +        }
 +        let raw_lookup = UdpWindowLookup::new(server_id, association_id, host, port);
 +        let mut shard = self.lock_shard(&association_id)?;
-+        if let Some(&slot) = shard.by_raw_key.get(&raw_lookup) {
++        if let Some(slot) = shard.find_alias(&raw_lookup) {
 +            if let Some(eligible) = Self::refresh_existing(&mut shard, slot, now)? {
 +                if !eligible {
 +                    return Ok(None);
@@ -20694,13 +20852,13 @@ index 0000000000000000000000000000000000000000..274c2463c39cd23a82492b5675989363
 +            (other, _) => other,
 +        };
 +        let canonical_lookup = UdpWindowLookup::new(server_id, association_id, canonical_host, port);
-+        if let Some(&slot) = shard.by_key.get(&canonical_lookup) {
++        if let Some(slot) = shard.find_canonical(&canonical_lookup) {
 +            if let Some(eligible) = Self::refresh_existing(&mut shard, slot, now)? {
 +                // Cache one alternate spelling beside the primary. Hits for
 +                // those two spellings construct no owned key; a later spelling
 +                // replaces only the alternate so alias memory remains bounded.
-+                let raw_key = self.owned_key(raw_lookup);
-+                shard.add_raw_alias(slot, raw_key)?;
++                let raw_host = self.owned_host(raw_lookup.host);
++                shard.add_raw_alias(slot, raw_host)?;
 +                if !eligible {
 +                    return Ok(None);
 +                }
@@ -20708,13 +20866,21 @@ index 0000000000000000000000000000000000000000..274c2463c39cd23a82492b5675989363
 +                return Ok(Some(build_target()));
 +            }
 +        }
-+        let raw_key = self.owned_key(raw_lookup);
-+        let canonical_key = if canonical_host == host {
-+            raw_key.clone()
++        let owned_raw = self.owned_host(host);
++        let owned_canonical = if canonical_host == host {
++            owned_raw.clone()
 +        } else {
-+            self.owned_key(canonical_lookup)
++            self.owned_host(canonical_host)
 +        };
-+        self.insert_entry(&mut shard, canonical_key, raw_key, association_id, server_id, now)?;
++        self.insert_entry(
++            &mut shard,
++            owned_canonical,
++            owned_raw,
++            association_id,
++            server_id,
++            port,
++            now,
++        )?;
 +        drop(shard);
 +        Ok(Some(build_target()))
 +    }
@@ -20728,6 +20894,18 @@ index 0000000000000000000000000000000000000000..274c2463c39cd23a82492b5675989363
 +                associations + guard.association_counts.len(),
 +            )
 +        })
++    }
++
++    /// Resident bytes of the whole cache, summed over its shards.
++    #[cfg(test)]
++    fn footprint_bytes(&self) -> usize {
++        self.shards
++            .iter()
++            .map(|shard| {
++                let guard = shard.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
++                guard.footprint_bytes()
++            })
++            .sum()
 +    }
 +
 +    #[cfg(test)]
@@ -22606,6 +22784,14 @@ index 0000000000000000000000000000000000000000..274c2463c39cd23a82492b5675989363
 +        AuditTargetDraft::domain(host, port, "192.0.2.1".parse().unwrap())
 +    }
 +
++    fn canonical_lookup<'a>(
++        server_id: &'a Arc<str>,
++        association_id: [u8; 16],
++        target: &'a AuditTargetDraft,
++    ) -> UdpWindowLookup<'a> {
++        UdpWindowLookup::new(server_id, association_id, target.audit_host(true), target.port)
++    }
++
 +    #[test]
 +    fn udp_cache_lazy_hit_skips_target_construction() {
 +        let cache = UdpAuditWindowCache::new(4, USER_AUDIT_UDP_WINDOW_SHARDS * 4);
@@ -22756,33 +22942,26 @@ index 0000000000000000000000000000000000000000..274c2463c39cd23a82492b5675989363
 +        assert_eq!(shard.by_key.len(), 1);
 +        assert_eq!(shard.by_raw_key.len(), 2);
 +        let entry = shard.entries.iter().flatten().next().expect("window entry");
-+        assert_eq!(entry.raw_keys.iter().flatten().count(), 2);
-+        assert!(shard.by_raw_key.contains_key(&UdpWindowLookup::new(
-+            &server_id,
-+            association,
-+            UdpAuditHost::Domain("Example.com"),
-+            443,
-+        )));
-+        assert!(!shard.by_raw_key.contains_key(&UdpWindowLookup::new(
-+            &server_id,
-+            association,
-+            UdpAuditHost::Domain("EXAMPLE.COM"),
-+            443,
-+        )));
-+        assert!(shard.by_raw_key.contains_key(&UdpWindowLookup::new(
-+            &server_id,
-+            association,
-+            UdpAuditHost::Domain("eXample.COM"),
-+            443,
-+        )));
++        assert_eq!(entry.raw_hosts.iter().flatten().count(), 2);
++        let alias = |spelling| {
++            shard.find_alias(&UdpWindowLookup::new(
++                &server_id,
++                association,
++                UdpAuditHost::Domain(spelling),
++                443,
++            ))
++        };
++        assert!(alias("Example.com").is_some());
++        assert!(alias("EXAMPLE.COM").is_none());
++        assert!(alias("eXample.COM").is_some());
 +    }
 +
 +    #[test]
-+    fn udp_cache_indexes_share_entry_key_allocations() {
++    fn udp_cache_indexes_hold_no_key_material() {
 +        let cache = UdpAuditWindowCache::new(4, USER_AUDIT_UDP_WINDOW_SHARDS * 4);
 +        let server_id: Arc<str> = Arc::from("server");
 +        let association = [0u8; 16];
-+        let target = cache_target("Example.com", 443);
++        let target = cache_target("example.com", 443);
 +        assert!(
 +            cache
 +                .eligible(&server_id, association, &target, Instant::now())
@@ -22793,21 +22972,80 @@ index 0000000000000000000000000000000000000000..274c2463c39cd23a82492b5675989363
 +            .lock()
 +            .unwrap();
 +        let entry = shard.entries.iter().flatten().next().expect("window entry");
-+        let canonical = shard.by_key.keys().next().expect("canonical index key");
-+        let raw = shard.by_raw_key.keys().next().expect("raw index key");
-+        let entry_raw = entry.raw_keys[0].as_ref().expect("primary raw key");
-+        match (&entry.key.host, &canonical.host) {
-+            (UdpWindowHost::Domain(entry), UdpWindowHost::Domain(index)) => {
-+                assert!(Arc::ptr_eq(entry, index));
++        // Both indexes address the arena slot instead of storing a copy of the
++        // key, so an index item is one slot reference wide.
++        assert_eq!(
++            size_of_val(shard.by_key.iter().next().expect("canonical index item")),
++            size_of::<u32>()
++        );
++        assert_eq!(
++            size_of_val(shard.by_raw_key.iter().next().expect("alias index item")),
++            size_of::<AliasRef>()
++        );
++        // A relay spelling that is already canonical shares one allocation
++        // with the canonical host instead of duplicating it.
++        let raw_host = entry.raw_hosts[0].as_ref().expect("primary raw host");
++        match (&entry.host, raw_host) {
++            (UdpWindowHost::Domain(canonical), UdpWindowHost::Domain(raw)) => {
++                assert!(Arc::ptr_eq(canonical, raw));
 +            }
 +            _ => panic!("expected canonical domain keys"),
 +        }
-+        match (&entry_raw.host, &raw.host) {
-+            (UdpWindowHost::Domain(entry), UdpWindowHost::Domain(index)) => {
-+                assert!(Arc::ptr_eq(entry, index));
++    }
++
++    /// §14.5 caps the ssserver RSS increase at 64 MiB and the UDP window cache
++    /// is by far the largest structure inside it.  Fill one shard to the
++    /// default per-shard capacity with three equivalent spellings per window
++    /// (the worst case the two alias slots allow) and hold the projected
++    /// whole-cache footprint inside the budget below.
++    #[test]
++    fn udp_cache_default_capacity_fits_window_memory_budget() {
++        const WINDOW_CACHE_BUDGET_BYTES: usize = 32 * 1024 * 1024;
++        use crate::config::{
++            USER_AUDIT_DEFAULT_MAX_UDP_TARGET_WINDOWS, USER_AUDIT_DEFAULT_MAX_UDP_TARGETS_PER_ASSOCIATION,
++        };
++
++        let per_association = USER_AUDIT_DEFAULT_MAX_UDP_TARGETS_PER_ASSOCIATION;
++        let per_shard = USER_AUDIT_DEFAULT_MAX_UDP_TARGET_WINDOWS / USER_AUDIT_UDP_WINDOW_SHARDS;
++        let cache = UdpAuditWindowCache::new(per_association, USER_AUDIT_DEFAULT_MAX_UDP_TARGET_WINDOWS);
++        let server_id: Arc<str> = Arc::from("ss-entry-01");
++        let now = Instant::now();
++        let mut association = [0u8; 16];
++        for index in 0..per_shard {
++            // Byte 7 selects the shard, so every window below lands in the
++            // same shard while byte 6 keeps the per-association limit honest.
++            association[6] = u8::try_from(index / per_association).expect("association lineage");
++            let spellings = [
++                format!("Host-{index}.targets.example.com"),
++                format!("hOST-{index}.targets.example.com"),
++                format!("HOST-{index}.TARGETS.example.com"),
++            ];
++            for spelling in &spellings {
++                cache
++                    .eligible_lazy(
++                        &server_id,
++                        association,
++                        UdpAuditHost::Domain(spelling.as_str()),
++                        443,
++                        now,
++                        || cache_target(spelling.as_str(), 443),
++                    )
++                    .expect("window cache");
 +            }
-+            _ => panic!("expected raw domain keys"),
 +        }
++        let shard_index = UdpAuditWindowCache::shard_index(&association);
++        let filled = {
++            let shard = cache.shards[shard_index].lock().expect("shard");
++            assert_eq!(shard.by_key.len(), per_shard);
++            assert_eq!(shard.by_raw_key.len(), 2 * per_shard);
++            shard.footprint_bytes()
++        };
++        // Only one shard is populated; project the full cache from it.
++        let projected = filled * USER_AUDIT_UDP_WINDOW_SHARDS + cache.footprint_bytes() - filled;
++        assert!(
++            projected <= WINDOW_CACHE_BUDGET_BYTES,
++            "projected window cache footprint {projected} bytes exceeds the {WINDOW_CACHE_BUDGET_BYTES} byte budget"
++        );
 +    }
 +
 +    #[test]
@@ -22846,18 +23084,18 @@ index 0000000000000000000000000000000000000000..274c2463c39cd23a82492b5675989363
 +            .unwrap();
 +        assert!(
 +            shard
-+                .by_key
-+                .contains_key(&UdpWindowKey::new(&server_id, association, &a))
-+        );
-+        assert!(
-+            !shard
-+                .by_key
-+                .contains_key(&UdpWindowKey::new(&server_id, association_b, &b))
++                .find_canonical(&canonical_lookup(&server_id, association, &a))
++                .is_some()
 +        );
 +        assert!(
 +            shard
-+                .by_key
-+                .contains_key(&UdpWindowKey::new(&server_id, association_c, &c))
++                .find_canonical(&canonical_lookup(&server_id, association_b, &b))
++                .is_none()
++        );
++        assert!(
++            shard
++                .find_canonical(&canonical_lookup(&server_id, association_c, &c))
++                .is_some()
 +        );
 +    }
 +
