@@ -3988,3 +3988,153 @@ M-45 残留（部分修复）与 §24 M-51 点名的"同名不绑定"测试模�
    把存活率作为验收指标，而不是只看“测试全绿”。
 7. Linux runtime 完整实跑、fuzz sanitizer 实跑、§14.5 目标机压测、两次 musl 实建实签仍为发布
    前置，且在 1-2 修完之前无法产生有意义的结论。
+
+## 29. 第七/八轮整改记录（2026-08-29）
+
+> 本节记录对 §27（第七轮）与 §28（第八轮）全部保留问题的整改，不改变 §1–16 的合同——
+> 唯一的合同改动是按 §27.6 把规范升版到 **v5**（见 §29.4）。整改按“一个问题一个 commit”提交，
+> 源码改动通过 `.cache` 之外的准备源码树完成后重新生成 `patches/0003-user-audit.patch`。
+> 下列“已修复”表示代码与**可绑定的**回归护栏已闭合，不替代 §16 要求的 Linux 原生发布验收。
+
+### 29.1 整改范围
+
+共 **70 个 commit**，覆盖 §27/§28 记录的全部 68 个条目（`C-7`、`M-52`–`M-62`、
+`m-170`–`m-224`，含合并条目 `m-182 / m-139`），另有 3 个交付性 commit：
+
+- 一条修正 commit：套用编辑时 `tests/test_mock_collector.py` 的 `unittest` 入口被 anchor 一并
+  替换掉，导致该文件直接运行时执行 0 个用例并 exit 0——本轮反复批评的“静默通过”形态，已补回；
+- 一条 `upstream.lock` 的 `prepared_tree_sha256` 更新（`747a6a08…` → `d74cb6e9…`）；
+- 本节文档记录。
+
+`m-180`（环境事实反复翻转）不是代码问题，按 §29.5 以实测事实结案。
+
+### 29.2 Critical 与 Major
+
+| 编号 | 整改结果 |
+| --- | --- |
+| C-7 | `/run/shadowsocks-audit` 由 `0750` 放宽为 `0751`（可遍历、不可列举），两个子目录与 socket 的 `0750`/`0660` 分组隔离不变；`RuntimeDirectoryMode` 同步，避免 tmpfiles 与 systemd 两个创建来源给出不同权限。新增断言绑定“两个被授权账号必须能遍历到各自 socket”，并要求 unit 与 tmpfiles 对同一目录模式一致。 |
+| M-52 | dedup 触碰历史换成“每个活条目恰好一个槽”的 `BTreeMap` 索引，彻底去掉压实扫描；容量与 LRU recency 语义不变。 |
+| M-53 | 静态护栏的函数范围结束条件改用“这一行处理完之后的深度”，多行签名函数的整个函数体重新进入扫描；删除从未被 `check()` 调用的死扫描器，并加一条“所有 `_check_*` 扫描器都必须接线”的结构断言。 |
+| M-54 | 恢复期的损坏/截断 gap 绑定来源指纹并按指纹匹配；hint 为 None 且无指纹时一律生成新的随机 gap ID，N 个 meta 不可读的 batch 产生 N 条独立 gap。 |
+| M-55 | sticky fatal 从“每次调用的前置条件”改为“每次**写操作**的前置条件”，`reconcile`/`cleanup` 不再吞掉 `DurabilityUncertain`，fatal 之后不再写盘、不再返回 ACK。 |
+| M-56 | meta 不可解析的隔离路径不再依赖 `read_meta_hint` 更新索引，改为重新测量，消除幽灵 sealed batch 与随之伪造的第二条 gap。 |
+| M-57 | 关机期恢复 §7.3 的 2 秒有界 drain：CLOSED 时按固定 100 ms 重试直到预算耗尽，而不是一次 session 失败就 `break` 丢弃全部 queue/in-flight。 |
+| M-58 | 每个 diagnostic bucket 增加 in-flight 计数镜像，关机时被 supervisor 持有的快照计数不再从最终聚合 journald 中消失。 |
+| M-59 | `parse_lease` 对每条内嵌 event 走完整 variant 强类型校验（十进制字符串规则、必填/nullable/禁止字段、variant 交叉校验、时间序、port 范围），未知或缺失 `event_type` 一律拒绝。 |
+| M-60 | `.env` 不再被当作 shell 执行：按固定键允许清单逐行字面解析，命令替换保持字面量；三个发布脚本一律忽略 `.env`，发布输入不再受未跟踪文件影响。 |
+| M-61 | `config.rs`/`lib.rs`/`server/mod.rs` 三个接线文件从单行子串匹配改为完整 cfg 条目/语句范围扫描，与 relay 的整函数扫描合并为唯一实现；`mod.rs` 关机记录的 `pending.diagnostics[0..5]` 改为编译期校验的数组解构。 |
+| M-62 | `SHADOWSOCKS_REQUIRE_AUDIT_TARGET` 默认反转为 fail-closed；降级路径标记覆盖面缺失，`test.sh`/`verify.sh` 结尾如实区分“完整通过”“已交叉检查但无 runtime”“覆盖面不完整”三种结果。 |
+
+### 29.3 Minor
+
+按 §27.5/§28.6 的编号逐条整改，分组归纳：
+
+- **静态护栏**（`m-183`、`m-216`–`m-218`）：关机协调类型纳入标记范围；`FORBIDDEN` 补
+  `assert!`/`debug_assert`/`unwrap_err`/`expect_err`/`unwrap_unchecked`/`process::abort`；
+  `#[cfg(not(test))]` 不再被误判为测试代码；直接索引的“证明窗口”从前 256 行收紧到所在函数，
+  并删掉两条不构成上界的放行规则。
+- **参照 collector**（`m-137`、`m-203`、`m-204`、`m-219`）：204 不得携带已签名 batch 元数据、
+  ACK body 逐字比较、孤立代理项收敛为 `CollectorError`、字段序表全 variant 绑定；协议校验的
+  变异存活从 76/85 降到个位数。
+- **producer**（`m-170`、`m-172`、`m-184`、`m-185`、`m-194`–`m-199`）：`Instant` 算术全面
+  checked 化并补 `C-6` 单测；三个 `producer_gap` bucket 补 60 秒限频 journald；health counter
+  运行期每 60 秒限频可观测；`ObservationGuard::drop` 只在 CLOSED 时唤醒，共享 `Notify` 移出
+  relay 热路径；force-final 完成条件与 hello NACK 用例修正。
+- **spool**（`m-174`–`m-178`、`m-186`–`m-191`、`m-206`、`m-132`、`m-140`）：迭代级判据改为
+  “本轮累计释放字节”；corrupt-acked 分支与同构分支一致；`durable_gap_reasons` 事务完结即剔除；
+  常量双定义合并；seal 回滚不可自愈时升级为 sticky fatal 让 systemd 重启；health 纳入
+  “quarantine 未处置”与全部计数饱和；`evicted_unacked_records` 覆盖 quarantine 与恢复补完的驱逐；
+  §9.4 换 epoch 五条判据补齐绑定测试。
+- **发布链路**（`m-207`–`m-214`）：§26.3 的九项声明补上真正绑定的用例；`prepare-source.sh` 的
+  死循环修好；`check-patch-deletions.py` 换成专用 diff 头解析（含空格与 C-quote 路径）；
+  输出目录权限校验前移到两次构建之前；receipt 记录实际 PATH/RUSTUP_HOME；删除死代码并加
+  “禁止未引用私有函数”的结构断言；`absolute_path()` 去掉 `mkdir -p` 副作用。
+- **门禁与 benchmark**（`m-179`、`m-193`、`m-202`、`m-215`、`m-220`）：UDP 工作负载改为轮转多个
+  互不相同的 tunnel 目标并在门禁中拒绝单目标证据；每条证据校验配一个负向用例并加“新增校验必须
+  配负向用例”的元断言；fuzz 入口断言改为语义提取；`benchmark_data_path.py` 补测试并接进 `test.sh`。
+- **文档**（`m-181`、`m-182 / m-139`、`m-221`–`m-224`）：新建
+  `tests/test_docs_consistency.py` 把文档与实现的一致性变成可回归的断言；`tests/README` 按
+  `test.sh` 真实分支重写；OPERATIONS 补 §10.3 三条中介细则、就地标注 user-stats nginx 块不可照抄、
+  如实描述 producer health counter 的暴露面、新增 auditd durability fail-closed 一节；
+  PERFORMANCE 的复测口径改为与门禁一致的三案。
+- **协议与 wire**（`m-177`、`m-200`、`m-201`、`m-205`、`m-192`、`m-171`）：orphan recovery
+  marker 的 on-disk schema 进入协议 crate 并补跨栈 golden vector；dedup 容量测试改为绑定
+  “容量 + recency 一比一”不变量而不是某个阈值；删除 `protocol.rs` 的死 framing 帮助函数并把边界
+  测试接到真正的 ingest 路径；export 读超时与其它 framing 失败走同一签名决策；UDP 窗口缓存索引
+  只存 arena 槽引用，默认容量 RSS 由 58.2 MiB 降到 27.1 MiB（§14.5 的 64 MiB 预算内）；
+  `m-171` 的锁内规范化取舍就地写明依据（见 §29.6）。
+
+### 29.4 合同升版：v5
+
+按 §27.6 把 §1–16 升版到 **v5**，仅三处文本收紧，无行为改动：
+
+1. §7.3 的“成功收到合法 ACK 后重置”收紧为“合法 **event** ACK”（hello ACK 不重置退避，与实现一致）；
+2. §9.5 的 `quarantine_pending` reason 枚举补 `segment_corruption`；
+3. §5.1 的 Cargo feature 片段补 `dep:hashbrown`（根与 service crate 已实际引入）。
+
+另按 `m-213` 把 §15.1 的发布产物清单更新为工具实际强制的 8 成员目录（两份 build receipt）。
+文档头部的版本沿革链补齐 v2→v5。
+
+### 29.5 本轮实际验证结果
+
+本机为 **macOS**，本轮**新安装了 `x86_64-unknown-linux-gnu` target**——这是 §21.5/§23.1/§25.3
+反复出现失真的那一项，现已成立并被 `M-62` 变成 fail-closed 前置条件。
+
+```text
+./scripts/verify.sh                                                   # rc=0，完整通过
+  └─ 结尾文案：测试通过（auditd crate 已交叉检查；auditd Linux runtime 未在当前主机执行）
+cargo check --locked --target x86_64-unknown-linux-gnu \
+  -p shadowsocks-auditd --all-targets                                 # 通过，零警告
+cargo test --locked -p shadowsocks-audit-protocol                     # 25 passed
+cargo test --locked --workspace --features user-stats                 # 308 passed
+cargo test --locked -p shadowsocks-service --features server --lib    # 10 passed
+cargo test -p shadowsocks --test tcp_eih_user                         # 4 passed
+cargo fmt --all -- --check                                            # 通过
+python3 tests/test_mock_collector.py                                  # 47 passed
+python3 tests/test_release_artifact.py                                # 29 passed
+python3 tests/test_check_audit_static.py                              # 22 passed
+python3 tests/test_benchmark_data_path.py                             # 20 passed
+python3 tests/test_benchmark_audit.py                                 # 17 passed
+python3 tests/test_docs_consistency.py                                # 17 passed
+python3 tests/test_settlement.py / test_http_unix.py                  # 15 / 14 passed
+python3 tests/test_audit_packaging.py                                 # 12 passed
+python3 tests/test_cluster_users.py                                   # 11 passed
+python3 tests/test_fuzz_target.py --source <树>                       # 4 passed
+python3 tests/test_integration_audit.py                               # 3 passed（portable 部分）
+python3 tests/check_audit_static.py --source <树>                     # 通过
+bash scripts/check-sensitive.sh                                       # 通过
+python3 scripts/check-patch-deletions.py patches/0003-user-audit.patch # 通过
+```
+
+producer（`shadowsocks-service` 的 `user-audit`）按合同是 Linux-only，本机无交叉 C 工具链
+（`x86_64-linux-gnu-gcc`/`zig` 均不存在，`ring` 的交叉编译被阻断），因此本轮用**打桩 native 副本**
+（去 `compile_error!` + `SO_PEERCRED`/`ucred` shim）运行其单元测试：**113 passed**。该打桩副本只用于
+验证，不进入交付树；对 `O_PATH`/`AT_EMPTY_PATH` 语义敏感的 auditd spool 测试在 macOS 上会因副本
+假象失败，故 auditd 单测**未**以此方式背书。
+
+交付一致性：新鲜 `prepare-source.sh` 重放出的准备树与整改工作树**逐文件一致**（`diff -rq` 无差异），
+其 SHA-256 已写入 `upstream.lock`；`patches/0003-user-audit.patch` 由
+`git diff --full-index --binary --no-renames` 从“upstream+0001+0002 → +0003”重新生成，
+该机制在整改前经字节比对确认与既有补丁完全一致。
+
+**`m-180` 结案（环境事实）**：本机 `rg` 15.1.0 存在于 `/opt/homebrew/bin/rg`；
+`check-sensitive.sh`、`tests/test_http_unix.py` 与 `scripts/verify.sh` 均可复现通过。
+§27 m-180「第三次翻转……缺 rg」与 §27.7「3 项因缺 rg 不可复现」的归因不成立；真正长期不可复现的
+是 Linux target 项，现已安装并固化为 fail-closed 门禁。**建议把“验证记录写入前当日实跑确认环境
+前提”写进流程**，本轮的 `M-62` 已使这类失真无法再以“通过”的形式出现。
+
+### 29.6 仍未闭合的项目
+
+- **`m-171` 按“披露”而非“消除”结案。** 把域名规范化移出分片临界区，要么需要对同一数据报第二次
+  `try_lock()`（§6.4 明文禁止），要么需要每包无条件 owned 分配（正是 alias 缓存要消除的开销）。
+  §6.4 只禁止在临界区做序列化、queue 与 socket 操作，UTS #46 映射是纯 CPU 且受 255 字节域名上限
+  约束；主拼写加一个 alternate 命中时完全不规范化。该取舍已就地写明依据，并按 §27 m-171 的要求
+  把 `m-91` 的结论修正为“以 alias 缓存收窄、规范化回到锁内”。
+- **发布前置仍未执行**（与 §26.4/§27.1 披露一致，本轮没有改变）：Linux 原生 auditd runtime
+  （`SO_PEERCRED`/UDS 权限/signal/crash-capacity）、Linux 上完整
+  `cargo test --workspace --features user-audit` 与 `cargo test -p shadowsocks-auditd`、
+  `cargo-fuzz` sanitizer 实跑、§14.5 目标机吞吐/CPU/RSS 长压，以及固定工具链的两次 musl 实建实签。
+  交叉 `cargo check` 只证明 Linux cfg 分支可编译，不能替代这些运行期结论。
+- **`C-7` 的验证边界**：修复经打包断言绑定（改回 `0750` 即变红），但“两个账号确实能 connect 到
+  各自 socket”只能在 Linux 节点上按 `packaging/README.md` 实装一次才能坐实——这正是 `C-2`/`C-4`/
+  `C-7` 连续三次同型缺陷的共同盲区，建议作为 Linux 验收的第一步。
