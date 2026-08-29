@@ -1058,6 +1058,23 @@ with open(fixture_root / ("environment-" + source_root.name + ".json"), "w", enc
             result = self.verify_multi(output, success=False)
             self.assertIn("executable PT_LOAD", result.stderr)
 
+    def test_spec_release_artifact_list_matches_the_tool(self) -> None:
+        """§15.1 的发布产物清单必须与工具强制的 8 成员目录逐字一致。"""
+        module = self.load_artifact_module()
+        specification = (PROJECT_ROOT / "docs" / "USER_ACCESS_AUDIT.md").read_text(
+            encoding="utf-8"
+        )
+        section = specification.split("### 15.1 构建产物", 1)
+        self.assertEqual(len(section), 2)
+        block = re.search(r"```text\n(.*?)```", section[1], re.DOTALL)
+        self.assertIsNotNone(block)
+        listed = [line for line in block.group(1).splitlines() if line.strip()]
+        self.assertEqual(
+            sorted(listed),
+            sorted(module.UNSIGNED_RELEASE_FILES | {"release-manifest.sig"}),
+        )
+        self.assertEqual(len(listed), len(set(listed)))
+
     def test_manifest_binds_patch_series(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ssrp-release-series-") as temporary:
             root = Path(temporary)

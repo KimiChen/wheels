@@ -1562,19 +1562,25 @@ ingest hello 或 export health 携带，collector 必须另行通过 user-stats 
 
 ### 15.1 构建产物
 
-release 必须同时包含：
+发布目录必须**恰好**包含以下 8 个成员，多一个或少一个都必须判为失败：
 
 ```text
 ssserver
 ssserver.sha256
 shadowsocks-auditd
 shadowsocks-auditd.sha256
+build-a.receipt.json
+build-b.receipt.json
 release-manifest.json
 release-manifest.sig
 ```
 
-执行两次独立 Linux x86_64 musl 构建，两个二进制分别满足可复现 SHA。发布验证必须覆盖来源 commit、
-补丁 series、toolchain lock、artifact SHA 和 detached signature。
+签名前的 unsigned 成员集合是上述 8 项去掉 `release-manifest.sig` 后的 7 项。
+
+执行两次独立 Linux x86_64 musl 构建，两个二进制分别满足可复现 SHA；两次构建各自产出一份
+build receipt（`build-a.receipt.json`/`build-b.receipt.json`），由 `release-manifest.json` 以
+SHA-256 绑定。发布验证必须覆盖来源 commit、补丁 series、toolchain lock、prepared source tree
+SHA-256、两份 build receipt、artifact SHA 和 detached signature。
 
 ### 15.2 外部集成建议（非本仓库交付）
 
