@@ -6593,10 +6593,10 @@ index 0000000000000000000000000000000000000000..a544cd37b7a0f2e1784bb2f69a118650
 +}
 diff --git a/crates/shadowsocks-auditd/src/ingest.rs b/crates/shadowsocks-auditd/src/ingest.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..f26697471a044a5d1e14ebc2145b32c95699370f
+index 0000000000000000000000000000000000000000..fbf6d9650a152c53295655ac1448fe2bcfe5d85e
 --- /dev/null
 +++ b/crates/shadowsocks-auditd/src/ingest.rs
-@@ -0,0 +1,751 @@
+@@ -0,0 +1,793 @@
 +//! Unix-stream ingest endpoint used by the ssserver producer.
 +
 +use std::{
@@ -7312,31 +7312,73 @@ index 0000000000000000000000000000000000000000..f26697471a044a5d1e14ebc2145b32c9
 +        assert!(matches!(cache.get("id-3", "digest-3"), DedupLookup::Same(_)));
 +    }
 +
++    fn insert_default_entry(cache: &mut DedupCache, sequence: usize) {
++        let event_id = format!("default-id-{sequence}");
++        cache.insert(
++            event_id.clone(),
++            format!("default-digest-{sequence}"),
++            EventAck {
++                event_id,
++                spool_epoch: "0".repeat(32),
++                spool_sequence: sequence as u64,
++            },
++        );
++    }
++
 +    #[test]
-+    fn default_dedup_capacity_keeps_touch_history_bounded() {
++    fn default_dedup_capacity_keeps_recency_index_bounded() {
++        let started = std::time::Instant::now();
 +        let mut cache = DedupCache::new();
 +        for sequence in 0..MAX_DEDUP_ENTRIES {
-+            let event_id = format!("default-id-{sequence}");
-+            cache.insert(
-+                event_id.clone(),
-+                format!("default-digest-{sequence}"),
-+                EventAck {
-+                    event_id,
-+                    spool_epoch: "0".repeat(32),
-+                    spool_sequence: sequence as u64,
-+                },
-+            );
++            insert_default_entry(&mut cache, sequence);
 +        }
-+        for _ in 0..(MAX_DEDUP_ENTRIES * 2) {
++        assert_eq!(cache.entries.len(), MAX_DEDUP_ENTRIES);
++
++        // §8.3 keeps the most recent MAX_DEDUP_ENTRIES events, so the recency
++        // index must hold exactly one slot per live entry after *every* touch
++        // - not only after some periodic compaction pass.  A replay storm is
++        // nothing but repeated hits, and it must not grow this index at all.
++        for round in 0..(MAX_DEDUP_ENTRIES * 2) {
 +            assert!(matches!(
 +                cache.get("default-id-0", "default-digest-0"),
 +                DedupLookup::Same(_)
 +            ));
++            assert_eq!(
++                cache.order.len(),
++                cache.entries.len(),
++                "touch {round} left a second recency slot behind"
++            );
 +        }
 +        assert_eq!(cache.entries.len(), MAX_DEDUP_ENTRIES);
++
++        // Recency, not insertion order, decides eviction: the touched entry
++        // outlives a further wave of inserts while the untouched oldest
++        // entries are the ones that age out.
++        for sequence in MAX_DEDUP_ENTRIES..(MAX_DEDUP_ENTRIES + 1024) {
++            insert_default_entry(&mut cache, sequence);
++        }
++        assert_eq!(cache.entries.len(), MAX_DEDUP_ENTRIES);
++        assert_eq!(cache.order.len(), MAX_DEDUP_ENTRIES);
++        assert!(matches!(
++            cache.get("default-id-0", "default-digest-0"),
++            DedupLookup::Same(_)
++        ));
++        assert!(matches!(
++            cache.get("default-id-1", "default-digest-1"),
++            DedupLookup::Missing
++        ));
++        let newest = MAX_DEDUP_ENTRIES + 1023;
++        assert!(matches!(
++            cache.get(&format!("default-id-{newest}"), &format!("default-digest-{newest}")),
++            DedupLookup::Same(_)
++        ));
++
++        // The real capacity has to stay observable under the default debug
++        // profile; a per-hit full scan of the index needed minutes here.
 +        assert!(
-+            cache.order.len() <= MAX_DEDUP_ENTRIES + 1,
-+            "touch history exceeded the bounded compaction window"
++            started.elapsed() < Duration::from_secs(60),
++            "dedup cache at real capacity took {:?}",
++            started.elapsed()
 +        );
 +    }
 +
