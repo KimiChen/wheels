@@ -4143,3 +4143,121 @@ producer（`shadowsocks-service` 的 `user-audit`）按合同是 Linux-only，�
 - **`C-7` 的验证边界**：修复经打包断言绑定（改回 `0750` 即变红），但“两个账号确实能 connect 到
   各自 socket”只能在 Linux 节点上按 `packaging/README.md` 实装一次才能坐实——这正是 `C-2`/`C-4`/
   `C-7` 连续三次同型缺陷的共同盲区，建议作为 Linux 验收的第一步。
+
+## 30. Linux 节点实装验收记录（2026-08-29，进行中）
+
+> 本节记录首次在真实 Linux 节点上按 `packaging/README.md` 实装所取得的结论。这是 §21.7、§28.7
+> 与 §29.6 反复列为发布前置、而此前八轮审计从未执行过的一步。新增问题编号接续：major 自
+> `M-63` 起。本节按阶段推进，未完成的阶段明确标注为“未验证”，不得当作已验收。
+
+### 30.1 环境与方法
+
+两台节点：
+
+- **节点 A（10.0.2.3）**：Debian 13 trixie、systemd 257、x86_64、4 核、**3.8 GiB 内存、无 swap**。
+  用于首次尝试 README 第 1 步。该机在两次 `lto = "fat"` + `codegen-units = 1` 的 musl 构建下
+  内存耗尽、SSH 失去响应，构建未完成。**这本身是一条结论**：§15.1 要求两次独立 musl 构建，
+  但既未声明主机资源要求，`scripts/build-linux-release.sh` 也只对工具**版本**做硬门禁而对内存
+  不做任何检查；3.8 GiB 无 swap 的节点不足以完成该流程。
+- **节点 B（10.0.1.3）**：Debian 13 trixie、systemd 257、x86_64、4 核、7.7 GiB 内存 + 7.8 GiB
+  swap、449 GiB 磁盘。安装前基线干净（无审计账号/组/目录/unit）。后续阶段在此节点执行，
+  并按“低负载、分阶段”原则限制并发（`CARGO_BUILD_JOBS=2`、`nice -n 10`），每阶段单独运行。
+
+工具链按 `packaging/release-toolchain.lock` 安装于临时目录内，不污染系统路径：
+rustc 1.97.0（`2d8144b78`，与锁定 commit 一致）、cargo 1.97.0、zig 0.16.0、
+cargo-zigbuild 0.23.0、Python 3.14.6（Debian 自带 3.13.5，被 lock 拒绝，故从源码构建）。
+节点 B 目前只安装了 rustc/cargo 与 musl std。
+
+### 30.2 Major
+
+- **M-63 工具解析折叠 rustup 代理符号链接，发布构建对任何 rustup 工具链都不可完成。**
+  在节点 A 执行 README 第 1 步时失败：`错误：cargo 实际版本与 build receipt toolchain 不一致`。
+  插桩后取得实际值：
+
+  ```text
+  exe=…/cargo/bin/rustup  out='rustup 1.29.0 (28d1352db 2026-03-05)'  declared='1.97.0'
+  ```
+
+  rustup 把 `bin/cargo`、`bin/rustc` 装成指向 `rustup` 代理的符号链接，代理靠 `argv[0]` 决定
+  扮演哪个工具；而 `_resolve_build_tool`/`_resolve_cargo_zigbuild` 用
+  `Path(resolved).resolve(strict=True)` 把链接折叠成 `rustup` 本身，于是执行的是 `rustup -V`。
+  §5.3/§15.1 要求固定版本工具链，而 rustup 正是获得固定 rustc 的标准方式，因此**README 第 1 步
+  对任何 rustup 工具链都不可完成**。缺陷自 `76f80fc` 引入，前七轮审计全部漏检，原因是从未在
+  真机上跑过发布构建。修复：新增 `_absolute_tool_path`，只解析目录部分以保证绝对路径、保留被
+  调用的文件名，`stat()` 仍跟随链接，因此“绝对普通文件 + 可执行位 + inode 前后一致”的约束不变。
+  变异检验：改回 `.resolve(strict=True)` 后新用例变红，还原后 31 项全绿。（§15.1 §5.3）
+
+- **M-64 `ensure_dir_rejects_symlink_components` 在任何平台都必然失败。**
+  节点 B 首次真机执行 `cargo test -p shadowsocks-auditd` 得 `97 passed / 2 failed`。该用例只接受
+  `EACCES`/`ELOOP`，插桩实测 errno 为 `ENOTDIR(20)`：`ensure_dir` 以
+  `O_NOFOLLOW | O_DIRECTORY` 打开路径组件，单独 `O_NOFOLLOW` 报 ELOOP，与 `O_DIRECTORY` 组合时
+  Linux 报 ENOTDIR。**实现本身正确**——符号链接被拒、外部目录未被创建（第二条断言一直成立），
+  错的是断言允许的 errno 集合。
+  **同时更正本文件此前的一处错误结论**：§29.5 与第八轮打桩实验把该用例失败解释为
+  “macOS 返回 ENOTDIR、Linux 返回 ELOOP 的副本假象”。真机证明 Linux 同样返回 ENOTDIR，
+  它是一条从未在任何平台通过过的坏用例，不是环境差异。（§14.4）
+
+- **M-65 `load_from_file_reaches_strict_parser_when_metadata_is_valid` 的 root 分支结构上不可达。**
+  `validate_existing_parent` 从 `/` 起遍历**每一级祖先**并拒绝任何 group/other 可写目录
+  （`mode & 0o022`），而 `tempfile` 建在 `TMPDIR` 下、标准 `/tmp` 是 `1777`，因此无论用例把自己
+  那一级目录设成什么模式都走不到 JSON 解析器。定位过程依次得到
+  `InvalidPath("config parent is writable by group or other")`（默认 `/tmp`）与
+  `InvalidPath("config parent must have mode 0750")`（私有 TMPDIR + 0700 目录）。
+  原用例把“元数据门禁”和“严格解析器”两件事串在一条不可达路径上，改为各自在可达位置断言。
+  （§14.4 §11）
+
+  `M-64`/`M-65` 与 §24 `M-42` 同型：**交付的测试其前置条件与它所测试的合同自相矛盾**，
+  只有在目标 OS 上真正执行才会暴露。
+
+- **M-66 `user_stats` exporter 的 4 个用例在 Linux 上确定性失败，使 §16 的
+  `cargo test --workspace --features user-audit` 无法全绿。**
+  节点 B 上 producer 侧首次真机执行得 `116 passed / 4 failed`，全部落在
+  `server::user_stats::tests::` 的 `exporter_bounds_busy_response_workers`、
+  `exporter_enforces_request_and_response_size_limits`、
+  `exporter_rejects_clients_above_the_concurrency_limit`、
+  `timed_out_snapshot_holds_concurrency_permit_until_blocking_work_finishes`。
+  以 root 运行时表现为读取响应时 `ECONNRESET (104)`：契约要求返回
+  `413 + ERROR_REQUEST_TOO_LARGE`（`user_stats.rs:2412-2413`），客户端却拿到连接重置。
+  已排除的可能：**不是并发抖动**（单线程、空载、0.07 秒内确定性复现）；**不是 root 专有**
+  （非 root 复跑同样 4 项失败，但失败位点不同，说明存在第二个成因）；**与审计功能无关**
+  （仅用 `--features user-stats` 复跑，同样 4 项失败），因此属于 `0001` 的 user-stats exporter
+  范围，而非本次审计所整改的 `0003`。这些用例在 macOS 上通过（本机 308 项全绿），仅在唯一
+  受支持的部署平台 Linux 上失败。
+  尚未最终确认的是具体机制：初步怀疑是拒绝路径在客户端请求字节尚未读完时即关闭连接，Linux
+  因而发送 RST 并使已写出的 413 响应丢失；一次半关闭实验未能干净证实，故此处不作断言。
+  **本轮未修复**：修复点位于 `0001` 引入的代码，而当前工作流只重新生成 `0003` 补丁，把
+  user-stats 的修复并入审计补丁属于交付边界决策，需先确认归属再动手。（§16 §14.1）
+
+### 30.3 已验证与未验证
+
+**已验证（节点 B，Debian 13）**
+
+| 项目 | 结果 |
+| --- | --- |
+| `scripts/prepare-source.sh` 在 Linux 重放 0001/0002/0003 | 通过 |
+| auditd crate 原生编译 | 通过，零警告 |
+| `cargo test -p shadowsocks-auditd` | **99 passed / 0 failed**（修复 M-64/M-65 后；非 root 复跑同样 99 passed）——该套件首次在任何机器上全绿 |
+| `cargo test --workspace --features user-audit` | 116 passed / 4 failed（4 项见 M-66，与审计功能无关） |
+| 测试对运行身份的敏感性 | 存在：M-65 仅在 root 下失败；M-66 在 root 与非 root 下失败位点不同 |
+
+**未验证（本节不得当作已验收）**
+
+- **C-7 未验证**——即本次上 Linux 的首要目的。`shadowsocks` 与 `audit-exporter` 能否真正遍历
+  `/run/shadowsocks-audit` 连上各自 socket，目前仍只有打包断言，没有真机证据。
+- README 第 1–5 步在节点 B 上一步都未执行：无发布构建、无签名验签、无 sysusers/tmpfiles/unit
+  安装、无配置注入、无二进制安装。节点 B 当前仍无审计账号、组、目录与 unit。
+- `tests/integration_audit.py`、`cargo-fuzz` sanitizer 实跑、§14.5 目标机压测均未执行。
+- README 第 1 步在节点 A 上因内存耗尽未完成；`M-63` 修复后是否能跑通两次 musl 构建，尚未在任何
+  机器上得到验证。
+
+### 30.4 文档待补（非代码缺陷）
+
+- `scripts/prepare-source.sh` **每次调用都要从 GitHub 拉取上游 tag**。节点 B 中途失去外网时该
+  脚本挂满 300 秒后失败，并连带使 `verify.sh`、`build-linux-release.sh` 全部不可用。
+  `UPSTREAM_REPOSITORY`/第二参数可指向本地镜像并且实测可用，但 `packaging/README.md` 与
+  `docs/OPERATIONS.md` 均未说明这一点，也未说明离线/弱网发布主机应如何准备镜像。
+- 若按上述方式准备本地镜像，需注意 `rsync -a` 以 root 接收会保留发送方 uid，git 会因
+  `safe.directory`（dubious ownership）拒绝，需 `chown -R root:root`。建议在文档中一并说明。
+- §15.1 要求两次独立 musl 构建，但未声明主机资源要求；`build-linux-release.sh` 只对工具**版本**
+  做硬门禁，对内存不做任何检查。实测 3.8 GiB 无 swap 的节点在 `lto = "fat"` +
+  `codegen-units = 1` 下会耗尽内存并使主机失去响应。建议在 §15.1 或 README 中给出最低资源建议。
