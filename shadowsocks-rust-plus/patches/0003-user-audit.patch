@@ -19238,10 +19238,10 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..5b0ebb7924e76785c6e14e5826db6b88
  }
 diff --git a/crates/shadowsocks-service/src/server/user_audit.rs b/crates/shadowsocks-service/src/server/user_audit.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..60ae45752019d5e624193c93f94b9454b33c898e
+index 0000000000000000000000000000000000000000..193209edb407583c5815a33e6fb1ea71e7ab627c
 --- /dev/null
 +++ b/crates/shadowsocks-service/src/server/user_audit.rs
-@@ -0,0 +1,4227 @@
+@@ -0,0 +1,4264 @@
 +//! Non-blocking successful-target access auditing for the server data path.
 +//!
 +//! The relay only constructs a small draft and performs bounded atomic/cache
@@ -20646,7 +20646,12 @@ index 0000000000000000000000000000000000000000..60ae45752019d5e624193c93f94b9454
 +                .compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Acquire)
 +            {
 +                Ok(_) => {
-+                    if active <= 1 {
++                    // Only the shutdown drain waits for the active count to
++                    // reach zero, and it can only wait once the closed bit is
++                    // set.  Before that there is no waiter at all, so the
++                    // shared Notify (and its mutex) stays out of the relay hot
++                    // path: every successful datagram/stream lands here.
++                    if active <= 1 && next & CLOSED_BIT != 0 {
 +                        self.emitter.notify.notify_waiters();
 +                    }
 +                    break;
@@ -22937,6 +22942,38 @@ index 0000000000000000000000000000000000000000..60ae45752019d5e624193c93f94b9454
 +        assert_eq!(snapshot.first_time, 200);
 +        assert_eq!(snapshot.last_time, 200);
 +        assert_eq!(emitter.queue.pop().map(|draft| draft.sequence()), Some(2));
++    }
++
++    #[tokio::test]
++    async fn observation_guard_notifies_only_after_close() {
++        let config = UserAuditConfig::new("/tmp/audit.sock", test_auditd_user());
++        let emitter = AuditEmitter::new(runtime(), &config);
++
++        // Hot path: an observation that ends while the producer is running must
++        // not touch the shared lifecycle Notify.
++        let guard = emitter.begin_observation().expect("observation guard");
++        let notified = emitter.notify.notified();
++        tokio::pin!(notified);
++        assert!(!notified.as_mut().enable(), "no permit may be pending yet");
++        drop(guard);
++        assert!(
++            tokio::time::timeout(Duration::from_millis(50), &mut notified)
++                .await
++                .is_err(),
++            "a running observation must not wake the shutdown waiter"
++        );
++
++        // Shutdown path: the last guard released after close is exactly the
++        // transition drain() is waiting for.
++        let guard = emitter.begin_observation().expect("observation guard");
++        emitter.close_emitter();
++        let notified = emitter.notify.notified();
++        tokio::pin!(notified);
++        notified.as_mut().enable();
++        drop(guard);
++        tokio::time::timeout(Duration::from_millis(500), &mut notified)
++            .await
++            .expect("the final guard release must wake drain");
 +    }
 +
 +    #[test]
