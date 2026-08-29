@@ -34,14 +34,32 @@
 
 ## 3. 待执行的验证
 
-以下为发布前置，**从未在任何机器上执行过**：
+以下为发布前置。第一项已首次执行（结论见表下），其余三项**从未在任何机器上执行过**：
 
 | 项目 | 说明 | 阻塞因素 |
 | --- | --- | --- |
-| `cargo test --workspace --features user-audit`（Linux 全绿） | §16 验收项 | `M-66` 已修复解除阻塞；**该命令本身仍未跑完过一次全绿** |
+| `cargo test --workspace --features user-audit`（Linux 全绿） | §16 验收项 | 已首次执行：overlay 自有目标全绿，但 **9 条上游联网用例必然失败**，该命令按字面无法全绿 |
 | `cargo-fuzz` sanitizer 实跑 | §3.2/§14.4 要求交付并运行 fuzz target | 无，尚未安排 |
 | §14.5 目标机压测 | 吞吐 ≤5%、CPU ≤10%、ssserver RSS ≤64 MiB、auditd RSS ≤128 MiB，及离线/队列满/慢 ACK/spool 满四类专项 | 需目标机与真实数据面负载 |
 | 真实流量端到端审计事件 | 经 ssserver 转发真实 TCP/UDP 流量后，验证 access event 落入 spool 并可经 lease 导出 | `integration_audit.py` 覆盖的是 ingest/export 协议链路，**不含**真实代理流量 |
+
+### 3.1 首次执行结果（2026-08-30，Debian 13 / rustc 1.97.0）
+
+`M-66` 修复后在 `10.0.1.3` 上以 `--no-fail-fast` 完整跑了一次。**overlay 自有的每一个目标全绿**：
+`shadowsocks-audit-protocol` 25、`shadowsocks-auditd` 99、`shadowsocks-service` lib 121、
+`shadowsocks` lib 9、`0001` 新增的 `tcp_eih_user.rs` 4、根 crate lib 10，以及 `dns`/`http`/`udp`
+三组集成用例。
+
+失败 9 条，**全部落在上游 v1.24.0 自带、三个补丁都未改动的联网集成用例**上：
+`crates/shadowsocks/tests/tcp.rs` 5 条、`tcp_tfo.rs` 1 条、根 crate 的
+`tests/{socks4,socks5,tunnel}.rs` 各 1 条。它们经真实隧道向 `www.example.com` 发
+`GET / HTTP/1.0` 并断言应答行是 `HTTP/1.0 200 OK`，而真实服务器一律回 `HTTP/1.1 200 OK`。
+`tests/socks5.rs` 一个文件里两条用例正好互证：期望 `HTTP/1.1` 的那条通过，期望 `HTTP/1.0`
+的那条失败——既不是网络问题，也与本功能无关，是上游用例自身过时。
+
+由此得到一个此前没暴露过的结论：**只要 overlay 继续原样携带上游 v1.24.0，§16 那条
+「`cargo test --workspace --features user-audit` 全绿」按字面在任何主机上都不可能成立。**
+处理方式需决策，见第 5 节。
 
 第四项值得单独强调：目前**没有任何一次验证**证明过「真实用户流量 → 产生 access event →
 写入 spool → 被 collector 取走」这条完整链路。§6 的两类成功事件语义在真机上仍未被端到端验证。
@@ -60,11 +78,18 @@
 
 ## 5. 需要决策的事项
 
-**当前无未决事项。** 此前列出的三项均已决策并落实，结论见第 6 节：
+此前列出的三项均已决策并落实，结论见第 6 节：
 
 1. `M-66` 的归属 → 并入 `0003`（已修复）；
 2. `D-5` 是否收窄发布构建的 feature 集 → 收窄（已实施，规范升版到 v6）；
 3. 实装节点的处置 → 清理（`10.0.1.3`、`10.0.2.3` 均已回到基线）。
+
+**新增一项待决**（由 §3.1 的首次执行暴露）：
+
+4. **§16 的工作区测试判据如何收口**。三个可选方向：（a）把 §16 的命令收窄到 overlay 自有目标
+   （按 `-p` 列举四个 crate，或排除上游联网集成用例），（b）在 overlay 里加一个补丁把上游那 5 个
+   文件的 `HTTP/1.0` 期望改对——但这会扩大 overlay 对上游测试的改动面，且每次跟版都要重做，
+   （c）在 §16 明确豁免这 9 条并记录豁免理由。此项属合同层面，落实需再次升版。
 
 ## 6. 变更记录
 
@@ -83,7 +108,8 @@
   接受 EOF 或 ECONNRESET 并仍断言零响应字节。新增
   `direct_error_response_drains_unread_request_input` 以 `UnixStream::pair()` + FIONREAD
   直接断言队列被读空，不依赖平台 close 语义。Linux（Debian 13 / rustc 1.97.0）变异检验：
-  修复在位 5/5 通过，去掉 drain 后 4 项转红。
+  修复在位 5/5 通过，去掉 drain 后 4 项转红。修复解除阻塞后随即在同一节点首次跑完
+  `cargo test --workspace --features user-audit --no-fail-fast`，结果见 §3.1。
 - 2026-08-30：**`D-5` 已实施**（overlay `8711cbd`，规范升版 v5 → v6）。发布构建改为
   `--no-default-features` 加显式 feature 集，§15.1 增列该集合。x86_64-unknown-linux-musl
   下少编译 29 个 crate（brotli/zstd/flate2、tun/smoltcp/etherparse、nix、qrcode、
