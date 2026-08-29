@@ -4144,7 +4144,7 @@ producer（`shadowsocks-service` 的 `user-audit`）按合同是 Linux-only，�
   各自 socket”只能在 Linux 节点上按 `packaging/README.md` 实装一次才能坐实——这正是 `C-2`/`C-4`/
   `C-7` 连续三次同型缺陷的共同盲区，建议作为 Linux 验收的第一步。
 
-## 30. Linux 节点实装验收记录（2026-08-29，进行中）
+## 30. Linux 节点实装验收记录（2026-08-29/30）
 
 > 本节记录首次在真实 Linux 节点上按 `packaging/README.md` 实装所取得的结论。这是 §21.7、§28.7
 > 与 §29.6 反复列为发布前置、而此前八轮审计从未执行过的一步。新增问题编号接续：major 自
@@ -4261,3 +4261,64 @@ cargo-zigbuild 0.23.0、Python 3.14.6（Debian 自带 3.13.5，被 lock 拒绝�
 - §15.1 要求两次独立 musl 构建，但未声明主机资源要求；`build-linux-release.sh` 只对工具**版本**
   做硬门禁，对内存不做任何检查。实测 3.8 GiB 无 swap 的节点在 `lto = "fat"` +
   `codegen-units = 1` 下会耗尽内存并使主机失去响应。建议在 §15.1 或 README 中给出最低资源建议。
+
+### 30.5 阶段 3–4：发布构建与实装（节点 B）
+
+**阶段 3a 工具链**：zig 0.16.0、cargo-zigbuild 0.23.0、Python 3.14.6 均按
+`release-toolchain.lock` 装齐并逐一核对版本。
+
+**阶段 3b 发布构建：未完成（环境原因，非代码缺陷）。**
+第一次执行被 `准备源码树 SHA-256 与锁定摘要不一致` 正确拦截——`M-64`/`M-65` 改动了 0003 补丁而
+我未同步刷新 `upstream.lock` 的 trust anchor。**这是 §26.3 该机制第一次在真机上证明有效**，
+刷新后放行。第二次执行运行约 48 分钟后失败于依赖下载：
+`download of web-sys failed — transfer too slow: 0 bytes in 30s`。实测该节点到 crates.io 的
+吞吐在 29 KB/s–807 KB/s 之间剧烈波动，github.com 则完全不可达。
+
+需要如实区分：**这次失败是链路抖动，不是确定性缺陷**——随后用温缓存直接构建同一目标
+（`cargo zigbuild --release --target x86_64-unknown-linux-musl --features user-audit`）一次即
+成功。但过程暴露了三个真实的交付约束，均未见于 §15.1 或 `packaging/README.md`：
+
+1. 两次构建各自使用**全新空 `CARGO_HOME`**（§26.3 的隔离设计），因此整个依赖图每次发布要
+   **完整下载两遍**，两次之间无法复用；
+2. 发布构建对根 crate 用 `--features user-audit` 但**未加 `--no-default-features`**，默认 `full`
+   feature 因而拉入 `reqwest`/`web-sys` 等审计功能本身并不需要的大量依赖；
+3. 净化后的环境 allowlist 不放行 `CARGO_HTTP_*`，运维**无法**调整 cargo 固定的
+   “30 秒内不足 10 字节即失败” 停滞阈值，也没有 vendor/离线 registry 方案。
+
+综合节点 A 的内存耗尽，结论是：§15.1 要求两次独立 musl 构建，却既未声明主机**资源**要求，
+也未声明**连通性**要求；而网络受限恰恰是签名主机合理甚至理想的姿态。
+
+**阶段 4 实装：按 README 第 3 步完成，C-7/C-4/C-2 全部取得真机实证。**
+用上述验证构建的 musl 二进制（**明确不是发布链产物**，仅用于实装验证）完成安装。
+
+§11 权限模型逐项实测与规格一致：
+
+| 对象 | 实测 | §11 要求 |
+| --- | --- | --- |
+| `/run/shadowsocks-audit` | `751 shadowsocks-audit:shadowsocks-audit` | 需可遍历（`C-7` 修复） |
+| `/run/shadowsocks-audit/ingest` | `750 shadowsocks-audit:shadowsocks-audit-ingest` | 一致 |
+| `/run/shadowsocks-audit/export` | `750 shadowsocks-audit:shadowsocks-audit-export` | 一致 |
+| `ingest.sock` / `export.sock` | `660`，属组分别为两个专用组 | 一致 |
+| `/var/lib/shadowsocks-audit` | `700 shadowsocks-audit:shadowsocks-audit` | 一致 |
+| `/etc/shadowsocks-audit` | `750 root:shadowsocks-audit` | 一致 |
+| `auditd.json` / `export-hmac` | `640 root:shadowsocks-audit` / `600 shadowsocks-audit:shadowsocks-audit` | 一致 |
+
+组成员关系亦与 §11 一致：`shadowsocks-audit-ingest = {shadowsocks, shadowsocks-audit}`、
+`shadowsocks-audit-export = {audit-exporter, shadowsocks-audit}`。
+
+- **C-7 已实证修复。** 以 `setpriv --init-groups` 降权后：`shadowsocks` 能 `stat` 并
+  **成功 `connect()`** ingest socket；`audit-exporter` 同样成功连上 export socket。
+  **反证成立**：无关账号 `nobody` 被拒——说明把共同父目录放宽到 `0751` 并没有削弱隔离，
+  每个 endpoint 的 `0750` 分组隔离依然有效。这是三轮同型 packaging critical 中第一次拿到真机证据。
+- **C-4 已实证修复。** auditd 在真实 Linux 上**成功启动并 bind 两个 socket，且属组正确**。
+  若 `fchownat(fd, NULL, …)` 的旧写法仍在，bind 后的属组设置会失败并使 daemon 无法启动；
+  socket 实测为 `660` 且属组正确，即 `/proc/self/fd/N` 方案在真机有效。
+- **C-2 已实证修复。** `systemctl restart shadowsocks-auditd` 后
+  `/run/shadowsocks-audit/{ingest,export}` 两个子目录连同属组完整存活
+  （`RuntimeDirectoryPreserve=yes` 生效），producer 重启后仍可达 ingest socket；
+  `stop` 后目录亦不消失。ssserver unit 的 `ReadWritePaths` 现仅含
+  `/run/shadowsocks-rust-plus`，不再对审计目录形成启动硬依赖。
+
+**仍未执行**：README 第 1–2 步的两次独立发布构建与签名验签（阶段 3b 未完成）；第 4–5 步的
+ssserver 配置注入与数据面启动；`tests/integration_audit.py` 端到端；fuzz sanitizer；§14.5 压测。
+因此本节仍**不构成 §16 发布验收**，只证明 §11 权限模型与三条 packaging critical 的修复在真机成立。
