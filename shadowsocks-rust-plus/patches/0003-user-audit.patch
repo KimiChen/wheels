@@ -3948,10 +3948,10 @@ index 0000000000000000000000000000000000000000..b8c6b8706b4624f89f3a938720af5ba6
 +}
 diff --git a/crates/shadowsocks-auditd/Cargo.toml b/crates/shadowsocks-auditd/Cargo.toml
 new file mode 100644
-index 0000000000000000000000000000000000000000..765bfee9c2ef4a0b304d77041870e6842cd9967e
+index 0000000000000000000000000000000000000000..545e7c98d95df717caaa40147af26158d5a22772
 --- /dev/null
 +++ b/crates/shadowsocks-auditd/Cargo.toml
-@@ -0,0 +1,26 @@
+@@ -0,0 +1,28 @@
 +[package]
 +name = "shadowsocks-auditd"
 +version = "1.24.0"
@@ -3978,6 +3978,8 @@ index 0000000000000000000000000000000000000000..765bfee9c2ef4a0b304d77041870e684
 +
 +[dev-dependencies]
 +tempfile = "3"
++# `test-util` provides the paused clock used by the export read-deadline test.
++tokio = { version = "1.38", features = ["macros", "rt", "test-util"] }
 diff --git a/crates/shadowsocks-auditd/src/config.rs b/crates/shadowsocks-auditd/src/config.rs
 new file mode 100644
 index 0000000000000000000000000000000000000000..bb6d17adea85cc5498c671ded6bc76c113c021d1
@@ -5213,10 +5215,10 @@ index 0000000000000000000000000000000000000000..bb6d17adea85cc5498c671ded6bc76c1
 +}
 diff --git a/crates/shadowsocks-auditd/src/export.rs b/crates/shadowsocks-auditd/src/export.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..a544cd37b7a0f2e1784bb2f69a118650d2c4694e
+index 0000000000000000000000000000000000000000..e10bcde625993b6c39a03f263e11f26da61c5ce6
 --- /dev/null
 +++ b/crates/shadowsocks-auditd/src/export.rs
-@@ -0,0 +1,1374 @@
+@@ -0,0 +1,1414 @@
 +//! Strict HTTP/1.1 export endpoint for the node-local audit spool.
 +
 +use std::{
@@ -5517,23 +5519,22 @@ index 0000000000000000000000000000000000000000..a544cd37b7a0f2e1784bb2f69a118650
 +        let _ = time::timeout(HTTP_DEADLINE, write_response(&mut stream, &response)).await;
 +        return Ok(());
 +    }
-+    let request = match time::timeout(HTTP_DEADLINE, read_request(&mut stream)).await {
-+        Ok(Ok(value)) => value,
-+        Ok(Err(error)) => {
-+            // A malformed route, Host, or body framing can still carry valid
-+            // node/nonce headers.  Sign that error response; malformed or
-+            // ambiguous authentication material remains unsigned.
++    // `read_request` enforces the read deadline itself so that an expired
++    // deadline is reported like any other framing failure; wrapping it in a
++    // second timeout here would pre-empt that and drop the parsed prefix.
++    let request = match read_request(&mut stream).await {
++        Ok(value) => value,
++        Err(error) => {
++            // A malformed route, Host, or body framing, and an expired read
++            // deadline, can still carry valid node/nonce headers.  Sign that
++            // error response; malformed or ambiguous authentication material
++            // remains unsigned.
 +            let response = error
 +                .partial
 +                .as_ref()
 +                .filter(|request| request_is_signable(request))
 +                .map(|request| signed_error_for_request(request, &config.node_id, &key, 400, "invalid_request"))
 +                .unwrap_or_else(|| unsigned_error_response(400, "invalid_request", &config.node_id));
-+            let _ = time::timeout(HTTP_DEADLINE, write_response(&mut stream, &response)).await;
-+            return Ok(());
-+        }
-+        Err(_) => {
-+            let response = unsigned_error_response(400, "invalid_request", &config.node_id);
 +            let _ = time::timeout(HTTP_DEADLINE, write_response(&mut stream, &response)).await;
 +            return Ok(());
 +        }
@@ -5908,14 +5909,23 @@ index 0000000000000000000000000000000000000000..a544cd37b7a0f2e1784bb2f69a118650
 +}
 +
 +async fn read_request(stream: &mut UnixStream) -> Result<HttpRequest, RequestReadError> {
++    // One deadline covers the whole request read, so a slow peer cannot extend
++    // it chunk by chunk.  Expiry is a framing failure and keeps the parsed
++    // prefix, which is what decides whether the fixed 400 can be signed.
++    let deadline = time::Instant::now() + HTTP_DEADLINE;
 +    let mut bytes = Vec::with_capacity(4096);
 +    let mut header_end = None;
 +    let mut chunk = [0_u8; 1024];
 +    while header_end.is_none() {
-+        let read = stream
-+            .read(&mut chunk)
-+            .await
-+            .map_err(|error| RequestReadError::io(error, request_hint_from_bytes(&bytes)))?;
++        let read = match time::timeout_at(deadline, stream.read(&mut chunk)).await {
++            Ok(result) => result.map_err(|error| RequestReadError::io(error, request_hint_from_bytes(&bytes)))?,
++            Err(_) => {
++                return Err(RequestReadError::protocol(
++                    "read deadline expired",
++                    request_hint_from_bytes(&bytes),
++                ));
++            }
++        };
 +        if read == 0 {
 +            return Err(RequestReadError::protocol(
 +                "unexpected EOF",
@@ -6115,10 +6125,15 @@ index 0000000000000000000000000000000000000000..a544cd37b7a0f2e1784bb2f69a118650
 +        return Err(RequestReadError::protocol("body has trailing bytes", Some(partial)));
 +    }
 +    while body.len() < length {
-+        let read = stream
-+            .read(&mut chunk)
-+            .await
-+            .map_err(|error| RequestReadError::io(error, Some(request.clone())))?;
++        let read = match time::timeout_at(deadline, stream.read(&mut chunk)).await {
++            Ok(result) => result.map_err(|error| RequestReadError::io(error, Some(request.clone())))?,
++            Err(_) => {
++                return Err(RequestReadError::protocol(
++                    "read deadline expired",
++                    Some(request.clone()),
++                ));
++            }
++        };
 +        if read == 0 {
 +            return Err(RequestReadError::protocol("truncated body", Some(request.clone())));
 +        }
@@ -6519,6 +6534,33 @@ index 0000000000000000000000000000000000000000..a544cd37b7a0f2e1784bb2f69a118650
 +        let error = read_request(&mut server).await.expect_err("framing must be rejected");
 +        let partial = error.partial.expect("parsed auth prefix");
 +        assert!(request_is_signable(&partial));
++    }
++
++    #[tokio::test(start_paused = true)]
++    async fn expired_read_deadline_preserves_signable_auth_prefix() {
++        let (mut client, mut server) = UnixStream::pair().expect("unix pair");
++        // Valid node/nonce headers, but the header terminator never arrives:
++        // the only possible framing failure is the read deadline.
++        client
++            .write_all(
++                format!(
++                    "GET /v1/audit/healthz HTTP/1.1\r\nHost: auditd.example\r\nX-Shadowsocks-Audit-Node: {TEST_NODE}\r\nX-Shadowsocks-Audit-Nonce: {TEST_NONCE}\r\n"
++                )
++                .as_bytes(),
++            )
++            .await
++            .expect("write request");
++        let error = time::timeout(HTTP_DEADLINE * 4, read_request(&mut server))
++            .await
++            .expect("read_request must enforce its own read deadline")
++            .expect_err("an expired deadline must be reported as a framing failure");
++        let partial = error.partial.expect("parsed auth prefix");
++        assert!(request_is_signable(&partial));
++
++        let response = signed_error_for_request(&partial, TEST_NODE, &[0x11; 32], 400, "invalid_request");
++        let response = String::from_utf8(response.bytes).expect("response is UTF-8");
++        assert!(response.contains("X-Shadowsocks-Audit-Response-MAC: "));
++        drop(client);
 +    }
 +
 +    #[tokio::test]
