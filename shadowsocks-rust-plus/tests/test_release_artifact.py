@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import importlib.util
 import json
@@ -1578,6 +1579,22 @@ raise SystemExit(90)
             binary.write_bytes(tampered)
             result = self.verify_multi(output, success=False)
             self.assertIn("SHA-256 与 manifest 不一致", result.stderr)
+
+    def test_release_tool_has_no_unreferenced_private_helpers(self) -> None:
+        """死代码不会被任何行为用例覆盖，只能由这条结构断言绑定。"""
+        tree = ast.parse(ARTIFACT_TOOL.read_text(encoding="utf-8"))
+        defined = [
+            node.name
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name.startswith("_")
+        ]
+        self.assertGreater(len(defined), 20)
+        referenced = {
+            node.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+        }
+        self.assertEqual([name for name in defined if name not in referenced], [])
 
     @unittest.skipUnless(shutil.which("openssl"), "openssl is required")
     def test_detached_signature_is_required_and_verified(self) -> None:

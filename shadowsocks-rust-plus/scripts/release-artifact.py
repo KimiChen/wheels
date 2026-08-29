@@ -1681,18 +1681,6 @@ def command_package_multi(args: argparse.Namespace) -> None:
     print("发布 manifest：" + str(output_dir / "release-manifest.json"))
 
 
-def _read_checksum(path: Path, binary_name: str, expected_hash: str) -> None:
-    payload, metadata = _read_regular(path, 1024)
-    if stat.S_IMODE(metadata.st_mode) != 0o644:
-        raise ArtifactError(f"{binary_name} SHA-256 文件权限必须为 0644")
-    try:
-        line = payload.decode("ascii")
-    except UnicodeDecodeError as exc:
-        raise ArtifactError(f"{binary_name} SHA-256 文件不是 ASCII") from exc
-    if line != f"{expected_hash}  {binary_name}\n":
-        raise ArtifactError(f"{binary_name} SHA-256 校验失败或格式错误")
-
-
 def _check_multi_expected(manifest: dict[str, Any], args: argparse.Namespace) -> None:
     build = manifest["build"]
     expected = {
