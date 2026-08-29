@@ -7813,10 +7813,10 @@ index 0000000000000000000000000000000000000000..6cf8d005dfef917c852be4f611d5b945
 +}
 diff --git a/crates/shadowsocks-auditd/src/spool.rs b/crates/shadowsocks-auditd/src/spool.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..c06a204c1506f554ce01dab7f6f903513a9c849a
+index 0000000000000000000000000000000000000000..6fe481d768d8b92436ece5b9e1c3d60ee9b084ee
 --- /dev/null
 +++ b/crates/shadowsocks-auditd/src/spool.rs
-@@ -0,0 +1,7237 @@
+@@ -0,0 +1,7284 @@
 +//! Durable, node-local audit spool.
 +//!
 +//! The spool is deliberately synchronous.  Ingest and export perform their
@@ -8786,6 +8786,7 @@ index 0000000000000000000000000000000000000000..c06a204c1506f554ce01dab7f6f90351
 +    persist_state: bool,
 +    persist_state_after_commit: bool,
 +    persist_state_accounting: bool,
++    recovery_marker_accounting: bool,
 +    rollback: bool,
 +    recovery_marker: bool,
 +    orphan_after_marker: bool,
@@ -11158,7 +11159,22 @@ index 0000000000000000000000000000000000000000..c06a204c1506f554ce01dab7f6f90351
 +        let path = recovery_gap_marker_path(&self.root, &spec.event_id)?;
 +        let before = file_len(&path)?;
 +        let result = persist_recovery_gap_marker(&self.root, spec);
-+        if let Err(error) = Self::update_path_size(inner, &path, before) {
++        #[cfg(test)]
++        let accounting = if std::mem::take(&mut inner.faults.recovery_marker_accounting) {
++            Err(io::Error::other(
++                "injected recovery marker path-size accounting failure",
++            ))
++        } else {
++            Self::update_path_size(inner, &path, before)
++        };
++        #[cfg(not(test))]
++        let accounting = Self::update_path_size(inner, &path, before);
++        if let Err(error) = accounting {
++            // The marker may already be on disk with a size that cannot be
++            // established.  Leaving the incremental index "known" would keep a
++            // permanent offset, so force a full re-measurement exactly as the
++            // marker removal path does.
++            inner.spool_bytes_known = false;
 +            mark_storage_rejection(inner, true);
 +            return Err(error.into());
 +        }
@@ -15010,6 +15026,37 @@ index 0000000000000000000000000000000000000000..c06a204c1506f554ce01dab7f6f90351
 +            "first event must not be sealed due to idle age"
 +        );
 +        assert!(inner.open_meta.opened_at > SystemTime::UNIX_EPOCH);
++    }
++
++    #[test]
++    fn recovery_marker_accounting_failure_invalidates_the_byte_index() {
++        let dir = tempfile::tempdir().expect("tempdir");
++        let spool = Spool::open(config(dir.path())).expect("spool");
++        let spec = GapSpec {
++            event_id: "spool:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
++            occurred_at_unix_ms: 3,
++            lost_spool_epoch: None,
++            reason: wire::SpoolGapReason::TailTruncation,
++            first_lost_spool_sequence: None,
++            last_lost_spool_sequence: None,
++            lost_events: None,
++            lost_bytes: None,
++            lost_batch_id: None,
++            source_fingerprint: None,
++        };
++        let mut inner = lock(&spool.inner);
++        inner.spool_bytes_known = true;
++        inner.faults.recovery_marker_accounting = true;
++
++        let error = spool
++            .persist_recovery_gap_marker_locked(&mut inner, &spec)
++            .expect_err("unmeasurable marker");
++        assert!(matches!(error, SpoolError::Io(_)), "{error:?}");
++        assert!(
++            !inner.spool_bytes_known,
++            "an unmeasurable marker must force a full re-measurement"
++        );
++        assert!(inner.storage_rejected_attempts > 0);
 +    }
 +
 +    #[test]
