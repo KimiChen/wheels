@@ -7813,10 +7813,10 @@ index 0000000000000000000000000000000000000000..6cf8d005dfef917c852be4f611d5b945
 +}
 diff --git a/crates/shadowsocks-auditd/src/spool.rs b/crates/shadowsocks-auditd/src/spool.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..e0642fae8219ef19144e622d388a0dd589aa17b1
+index 0000000000000000000000000000000000000000..e0e15e391213c244d7914769e5422a13369e8556
 --- /dev/null
 +++ b/crates/shadowsocks-auditd/src/spool.rs
-@@ -0,0 +1,6992 @@
+@@ -0,0 +1,7158 @@
 +//! Durable, node-local audit spool.
 +//!
 +//! The spool is deliberately synchronous.  Ingest and export perform their
@@ -9979,6 +9979,11 @@ index 0000000000000000000000000000000000000000..e0642fae8219ef19144e622d388a0dd5
 +    /// document itself is valid; body corruption must not erase trustworthy
 +    /// batch/range evidence from the diagnostic record.
 +    fn quarantine_batch_locked(&self, inner: &mut SpoolInner, path: &Path, label: &str) -> Result<(), SpoolError> {
++        // The fatal state is a precondition of every write, not only of the
++        // public entry points: `mark_durability_uncertain_locked` can fire in
++        // the middle of a call, and anything written afterwards would carry an
++        // unproven `(spool_epoch, spool_sequence)`.
++        Self::reject_if_durability_uncertain(inner)?;
 +        let hint = read_meta_hint(path, &self.config.node_id);
 +        inner.gap_degraded = true;
 +        // Persist a transaction marker before moving the damaged object.  The
@@ -10129,6 +10134,10 @@ index 0000000000000000000000000000000000000000..e0642fae8219ef19144e622d388a0dd5
 +        sequence: u64,
 +        received_at_unix_ms: u64,
 +    ) -> Result<(), SpoolError> {
++        // See `quarantine_batch_locked`: a barrier that became fatal earlier in
++        // this same call must stop the write here, before the producer event
++        // can be persisted and acknowledged.
++        Self::reject_if_durability_uncertain(inner)?;
 +        self.ensure_open_file_bound(inner)?;
 +        let old_len = inner.open_file.metadata()?.len();
 +        let old_meta = inner.open_meta.clone();
@@ -10749,6 +10758,12 @@ index 0000000000000000000000000000000000000000..e0642fae8219ef19144e622d388a0dd5
 +                continue;
 +            }
 +            break;
++        }
++        if inner.durability_uncertain {
++            // Freeing capacity does not repair an ambiguous write barrier; the
++            // caller must never proceed to the producer record after one.
++            inner.degraded = true;
++            return Err(SpoolError::DurabilityUncertain);
 +        }
 +        if self.capacity_ok(inner, additional) {
 +            if first_error.is_some() {
@@ -11571,6 +11586,12 @@ index 0000000000000000000000000000000000000000..e0642fae8219ef19144e622d388a0dd5
 +            match result {
 +                Ok(true) => index += 1,
 +                Ok(false) => {}
++                Err(SpoolError::DurabilityUncertain) => {
++                    // A fatal write barrier is not a per-candidate fault.
++                    // Swallowing it into `Ok(())` let the caller keep writing
++                    // and ACK a producer event after the sticky state was set.
++                    return Err(SpoolError::DurabilityUncertain);
++                }
 +                Err(_) => {
 +                    // A single permanently unreadable candidate must not
 +                    // prevent unrelated receipts/pending transactions from
@@ -11585,6 +11606,7 @@ index 0000000000000000000000000000000000000000..e0642fae8219ef19144e622d388a0dd5
 +    }
 +
 +    fn seal_locked(&self, inner: &mut SpoolInner) -> Result<(), SpoolError> {
++        Self::reject_if_durability_uncertain(inner)?;
 +        if inner.open_meta.event_count == 0 {
 +            return Ok(());
 +        }
@@ -14317,6 +14339,150 @@ index 0000000000000000000000000000000000000000..e0642fae8219ef19144e622d388a0dd5
 +        );
 +        let next = spool.lease().expect("next lease").expect("gap batch");
 +        assert_ne!(next.info.batch_id, first_id);
++    }
++
++    #[test]
++    fn fatal_barrier_mid_append_stops_further_writes_and_the_ack() {
++        let dir = tempfile::tempdir().expect("tempdir");
++        let spool = Spool::open(config(dir.path())).expect("spool");
++        let first_gap = "spool:88888888888888888888888888888888";
++        let second_gap = "spool:99999999999999999999999999999999";
++        {
++            let mut inner = lock(&spool.inner);
++            for (gap_id, basename) in [(first_gap, "orphan-batch-a"), (second_gap, "orphan-batch-b")] {
++                let pending = TombstoneEntry::QuarantinePending(wire::QuarantinePending::new(
++                    gap_id, basename, 10, None, None, None, None, None, None, None,
++                ));
++                spool.add_tombstone_locked(&mut inner, pending).expect("pending ledger");
++            }
++            // rename succeeded, parent fsync failed: the cursor is
++            // commit-uncertain and the spool turns fatal in mid-call.
++            inner.faults.persist_state_after_commit = true;
++        }
++
++        let error = spool.append(&event(1), 1).expect_err("a fatal barrier must not ACK");
++        assert!(matches!(error, SpoolError::DurabilityUncertain), "{error:?}");
++        assert!(
++            lock(&spool.inner).durability_uncertain,
++            "the fatal state must be sticky"
++        );
++
++        let body = fs::read(dir.path().join("open/current.ndjson")).expect("open segment");
++        assert_eq!(
++            body.split_inclusive(|byte| *byte == b'\n').count(),
++            1,
++            "only the record that triggered the barrier may be on disk"
++        );
++        assert!(
++            body.windows(first_gap.len())
++                .any(|window| window == first_gap.as_bytes())
++        );
++        assert!(
++            !body
++                .windows(second_gap.len())
++                .any(|window| window == second_gap.as_bytes()),
++            "no further gap may be written after the fatal barrier"
++        );
++        assert!(
++            !body.windows(9).any(|window| window == b"\"access\""),
++            "the producer event must not reach the spool after the fatal barrier"
++        );
++    }
++
++    #[test]
++    fn every_write_operation_rejects_after_the_fatal_barrier() {
++        let dir = tempfile::tempdir().expect("tempdir");
++        let spool = Spool::open(config(dir.path())).expect("spool");
++        spool.append(&event(1), 1).expect("durable record");
++        {
++            let mut inner = lock(&spool.inner);
++            let pending = TombstoneEntry::QuarantinePending(wire::QuarantinePending::new(
++                "spool:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
++                "orphan-batch",
++                10,
++                None,
++                None,
++                None,
++                None,
++                None,
++                None,
++                None,
++            ));
++            spool.add_tombstone_locked(&mut inner, pending).expect("pending ledger");
++        }
++        let open_path = dir.path().join("open/current.ndjson");
++        let before = fs::read(&open_path).expect("open segment");
++        let sealed_before = fs::read_dir(dir.path().join("sealed")).expect("sealed").count();
++        let markers_before = recovery_marker_count(dir.path());
++        let ledger_before = fs::read(dir.path().join("tombstones.json")).expect("tombstone ledger");
++
++        let mut inner = lock(&spool.inner);
++        inner.durability_uncertain = true;
++        let spec = GapSpec {
++            event_id: "spool:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab".to_owned(),
++            occurred_at_unix_ms: 2,
++            lost_spool_epoch: None,
++            reason: wire::SpoolGapReason::TailTruncation,
++            first_lost_spool_sequence: None,
++            last_lost_spool_sequence: None,
++            lost_events: None,
++            lost_bytes: None,
++            lost_batch_id: None,
++            source_fingerprint: None,
++        };
++        assert!(matches!(
++            spool.write_gap_locked(&mut inner, &spec),
++            Err(SpoolError::DurabilityUncertain)
++        ));
++        assert!(matches!(
++            spool.seal_locked(&mut inner),
++            Err(SpoolError::DurabilityUncertain)
++        ));
++        let sequence = inner.next_sequence;
++        let wrapper = wrapper_bytes(&inner.epoch, sequence, 2, &event(2)).expect("wrapper");
++        assert!(matches!(
++            spool.write_record_locked(&mut inner, &wrapper, sequence, 2),
++            Err(SpoolError::DurabilityUncertain)
++        ));
++        assert!(matches!(
++            spool.quarantine_batch_locked(&mut inner, &dir.path().join("sealed/absent"), "batch-corrupt"),
++            Err(SpoolError::DurabilityUncertain)
++        ));
++        assert!(
++            matches!(
++                spool.reconcile_tombstones_locked(&mut inner),
++                Err(SpoolError::DurabilityUncertain)
++            ),
++            "a fatal barrier must not be swallowed as one unreadable reconcile candidate"
++        );
++        assert!(
++            matches!(
++                spool.cleanup_locked(&mut inner, 0),
++                Err(SpoolError::DurabilityUncertain)
++            ),
++            "a satisfied capacity check must not mask the fatal barrier"
++        );
++        drop(inner);
++
++        assert_eq!(
++            fs::read(&open_path).expect("open segment"),
++            before,
++            "no write may reach disk"
++        );
++        assert_eq!(
++            fs::read_dir(dir.path().join("sealed")).expect("sealed").count(),
++            sealed_before
++        );
++        assert_eq!(
++            recovery_marker_count(dir.path()),
++            markers_before,
++            "a rejected quarantine must not persist a new recovery marker"
++        );
++        assert_eq!(
++            fs::read(dir.path().join("tombstones.json")).expect("tombstone ledger"),
++            ledger_before,
++            "a rejected quarantine must not extend the tombstone ledger"
++        );
 +    }
 +
 +    #[test]
