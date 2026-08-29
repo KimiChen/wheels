@@ -330,6 +330,9 @@ with open(fixture_root / ("environment-" + source_root.name + ".json"), "w", enc
             environment["CARGO_ALIAS_ZIGBUILD"] = "run --package attacker"
             environment["CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER"] = "/tmp/attacker"
             environment["SSRP_ARBITRARY_ENV_SENTINEL"] = "must-not-leak"
+            rustup_home = root / "rustup-home"
+            rustup_home.mkdir(mode=0o755)
+            environment["RUSTUP_HOME"] = str(rustup_home)
             ambient_home = root / "ambient-cargo-home"
             ambient_home.mkdir()
             (ambient_home / "config.toml").write_text(
@@ -360,7 +363,8 @@ with open(fixture_root / ("environment-" + source_root.name + ".json"), "w", enc
                 (root / "target-a" / "build-receipt.json").read_text(encoding="utf-8")
             )
             self.assertEqual(
-                receipt["execution"]["command"][:2], ["cargo-zigbuild", "zigbuild"]
+                receipt["execution"]["command"][:2],
+                [str((fake_bin / "cargo-zigbuild").resolve()), "zigbuild"],
             )
             captured = json.loads(
                 (root / "environment-source-a.json").read_text(encoding="utf-8")
@@ -368,6 +372,17 @@ with open(fixture_root / ("environment-" + source_root.name + ".json"), "w", enc
             self.assertEqual(captured["CARGO_HOME"], str(cargo_home.resolve()))
             self.assertNotIn("CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER", captured)
             self.assertNotIn("SSRP_ARBITRARY_ENV_SENTINEL", captured)
+            # recipe.environment 必须是对本次构建环境的观测，而不是硬编码常量：
+            # PATH 与 RUSTUP_HOME 决定构建实际解析到哪些工具，必须逐字记入 receipt。
+            recorded = receipt["recipe"]["environment"]
+            self.assertEqual(recorded["PATH"], environment["PATH"])
+            self.assertEqual(recorded["RUSTUP_HOME"], str(rustup_home.resolve()))
+            self.assertEqual(recorded["CARGO_HOME"], "{cargo_home}")
+            self.assertEqual(recorded["CARGO_TARGET_DIR"], "{target_root}")
+            self.assertEqual(
+                set(recorded) - {"PATH", "RUSTUP_HOME"},
+                set(captured) - {"PATH", "RUSTUP_HOME", "__CF_USER_TEXT_ENCODING"},
+            )
 
             poisoned_home = root / "poisoned-cargo-home"
             poisoned_home.mkdir()

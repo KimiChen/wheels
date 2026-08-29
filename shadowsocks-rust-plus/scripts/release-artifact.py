@@ -30,6 +30,10 @@ SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 VERSION_PATTERN = re.compile(r"v[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}\Z")
 TOOL_VERSION_PATTERN = re.compile(r"[0-9]+(?:\.[0-9A-Za-z+-]+)+\Z")
 BUILD_IDS = ("build-a", "build-b")
+# Recorded verbatim in the receipt: they are decided by the build host and they
+# decide which toolchain binaries the build actually resolves.
+RECIPE_HOST_ENVIRONMENT = ("PATH", "RUSTUP_HOME")
+RECIPE_OPTIONAL_ENVIRONMENT = ("RUSTUP_HOME",)
 EVIDENCE_BOUNDARY = {
     "packager_checks": [
         "cargo-zigbuild-command-execution",
@@ -403,7 +407,22 @@ def _tree_sha256(root: Path) -> str:
     return digest.hexdigest()
 
 
-def _recipe_metadata(source_date_epoch: int) -> dict[str, Any]:
+def _encoded_rustflags(source_root: str, target_root: str, cargo_home: str) -> str:
+    return "\x1f".join(
+        (
+            f"--remap-path-prefix={source_root}=/usr/src/shadowsocks-rust",
+            f"--remap-path-prefix={target_root}=/usr/src/target",
+            f"--remap-path-prefix={cargo_home}=/usr/local/cargo",
+            "-C",
+            "link-arg=-Wl,--build-id=none",
+            "-C",
+            "strip=symbols",
+        )
+    )
+
+
+def _recipe_declaration() -> dict[str, Any]:
+    """Pinned part of the recipe: it never depends on the build host."""
     script_path = Path(__file__).resolve().parent / "build-linux-release.sh"
     script_payload, _ = _read_regular(script_path, MAX_MANIFEST_BYTES)
     return {
@@ -427,27 +446,96 @@ def _recipe_metadata(source_date_epoch: int) -> dict[str, Any]:
             "--bin",
             "shadowsocks-auditd",
         ],
-        "environment": {
-            "CARGO_ENCODED_RUSTFLAGS": (
-                "--remap-path-prefix={source_root}=/usr/src/shadowsocks-rust"
-                "\\x1f--remap-path-prefix={target_root}=/usr/src/target"
-                "\\x1f--remap-path-prefix={cargo_home}=/usr/local/cargo"
-                "\\x1f-C\\x1flink-arg=-Wl,--build-id=none"
-                "\\x1f-C\\x1fstrip=symbols"
-            ),
-            "CARGO_HOME": "{cargo_home}",
-            "CARGO_INCREMENTAL": "0",
-            "CARGO_PROFILE_RELEASE_INCREMENTAL": "false",
-            "CARGO_TARGET_DIR": "{target_root}",
-            "HOME": "{cargo_home}",
-            "LANG": "C",
-            "LC_ALL": "C",
-            "SHADOWSOCKS_BUILD_TIME_UTC": _epoch_timestamp(source_date_epoch),
-            "SOURCE_DATE_EPOCH": str(source_date_epoch),
-            "TZ": "UTC",
-            "ZERO_AR_DATE": "1",
-        },
     }
+
+
+def _recipe_environment_template(source_date_epoch: int) -> dict[str, str]:
+    """Environment variables the release recipe pins to a fixed value."""
+    return {
+        "CARGO_ENCODED_RUSTFLAGS": _encoded_rustflags(
+            "{source_root}", "{target_root}", "{cargo_home}"
+        ),
+        "CARGO_HOME": "{cargo_home}",
+        "CARGO_INCREMENTAL": "0",
+        "CARGO_PROFILE_RELEASE_INCREMENTAL": "false",
+        "CARGO_TARGET_DIR": "{target_root}",
+        "HOME": "{cargo_home}",
+        "LANG": "C",
+        "LC_ALL": "C",
+        "SHADOWSOCKS_BUILD_TIME_UTC": _epoch_timestamp(source_date_epoch),
+        "SOURCE_DATE_EPOCH": str(source_date_epoch),
+        "TZ": "UTC",
+        "ZERO_AR_DATE": "1",
+    }
+
+
+def _observed_recipe_environment(
+    environment: dict[str, str],
+    source_root: Path,
+    target_root: Path,
+    cargo_home: Path,
+) -> dict[str, str]:
+    """Record the environment the build actually ran with.
+
+    Only the three per-build absolute roots are folded back into the recipe
+    placeholders, so both independent builds record the same recipe while the
+    host-determined PATH and RUSTUP_HOME — which decide *which* toolchain
+    binaries the build resolves — are recorded verbatim.
+    """
+    placeholders = sorted(
+        (
+            (str(source_root), "{source_root}"),
+            (str(target_root), "{target_root}"),
+            (str(cargo_home), "{cargo_home}"),
+        ),
+        key=lambda item: len(item[0]),
+        reverse=True,
+    )
+    observed: dict[str, str] = {}
+    for key, value in environment.items():
+        for actual, placeholder in placeholders:
+            value = value.replace(actual, placeholder)
+        observed[key] = value
+    return observed
+
+
+def _observed_execution_command(command: list[str], source_root: Path) -> list[str]:
+    """Record the argv actually executed, keeping the resolved tool path."""
+    return [
+        command[0],
+        *(item.replace(str(source_root), "{source_root}") for item in command[1:]),
+    ]
+
+
+def _recipe_metadata(environment: dict[str, str]) -> dict[str, Any]:
+    return {**_recipe_declaration(), "environment": dict(environment)}
+
+
+def _validate_recipe(recipe: Any, source_date_epoch: int) -> None:
+    if not isinstance(recipe, dict):
+        raise ArtifactError("build receipt recipe 必须是对象")
+    declaration = _recipe_declaration()
+    _exact_keys(recipe, set(declaration) | {"environment"}, "build receipt recipe")
+    for key, expected in declaration.items():
+        if recipe[key] != expected:
+            raise ArtifactError("build receipt recipe 与当前发布脚本不一致")
+    environment = recipe["environment"]
+    if not isinstance(environment, dict):
+        raise ArtifactError("build receipt recipe.environment 必须是对象")
+    template = _recipe_environment_template(source_date_epoch)
+    _exact_keys(
+        environment,
+        set(template) | {"PATH"} | (set(environment) & set(RECIPE_OPTIONAL_ENVIRONMENT)),
+        "build receipt recipe.environment",
+    )
+    for key, expected in template.items():
+        if environment[key] != expected:
+            raise ArtifactError(f"build receipt recipe.environment.{key} 与发布配方不一致")
+    for key in RECIPE_HOST_ENVIRONMENT:
+        if key in environment and (
+            not isinstance(environment[key], str) or not environment[key]
+        ):
+            raise ArtifactError(f"build receipt recipe.environment.{key} 必须是非空字符串")
 
 
 def _resolve_cargo_zigbuild(environment: dict[str, str]) -> Path:
@@ -634,17 +722,7 @@ def _release_build_environment(
     cargo_home: Path,
     source_date_epoch: int,
 ) -> dict[str, str]:
-    encoded_flags = "\x1f".join(
-        (
-            f"--remap-path-prefix={source_root}=/usr/src/shadowsocks-rust",
-            f"--remap-path-prefix={target_root}=/usr/src/target",
-            f"--remap-path-prefix={cargo_home}=/usr/local/cargo",
-            "-C",
-            "link-arg=-Wl,--build-id=none",
-            "-C",
-            "strip=symbols",
-        )
-    )
+    encoded_flags = _encoded_rustflags(str(source_root), str(target_root), str(cargo_home))
     path = os.environ.get("PATH")
     if not path:
         raise ArtifactError("构建环境缺少 PATH")
@@ -824,8 +902,7 @@ def _parse_build_receipt(payload: bytes, expected_build_id: str | None = None) -
     if not isinstance(toolchain, dict):
         raise ArtifactError("build receipt toolchain 必须是对象")
     _validate_toolchain(toolchain, "build receipt toolchain")
-    if value["recipe"] != _recipe_metadata(build["source_date_epoch"]):
-        raise ArtifactError("build receipt recipe 与当前发布脚本或 source epoch 不一致")
+    _validate_recipe(value["recipe"], build["source_date_epoch"])
     execution = value["execution"]
     if not isinstance(execution, dict):
         raise ArtifactError("build receipt execution 必须是对象")
@@ -834,9 +911,22 @@ def _parse_build_receipt(payload: bytes, expected_build_id: str | None = None) -
         {"runner", "command", "exit_code", "target_was_empty"},
         "build receipt execution",
     )
+    command_template = value["recipe"]["command_template"]
+    command = execution["command"]
+    if (
+        not isinstance(command, list)
+        or len(command) != len(command_template)
+        or not all(isinstance(item, str) for item in command)
+    ):
+        raise ArtifactError("build receipt execution.command 格式错误")
+    executable = command[0]
+    if not executable.startswith("/") or os.path.basename(executable) != "cargo-zigbuild":
+        raise ArtifactError(
+            "build receipt execution.command 必须记录实际执行的 cargo-zigbuild 绝对路径"
+        )
     expected_execution = {
         "runner": "scripts/release-artifact.py build-and-receipt",
-        "command": value["recipe"]["command_template"],
+        "command": [executable, *command_template[1:]],
         "exit_code": 0,
         "target_was_empty": True,
     }
@@ -1438,11 +1528,13 @@ def command_build_and_receipt(args: argparse.Namespace) -> None:
             "source_date_epoch": args.source_date_epoch,
         },
         "toolchain": toolchain,
-        "recipe": _recipe_metadata(args.source_date_epoch),
+        "recipe": _recipe_metadata(
+            _observed_recipe_environment(environment, source_root, target_root, cargo_home)
+        ),
         "execution": {
             "runner": "scripts/release-artifact.py build-and-receipt",
-            "command": _recipe_metadata(args.source_date_epoch)["command_template"],
-            "exit_code": 0,
+            "command": _observed_execution_command(command, source_root),
+            "exit_code": completed.returncode,
             "target_was_empty": True,
         },
         "artifacts": _receipt_artifacts(args.build_id, binaries),
