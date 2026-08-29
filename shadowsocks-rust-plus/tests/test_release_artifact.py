@@ -656,6 +656,92 @@ with open(fixture_root / ("environment-" + source_root.name + ".json"), "w", enc
             )
             self.assertIn("prepared_tree_sha256", result.stderr)
 
+    @unittest.skipUnless(
+        shutil.which("git") and shutil.which("patch"), "git and patch are required"
+    )
+    def test_prepare_source_creates_parent_directories_named_by_patches(self) -> None:
+        """补丁新增嵌套路径时，源码准备必须先建好父目录（部分 patch(1) 不会代劳）。"""
+        with tempfile.TemporaryDirectory(prefix="ssrp-prepare-source-") as temporary:
+            root = Path(temporary)
+            origin = root / "upstream-origin"
+            (origin / "src").mkdir(parents=True)
+            (origin / "Cargo.toml").write_text(
+                '[workspace]\nresolver = "2"\n', encoding="utf-8"
+            )
+            (origin / "src" / "main.rs").write_text("fn main() {}\n", encoding="utf-8")
+            for arguments in (
+                ["init", "-q", "-b", "main"],
+                ["add", "-A"],
+                ["-c", "user.email=a@b", "-c", "user.name=c", "commit", "-qm", "base"],
+                ["tag", "v0.0.1"],
+            ):
+                self.run_command(["git", "-C", str(origin), *arguments])
+            commit = self.run_command(
+                ["git", "-C", str(origin), "rev-parse", "v0.0.1^{commit}"]
+            ).stdout.strip()
+
+            fixture = root / "fixture"
+            (fixture / "scripts").mkdir(parents=True)
+            (fixture / "patches").mkdir()
+            for name in ("lib.sh", "prepare-source.sh", "check-patch-deletions.py"):
+                shutil.copy2(PROJECT_ROOT / "scripts" / name, fixture / "scripts" / name)
+            (fixture / "upstream.lock").write_text(
+                "schema_version=1\n"
+                f"repository={origin}\n"
+                "tag=v0.0.1\n"
+                f"commit={commit}\n",
+                encoding="utf-8",
+            )
+            (fixture / "patches" / "0001-add-nested.patch").write_text(
+                "diff --git a/crates/nested/deep/new.rs b/crates/nested/deep/new.rs\n"
+                "new file mode 100644\n"
+                "--- /dev/null\n"
+                "+++ b/crates/nested/deep/new.rs\n"
+                "@@ -0,0 +1 @@\n"
+                "+pub fn added() {}\n",
+                encoding="utf-8",
+            )
+            (fixture / "patches" / "series").write_text(
+                "0001-add-nested.patch\n", encoding="utf-8"
+            )
+
+            # 站位 patch(1)：拒绝为新文件创建上级目录，正是这段循环存在的理由。
+            strict_bin = root / "strict-bin"
+            strict_bin.mkdir()
+            real_patch = shutil.which("patch")
+            (strict_bin / "patch").write_text(
+                "#!/bin/sh\n"
+                "spool=$(mktemp)\n"
+                'cat > "$spool"\n'
+                "while IFS= read -r line; do\n"
+                '  case "$line" in\n'
+                '    "+++ b/"*)\n'
+                "      target=${line#+++ b/}\n"
+                '      directory=$(dirname "$target")\n'
+                '      if [ "$directory" != "." ] && [ ! -d "$directory" ]; then\n'
+                '        printf "patch: 缺少上级目录 %s\\n" "$directory" >&2\n'
+                '        rm -f "$spool"\n'
+                "        exit 2\n"
+                "      fi\n"
+                "      ;;\n"
+                "  esac\n"
+                'done < "$spool"\n'
+                f"{shlex.quote(real_patch or 'patch')} \"$@\" < \"$spool\"\n"
+                "status=$?\n"
+                'rm -f "$spool"\n'
+                'exit "$status"\n',
+                encoding="utf-8",
+            )
+            os.chmod(strict_bin / "patch", 0o755)
+            env = os.environ.copy()
+            env["PATH"] = f"{strict_bin}{os.pathsep}{env['PATH']}"
+
+            prepared = root / "prepared"
+            self.run_command(
+                [str(fixture / "scripts" / "prepare-source.sh"), str(prepared)], env=env
+            )
+            self.assertTrue((prepared / "crates" / "nested" / "deep" / "new.rs").is_file())
+
     def test_build_receipt_requires_command_execution_and_empty_target(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ssrp-release-build-proof-") as temporary:
             root = Path(temporary)

@@ -47,8 +47,11 @@ while IFS= read -r patch_name; do
   # so newly added crates and fuzz targets remain replayable from a clean
   # upstream archive.
   while IFS= read -r target_path; do
-    [[ "$target_path" == b/* ]] || continue
-    target_path="${target_path#b/}"
+    # `sed` already stripped the `b/` prefix, so the guard here must reject
+    # paths that could escape the disposable source tree, not re-test it.
+    case "$target_path" in
+      ""|/*|../*|*/../*|*/..) die "补丁目标路径非法：$patch_name -> $target_path" ;;
+    esac
     mkdir -p "$output_dir/$(dirname "$target_path")"
   done < <(sed -n 's#^+++ b/##p' "$patch_path")
   # Validate both properties that patch(1) itself does not enforce: a deletion
