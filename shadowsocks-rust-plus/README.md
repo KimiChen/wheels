@@ -342,7 +342,9 @@ exporter 是统计启用时的必要服务，而不是可选旁路：
 - [安装、监控与回滚](docs/OPERATIONS.md)：生产前检查、systemd、采集、重启屏障和回滚。
 - [固定上游基线](docs/UPSTREAM_BASELINE.md)：tag/commit、已知测试基线和升级规则。
 - [参考性能基线](docs/PERFORMANCE.md)：快照规模与回环数据面对照结果、局限和复测要求。
-- [用户成功访问审计规格](docs/USER_ACCESS_AUDIT.md)：审计事件、ingest/spool/export 协议、HMAC、保留和验收合同。
+- [用户成功访问审计规格](docs/USER_ACCESS_AUDIT.md)：审计事件、ingest/spool/export 协议、HMAC、保留和验收合同；
+  该文件同时是第 1–8 轮审计与 Linux 实装验收的历史档案。
+- [用户成功访问审计待办（V2）](docs/USER_ACCESS_AUDIT_V2.md)：仍未闭合的问题、待执行的验证与需决策事项。
 - [测试与性能](tests/README.md)：自动化测试、集成测试和 benchmark 运行方式。
 
 ## 范围边界
