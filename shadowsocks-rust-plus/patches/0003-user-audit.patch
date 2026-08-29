@@ -215,10 +215,10 @@ index 0000000000000000000000000000000000000000..4a4ba0194459f0c5876e9b00dc138024
 +thiserror = "2.0"
 diff --git a/crates/shadowsocks-audit-protocol/src/golden_vectors.json b/crates/shadowsocks-audit-protocol/src/golden_vectors.json
 new file mode 100644
-index 0000000000000000000000000000000000000000..74554b1adf41d2373414239742c34ea4d9604a78
+index 0000000000000000000000000000000000000000..2cad1d424649265187bdba38c312ccea07336240
 --- /dev/null
 +++ b/crates/shadowsocks-audit-protocol/src/golden_vectors.json
-@@ -0,0 +1,119 @@
+@@ -0,0 +1,129 @@
 +{
 +  "hmac_key_hex": "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
 +  "request": {
@@ -336,14 +336,24 @@ index 0000000000000000000000000000000000000000..74554b1adf41d2373414239742c34ea4
 +      "canonical": "{\"spool_schema_version\":1,\"spool_epoch\":\"cccccccccccccccccccccccccccccccc\",\"spool_sequence\":\"2\",\"received_at_unix_ms\":\"1787587230002\",\"event_payload_sha256\":\"5b05c3294e8e2f8f36ce92f532e08a55b5a81b8e1fd40121b259eeeb6ba51cd5\",\"event\":{\"schema_version\":1,\"record_type\":\"diagnostic\",\"event_type\":\"spool_gap\",\"event_id\":\"spool:dddddddddddddddddddddddddddddddd\",\"occurred_at_unix_ms\":\"1787587221000\",\"node_id\":\"node-example-01\",\"spool_epoch\":\"89abcdef0123456789abcdef01234567\",\"lost_spool_epoch\":null,\"reason\":\"state_reset\",\"first_lost_spool_sequence\":null,\"last_lost_spool_sequence\":null,\"lost_events\":null,\"lost_bytes\":null,\"lost_batch_id\":null}}\n",
 +      "sha256": "c565a0fb815001993ebf4ab218718f64a626e74b4d26dfda44471e30fb26141e"
 +    }
++  },
++  "recovery_gap_markers": {
++    "orphan_open_schema_2": {
++      "canonical": "{\"marker_schema_version\":2,\"event_id\":\"spool:fedcba9876543210fedcba9876543210\",\"occurred_at_unix_ms\":1787587220000,\"lost_spool_epoch\":\"89abcdef0123456789abcdef01234567\",\"reason\":\"capacity_eviction\",\"first_lost_spool_sequence\":1,\"last_lost_spool_sequence\":1000,\"lost_events\":1000,\"lost_bytes\":4194304,\"lost_batch_id\":\"fedcba9876543210fedcba9876543210\",\"source_fingerprint\":\"orphan-open:abababababababababababababababababababababababababababababababab\"}",
++      "sha256": "6dff87ecde7a2dfa793e88072c36f190ea7a9857a7379ea29ce31a0d5c560c4d"
++    },
++    "legacy_schema_1": {
++      "canonical": "{\"marker_schema_version\":1,\"event_id\":\"spool:dddddddddddddddddddddddddddddddd\",\"occurred_at_unix_ms\":1787587221000,\"lost_spool_epoch\":null,\"reason\":\"state_reset\",\"first_lost_spool_sequence\":null,\"last_lost_spool_sequence\":null,\"lost_events\":null,\"lost_bytes\":null,\"lost_batch_id\":null}",
++      "sha256": "5aa3020d454310717f353a3e39edbf2d07c6a61b1c725411e52a4b4101b00f12"
++    }
 +  }
 +}
 diff --git a/crates/shadowsocks-audit-protocol/src/lib.rs b/crates/shadowsocks-audit-protocol/src/lib.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..b8c6b8706b4624f89f3a938720af5ba6a1381ad6
+index 0000000000000000000000000000000000000000..bd0bf6748abb81d226536a68024528ab5cdb05dc
 --- /dev/null
 +++ b/crates/shadowsocks-audit-protocol/src/lib.rs
-@@ -0,0 +1,3602 @@
+@@ -0,0 +1,3710 @@
 +//! Wire types and deterministic canonicalization for the node-local access audit.
 +//!
 +//! This crate deliberately contains no filesystem, socket, clock, or task code.  It
@@ -1327,6 +1337,48 @@ index 0000000000000000000000000000000000000000..b8c6b8706b4624f89f3a938720af5ba6
 +            return Err(invalid("lost_bytes", "must be positive when present"));
 +        }
 +        Ok(())
++    }
++}
++
++/// Current schema of the node-local recovery gap marker.
++pub const RECOVERY_GAP_MARKER_SCHEMA: u8 = 2;
++/// Schema 1 markers predate `source_fingerprint` and are still readable.
++pub const LEGACY_RECOVERY_GAP_MARKER_SCHEMA: u8 = 1;
++
++/// Private on-disk intent record for a recovery gap.
++///
++/// A marker never reaches a collector: the daemon writes it before the
++/// corresponding `spool_gap` is durable and unlinks it afterwards.  Its schema
++/// still lives beside the wire records so that every stack reads the same
++/// field names, order and encoding, and so the shared golden vectors can pin
++/// the exact bytes.  Numbers are plain JSON integers here, unlike the decimal
++/// strings of the exported `spool_gap`.
++#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
++#[serde(deny_unknown_fields)]
++pub struct RecoveryGapMarker {
++    pub marker_schema_version: u8,
++    pub event_id: String,
++    pub occurred_at_unix_ms: u64,
++    pub lost_spool_epoch: Option<String>,
++    pub reason: SpoolGapReason,
++    pub first_lost_spool_sequence: Option<u64>,
++    pub last_lost_spool_sequence: Option<u64>,
++    pub lost_events: Option<u64>,
++    pub lost_bytes: Option<u64>,
++    pub lost_batch_id: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub source_fingerprint: Option<String>,
++}
++
++impl RecoveryGapMarker {
++    /// True for the marker schemas this build understands.  A schema 1 marker
++    /// predates the fingerprint field and must not carry one.
++    pub fn schema_is_supported(&self) -> bool {
++        match self.marker_schema_version {
++            RECOVERY_GAP_MARKER_SCHEMA => true,
++            LEGACY_RECOVERY_GAP_MARKER_SCHEMA => self.source_fingerprint.is_none(),
++            _ => false,
++        }
 +    }
 +}
 +
@@ -3880,6 +3932,72 @@ index 0000000000000000000000000000000000000000..b8c6b8706b4624f89f3a938720af5ba6
 +                .unwrap_or_else(|error| panic!("{name} golden record should parse: {error}"));
 +            assert_eq!(serialize_canonical_record(&record).unwrap(), canonical, "{name} bytes");
 +        }
++    }
++
++    #[test]
++    fn recovery_gap_marker_golden_vectors_are_canonical_and_round_trip() {
++        let vectors = golden_vectors();
++        let markers = vectors
++            .get("recovery_gap_markers")
++            .and_then(Value::as_object)
++            .expect("recovery gap marker vectors object");
++        let actual = markers
++            .keys()
++            .map(String::as_str)
++            .collect::<std::collections::BTreeSet<_>>();
++        let expected = ["orphan_open_schema_2", "legacy_schema_1"]
++            .into_iter()
++            .collect::<std::collections::BTreeSet<_>>();
++        assert_eq!(actual, expected);
++        for (name, vector) in markers {
++            let canonical = vector
++                .get("canonical")
++                .and_then(Value::as_str)
++                .expect("canonical marker text")
++                .as_bytes();
++            assert_eq!(
++                sha256_hex(canonical),
++                vector.get("sha256").and_then(Value::as_str).expect("marker digest"),
++                "{name} digest"
++            );
++            let marker = parse_canonical::<RecoveryGapMarker>(canonical)
++                .unwrap_or_else(|error| panic!("{name} golden marker should parse: {error}"));
++            assert!(marker.schema_is_supported(), "{name} schema");
++            assert_eq!(serialize_canonical(&marker).unwrap(), canonical, "{name} bytes");
++        }
++        let schema_2 = markers["orphan_open_schema_2"]["canonical"].as_str().unwrap();
++        assert!(schema_2.contains("\"source_fingerprint\""));
++        assert!(
++            !markers["legacy_schema_1"]["canonical"]
++                .as_str()
++                .unwrap()
++                .contains("source_fingerprint")
++        );
++    }
++
++    #[test]
++    fn recovery_gap_marker_rejects_unknown_and_unsupported_schemas() {
++        let vectors = golden_vectors();
++        let canonical = vectors["recovery_gap_markers"]["legacy_schema_1"]["canonical"]
++            .as_str()
++            .unwrap()
++            .to_owned();
++        // Unknown members and non-canonical member order are both refused.
++        let extended = canonical.replace(
++            "\"marker_schema_version\":1",
++            "\"marker_schema_version\":1,\"unexpected\":true",
++        );
++        assert!(parse_canonical::<RecoveryGapMarker>(extended.as_bytes()).is_err());
++        // A schema 1 marker predates the fingerprint field.
++        let fingerprinted = canonical.replace(
++            "\"lost_batch_id\":null",
++            "\"lost_batch_id\":null,\"source_fingerprint\":\"orphan-open:00\"",
++        );
++        let marker = parse_canonical::<RecoveryGapMarker>(fingerprinted.as_bytes()).expect("canonical bytes");
++        assert!(!marker.schema_is_supported());
++        let mut future = parse_canonical::<RecoveryGapMarker>(canonical.as_bytes()).expect("legacy marker");
++        future.marker_schema_version = RECOVERY_GAP_MARKER_SCHEMA + 1;
++        assert!(!future.schema_is_supported());
 +    }
 +
 +    #[test]
@@ -7855,10 +7973,10 @@ index 0000000000000000000000000000000000000000..6cf8d005dfef917c852be4f611d5b945
 +}
 diff --git a/crates/shadowsocks-auditd/src/spool.rs b/crates/shadowsocks-auditd/src/spool.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..c0afb7d9033240fc169c64d9af1c725a3d4ce1ea
+index 0000000000000000000000000000000000000000..9cd73a0c431e340f795f2ed7d2a7a7c078416c47
 --- /dev/null
 +++ b/crates/shadowsocks-auditd/src/spool.rs
-@@ -0,0 +1,7962 @@
+@@ -0,0 +1,7934 @@
 +//! Durable, node-local audit spool.
 +//!
 +//! The spool is deliberately synchronous.  Ingest and export perform their
@@ -7899,8 +8017,6 @@ index 0000000000000000000000000000000000000000..c0afb7d9033240fc169c64d9af1c725a
 +const RETENTION_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 +const INDEX_REBUILD_RETRY_INTERVAL: Duration = Duration::from_secs(60);
 +const MAX_CLEANUP_ITERATIONS: usize = MAX_TOMBSTONES;
-+const RECOVERY_GAP_MARKER_SCHEMA: u8 = 2;
-+const LEGACY_RECOVERY_GAP_MARKER_SCHEMA: u8 = 1;
 +const RECOVERY_GAP_MARKER_PREFIX: &str = ".recovery-gap-";
 +const ORPHAN_OPEN_SOURCE_PREFIX: &str = "orphan-open:";
 +// Recovery gaps derived from a damaged spool object are bound to that exact
@@ -8046,27 +8162,6 @@ index 0000000000000000000000000000000000000000..c0afb7d9033240fc169c64d9af1c725a
 +    source_fingerprint: Option<String>,
 +}
 +
-+/// Private on-disk intent record for a recovery gap.  This is deliberately
-+/// separate from the wire tombstone schema: a marker is removed as soon as
-+/// the corresponding `spool_gap` reaches the durable open segment and is
-+/// never exported to a collector.
-+#[derive(Debug, Clone, Serialize, Deserialize)]
-+#[serde(deny_unknown_fields)]
-+struct RecoveryGapMarker {
-+    marker_schema_version: u8,
-+    event_id: String,
-+    occurred_at_unix_ms: u64,
-+    lost_spool_epoch: Option<String>,
-+    reason: wire::SpoolGapReason,
-+    first_lost_spool_sequence: Option<u64>,
-+    last_lost_spool_sequence: Option<u64>,
-+    lost_events: Option<u64>,
-+    lost_bytes: Option<u64>,
-+    lost_batch_id: Option<String>,
-+    #[serde(default, skip_serializing_if = "Option::is_none")]
-+    source_fingerprint: Option<String>,
-+}
-+
 +#[derive(Debug, Clone, Serialize, Deserialize)]
 +#[serde(deny_unknown_fields)]
 +struct TombstonePendingMarker {
@@ -8108,61 +8203,56 @@ index 0000000000000000000000000000000000000000..c0afb7d9033240fc169c64d9af1c725a
 +    }
 +}
 +
-+impl RecoveryGapMarker {
-+    fn from_spec(spec: &GapSpec) -> Self {
-+        Self {
-+            marker_schema_version: RECOVERY_GAP_MARKER_SCHEMA,
-+            event_id: spec.event_id.clone(),
-+            occurred_at_unix_ms: spec.occurred_at_unix_ms,
-+            lost_spool_epoch: spec.lost_spool_epoch.clone(),
-+            reason: spec.reason,
-+            first_lost_spool_sequence: spec.first_lost_spool_sequence,
-+            last_lost_spool_sequence: spec.last_lost_spool_sequence,
-+            lost_events: spec.lost_events,
-+            lost_bytes: spec.lost_bytes,
-+            lost_batch_id: spec.lost_batch_id.clone(),
-+            source_fingerprint: spec.source_fingerprint.clone(),
-+        }
++/// Build the on-disk marker for a recovery intent.  The schema itself lives
++/// in the protocol crate so both stacks agree on the exact bytes.
++fn recovery_gap_marker_from_spec(spec: &GapSpec) -> wire::RecoveryGapMarker {
++    wire::RecoveryGapMarker {
++        marker_schema_version: wire::RECOVERY_GAP_MARKER_SCHEMA,
++        event_id: spec.event_id.clone(),
++        occurred_at_unix_ms: spec.occurred_at_unix_ms,
++        lost_spool_epoch: spec.lost_spool_epoch.clone(),
++        reason: spec.reason,
++        first_lost_spool_sequence: spec.first_lost_spool_sequence,
++        last_lost_spool_sequence: spec.last_lost_spool_sequence,
++        lost_events: spec.lost_events,
++        lost_bytes: spec.lost_bytes,
++        lost_batch_id: spec.lost_batch_id.clone(),
++        source_fingerprint: spec.source_fingerprint.clone(),
 +    }
++}
 +
-+    fn into_spec(self) -> Result<GapSpec, SpoolError> {
-+        if !matches!(
-+            self.marker_schema_version,
-+            LEGACY_RECOVERY_GAP_MARKER_SCHEMA | RECOVERY_GAP_MARKER_SCHEMA
-+        ) {
-+            return Err(SpoolError::InvalidState(
-+                "unsupported recovery gap marker schema".to_owned(),
-+            ));
-+        }
-+        if self.marker_schema_version == LEGACY_RECOVERY_GAP_MARKER_SCHEMA && self.source_fingerprint.is_some() {
-+            return Err(SpoolError::InvalidState(
-+                "legacy recovery gap marker cannot contain a source fingerprint".to_owned(),
-+            ));
-+        }
-+        validate_gap_identity(
-+            &self.event_id,
-+            self.lost_spool_epoch.as_deref(),
-+            self.first_lost_spool_sequence,
-+            self.last_lost_spool_sequence,
-+            self.lost_events,
-+            self.lost_bytes,
-+            self.lost_batch_id.as_deref(),
-+        )?;
-+        let spec = GapSpec {
-+            event_id: self.event_id,
-+            occurred_at_unix_ms: self.occurred_at_unix_ms,
-+            lost_spool_epoch: self.lost_spool_epoch,
-+            reason: self.reason,
-+            first_lost_spool_sequence: self.first_lost_spool_sequence,
-+            last_lost_spool_sequence: self.last_lost_spool_sequence,
-+            lost_events: self.lost_events,
-+            lost_bytes: self.lost_bytes,
-+            lost_batch_id: self.lost_batch_id,
-+            source_fingerprint: self.source_fingerprint,
-+        };
-+        validate_gap_spec(&spec)?;
-+        Ok(spec)
++/// Convert a parsed marker back into a recovery intent.  Schema acceptance is
++/// the protocol crate's rule; the identity and payload rules stay here because
++/// they guard this daemon's cursor.
++fn recovery_gap_spec_from_marker(marker: wire::RecoveryGapMarker) -> Result<GapSpec, SpoolError> {
++    if !marker.schema_is_supported() {
++        return Err(SpoolError::InvalidState(
++            "unsupported recovery gap marker schema".to_owned(),
++        ));
 +    }
++    validate_gap_identity(
++        &marker.event_id,
++        marker.lost_spool_epoch.as_deref(),
++        marker.first_lost_spool_sequence,
++        marker.last_lost_spool_sequence,
++        marker.lost_events,
++        marker.lost_bytes,
++        marker.lost_batch_id.as_deref(),
++    )?;
++    let spec = GapSpec {
++        event_id: marker.event_id,
++        occurred_at_unix_ms: marker.occurred_at_unix_ms,
++        lost_spool_epoch: marker.lost_spool_epoch,
++        reason: marker.reason,
++        first_lost_spool_sequence: marker.first_lost_spool_sequence,
++        last_lost_spool_sequence: marker.last_lost_spool_sequence,
++        lost_events: marker.lost_events,
++        lost_bytes: marker.lost_bytes,
++        lost_batch_id: marker.lost_batch_id,
++        source_fingerprint: marker.source_fingerprint,
++    };
++    validate_gap_spec(&spec)?;
++    Ok(spec)
 +}
 +
 +/// Validate the identity-bearing fields copied into a recovery marker before
@@ -8392,9 +8482,9 @@ index 0000000000000000000000000000000000000000..c0afb7d9033240fc169c64d9af1c725a
 +    let path = recovery_gap_marker_path(root, &spec.event_id)?;
 +    if fs::symlink_metadata(&path).is_ok() {
 +        let existing = read_regular_file(&path).map_err(SpoolError::Io).and_then(|bytes| {
-+            wire::parse_canonical::<RecoveryGapMarker>(&bytes)
-+                .map_err(|error| SpoolError::Protocol(ProtocolError::from(error)))?
-+                .into_spec()
++            let marker = wire::parse_canonical::<wire::RecoveryGapMarker>(&bytes)
++                .map_err(|error| SpoolError::Protocol(ProtocolError::from(error)))?;
++            recovery_gap_spec_from_marker(marker)
 +        })?;
 +        if existing.event_id == spec.event_id && existing.same_payload(spec) {
 +            return Ok(());
@@ -8403,7 +8493,7 @@ index 0000000000000000000000000000000000000000..c0afb7d9033240fc169c64d9af1c725a
 +            "recovery gap marker has a conflicting identity".to_owned(),
 +        ));
 +    }
-+    let marker = RecoveryGapMarker::from_spec(spec);
++    let marker = recovery_gap_marker_from_spec(spec);
 +    let bytes = wire::serialize_canonical(&marker).map_err(|error| SpoolError::Protocol(ProtocolError::from(error)))?;
 +    write_atomic_file(&path, &bytes, 0o600)
 +}
@@ -8415,9 +8505,9 @@ index 0000000000000000000000000000000000000000..c0afb7d9033240fc169c64d9af1c725a
 +        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
 +        Err(error) => return Err(error.into()),
 +    };
-+    let marker = wire::parse_canonical::<RecoveryGapMarker>(&bytes)
++    let marker = wire::parse_canonical::<wire::RecoveryGapMarker>(&bytes)
 +        .map_err(|error| SpoolError::Protocol(ProtocolError::from(error)))?;
-+    let spec = marker.into_spec()?;
++    let spec = recovery_gap_spec_from_marker(marker)?;
 +    if spec.event_id != event_id {
 +        return Err(SpoolError::InvalidState(
 +            "recovery gap marker filename does not match event_id".to_owned(),
@@ -8545,9 +8635,9 @@ index 0000000000000000000000000000000000000000..c0afb7d9033240fc169c64d9af1c725a
 +        // corruption gaps, but leave the original inode in place until the
 +        // corresponding gap is durable and the marker can be unlinked.
 +        let parsed = read_regular_file(&path).map_err(SpoolError::Io).and_then(|bytes| {
-+            wire::parse_canonical::<RecoveryGapMarker>(&bytes)
-+                .map_err(|error| SpoolError::Protocol(ProtocolError::from(error)))?
-+                .into_spec()
++            let marker = wire::parse_canonical::<wire::RecoveryGapMarker>(&bytes)
++                .map_err(|error| SpoolError::Protocol(ProtocolError::from(error)))?;
++            recovery_gap_spec_from_marker(marker)
 +        });
 +        let spec = match parsed {
 +            Ok(spec) if spec.event_id == event_id => spec,

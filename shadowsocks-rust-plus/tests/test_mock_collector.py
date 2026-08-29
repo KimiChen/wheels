@@ -143,6 +143,27 @@ class MockCollectorProtocolTest(unittest.TestCase):
             # in member ordering or escaping in the collector serializer.
             self.assertEqual(canonical_json(parsed), raw, name)
 
+    def test_recovery_gap_marker_golden_vectors_are_canonical(self) -> None:
+        data = vectors()
+        markers = data.get("recovery_gap_markers")
+        self.assertIsInstance(markers, dict)
+        self.assertEqual(set(markers), {"orphan_open_schema_2", "legacy_schema_1"})
+        for name, vector in markers.items():
+            raw = vector["canonical"].encode("utf-8")
+            self.assertEqual(sha256_hex(raw), vector["sha256"], name)
+            parsed = strict_json(raw)
+            self.assertIsInstance(parsed, dict, name)
+            # The node-local recovery marker is not a wire record, but both
+            # stacks must still agree on its member order and encoding.
+            self.assertEqual(canonical_json(parsed), raw, name)
+        schema_2 = strict_json(markers["orphan_open_schema_2"]["canonical"].encode("utf-8"))
+        self.assertEqual(schema_2["marker_schema_version"], 2)
+        self.assertTrue(str(schema_2["source_fingerprint"]).startswith("orphan-open:"))
+        self.assertEqual(schema_2["event_id"][:6], "spool:")
+        legacy = strict_json(markers["legacy_schema_1"]["canonical"].encode("utf-8"))
+        self.assertEqual(legacy["marker_schema_version"], 1)
+        self.assertNotIn("source_fingerprint", legacy)
+
     def test_request_golden_vector(self) -> None:
         data = vectors()
         request_vector = data["request"]

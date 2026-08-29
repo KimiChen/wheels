@@ -115,5 +115,15 @@
       "canonical": "{\"spool_schema_version\":1,\"spool_epoch\":\"cccccccccccccccccccccccccccccccc\",\"spool_sequence\":\"2\",\"received_at_unix_ms\":\"1787587230002\",\"event_payload_sha256\":\"5b05c3294e8e2f8f36ce92f532e08a55b5a81b8e1fd40121b259eeeb6ba51cd5\",\"event\":{\"schema_version\":1,\"record_type\":\"diagnostic\",\"event_type\":\"spool_gap\",\"event_id\":\"spool:dddddddddddddddddddddddddddddddd\",\"occurred_at_unix_ms\":\"1787587221000\",\"node_id\":\"node-example-01\",\"spool_epoch\":\"89abcdef0123456789abcdef01234567\",\"lost_spool_epoch\":null,\"reason\":\"state_reset\",\"first_lost_spool_sequence\":null,\"last_lost_spool_sequence\":null,\"lost_events\":null,\"lost_bytes\":null,\"lost_batch_id\":null}}\n",
       "sha256": "c565a0fb815001993ebf4ab218718f64a626e74b4d26dfda44471e30fb26141e"
     }
+  },
+  "recovery_gap_markers": {
+    "orphan_open_schema_2": {
+      "canonical": "{\"marker_schema_version\":2,\"event_id\":\"spool:fedcba9876543210fedcba9876543210\",\"occurred_at_unix_ms\":1787587220000,\"lost_spool_epoch\":\"89abcdef0123456789abcdef01234567\",\"reason\":\"capacity_eviction\",\"first_lost_spool_sequence\":1,\"last_lost_spool_sequence\":1000,\"lost_events\":1000,\"lost_bytes\":4194304,\"lost_batch_id\":\"fedcba9876543210fedcba9876543210\",\"source_fingerprint\":\"orphan-open:abababababababababababababababababababababababababababababababab\"}",
+      "sha256": "6dff87ecde7a2dfa793e88072c36f190ea7a9857a7379ea29ce31a0d5c560c4d"
+    },
+    "legacy_schema_1": {
+      "canonical": "{\"marker_schema_version\":1,\"event_id\":\"spool:dddddddddddddddddddddddddddddddd\",\"occurred_at_unix_ms\":1787587221000,\"lost_spool_epoch\":null,\"reason\":\"state_reset\",\"first_lost_spool_sequence\":null,\"last_lost_spool_sequence\":null,\"lost_events\":null,\"lost_bytes\":null,\"lost_batch_id\":null}",
+      "sha256": "5aa3020d454310717f353a3e39edbf2d07c6a61b1c725411e52a4b4101b00f12"
+    }
   }
 }
