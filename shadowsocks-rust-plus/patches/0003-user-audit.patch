@@ -7813,10 +7813,10 @@ index 0000000000000000000000000000000000000000..6cf8d005dfef917c852be4f611d5b945
 +}
 diff --git a/crates/shadowsocks-auditd/src/spool.rs b/crates/shadowsocks-auditd/src/spool.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..e0e15e391213c244d7914769e5422a13369e8556
+index 0000000000000000000000000000000000000000..c06a204c1506f554ce01dab7f6f903513a9c849a
 --- /dev/null
 +++ b/crates/shadowsocks-auditd/src/spool.rs
-@@ -0,0 +1,7158 @@
+@@ -0,0 +1,7237 @@
 +//! Durable, node-local audit spool.
 +//!
 +//! The spool is deliberately synchronous.  Ingest and export perform their
@@ -8792,6 +8792,8 @@ index 0000000000000000000000000000000000000000..e0e15e391213c244d7914769e5422a13
 +    orphan_after_rename: bool,
 +    orphan_new_open_sync: bool,
 +    recovery_marker_remove_sync: bool,
++    seal_after_open_rename: bool,
++    seal_rollback: bool,
 +}
 +
 +pub struct Spool {
@@ -11629,11 +11631,17 @@ index 0000000000000000000000000000000000000000..e0e15e391213c244d7914769e5422a13
 +        // writable descriptor from the segment inode. A directory descriptor
 +        // is intentionally unusable by `write_record_locked`.
 +        let detached_guard = File::open(self.root.join("open"))?;
++        #[cfg(test)]
++        let fail_after_open_rename = std::mem::take(&mut inner.faults.seal_after_open_rename);
 +        let mut moved_open = false;
 +        let operation = (|| -> Result<(File, u64), SpoolError> {
 +            ensure_dir(&tmp, 0o700)?;
 +            fs::rename(&open_path, &segment_path)?;
 +            moved_open = true;
++            #[cfg(test)]
++            if fail_after_open_rename {
++                return Err(io::Error::other("injected seal failure after the open rename").into());
++            }
 +            sync_dir(&self.root.join("open"))?;
 +            sync_dir(&tmp)?;
 +            let body = read_regular_file(&segment_path)?;
@@ -11735,11 +11743,40 @@ index 0000000000000000000000000000000000000000..e0e15e391213c244d7914769e5422a13
 +                if let Err(recovery_error) = recovery_result {
 +                    inner.degraded = true;
 +                    inner.non_gap_degraded = true;
++                    // Recovery can return before the writable descriptor was
++                    // rebound to current.ndjson.  The detached `open/`
++                    // directory descriptor plus non-empty open metadata is not
++                    // repairable in process: `ensure_open_file_bound` then
++                    // rejects every later write with `InvalidState` forever and
++                    // the daemon never exits.  Escalate to the sticky fatal
++                    // state so the supervisor restarts and crash recovery runs.
++                    if Self::open_descriptor_is_unrepairable(inner, &open_path) {
++                        let _ = recovery_error;
++                        return Err(self.mark_durability_uncertain_locked(inner));
++                    }
 +                    return Err(recovery_error);
 +                }
 +                Err(error)
 +            }
 +        }
++    }
++
++    /// Report whether a later `ensure_open_file_bound` can still repair the
++    /// writable open-segment descriptor.  This mirrors that function's own
++    /// binding rule: an empty open view is always repairable by reopening the
++    /// pathname, while a descriptor that no longer names current.ndjson while
++    /// `open_meta` still describes records is a permanent write failure.
++    fn open_descriptor_is_unrepairable(inner: &SpoolInner, open_path: &Path) -> bool {
++        if inner.open_meta.event_count == 0 && inner.open_meta.bytes == 0 {
++            return false;
++        }
++        let Ok(opened) = inner.open_file.metadata() else {
++            return true;
++        };
++        let bound = fs::symlink_metadata(open_path)
++            .is_ok_and(|current| current.is_file() && current.dev() == opened.dev() && current.ino() == opened.ino())
++            && opened.len() == inner.open_meta.bytes;
++        !bound
 +    }
 +
 +    fn recover_seal_failure(
@@ -11763,6 +11800,10 @@ index 0000000000000000000000000000000000000000..e0e15e391213c244d7914769e5422a13
 +        // appends encounter a descriptor/path mismatch instead of appending
 +        // acknowledged bytes into an already sealed batch.
 +        inner.open_file = detached_guard;
++        #[cfg(test)]
++        if std::mem::take(&mut inner.faults.seal_rollback) {
++            return Err(io::Error::other("injected seal rollback failure").into());
++        }
 +        // A pathname at `final_dir` is not enough evidence that the rename
 +        // completed: a pre-existing file (or a malicious symlink) can make
 +        // the rename fail while still satisfying `metadata(...).is_ok()`.  A
@@ -14506,6 +14547,44 @@ index 0000000000000000000000000000000000000000..e0e15e391213c244d7914769e5422a13
 +        let state = wire::parse_spool_state(&fs::read(dir.path().join("state.json")).expect("state"))
 +            .expect("state remains valid");
 +        assert_eq!(state.next_spool_sequence.0, second.spool_sequence + 1);
++    }
++
++    #[tokio::test]
++    async fn unrepairable_seal_rollback_is_fatal_instead_of_wedging_every_write() {
++        let dir = tempfile::tempdir().expect("tempdir");
++        let spool = Spool::open(config(dir.path())).expect("spool");
++        spool.append(&event(1), 1).expect("durable record");
++        {
++            let mut inner = lock(&spool.inner);
++            // The seal fails after current.ndjson was renamed away and the
++            // rollback fails as well, so `open_file` stays on the detached
++            // open/ directory descriptor while open_meta still has records.
++            inner.faults.seal_after_open_rename = true;
++            inner.faults.seal_rollback = true;
++        }
++
++        {
++            let mut inner = lock(&spool.inner);
++            let error = spool.seal_locked(&mut inner).expect_err("seal must fail");
++            assert!(matches!(error, SpoolError::DurabilityUncertain), "{error:?}");
++            assert!(
++                inner.durability_uncertain,
++                "an unrepairable open descriptor must enter the sticky fatal state"
++            );
++            assert!(
++                Spool::open_descriptor_is_unrepairable(&inner, &dir.path().join("open/current.ndjson")),
++                "the descriptor is expected to be detached for this scenario"
++            );
++        }
++
++        // Without the escalation the daemon keeps running and every later
++        // append fails with InvalidState forever, so systemd never restarts it.
++        let follow_up = spool.append(&event(2), 2).expect_err("no write after the fatal state");
++        assert!(matches!(follow_up, SpoolError::DurabilityUncertain), "{follow_up:?}");
++        let fatal = spool.durability_uncertain_receiver();
++        tokio::time::timeout(Duration::from_secs(1), crate::wait_for_durability_uncertain(fatal))
++            .await
++            .expect("daemon fatal watcher notification");
 +    }
 +
 +    #[test]
