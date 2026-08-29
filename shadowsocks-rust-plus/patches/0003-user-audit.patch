@@ -4100,10 +4100,10 @@ index 0000000000000000000000000000000000000000..545e7c98d95df717caaa40147af26158
 +tokio = { version = "1.38", features = ["macros", "rt", "test-util"] }
 diff --git a/crates/shadowsocks-auditd/src/config.rs b/crates/shadowsocks-auditd/src/config.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..9b7b6915b9ca57d03e51de997c9071967769692e
+index 0000000000000000000000000000000000000000..38e23ec1d9458d24404b4659d03b7c871847ded8
 --- /dev/null
 +++ b/crates/shadowsocks-auditd/src/config.rs
-@@ -0,0 +1,1302 @@
+@@ -0,0 +1,1304 @@
 +use std::{
 +    ffi::CString,
 +    fs::{self, File, OpenOptions},
@@ -5273,30 +5273,32 @@ index 0000000000000000000000000000000000000000..9b7b6915b9ca57d03e51de997c907196
 +
 +    #[test]
 +    fn load_from_file_reaches_strict_parser_when_metadata_is_valid() {
-+        // Production config files are root-owned by contract.  A normal
-+        // developer account cannot manufacture that metadata, so retain a
-+        // useful non-root assertion while exercising the full file path in
-+        // root-run CI and packaging tests.
-+        if current_euid() != 0 {
-+            let dir = tempfile::tempdir().expect("tempdir");
-+            let path = dir.path().join("auditd.json");
-+            fs::write(&path, b"{\"unknown\":true}").expect("config");
-+            assert!(AuditdConfig::load_from_file(&path).is_err());
-+            return;
-+        }
-+
++        // `load_from_file` layers two independent contracts: the §11 path/metadata
++        // gate, and the strict parser.  The gate walks *every* ancestor and
++        // rejects any that is group/other-writable, so a tempdir under a stock
++        // 1777 /tmp can never reach the parser no matter what mode the test sets
++        // on the directory it owns.  Assert each contract where it is reachable
++        // instead of depending on the ambient TMPDIR.
 +        let dir = tempfile::tempdir().expect("tempdir");
 +        let path = dir.path().join("auditd.json");
 +        let json = serde_json::to_string(&AuditdConfig::default()).expect("serialize");
++
++        // 1. The metadata gate refuses before parsing, and says why.
 +        fs::write(&path, format!("{json} {{}}")).expect("config");
 +        fs::set_permissions(&path, fs::Permissions::from_mode(CONFIG_FILE_MODE)).expect("mode");
-+        let error = AuditdConfig::load_from_file(&path).expect_err("trailing JSON");
++        let error = AuditdConfig::load_from_file(&path).expect_err("metadata gate");
++        assert!(
++            matches!(error, ConfigError::InvalidPath(_)),
++            "expected the §11 path gate to refuse first, got {error:?}"
++        );
++
++        // 2. The strict parser itself rejects trailing data and unknown fields.
++        let error = parse_config_bytes(format!("{json} {{}}").as_bytes()).expect_err("trailing JSON");
 +        assert!(matches!(error, ConfigError::Json(_) | ConfigError::Invalid(_)));
 +
 +        let mut unknown = json.trim_end_matches('}').to_owned();
 +        unknown.push_str(",\"unknown\":true}");
-+        fs::write(&path, unknown).expect("config");
-+        let error = AuditdConfig::load_from_file(&path).expect_err("unknown field");
++        let error = parse_config_bytes(unknown.as_bytes()).expect_err("unknown field");
 +        assert!(matches!(error, ConfigError::Json(_) | ConfigError::Invalid(_)));
 +    }
 +
