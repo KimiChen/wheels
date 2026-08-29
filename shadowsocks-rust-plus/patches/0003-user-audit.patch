@@ -19238,10 +19238,10 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..5b0ebb7924e76785c6e14e5826db6b88
  }
 diff --git a/crates/shadowsocks-service/src/server/user_audit.rs b/crates/shadowsocks-service/src/server/user_audit.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..179b5485c0418aebe694678080542ed42083e757
+index 0000000000000000000000000000000000000000..b45e8e455265eb42e3a98ccb946299fece7ea953
 --- /dev/null
 +++ b/crates/shadowsocks-service/src/server/user_audit.rs
-@@ -0,0 +1,4052 @@
+@@ -0,0 +1,4073 @@
 +//! Non-blocking successful-target access auditing for the server data path.
 +//!
 +//! The relay only constructs a small draft and performs bounded atomic/cache
@@ -21683,6 +21683,14 @@ index 0000000000000000000000000000000000000000..179b5485c0418aebe694678080542ed4
 +    }
 +}
 +
++/// Initial value for a 60-second rate-limit stamp.  The first log line must
++/// be allowed immediately, but `Instant - Duration` panics when the monotonic
++/// clock has not been running for a whole interval yet (C-6).  Clamp to `now`
++/// instead of aborting the producer.
++fn rate_limit_stamp_before(now: Instant, interval: Duration) -> Instant {
++    now.checked_sub(interval).unwrap_or(now)
++}
++
 +fn wall_now() -> Option<u64> {
 +    SystemTime::now()
 +        .duration_since(UNIX_EPOCH)
@@ -21851,8 +21859,8 @@ index 0000000000000000000000000000000000000000..179b5485c0418aebe694678080542ed4
 +async fn run_supervisor(emitter: Arc<AuditEmitter>) {
 +    let mut state = SupervisorState::new();
 +    let now = Instant::now();
-+    let mut last_error_log = now.checked_sub(DIAGNOSTIC_INTERVAL).unwrap_or(now);
-+    let mut last_hello_nack_log = now.checked_sub(DIAGNOSTIC_INTERVAL).unwrap_or(now);
++    let mut last_error_log = rate_limit_stamp_before(now, DIAGNOSTIC_INTERVAL);
++    let mut last_hello_nack_log = rate_limit_stamp_before(now, DIAGNOSTIC_INTERVAL);
 +    loop {
 +        fill_pending(&emitter, &mut state);
 +        if supervisor_drained(&emitter, &state) {
@@ -22718,6 +22726,19 @@ index 0000000000000000000000000000000000000000..179b5485c0418aebe694678080542ed4
 +        assert_eq!(recovered.hello_nack_count, 2);
 +        assert!(!recovered.hello_nack_degraded);
 +        assert!(recovered.has_issue());
++    }
++
++    #[test]
++    fn rate_limit_stamp_is_checked_and_allows_the_first_line() {
++        let now = Instant::now();
++        // A representable interval moves the stamp exactly one interval into
++        // the past so the first rate-limited line is emitted immediately.
++        let stamp = rate_limit_stamp_before(now, DIAGNOSTIC_INTERVAL);
++        assert!(stamp <= now);
++        assert!(now.saturating_duration_since(stamp) >= DIAGNOSTIC_INTERVAL);
++        // C-6: an interval this monotonic clock cannot represent must clamp to
++        // `now` rather than abort the producer.  Plain `now - interval` panics.
++        assert_eq!(rate_limit_stamp_before(now, Duration::MAX), now);
 +    }
 +
 +    #[test]
