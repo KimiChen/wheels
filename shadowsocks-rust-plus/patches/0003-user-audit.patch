@@ -7813,10 +7813,10 @@ index 0000000000000000000000000000000000000000..6cf8d005dfef917c852be4f611d5b945
 +}
 diff --git a/crates/shadowsocks-auditd/src/spool.rs b/crates/shadowsocks-auditd/src/spool.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..29b6ea836c2944186a43db0474f1e64e677449d8
+index 0000000000000000000000000000000000000000..e484e4f2b012729d30acd2fe691ecbd33e669421
 --- /dev/null
 +++ b/crates/shadowsocks-auditd/src/spool.rs
-@@ -0,0 +1,7770 @@
+@@ -0,0 +1,7828 @@
 +//! Durable, node-local audit spool.
 +//!
 +//! The spool is deliberately synchronous.  Ingest and export perform their
@@ -10663,7 +10663,13 @@ index 0000000000000000000000000000000000000000..29b6ea836c2944186a43db0474f1e64e
 +                    let freed = Self::released_bytes(inner, candidate_start_bytes);
 +                    iteration_released = iteration_released.saturating_add(freed);
 +                    progressed = freed > 0;
-+                    if self.capacity_ok(inner, additional) || progressed {
++                    // Mirror the quarantine/sealed branches: reaching the
++                    // capacity target is progress for this iteration.  Leaving
++                    // `progressed` false here made a break on `capacity_ok`
++                    // fall through to the quarantine loop and evict one more
++                    // isolated object that nothing required.
++                    if progressed || self.capacity_ok(inner, additional) {
++                        progressed = true;
 +                        break;
 +                    }
 +                    continue;
@@ -15005,6 +15011,58 @@ index 0000000000000000000000000000000000000000..29b6ea836c2944186a43db0474f1e64e
 +        cleanup_recovered_temp_files(dir.path()).expect("cleanup");
 +        assert!(!orphan.exists());
 +        assert!(!dir.path().join(".state.json.tmp-test").exists());
++    }
++
++    /// m-175: the corrupt-acked branch must end the iteration the same way the
++    /// quarantine/sealed branches do.  Leaving `progressed` false once the
++    /// capacity target was already reached made the pass fall through and evict
++    /// one further isolated object that nothing required.
++    #[test]
++    fn reaching_capacity_on_a_corrupt_acked_batch_does_not_evict_a_quarantine_object() {
++        let dir = tempfile::tempdir().expect("tempdir");
++        let spool = Spool::open(config(dir.path())).expect("spool");
++        let gap_count = |reason: &str| -> usize {
++            let body = fs::read(dir.path().join("open/current.ndjson")).expect("open segment");
++            let needle = format!("\"reason\":\"{reason}\"").into_bytes();
++            body.split_inclusive(|byte| *byte == b'\n')
++                .filter(|line| line.windows(needle.len()).any(|window| window == needle.as_slice()))
++                .count()
++        };
++        spool.append(&event(1), 1).expect("append");
++        let lease = spool.lease().expect("lease").expect("batch");
++        assert_eq!(
++            spool.ack(&lease.info.batch_id, &lease.info.body_sha256).expect("ack"),
++            AckOutcome::Acked
++        );
++        let acked = list_batch_dirs(&dir.path().join("acked")).expect("acked");
++        assert_eq!(acked.len(), 1);
++        fs::write(acked[0].join("meta.json"), b"{").expect("corrupt acked meta");
++        let isolated = dir.path().join("quarantine").join("00000000-batch-corrupt");
++        fs::create_dir_all(&isolated).expect("quarantine object");
++        fs::write(isolated.join("segment.ndjson"), b"unrelated\n").expect("isolated body");
++
++        let measured = directory_size(dir.path()).expect("spool size");
++        {
++            let mut inner = lock(&spool.inner);
++            // Ask for exactly the headroom the quarantine transaction's own
++            // remeasurement proves available.  An unproven byte index is the
++            // one condition that lets the capacity target become reachable
++            // inside the corrupt-acked branch itself.
++            let additional = spool.config.max_spool_bytes - measured - 4_096;
++            inner.spool_bytes_known = false;
++            assert!(!spool.capacity_ok(&inner, additional));
++            spool.cleanup_locked(&mut inner, additional).expect("cleanup");
++            assert!(spool.capacity_ok(&inner, additional));
++        }
++        assert_eq!(
++            gap_count("quarantine_eviction"),
++            0,
++            "a cleanup that already reached its capacity target must not evict a further object"
++        );
++        assert!(
++            isolated.exists(),
++            "the unrelated quarantine object must survive a cleanup that already reached capacity"
++        );
 +    }
 +
 +    #[test]
