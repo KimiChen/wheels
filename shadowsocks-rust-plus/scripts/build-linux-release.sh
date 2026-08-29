@@ -25,6 +25,22 @@ require_empty_release_directory() {
   [[ -z "$entries" ]] || die "发布输出目录必须为空，拒绝覆盖或保留未绑定文件：$path"
 }
 
+# The packager enforces the same ownership/mode requirement, but only after two
+# musl builds have already run.  Check it here so an unusable destination fails
+# before any build time is spent.
+require_release_directory_permissions() {
+  local path="$1"
+  local owner mode
+  owner="$(stat -Lc '%u' -- "$path" 2>/dev/null || stat -f '%u' -- "$path")" || \
+    die "无法取得发布输出目录属主：$path"
+  mode="$(stat -Lc '%a' -- "$path" 2>/dev/null || stat -f '%Lp' -- "$path")" || \
+    die "无法取得发布输出目录权限：$path"
+  [[ "$owner" == "$(id -u)" || "$owner" == 0 ]] || \
+    die "发布输出目录必须由当前用户或 root 持有：$path"
+  (( (8#$mode & 022) == 0 )) || \
+    die "发布输出目录不得允许 group/other 写入：$path"
+}
+
 repository_override=""
 output_dir="$SHADOWSOCKS_RUST_PLUS_ROOT/dist"
 while [[ $# -gt 0 ]]; do
@@ -65,7 +81,7 @@ else
   mkdir -p "$(dirname "$output_dir")"
   output_parent="$(cd "$(dirname "$output_dir")" && pwd -P)" || die "无法解析发布产物父目录：$output_dir"
   output_dir="$output_parent/$(basename "$output_dir")"
-  mkdir "$output_dir" || die "无法创建发布产物目录：$output_dir"
+  mkdir -m 0755 "$output_dir" || die "无法创建发布产物目录：$output_dir"
 fi
 case "$output_dir" in
   "$SHADOWSOCKS_RUST_PLUS_ROOT/.cache/dev-dist"|"$SHADOWSOCKS_RUST_PLUS_ROOT/.cache/dev-dist"/*)
@@ -73,6 +89,7 @@ case "$output_dir" in
     ;;
 esac
 require_empty_release_directory "$output_dir"
+require_release_directory_permissions "$output_dir"
 output_identity="$(directory_identity "$output_dir")" || die "无法取得发布输出目录身份：$output_dir"
 output_device="${output_identity%%:*}"
 output_inode="${output_identity#*:}"
@@ -86,6 +103,7 @@ validate_release_output_directory() {
   [[ "$(directory_identity "$output_dir")" == "$output_identity" ]] || \
     die "发布输出目录 inode 已在构建期间变化"
   require_empty_release_directory "$output_dir"
+  require_release_directory_permissions "$output_dir"
 }
 
 require_command cargo

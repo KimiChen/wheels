@@ -10,6 +10,7 @@ import platform
 import re
 import shlex
 import shutil
+import stat
 import struct
 import subprocess
 import sys
@@ -849,6 +850,48 @@ with open(fixture_root / ("environment-" + source_root.name + ".json"), "w", enc
             )
             self.assertIn("必须事先不存在", result.stderr)
             self.assertFalse((target / "build-receipt.json").exists())
+
+    def test_release_build_checks_output_permissions_before_building(self) -> None:
+        """发布输出目录的属主/权限要求必须在两次 musl 构建之前生效。"""
+        with tempfile.TemporaryDirectory(prefix="ssrp-release-output-mode-") as temporary:
+            root = Path(temporary)
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            invoked = root / "cargo-invoked"
+            fake_cargo = fake_bin / "cargo"
+            fake_cargo.write_text(
+                f"#!/bin/sh\ntouch {shlex.quote(str(invoked))}\nexit 99\n",
+                encoding="utf-8",
+            )
+            os.chmod(fake_cargo, 0o755)
+            env = os.environ.copy()
+            env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+
+            group_writable = root / "group-writable-release"
+            group_writable.mkdir()
+            os.chmod(group_writable, 0o775)
+            rejected = self.run_command(
+                [str(LINUX_BUILD_TOOL), "--output-dir", str(group_writable)],
+                success=False,
+                env=env,
+            )
+            self.assertIn("不得允许 group/other 写入", rejected.stderr)
+            self.assertFalse(invoked.exists())
+
+            # umask 002 的主机必须直接建出合规目录，而不是在 package 阶段才失败。
+            created = root / "created-release"
+            self.run_command(
+                [
+                    "bash",
+                    "-c",
+                    f"umask 002; exec {shlex.quote(str(LINUX_BUILD_TOOL))} "
+                    f"--output-dir {shlex.quote(str(created))}",
+                ],
+                success=False,
+                env=env,
+            )
+            self.assertTrue(created.is_dir())
+            self.assertEqual(stat.S_IMODE(created.stat().st_mode), 0o755)
 
     def test_release_directory_is_exact_and_bound_to_original_inode(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ssrp-release-directory-") as temporary:
