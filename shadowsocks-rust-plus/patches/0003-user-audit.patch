@@ -19355,10 +19355,10 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..fe9b793919b2c697acb463dce34c012d
  }
 diff --git a/crates/shadowsocks-service/src/server/user_audit.rs b/crates/shadowsocks-service/src/server/user_audit.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..1c80c5aab0fb51141c84418c10c7b42afa1e29ec
+index 0000000000000000000000000000000000000000..fe8199f486c3e85ae17cb8c749473cb2111b8763
 --- /dev/null
 +++ b/crates/shadowsocks-service/src/server/user_audit.rs
-@@ -0,0 +1,4786 @@
+@@ -0,0 +1,4806 @@
 +//! Non-blocking successful-target access auditing for the server data path.
 +//!
 +//! The relay only constructs a small draft and performs bounded atomic/cache
@@ -21707,8 +21707,11 @@ index 0000000000000000000000000000000000000000..1c80c5aab0fb51141c84418c10c7b42a
 +            // `force_push` returns the old draft that was evicted.  Record
 +            // that draft's sequence/time, never the newly inserted event.
 +            if !self.diagnostics_frozen.load(Ordering::Acquire) {
-+                self.queue_overflow
-+                    .add(1, Some(dropped.sequence()), observed_at.unwrap_or(0));
++                // An unavailable wall clock is accounted like the other gap
++                // paths: count it in `encode_error_time_unknown` and keep `0`
++                // as the internal unknown-time marker.
++                let observed_at = self.gap_observation_time_from(observed_at);
++                self.queue_overflow.add(1, Some(dropped.sequence()), observed_at);
 +            } else {
 +                // The producer-side accumulators are frozen after the last
 +                // observation guard has drained.  A supervisor-side
@@ -23481,6 +23484,23 @@ index 0000000000000000000000000000000000000000..1c80c5aab0fb51141c84418c10c7b42a
 +        assert_eq!(snapshot.first_time, 200);
 +        assert_eq!(snapshot.last_time, 200);
 +        assert_eq!(emitter.queue.pop().map(|draft| draft.sequence()), Some(2));
++    }
++
++    #[test]
++    fn force_push_without_wall_clock_counts_unknown_gap_time() {
++        let mut config = UserAuditConfig::new("/tmp/audit.sock", test_auditd_user());
++        config.queue_capacity = 1;
++        let emitter = AuditEmitter::new(runtime(), &config);
++        emitter.try_push_observed_at(tcp_draft(&emitter, 1), Some(100));
++        emitter.try_push_observed_at(tcp_draft(&emitter, 2), None);
++
++        // The overflow bucket uses the same unknown-time accounting as the
++        // encode-error and permanent-NACK gap paths.
++        assert_eq!(emitter.encode_error_time_unknown.load(Ordering::Acquire), 1);
++        assert_eq!(emitter.health_snapshot().encode_error_time_unknown, 1);
++        let snapshot = emitter.queue_overflow.take().expect("overflow snapshot");
++        assert_eq!(snapshot.count, 1);
++        assert_eq!(snapshot.first_time, 0);
 +    }
 +
 +    #[tokio::test]
