@@ -7813,10 +7813,10 @@ index 0000000000000000000000000000000000000000..6cf8d005dfef917c852be4f611d5b945
 +}
 diff --git a/crates/shadowsocks-auditd/src/spool.rs b/crates/shadowsocks-auditd/src/spool.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..fc04cae46b3f20eb750d2560bec8ef1dd9043a97
+index 0000000000000000000000000000000000000000..c0afb7d9033240fc169c64d9af1c725a3d4ce1ea
 --- /dev/null
 +++ b/crates/shadowsocks-auditd/src/spool.rs
-@@ -0,0 +1,7925 @@
+@@ -0,0 +1,7962 @@
 +//! Durable, node-local audit spool.
 +//!
 +//! The spool is deliberately synchronous.  Ingest and export perform their
@@ -15027,6 +15027,43 @@ index 0000000000000000000000000000000000000000..fc04cae46b3f20eb750d2560bec8ef1d
 +        }
 +        let body = fs::read(dir.path().join("open/current.ndjson")).expect("gap segment");
 +        assert!(body.windows(gap_id.len()).any(|window| window == gap_id.as_bytes()));
++    }
++
++    /// m-190: an eviction that releases no bytes is not progress.  A zero-byte
++    /// quarantine object must not stop the cleanup before it reaches the sealed
++    /// batches that can actually free space.
++    #[test]
++    fn a_zero_byte_quarantine_object_is_not_counted_as_progress() {
++        let dir = tempfile::tempdir().expect("tempdir");
++        let spool = Spool::open(config(dir.path())).expect("spool");
++        let mut sequence = 1;
++        for _ in 0..3 {
++            for _ in 0..40 {
++                spool.append(&event(sequence), sequence).expect("append");
++                sequence += 1;
++            }
++            {
++                let mut inner = lock(&spool.inner);
++                spool.seal_locked(&mut inner).expect("seal");
++            }
++        }
++        let empty = dir.path().join("quarantine").join("00000000-batch-corrupt");
++        fs::create_dir_all(&empty).expect("quarantine object");
++        fs::write(empty.join("segment.ndjson"), b"").expect("empty body");
++
++        let mut inner = lock(&spool.inner);
++        let additional = spool.config.max_spool_bytes - inner.spool_bytes + 8_192;
++        assert!(
++            !spool.capacity_ok(&inner, additional),
++            "the fixture must start over the watermark"
++        );
++        spool.cleanup_locked(&mut inner, additional).expect("cleanup");
++        assert!(
++            spool.capacity_ok(&inner, additional),
++            "cleanup must continue past an eviction that released nothing: spool_bytes {} + {additional} > max {}",
++            inner.spool_bytes,
++            spool.config.max_spool_bytes
++        );
 +    }
 +
 +    #[test]
