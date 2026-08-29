@@ -63,6 +63,12 @@ FUNCTION_DECLARATION = re.compile(r"(?:^|\s)(?:pub\s+)?(?:async\s+)?(?:unsafe\s+
 AUDIT_MARKER = re.compile(
     r"\b(?:user_audit|audit_emitter|AuditEmitter|AuditTarget|AuditRecord|audit_event|user-audit)\b"
 )
+# Shutdown coordination carries no `user-audit` spelling, but §10 makes audit
+# completeness depend on the data-plane drain order, so those items belong in
+# the same panic-free scope.
+SHUTDOWN_MARKER = re.compile(
+    r"\b(?:DataShutdownState|DataShutdownHandle|RelayTaskGuard|data_shutdown|data_shutdowns)\b"
+)
 AUDIT_CFG_ATTRIBUTES = frozenset(
     {
         '#[cfg(feature = "user-audit")]',
@@ -461,7 +467,11 @@ def _check_wiring_file(path: Path, *, whole_function: bool) -> list[str]:
     audited_lines: set[int] = set()
     for marker_index, structural in enumerate(structural_lines):
         audit_cfg = lines[marker_index].strip() in AUDIT_CFG_ATTRIBUTES
-        if AUDIT_MARKER.search(structural) is None and not audit_cfg:
+        if (
+            not audit_cfg
+            and AUDIT_MARKER.search(structural) is None
+            and SHUTDOWN_MARKER.search(structural) is None
+        ):
             continue
         candidates = [
             start

@@ -428,5 +428,23 @@ fn due(next_due: &[u64; 4], bucket: Bucket) -> u64 {
         self.assertFalse(any(":11:" in item for item in findings))
 
 
+    def test_scans_data_shutdown_coordination_items(self) -> None:
+        # m-183：关机协调没有 user-audit 标记，但审计完整性依赖它的 drain 顺序。
+        findings = self.check_service_source(
+            "server/context.rs",
+            'struct DataShutdownState {\n'
+            '    tasks: Mutex<HashMap<u64, AbortHandle>>,\n'
+            '}\n'
+            '\n'
+            'impl DataShutdownHandle {\n'
+            '    fn stop_accepting(&self) {\n'
+            '        let tasks = self.inner.tasks.lock().unwrap();\n'
+            '        drop(tasks);\n'
+            '    }\n'
+            '}\n',
+        )
+        self.assertTrue(any(":7: forbidden panic path in user-audit wiring" in item for item in findings))
+
+
 if __name__ == "__main__":
     unittest.main()
