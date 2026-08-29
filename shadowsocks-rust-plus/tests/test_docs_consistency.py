@@ -240,5 +240,68 @@ class AuditIntermediaryDocsTests(unittest.TestCase):
         self.assertIn("不可照抄", self.operations[fence:location])
 
 
+class SpecContractTests(unittest.TestCase):
+    """§1–§16 合同正文与实际实现的三处对齐点，以及版本沿革链的自洽。"""
+
+    def setUp(self) -> None:
+        self.spec = read(DOCS / "USER_ACCESS_AUDIT.md")
+        self.added = patch_added_lines()
+
+    def section(self, heading: str) -> str:
+        self.assertIn(heading, self.spec)
+        start = self.spec.index(heading) + len(heading)
+        rest = self.spec[start:]
+        end = re.search(r"^#{2,3} ", rest, re.M)
+        return rest[: end.start()] if end is not None else rest
+
+    def feature_list(self, manifest: str) -> list[str]:
+        joined = "\n".join(self.added[manifest])
+        block = re.search(r"^user-audit = \[(.*?)^\]", joined, re.S | re.M)
+        self.assertIsNotNone(block, f"{manifest} 中找不到 user-audit feature 定义")
+        return re.findall(r'"([^"]+)"', block.group(1))
+
+    def test_declared_version_matches_the_changelog_chain(self) -> None:
+        declared = re.search(r"^> 规范版本：(\d+)$", self.spec, re.M)
+        self.assertIsNotNone(declared)
+        versions = re.findall(r"^> - v(\d+)（", self.spec, re.M)
+        self.assertEqual(versions, [str(item) for item in range(2, int(declared.group(1)) + 1)])
+
+    def test_cargo_feature_snippet_matches_the_manifests(self) -> None:
+        section = self.section("### 5.1 Cargo feature")
+        service = self.feature_list("crates/shadowsocks-service/Cargo.toml")
+        self.assertIn("dep:hashbrown", service)
+        for feature in service:
+            self.assertIn(f'"{feature}"', section, feature)
+        root = self.feature_list("Cargo.toml")
+        self.assertNotIn("dep:hashbrown", root, "根 Cargo.toml 现在也声明了 hashbrown")
+        for feature in root:
+            self.assertIn(f'"{feature}"', section, feature)
+
+    def test_quarantine_pending_reason_enum_matches_the_protocol(self) -> None:
+        protocol = "\n".join(self.added["crates/shadowsocks-audit-protocol/src/lib.rs"])
+        guard = re.search(
+            r'self\.entry_type != "quarantine_pending".*?'
+            r"matches!\(self\.reason\.as_str\(\), ([^)]+)\)",
+            protocol,
+            re.S,
+        )
+        self.assertIsNotNone(guard, "protocol 不再用 matches! 校验 quarantine reason")
+        reasons = sorted(re.findall(r'"([a-z_]+)"', guard.group(1)))
+        self.assertEqual(reasons, ["quarantine_eviction", "segment_corruption"])
+        section = self.section("### 9.5 容量和循环覆盖")
+        for reason in reasons:
+            self.assertIn(f"`{reason}`", section)
+
+    def test_backoff_reset_wording_matches_the_producer(self) -> None:
+        producer = "\n".join(self.added["crates/shadowsocks-service/src/server/user_audit.rs"])
+        self.assertIn("an event ACK resets reconnect backoff", producer)
+        section = flat(self.section("### 7.3 AuditSupervisor 与 AuditClient session"))
+        self.assertIn(flat("合法 event ACK 后立即重置"), section)
+        self.assertFalse(
+            flat("任一合法 ACK 后立即重置") in section,
+            "§7.3 仍写“任一合法 ACK”",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

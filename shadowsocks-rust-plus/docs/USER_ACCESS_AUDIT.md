@@ -4,9 +4,9 @@
 >
 > 目标读者：独立负责 `shadowsocks-rust-plus` 节点侧审计功能的开发同事
 >
-> 规范版本：4
+> 规范版本：5
 >
-> 最后决策日期：2026-08-28
+> 最后决策日期：2026-08-29
 >
 > 版本沿革：
 >
@@ -19,7 +19,11 @@
 >   feature-on/off 下保持相同数据面语义、`min_free_bytes` 仅作为运行期清理水位、未 ACK spool gap
 >   使 health 为 `degraded`、producer diagnostic 按 bucket 独立重试并 round-robin，以及对
 >   `spool_dir/.lock` 持有排他锁。同步记录 macOS 可执行验证与 Linux runtime、fuzz、性能及完整
->   capacity/crash 矩阵的环境限制。
+>   capacity/crash 矩阵的环境限制；
+> - v5（2026-08-29）：随第七、八轮审计把三处合同文本与已交付实现对齐——§7.3 的重连退避重置收紧为
+>   “合法 event ACK”（hello ACK 不重置）、§9.5 `quarantine_pending` 的 reason 补记为
+>   `quarantine_eviction`/`segment_corruption` 二元枚举、§5.1 的 `shadowsocks-service` feature 片段
+>   补记实际已引入的 `dep:hashbrown`。本次升版不改变任何运行时行为，只消除文本与实现的偏差。
 
 本文是节点侧成功访问审计的规范性合同。实现者不需要再决定产品语义、组件边界、失败策略、
 存储上限或协议形态。文中的“必须”“不得”“应当”分别对应 MUST、MUST NOT、SHOULD。
@@ -253,16 +257,19 @@ relay，2 秒总 timeout 仍由根 launcher 控制。该 skipped counter 不属�
 user-audit = ["user-stats", "shadowsocks-service/user-audit", "dep:shadowsocks-auditd"]
 
 # crates/shadowsocks-service/Cargo.toml
-user-audit = ["user-stats", "dep:shadowsocks-audit-protocol", "dep:crossbeam-queue"]
+user-audit = ["user-stats", "dep:shadowsocks-audit-protocol", "dep:crossbeam-queue", "dep:hashbrown"]
 
 [dependencies]
 shadowsocks-audit-protocol = { path = "../shadowsocks-audit-protocol", optional = true }
 crossbeam-queue = { version = "0.3.13", optional = true }
+hashbrown = { version = "0.16.1", optional = true, default-features = false }
 ```
 
 约束：
 
 - 只支持 Linux；不是泛 Unix feature；
+- `dep:hashbrown` 只出现在 `shadowsocks-service`：UDP 去重窗口用它的 `Equivalent` 借用查找避免每包
+  分配 key；根 crate 的 `user-audit` 不重复声明该依赖；
 - 必须依赖 `user-stats` 的 EIH 身份接线；
 - 只支持静态 server 配置和支持 EIH 的 AEAD-2022 method；
 - 与 built-in/standalone manager 模式互斥；
@@ -796,7 +803,7 @@ producer diagnostics 不是访问事件，字段集合严格以第 6.5 节为准
 - 强类型序列化发生在 supervisor 从 queue 取出 draft 后、放入 in-flight 前；序列化失败累计
   `encode_error`，不得在 relay task 序列化；
 - 首次重连等待 100 ms，指数退避并加入 0–20% 正抖动，但总等待时间硬顶 5 秒（含 jitter）；成功收到
-  任一合法 ACK 后立即重置；非 retryable hello NACK 使用精确固定 5 秒重试；
+  合法 event ACK 后立即重置，hello ACK 本身不重置退避；非 retryable hello NACK 使用精确固定 5 秒重试；
 - 每次发送和读取 ACK 超时 3 秒，不短于第 8.1 节 auditd 响应 2 秒写截止；超时只触发后台重连；
 - ACK 丢失时以完全相同的 event ID 和 JSON bytes 重试；
 - 256 条 in-flight 在重连时优先重试；未发送 queue 独立使用淘汰最老策略保留最新事件；
@@ -1108,8 +1115,10 @@ ssserver 流量。
 - `evicted_receipt`：gap 已同步后只保留 acked 的公共字段、`entry_type=evicted_receipt`、
   `status=evicted` 和 `gap_persisted=true`；
 - `quarantine_pending`：`entry_type=quarantine_pending`、预先生成且固定的 `gap_event_id`、quarantine 相对 basename、
-  `reason=quarantine_eviction`、recorded time，以及能够从损坏对象可靠取得的 nullable batch/digest/epoch/
-  sequence/count/bytes；不得保存任意绝对路径。
+  reason、recorded time，以及能够从损坏对象可靠取得的 nullable batch/digest/epoch/
+  sequence/count/bytes；不得保存任意绝对路径。reason 是二元枚举，只允许 `quarantine_eviction`
+  （容量清理驱逐 quarantine 对象）与 `segment_corruption`（恢复期把损坏 segment 移入 quarantine），
+  其余取值一律拒绝。
 
 删除未 ACK batch 的事务顺序固定为：先同步 `eviction_pending`，再删除 batch 并同步原目录，再把对应
 `spool_gap` 写入 durable group，最后把 pending entry 压缩成 `evicted` receipt。进程崩溃后，若 pending
