@@ -148,8 +148,11 @@ if arguments == ["--version"]:
     raise SystemExit(0)
 if not arguments or arguments[0] != "zigbuild":
     raise SystemExit(91)
-expected = ["--locked", "--release", "--features", "user-audit"]
+expected = ["--locked", "--release", "--no-default-features", "--features"]
 if any(item not in arguments for item in expected):
+    raise SystemExit(92)
+features = arguments[arguments.index("--features") + 1].split(",")
+if "user-audit" not in features or not {{"local", "manager", "service", "utility"}}.isdisjoint(features):
     raise SystemExit(92)
 target = arguments[arguments.index("--target") + 1]
 if target != "x86_64-unknown-linux-musl":
@@ -288,6 +291,16 @@ with open(fixture_root / ("environment-" + source_root.name + ".json"), "w", enc
         self.assertEqual(len(invocations), 2)
         for invocation in invocations:
             self.assertIn("--bin ssserver --bin shadowsocks-auditd", invocation)
+            # §15.1: the release builds only the two server-side binaries, so the
+            # root crate's default `full` set must not be in effect.
+            self.assertIn("--no-default-features", invocation)
+            arguments = invocation.split()
+            features = arguments[arguments.index("--features") + 1].split(",")
+            self.assertIn("user-audit", features)
+            for shipped in ("logging", "hickory-dns", "multi-threaded", "aead-cipher"):
+                self.assertIn(shipped, features, shipped)
+            for withheld in ("local", "manager", "service", "utility", "full"):
+                self.assertNotIn(withheld, features, withheld)
         configured_names = {
             "CARGO_ENCODED_RUSTFLAGS",
             "CARGO_HOME",
@@ -1107,6 +1120,23 @@ with open(fixture_root / ("environment-" + source_root.name + ".json"), "w", enc
             sorted(module.UNSIGNED_RELEASE_FILES | {"release-manifest.sig"}),
         )
         self.assertEqual(len(listed), len(set(listed)))
+
+    def test_spec_release_feature_set_matches_the_build_recipe(self) -> None:
+        """§15.1 声明的 feature 集必须与构建配方逐字一致。"""
+        module = self.load_artifact_module()
+        specification = (PROJECT_ROOT / "docs" / "USER_ACCESS_AUDIT.md").read_text(
+            encoding="utf-8"
+        )
+        section = specification.split("### 15.1 构建产物", 1)
+        self.assertEqual(len(section), 2)
+        body = section[1].split("### 15.2", 1)[0]
+        blocks = re.findall(r"```text\n(.*?)```", body, re.DOTALL)
+        self.assertEqual(len(blocks), 2, "§15.1 必须同时声明产物清单与 feature 集")
+        self.assertEqual(blocks[1].strip(), module.RELEASE_FEATURES)
+        self.assertIn("--no-default-features", body)
+        recipe = module._recipe_declaration()["command_template"]
+        self.assertIn("--no-default-features", recipe)
+        self.assertEqual(recipe[recipe.index("--features") + 1], module.RELEASE_FEATURES)
 
     def test_manifest_binds_patch_series(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ssrp-release-series-") as temporary:

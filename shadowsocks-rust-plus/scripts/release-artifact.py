@@ -22,6 +22,27 @@ from typing import Any
 
 
 TARGET = "x86_64-unknown-linux-musl"
+
+# The release ships only `ssserver` and `shadowsocks-auditd`, so the root crate is
+# built with `--no-default-features` and an explicit list instead of the default
+# `full` set. Everything `full` adds for the binaries that are *not* shipped —
+# `local`/`local-*`, `manager`, `service`, `utility` — is left out; what remains is
+# what a production server plus the audit daemon actually need. Narrowing the set
+# changes the published artifacts, so it is pinned in §15.1 of the specification.
+RELEASE_FEATURES = ",".join(
+    (
+        "server",
+        "user-audit",
+        "logging",
+        "hickory-dns",
+        "dns-over-tls",
+        "dns-over-https",
+        "multi-threaded",
+        "aead-cipher",
+        "aead-cipher-2022",
+        "stream-cipher",
+    )
+)
 MAX_BINARY_BYTES = 256 * 1024 * 1024
 MAX_MANIFEST_BYTES = 256 * 1024
 MAX_RECEIPT_BYTES = 256 * 1024
@@ -426,7 +447,7 @@ def _recipe_declaration() -> dict[str, Any]:
     script_path = Path(__file__).resolve().parent / "build-linux-release.sh"
     script_payload, _ = _read_regular(script_path, MAX_MANIFEST_BYTES)
     return {
-        "id": "linux-musl-user-audit-v2",
+        "id": "linux-musl-user-audit-v3",
         "script": "scripts/build-linux-release.sh",
         "script_sha256": _sha256(script_payload),
         "working_directory": "{source_root}",
@@ -439,8 +460,9 @@ def _recipe_declaration() -> dict[str, Any]:
             "--release",
             "--target",
             TARGET,
+            "--no-default-features",
             "--features",
-            "user-audit",
+            RELEASE_FEATURES,
             "--bin",
             "ssserver",
             "--bin",
@@ -728,8 +750,9 @@ def _normalized_build_command(executable: Path, source_root: Path) -> list[str]:
         "--release",
         "--target",
         TARGET,
+        "--no-default-features",
         "--features",
-        "user-audit",
+        RELEASE_FEATURES,
         "--bin",
         "ssserver",
         "--bin",

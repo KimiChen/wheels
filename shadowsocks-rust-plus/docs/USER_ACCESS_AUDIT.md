@@ -1,6 +1,6 @@
 # shadowsocks-rust-plus 用户成功访问审计实现规格
 
-> **本文件为历史文档。** 它保存本功能的规范合同（v5，第 1–16 节）与第 1–8 轮代码审计、
+> **本文件为历史文档。** 它保存本功能的规范合同（v6，第 1–16 节）与第 1–8 轮代码审计、
 > 历次整改及 Linux 节点实装验收的完整过程记录（第 17–30 节），作为可追溯的审计档案保留，
 > 内容不再随新发现滚动更新。
 >
@@ -14,7 +14,7 @@
 >
 > 目标读者：独立负责 `shadowsocks-rust-plus` 节点侧审计功能的开发同事
 >
-> 规范版本：5
+> 规范版本：6
 >
 > 最后决策日期：2026-08-29
 >
@@ -34,6 +34,10 @@
 >   “合法 event ACK”（hello ACK 不重置）、§9.5 `quarantine_pending` 的 reason 补记为
 >   `quarantine_eviction`/`segment_corruption` 二元枚举、§5.1 的 `shadowsocks-service` feature 片段
 >   补记实际已引入的 `dep:hashbrown`。本次升版不改变任何运行时行为，只消除文本与实现的偏差。
+> - v6（2026-08-30）：按 `USER_ACCESS_AUDIT_V2.md` §5.2 的决策收窄发布构建的 feature 集——§15.1
+>   新增一条，要求根 crate 以 `--no-default-features` 加显式集合构建，不再依赖默认 `full`。发布产物
+>   只服务 `ssserver` 与 `shadowsocks-auditd`，因此不再包含 `local`/`local-*`、`manager`、`service`、
+>   `utility` 所引入的依赖；`ssserver` 自身的生产能力不变。
 
 本文是节点侧成功访问审计的规范性合同。实现者不需要再决定产品语义、组件边界、失败策略、
 存储上限或协议形态。文中的“必须”“不得”“应当”分别对应 MUST、MUST NOT、SHOULD。
@@ -1586,6 +1590,18 @@ release-manifest.sig
 ```
 
 签名前的 unsigned 成员集合是上述 8 项去掉 `release-manifest.sig` 后的 7 项。
+
+两个二进制由根 crate 一次构建产出。构建**必须**关闭根 crate 的默认 feature
+（`--no-default-features`），并**恰好**启用下列集合：
+
+```text
+server,user-audit,logging,hickory-dns,dns-over-tls,dns-over-https,multi-threaded,aead-cipher,aead-cipher-2022,stream-cipher
+```
+
+发布不提供 `sslocal`/`ssmanager`/`ssurl`/`ssservice`，因此默认 `full` 为它们引入的
+`local`/`local-*`、`manager`、`service`、`utility` 一律不得启用；`ssserver` 的生产能力
+（日志、DNS 解析器与 DoT/DoH、多线程 runtime、AEAD/AEAD-2022/stream 密码）保持不变。
+增删该集合中的任一项都改变发布产物，必须随本规范升版。
 
 执行两次独立 Linux x86_64 musl 构建，两个二进制分别满足可复现 SHA；两次构建各自产出一份
 build receipt（`build-a.receipt.json`/`build-b.receipt.json`），由 `release-manifest.json` 以
