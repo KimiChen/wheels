@@ -8071,10 +8071,10 @@ index 0000000000000000000000000000000000000000..6cf8d005dfef917c852be4f611d5b945
 +}
 diff --git a/crates/shadowsocks-auditd/src/spool.rs b/crates/shadowsocks-auditd/src/spool.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..262e7758b75cc2b60b0eed90f5ecb9ef2d16dd87
+index 0000000000000000000000000000000000000000..b89675c1b0f4cd69b007c94797f3921aefeb94ef
 --- /dev/null
 +++ b/crates/shadowsocks-auditd/src/spool.rs
-@@ -0,0 +1,8042 @@
+@@ -0,0 +1,8228 @@
 +//! Durable, node-local audit spool.
 +//!
 +//! The spool is deliberately synchronous.  Ingest and export perform their
@@ -15107,6 +15107,40 @@ index 0000000000000000000000000000000000000000..262e7758b75cc2b60b0eed90f5ecb9ef
 +        assert_eq!(spool.health().status, "ok");
 +    }
 +
++    /// The exact `spool_gap` `evict_sealed_locked` writes for the pending
++    /// entry built by `eviction_pending_for_test`.
++    fn eviction_gap_spec_for_test(gap_id: &str, batch_id: &str) -> GapSpec {
++        GapSpec {
++            event_id: gap_id.to_owned(),
++            occurred_at_unix_ms: 10,
++            lost_spool_epoch: Some("b".repeat(32)),
++            reason: wire::SpoolGapReason::CapacityEviction,
++            first_lost_spool_sequence: Some(1),
++            last_lost_spool_sequence: Some(2),
++            lost_events: Some(2),
++            lost_bytes: Some(128),
++            lost_batch_id: Some(batch_id.to_owned()),
++            source_fingerprint: None,
++        }
++    }
++
++    /// Every `spool_gap` record that survives in durable storage, so a test can
++    /// tell "the transaction was completed" from "a second copy was appended".
++    fn durable_gap_ids(root: &Path) -> Vec<String> {
++        let mut paths = vec![root.join("open/current.ndjson")];
++        for parent in ["sealed", "acked"] {
++            if let Ok(batches) = list_batch_dirs(&root.join(parent)) {
++                paths.extend(batches.into_iter().map(|batch| batch.join("segment.ndjson")));
++            }
++        }
++        let mut found = Vec::new();
++        for path in paths {
++            let Ok(body) = fs::read(&path) else { continue };
++            for_each_spool_gap(&body, |gap| found.push(gap.event_id));
++        }
++        found
++    }
++
 +    fn eviction_pending_for_test(gap_id: &str, batch_id: &str) -> TombstoneEntry {
 +        TombstoneEntry::EvictionPending(wire::EvictionPending::new(
 +            batch_id,
@@ -15153,6 +15187,67 @@ index 0000000000000000000000000000000000000000..262e7758b75cc2b60b0eed90f5ecb9ef
 +        drop(inner);
 +        let body = fs::read(dir.path().join("open/current.ndjson")).expect("gap segment");
 +        assert!(body.windows(gap_id.len()).any(|window| window == gap_id.as_bytes()));
++        assert!(!marker.exists(), "resolved pending marker should be removed");
++    }
++
++    /// m-173/M-41: §9.4 requires recovery to scan the fixed `gap_event_id`
++    /// first and only complete the pending transaction when that gap is already
++    /// durable.  The scan is the `durable_gap_reasons` index, so the index has
++    /// to be built *before* the startup flush block that consults it.  This
++    /// fixture reproduces the crash window `evict_sealed_locked` leaves behind
++    /// (batch deleted, fixed gap durable, pending entry and its marker not yet
++    /// compacted): rebuilding the index after the flush leaves it empty here
++    /// and appends a second record carrying the same `gap_event_id`.
++    #[test]
++    fn restart_inside_the_eviction_window_does_not_duplicate_the_fixed_gap() {
++        let dir = tempfile::tempdir().expect("tempdir");
++        let gap_id = format!("{GAP_ID_PREFIX}{}", "1".repeat(32));
++        let batch_id = "2".repeat(32);
++        let spool = Spool::open(config(dir.path())).expect("spool");
++        // A producer record keeps the epoch and cursor provable, so the restart
++        // below takes the ordinary recovery path instead of a state reset.
++        spool.append(&event(1), 1).expect("append");
++        {
++            let mut inner = lock(&spool.inner);
++            spool
++                .add_tombstone_locked(&mut inner, eviction_pending_for_test(&gap_id, &batch_id))
++                .expect("pending eviction");
++            spool
++                .write_gap_locked(&mut inner, &eviction_gap_spec_for_test(&gap_id, &batch_id))
++                .expect("durable eviction gap");
++        }
++        let marker = dir.path().join(format!(
++            "{TOMBSTONE_PENDING_MARKER_PREFIX}{}.json",
++            &gap_id[GAP_ID_PREFIX.len()..]
++        ));
++        assert!(marker.exists(), "the crash window keeps the pending marker on disk");
++        assert_eq!(
++            durable_gap_ids(dir.path()),
++            vec![gap_id.clone()],
++            "the fixture must start with exactly one durable copy of the fixed gap"
++        );
++        let sequence_before = lock(&spool.inner).next_sequence;
++        drop(spool);
++
++        let recovered = Spool::open(config(dir.path())).expect("recover eviction window");
++        assert_eq!(
++            durable_gap_ids(dir.path()),
++            vec![gap_id.clone()],
++            "recovery must not append a second record with the same fixed gap_event_id"
++        );
++        let inner = lock(&recovered.inner);
++        assert_eq!(
++            inner.next_sequence, sequence_before,
++            "an already durable gap must not consume another spool sequence"
++        );
++        assert!(
++            inner
++                .tombstones
++                .iter()
++                .any(|entry| matches!(entry, TombstoneEntry::EvictedReceipt(value) if value.batch_id == batch_id)),
++            "the pending transaction must still be compacted into its receipt"
++        );
++        drop(inner);
 +        assert!(!marker.exists(), "resolved pending marker should be removed");
 +    }
 +
@@ -15634,6 +15729,97 @@ index 0000000000000000000000000000000000000000..262e7758b75cc2b60b0eed90f5ecb9ef
 +        let sequence_before = inner.next_sequence;
 +        let _ = spool.cleanup_locked(&mut inner, 1);
 +        assert!(inner.next_sequence <= sequence_before.saturating_add(1));
++    }
++
++    /// m-173/M-44: once free space is below `min_free_bytes` for reasons the
++    /// spool cannot fix and every real object has been evicted, the open
++    /// segment holds nothing but the gap the previous cleanup wrote.  Sealing
++    /// and evicting that segment fabricates a fresh `min_free_eviction` gap on
++    /// every producer retry: it burns a spool sequence, adds a tombstone,
++    /// inflates `evicted_unacked_records`, and overwrites the real loss
++    /// evidence with self-referential records while the spool keeps growing on
++    /// an already full filesystem.  §9.5 step 6 requires the bounded rejection
++    /// instead, so cleanup must exit without producing a self-referential gap.
++    #[test]
++    fn min_free_cleanup_never_evicts_its_own_diagnostics() {
++        let dir = tempfile::tempdir().expect("tempdir");
++        let starved = || {
++            Arc::new(AuditdConfig {
++                node_id: "node-test".to_owned(),
++                spool_dir: dir.path().to_owned(),
++                max_spool_bytes: 67_108_864,
++                // No amount of eviction can satisfy this watermark: the missing
++                // space belongs to something other than the spool.
++                min_free_bytes: u64::MAX,
++                ..AuditdConfig::default()
++            })
++        };
++        // One real batch reaches `sealed/` while capacity is still healthy.
++        {
++            let spool = Spool::open(config(dir.path())).expect("spool");
++            spool.append(&event(1), 1).expect("append");
++            spool.append(&event(2), 2).expect("append");
++            let mut inner = lock(&spool.inner);
++            spool.seal_locked(&mut inner).expect("seal");
++        }
++
++        let spool = Spool::open(starved()).expect("spool");
++        // The first retry evicts the only real object and records exactly one
++        // legitimate gap describing the two events it lost.
++        assert!(
++            matches!(spool.append(&event(3), 3), Err(SpoolError::StorageUnavailable)),
++            "§9.5 step 6: a rejected attempt must be retryable"
++        );
++        assert!(
++            list_batch_dirs(&dir.path().join("sealed")).expect("sealed").is_empty(),
++            "the real batch is the only evictable object"
++        );
++        assert_eq!(durable_gap_ids(dir.path()).len(), 1, "one evicted batch, one gap");
++        let (sequence, evicted_records, tombstones) = {
++            let inner = lock(&spool.inner);
++            (
++                inner.next_sequence,
++                inner.evicted_unacked_records,
++                inner.tombstones.len(),
++            )
++        };
++        assert_eq!(evicted_records, 2, "the evicted batch held two unacknowledged events");
++
++        // Every further retry finds nothing real to evict.  Nothing below may
++        // move, however many times the producer retries.
++        for attempt in 4..12_u64 {
++            assert!(
++                matches!(
++                    spool.append(&event(attempt), attempt),
++                    Err(SpoolError::StorageUnavailable)
++                ),
++                "attempt {attempt} must stay a bounded retryable rejection"
++            );
++            let inner = lock(&spool.inner);
++            assert_eq!(
++                inner.next_sequence, sequence,
++                "attempt {attempt} consumed a spool sequence for a self-referential gap"
++            );
++            assert_eq!(
++                inner.evicted_unacked_records, evicted_records,
++                "attempt {attempt} reported the loss of events that never existed"
++            );
++            assert_eq!(
++                inner.tombstones.len(),
++                tombstones,
++                "attempt {attempt} grew the bounded tombstone ledger without evicting anything"
++            );
++            drop(inner);
++            assert_eq!(
++                durable_gap_ids(dir.path()).len(),
++                1,
++                "attempt {attempt} manufactured a gap out of cleanup's own diagnostics"
++            );
++            assert!(
++                list_batch_dirs(&dir.path().join("sealed")).expect("sealed").is_empty(),
++                "attempt {attempt} sealed the gap-only open segment into an evictable batch"
++            );
++        }
 +    }
 +
 +    /// M-56: the metadata hint is unavailable on exactly the path that puts a
