@@ -7813,10 +7813,10 @@ index 0000000000000000000000000000000000000000..6cf8d005dfef917c852be4f611d5b945
 +}
 diff --git a/crates/shadowsocks-auditd/src/spool.rs b/crates/shadowsocks-auditd/src/spool.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..e40c8d5aea70cc98e546d507a7ea086cab6fc3e8
+index 0000000000000000000000000000000000000000..9858d0204321ea5f7c39f1357e0b9920d34ffbde
 --- /dev/null
 +++ b/crates/shadowsocks-auditd/src/spool.rs
-@@ -0,0 +1,7548 @@
+@@ -0,0 +1,7591 @@
 +//! Durable, node-local audit spool.
 +//!
 +//! The spool is deliberately synchronous.  Ingest and export perform their
@@ -9630,6 +9630,19 @@ index 0000000000000000000000000000000000000000..e40c8d5aea70cc98e546d507a7ea086c
 +        inner.degraded = false;
 +    }
 +
++    /// §10.1 lists an undisposed quarantine object as a degraded condition.
++    /// Its bytes and its events are still lost, so neither a gap ACK nor a
++    /// restart may reset the reported status while the isolated object is
++    /// still on disk.
++    fn quarantine_outstanding(&self) -> bool {
++        match fs::read_dir(self.root.join("quarantine")) {
++            Ok(mut entries) => entries.next().is_some(),
++            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
++            // An unreadable quarantine directory is degraded evidence itself.
++            Err(_) => true,
++        }
++    }
++
 +    pub fn health(&self) -> HealthSnapshot {
 +        let mut inner = lock(&self.inner);
 +        if self.spool_lock.verify().is_err() {
@@ -9651,6 +9664,7 @@ index 0000000000000000000000000000000000000000..e40c8d5aea70cc98e546d507a7ea086c
 +            // the sticky flag when it reached the saturation point.
 +            || inner.storage_rejected_attempts == u64::MAX
 +            || spool_bytes >= self.config.max_spool_bytes
++            || self.quarantine_outstanding()
 +            || !free_space_ok(&self.root, self.config.min_free_bytes)
 +            || inner
 +                .producer_disconnected_at
@@ -14670,6 +14684,35 @@ index 0000000000000000000000000000000000000000..e40c8d5aea70cc98e546d507a7ea086c
 +        assert!(!health.producer_connected);
 +        assert!(health.producer_runtime_id.is_none());
 +        assert!(health.last_ingest_at_unix_ms.is_none());
++    }
++
++    /// m-189: §10.1 lists an undisposed quarantine object as a degraded
++    /// condition.  Isolated bytes survive restarts, so a fresh process must not
++    /// report `ok` while they are still on disk.
++    #[test]
++    fn undisposed_quarantine_object_keeps_health_degraded() {
++        let dir = tempfile::tempdir().expect("tempdir");
++        {
++            let spool = Spool::open(config(dir.path())).expect("spool");
++            spool.append(&event(1), 1).expect("append");
++            assert_eq!(spool.health().status, "ok", "the baseline spool is healthy");
++        }
++        let isolated = dir.path().join("quarantine").join("00000000-batch-corrupt");
++        fs::create_dir_all(&isolated).expect("quarantine object");
++        fs::write(isolated.join("segment.ndjson"), b"corrupt\n").expect("isolated body");
++
++        let spool = Spool::open(config(dir.path())).expect("reopen");
++        assert_eq!(
++            spool.health().status,
++            "degraded",
++            "an unresolved quarantine object must not be reset to ok by a restart"
++        );
++        fs::remove_dir_all(&isolated).expect("dispose of the isolated object");
++        assert_eq!(
++            spool.health().status,
++            "ok",
++            "health must recover once the isolated object is gone"
++        );
 +    }
 +
 +    #[test]
