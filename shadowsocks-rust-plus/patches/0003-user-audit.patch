@@ -7813,10 +7813,10 @@ index 0000000000000000000000000000000000000000..6cf8d005dfef917c852be4f611d5b945
 +}
 diff --git a/crates/shadowsocks-auditd/src/spool.rs b/crates/shadowsocks-auditd/src/spool.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..b5defd0a2f582397e6f58e25c350d7b20dd97ed9
+index 0000000000000000000000000000000000000000..1cc2b3841073795dc9e7ba5f43f48b31932ba5d9
 --- /dev/null
 +++ b/crates/shadowsocks-auditd/src/spool.rs
-@@ -0,0 +1,7630 @@
+@@ -0,0 +1,7705 @@
 +//! Durable, node-local audit spool.
 +//!
 +//! The spool is deliberately synchronous.  Ingest and export perform their
@@ -11314,6 +11314,19 @@ index 0000000000000000000000000000000000000000..b5defd0a2f582397e6f58e25c350d7b2
 +        )
 +    }
 +
++    /// Every destructive path that drops unacknowledged events feeds the same
++    /// health counter.  Sealed eviction, quarantine eviction and the recovery
++    /// completion of a crashed eviction all lose records the collector never
++    /// received; counting only one of them under-reports the loss in health.
++    fn add_evicted_unacked_records(inner: &mut SpoolInner, records: u64) {
++        let (value, overflowed) = inner.evicted_unacked_records.overflowing_add(records);
++        inner.evicted_unacked_records = if overflowed { u64::MAX } else { value };
++        if overflowed {
++            inner.degraded = true;
++            inner.non_gap_degraded = true;
++        }
++    }
++
 +    fn evict_sealed_locked(&self, inner: &mut SpoolInner, path: &Path) -> Result<(), SpoolError> {
 +        let lease = match self.read_batch(path, false) {
 +            Ok(Some(value)) => value,
@@ -11379,12 +11392,7 @@ index 0000000000000000000000000000000000000000..b5defd0a2f582397e6f58e25c350d7b2
 +        }) {
 +            self.replace_tombstone_locked(inner, index, Some(replacement))?;
 +        }
-+        let (value, overflowed) = inner.evicted_unacked_records.overflowing_add(info.event_count);
-+        inner.evicted_unacked_records = if overflowed { u64::MAX } else { value };
-+        if overflowed {
-+            inner.degraded = true;
-+            inner.non_gap_degraded = true;
-+        }
++        Self::add_evicted_unacked_records(inner, info.event_count);
 +        Ok(())
 +    }
 +
@@ -11438,6 +11446,9 @@ index 0000000000000000000000000000000000000000..b5defd0a2f582397e6f58e25c350d7b2
 +        };
 +        inner.gap_degraded = true;
 +        self.write_gap_locked(inner, &spec)?;
++        // The isolated object held unacknowledged events as well; health must
++        // account for them exactly like a sealed eviction.
++        Self::add_evicted_unacked_records(inner, spec.lost_events.unwrap_or(0));
 +        if let Some(index) = inner.tombstones.iter().position(|entry| {
 +            matches!(entry, TombstoneEntry::QuarantinePending(value) if value.gap_event_id == pending.gap_event_id)
 +        }) {
@@ -11503,6 +11514,9 @@ index 0000000000000000000000000000000000000000..b5defd0a2f582397e6f58e25c350d7b2
 +                        if !inner.durable_gap_reasons.contains_key(&pending.gap_event_id) {
 +                            self.write_gap_locked(inner, &spec)?;
 +                        }
++                        // Finishing a crashed eviction loses the same records
++                        // the in-process path would have counted.
++                        Self::add_evicted_unacked_records(inner, pending.event_count.0);
 +                        self.replace_tombstone_locked(
 +                            inner,
 +                            index,
@@ -14873,6 +14887,67 @@ index 0000000000000000000000000000000000000000..b5defd0a2f582397e6f58e25c350d7b2
 +        let body = fs::read(dir.path().join("open/current.ndjson")).expect("gap segment");
 +        assert!(body.windows(gap_id.len()).any(|window| window == gap_id.as_bytes()));
 +        assert!(!marker.exists(), "resolved pending marker should be removed");
++    }
++
++    /// m-191: `evicted_unacked_records` must cover every destructive path that
++    /// drops unacknowledged events, not only the in-process sealed eviction.
++    #[test]
++    fn quarantine_and_recovered_evictions_count_lost_records() {
++        let dir = tempfile::tempdir().expect("tempdir");
++        let spool = Spool::open(config(dir.path())).expect("spool");
++        spool.append(&event(1), 1).expect("append");
++        spool.append(&event(2), 2).expect("append");
++        {
++            let mut inner = lock(&spool.inner);
++            spool.seal_locked(&mut inner).expect("seal");
++        }
++        let sealed = list_batch_dirs(&dir.path().join("sealed")).expect("sealed");
++        // Body corruption keeps meta.json readable, so the isolated object
++        // still carries the exact number of events it holds.
++        fs::write(sealed[0].join("segment.ndjson"), b"corrupt\n").expect("corrupt body");
++        assert!(spool.lease().expect("lease").is_none());
++        let isolated = list_entries(&dir.path().join("quarantine")).expect("quarantine");
++        assert_eq!(isolated.len(), 1);
++        assert_eq!(lock(&spool.inner).evicted_unacked_records, 0);
++
++        {
++            let mut inner = lock(&spool.inner);
++            spool
++                .evict_quarantine_locked(&mut inner, &isolated[0])
++                .expect("quarantine eviction");
++        }
++        assert_eq!(
++            lock(&spool.inner).evicted_unacked_records,
++            2,
++            "quarantine eviction drops unacknowledged events as well"
++        );
++
++        // A crash between the delete barrier and the gap write is finished by
++        // recovery, which loses exactly the same records.
++        let pending = wire::EvictionPending::new(
++            "b".repeat(32),
++            "c".repeat(64),
++            unix_millis().expect("clock"),
++            format!("{GAP_ID_PREFIX}{}", "d".repeat(32)),
++            "capacity_eviction",
++            "e".repeat(32),
++            4096,
++            4099,
++            4,
++            512,
++        );
++        {
++            let mut inner = lock(&spool.inner);
++            spool
++                .add_tombstone_locked(&mut inner, TombstoneEntry::EvictionPending(pending))
++                .expect("pending eviction");
++            spool.reconcile_tombstones_locked(&mut inner).expect("reconcile");
++        }
++        assert_eq!(
++            lock(&spool.inner).evicted_unacked_records,
++            6,
++            "a recovery-completed eviction must be counted too"
++        );
 +    }
 +
 +    #[test]
