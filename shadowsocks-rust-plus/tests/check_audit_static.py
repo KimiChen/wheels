@@ -342,10 +342,12 @@ def _check_wiring_file_functions(path: Path) -> list[str]:
         structural_lines.append(structural)
 
     depth_before: list[int] = []
+    depth_after: list[int] = []
     depth = 0
     for structural in structural_lines:
         depth_before.append(depth)
         depth += structural.count("{") - structural.count("}")
+        depth_after.append(depth)
 
     function_starts = [
         index
@@ -374,7 +376,11 @@ def _check_wiring_file_functions(path: Path) -> list[str]:
             current = structural_lines[cursor]
             saw_brace = saw_brace or "{" in current
             end = cursor
-            if saw_brace and depth_before[cursor] <= baseline_depth and cursor > start:
+            # The body closes when the depth *after* this line falls back to the
+            # baseline.  Testing the depth *before* the line ends a multiline
+            # signature on its own `) {` line and leaves the whole body — and
+            # even the marker itself — outside the scan.
+            if saw_brace and depth_after[cursor] <= baseline_depth:
                 break
         # A marker in an attribute/closure without a discoverable function is
         # still checked locally instead of silently escaping the guard.
@@ -382,84 +388,6 @@ def _check_wiring_file_functions(path: Path) -> list[str]:
             start = max(0, marker_index - 8)
             end = min(len(lines) - 1, marker_index + 8)
         audited_lines.update(range(start, end + 1))
-
-    for line_index in sorted(audited_lines):
-        if line_index in test_only:
-            continue
-        structural = structural_lines[line_index]
-        number = line_index + 1
-        if FORBIDDEN.search(structural):
-            findings.append(f"{path}:{number}: forbidden panic path in user-audit wiring")
-        for match in INDEX.finditer(structural):
-            if not _index_is_proven_safe(structural_lines, line_index, match):
-                findings.append(f"{path}:{number}: direct index in user-audit wiring")
-    return findings
-
-
-def _check_relay_wiring_file(path: Path) -> list[str]:
-    """Audit complete ``cfg(user-audit)`` items in relay/context modules.
-
-    Relay modules contain a large amount of unrelated upstream code with
-    deliberate indexing patterns. Feature attributes provide a precise
-    boundary for audit-specific items; checking each complete item catches a
-    panic or unchecked index introduced after the attribute line.
-    """
-
-    findings: list[str] = []
-    lines = path.read_text(encoding="utf-8").splitlines()
-    test_only = _test_only_lines(lines)
-    structural_lines: list[str] = []
-    comment_depth = 0
-    for line in lines:
-        structural, comment_depth = _structural_characters(line, comment_depth)
-        structural_lines.append(structural)
-
-    audited_lines: set[int] = set()
-    cursor = 0
-    while cursor < len(lines):
-        attribute = lines[cursor].strip()
-        if attribute not in {
-            '#[cfg(feature = "user-audit")]',
-            '#[cfg(all(feature = "user-audit", target_os = "linux"))]',
-        }:
-            cursor += 1
-            continue
-        start = cursor
-        cursor += 1
-        # A cfg attribute can guard a struct field or a local binding rather
-        # than a whole function. Stop at its comma/semicolon so a later
-        # function brace cannot make the selected range span the enclosing item.
-        while cursor < len(lines) and not structural_lines[cursor].strip():
-            cursor += 1
-        first_item = structural_lines[cursor].strip() if cursor < len(lines) else ""
-        item_has_body = bool(re.search(r"\b(?:fn|struct|enum|impl|trait|mod)\b", first_item)) or "{" in first_item
-        if not item_has_body:
-            while cursor < len(lines):
-                current = structural_lines[cursor]
-                cursor += 1
-                if ";" in current or "," in current:
-                    break
-            audited_lines.update(range(start, cursor))
-            continue
-        depth = 0
-        saw_brace = False
-        while cursor < len(lines):
-            current = structural_lines[cursor]
-            depth += current.count("{") - current.count("}")
-            saw_brace = saw_brace or "{" in current
-            cursor += 1
-            if saw_brace and depth == 0:
-                break
-            if not saw_brace and ";" in current:
-                break
-        audited_lines.update(range(start, cursor))
-
-    # Some call sites are inside a larger feature-gated function without a
-    # nested cfg attribute. Include a short neighborhood around explicit audit
-    # markers so a newly added unchecked operation cannot hide on the next line.
-    for index, structural in enumerate(structural_lines):
-        if AUDIT_MARKER.search(structural) is not None:
-            audited_lines.update(range(max(0, index - 2), min(len(lines), index + 3)))
 
     for line_index in sorted(audited_lines):
         if line_index in test_only:

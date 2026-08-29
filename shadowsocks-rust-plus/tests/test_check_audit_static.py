@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -206,6 +207,56 @@ fn production() {
             findings = CHECKER.check(root, require_complete=False)
             self.assertTrue(any(":9: forbidden panic path in user-audit wiring" in item for item in findings))
             self.assertTrue(any(":11: direct index in user-audit wiring" in item for item in findings))
+
+
+    SERVICE_LINUX_GATE = (
+        '#[cfg(all(feature = "user-audit", not(target_os = "linux")))]\n'
+        'compile_error!("feature `user-audit` is supported on Linux only");\n'
+    )
+
+    def check_service_source(self, relative: str, source: str) -> list[str]:
+        """Check one service module inside an otherwise minimal prepared tree."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            service = root / "crates/shadowsocks-service/src"
+            service.mkdir(parents=True)
+            (service / "lib.rs").write_text(self.SERVICE_LINUX_GATE, encoding="utf-8")
+            path = service / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(source, encoding="utf-8")
+            return CHECKER.check(root, require_complete=False)
+
+    def test_scans_body_of_multiline_signature_relay_function(self) -> None:
+        # §27 M-53 的原始复现：多行签名函数的审计范围一度只剩签名行。
+        findings = self.check_service_source(
+            "server/udprelay.rs",
+            'impl UdpAssociation {\n'
+            '    async fn dispatch_received_packet(\n'
+            '        &mut self,\n'
+            '        peer_addr: SocketAddr,\n'
+            '        data: &[u8],\n'
+            '    ) {\n'
+            '        let injected: Option<u8> = None;\n'
+            '        let _ = injected.unwrap();\n'
+            '        let probe: [u8; 2] = [0; 2];\n'
+            '        let _ = probe[7];\n'
+            '        #[cfg(feature = "user-audit")]\n'
+            '        if let Some(audit_emitter) = self.context.user_audit_emitter() {\n'
+            '            audit_emitter.observe(peer_addr, data);\n'
+            '        }\n'
+            '    }\n'
+            '}\n',
+        )
+        self.assertTrue(any(":8: forbidden panic path in user-audit wiring" in item for item in findings))
+        self.assertTrue(any(":10: direct index in user-audit wiring" in item for item in findings))
+
+    def test_every_module_scanner_is_wired_into_check(self) -> None:
+        # §27 M-53 / §28 m-212 的死代码模式：定义了扫描器却从不被 check() 调用。
+        source = MODULE_PATH.read_text(encoding="utf-8")
+        defined = set(re.findall(r"^def (_check_[A-Za-z0-9_]+)\(", source, re.MULTILINE))
+        body = source[source.index("def check(root: Path"):]
+        called = set(re.findall(r"(_check_[A-Za-z0-9_]+)\(", body))
+        self.assertEqual(defined - called, set())
 
 
 if __name__ == "__main__":
