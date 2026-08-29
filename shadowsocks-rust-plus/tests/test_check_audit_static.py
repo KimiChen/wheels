@@ -404,5 +404,29 @@ fn due(next_due: &[u64; 4], bucket: Bucket) -> u64 {
                 self.assertEqual(self.check_source(source), [])
 
 
+    def test_scans_complete_audit_item_in_service_wiring_file(self) -> None:
+        # §28 M-61 的原始复现：接线文件只做单行匹配，构造块其余行全部逃逸。
+        findings = self.check_service_source(
+            "server/mod.rs",
+            'fn build_runtime(config: &Config) -> io::Result<()> {\n'
+            '    #[cfg(feature = "user-audit")]\n'
+            '    let audit_emitter = if let Some(audit_config) = config.user_audit.as_ref() {\n'
+            '        let runtime = audit_runtime_metadata\n'
+            '            .ok_or_else(|| io::Error::other("unavailable"))\n'
+            '            .unwrap();\n'
+            '        Some(AuditEmitter::new(runtime, audit_config))\n'
+            '    } else {\n'
+            '        None\n'
+            '    };\n'
+            '    let acl = config.acl.file_path().to_str().unwrap();\n'
+            '    Ok(())\n'
+            '}\n',
+        )
+        self.assertTrue(any(":6: forbidden panic path in user-audit wiring" in item for item in findings))
+        # 接线文件的范围是完整的 cfg 条目/语句而不是整个上游函数：同一函数里与审计
+        # 无关的上游行不得被拉进来，否则护栏会对既有交付代码误报。
+        self.assertFalse(any(":11:" in item for item in findings))
+
+
 if __name__ == "__main__":
     unittest.main()

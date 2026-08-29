@@ -16392,7 +16392,7 @@ index e00e53ada441f5f3356b3b8c554c238909de817d..f38312a278848b7ad191cf22c2c275b8
 +    }
 +}
 diff --git a/crates/shadowsocks-service/src/server/mod.rs b/crates/shadowsocks-service/src/server/mod.rs
-index a2e23a55b4f50cc5d73d0cb15eabc717864133fd..e26b9f03007d901710ecf7cd1660e51afb43ff87 100644
+index a2e23a55b4f50cc5d73d0cb15eabc717864133fd..a680551a5b54a6f1e653e980d16f6bd7556397b0 100644
 --- a/crates/shadowsocks-service/src/server/mod.rs
 +++ b/crates/shadowsocks-service/src/server/mod.rs
 @@ -1,6 +1,6 @@
@@ -16730,7 +16730,7 @@ index a2e23a55b4f50cc5d73d0cb15eabc717864133fd..e26b9f03007d901710ecf7cd1660e51a
      let mut vfut = Vec::with_capacity(servers.len());
  
      for server in servers {
-@@ -273,12 +478,247 @@ pub async fn run(config: Config) -> io::Result<()> {
+@@ -273,12 +478,260 @@ pub async fn run(config: Config) -> io::Result<()> {
          vfut.push(exporter);
      }
  
@@ -16779,6 +16779,19 @@ index a2e23a55b4f50cc5d73d0cb15eabc717864133fd..e26b9f03007d901710ecf7cd1660e51a
 +        // Aggregate-only final journald record, emitted after every relay has
 +        // joined.  Keep this count-only: identities, targets, event bodies and
 +        // credentials are never included in shutdown diagnostics.
++        //
++        // Destructure the diagnostic counters instead of indexing them: the
++        // array pattern is checked against `DIAGNOSTIC_BUCKETS` at compile time,
++        // so a bucket added later fails to build instead of silently shifting
++        // the record, and the shutdown path keeps no direct index.
++        let [
++            queue_overflow_remaining,
++            encode_error_remaining,
++            permanent_nack_invalid_schema_remaining,
++            permanent_nack_event_id_conflict_remaining,
++            permanent_nack_runtime_mismatch_remaining,
++            contention_remaining,
++        ] = pending.diagnostics;
 +        log::warn!(
 +            "user audit shutdown drain_completed={drain_completed} skipped_observations={skipped} \
 +             diagnostic_drops={diagnostic_drops} contention_drops={contention_drops} \
@@ -16792,12 +16805,12 @@ index a2e23a55b4f50cc5d73d0cb15eabc717864133fd..e26b9f03007d901710ecf7cd1660e51a
 +            pending.queue,
 +            pending.in_flight,
 +            pending.diagnostic_inflight,
-+            pending.diagnostics[0],
-+            pending.diagnostics[1],
-+            pending.diagnostics[2],
-+            pending.diagnostics[3],
-+            pending.diagnostics[4],
-+            pending.diagnostics[5],
++            queue_overflow_remaining,
++            encode_error_remaining,
++            permanent_nack_invalid_schema_remaining,
++            permanent_nack_event_id_conflict_remaining,
++            permanent_nack_runtime_mismatch_remaining,
++            contention_remaining,
 +            health.invalid_ack,
 +            health.encode_error_time_unknown,
 +            health.diagnostic_time_unknown,
@@ -16981,7 +16994,7 @@ index a2e23a55b4f50cc5d73d0cb15eabc717864133fd..e26b9f03007d901710ecf7cd1660e51a
  }
  
  #[cfg(test)]
-@@ -302,10 +742,40 @@ mod tests {
+@@ -302,10 +755,40 @@ mod tests {
          assert_eq!(error.to_string(), "user statistics exporter stopped");
      }
  

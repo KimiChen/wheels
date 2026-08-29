@@ -63,6 +63,12 @@ FUNCTION_DECLARATION = re.compile(r"(?:^|\s)(?:pub\s+)?(?:async\s+)?(?:unsafe\s+
 AUDIT_MARKER = re.compile(
     r"\b(?:user_audit|audit_emitter|AuditEmitter|AuditTarget|AuditRecord|audit_event|user-audit)\b"
 )
+AUDIT_CFG_ATTRIBUTES = frozenset(
+    {
+        '#[cfg(feature = "user-audit")]',
+        '#[cfg(all(feature = "user-audit", target_os = "linux"))]',
+    }
+)
 FIXED_ARRAY_DECLARATION = (
     r"\b{name}\s*:\s*&?\s*(?:mut\s+)?\[[^\]\n;]+;\s*(?P<typed_len>[A-Z_][A-Z0-9_]*(?:\.len\(\))?|[0-9]+)\]"
     r"|\blet\s+(?:mut\s+)?{name}\s*=\s*\[[^\]\n;]*;\s*(?P<literal_len>[A-Z_][A-Z0-9_]*|[0-9]+)\]"
@@ -399,14 +405,35 @@ def _check_file(path: Path) -> list[str]:
     return findings
 
 
-def _check_wiring_file_functions(path: Path) -> list[str]:
-    """Check complete functions that contain user-audit relay wiring.
+def _marker_item_end(structural_lines: list[str], marker_index: int) -> int:
+    """Return the last line of the item or statement starting at ``marker_index``."""
+
+    depth = 0
+    saw_brace = False
+    for cursor in range(marker_index, len(structural_lines)):
+        current = structural_lines[cursor]
+        depth += current.count("{") - current.count("}")
+        saw_brace = saw_brace or "{" in current
+        if depth < 0:
+            return cursor
+        if saw_brace and depth == 0:
+            return cursor
+        if not saw_brace and depth == 0 and (";" in current or "," in current):
+            return cursor
+    return len(structural_lines) - 1
+
+
+def _check_wiring_file(path: Path, *, whole_function: bool) -> list[str]:
+    """Check the audit wiring embedded in a mostly-upstream module.
 
     Looking only at the marker line misses a panic or an unchecked index on the
-    following line.  We first identify the enclosing Rust function for every
-    marker, then apply the same structural checks used for dedicated audit
-    files to that whole function.  Unrelated upstream functions remain out of
-    scope, keeping this guard useful on the large relay modules.
+    following line, so every marker is expanded to a complete syntactic range.
+    Relay modules keep audit state alive across a whole hot-path function, so
+    there the range is the enclosing function.  ``config.rs``/``lib.rs``/
+    ``server/mod.rs`` place a few audit statements inside very large upstream
+    functions (``impl Display for Config``), so there the range is the complete
+    cfg-guarded item or the complete statement carrying the marker; unrelated
+    upstream code stays out of scope in both cases.
     """
 
     findings: list[str] = []
@@ -429,15 +456,11 @@ def _check_wiring_file_functions(path: Path) -> list[str]:
     function_starts = [
         index
         for index, structural in enumerate(structural_lines)
-        if re.search(r"\b(?:async\s+)?fn\s+[A-Za-z_][A-Za-z0-9_]*", structural)
+        if FUNCTION_DECLARATION.search(structural)
     ]
     audited_lines: set[int] = set()
     for marker_index, structural in enumerate(structural_lines):
-        raw_attribute = lines[marker_index].strip()
-        audit_cfg = raw_attribute in {
-            '#[cfg(feature = "user-audit")]',
-            '#[cfg(all(feature = "user-audit", target_os = "linux"))]',
-        }
+        audit_cfg = lines[marker_index].strip() in AUDIT_CFG_ATTRIBUTES
         if AUDIT_MARKER.search(structural) is None and not audit_cfg:
             continue
         candidates = [
@@ -445,25 +468,26 @@ def _check_wiring_file_functions(path: Path) -> list[str]:
             for start in function_starts
             if start <= marker_index and depth_before[start] <= depth_before[marker_index]
         ]
-        start = candidates[-1] if candidates else marker_index
-        baseline_depth = depth_before[start]
-        saw_brace = False
-        end = start
-        for cursor in range(start, len(structural_lines)):
-            current = structural_lines[cursor]
-            saw_brace = saw_brace or "{" in current
-            end = cursor
-            # The body closes when the depth *after* this line falls back to the
-            # baseline.  Testing the depth *before* the line ends a multiline
-            # signature on its own `) {` line and leaves the whole body — and
-            # even the marker itself — outside the scan.
-            if saw_brace and depth_after[cursor] <= baseline_depth:
-                break
-        # A marker in an attribute/closure without a discoverable function is
-        # still checked locally instead of silently escaping the guard.
-        if not candidates:
-            start = max(0, marker_index - 8)
-            end = min(len(lines) - 1, marker_index + 8)
+        if whole_function and candidates:
+            start = candidates[-1]
+            baseline_depth = depth_before[start]
+            saw_brace = False
+            end = start
+            for cursor in range(start, len(structural_lines)):
+                saw_brace = saw_brace or "{" in structural_lines[cursor]
+                end = cursor
+                # The body closes when the depth *after* this line falls back to
+                # the baseline.  Testing the depth *before* the line ends a
+                # multiline signature on its own `) {` line and leaves the whole
+                # body — and even the marker itself — outside the scan.
+                if saw_brace and depth_after[cursor] <= baseline_depth:
+                    break
+        else:
+            # An attribute/closure marker with no discoverable enclosing
+            # function, and every marker in the three wiring modules, is scanned
+            # as one complete item or statement.
+            start = marker_index
+            end = _marker_item_end(structural_lines, marker_index)
         audited_lines.update(range(start, end + 1))
 
     for line_index in sorted(audited_lines):
@@ -476,27 +500,6 @@ def _check_wiring_file_functions(path: Path) -> list[str]:
         for match in INDEX.finditer(structural):
             if not _index_is_proven_safe(structural_lines, line_index, match):
                 findings.append(f"{path}:{number}: direct index in user-audit wiring")
-    return findings
-
-
-def _check_wiring_file(path: Path) -> list[str]:
-    """Check only lines that explicitly contain the audit feature wiring."""
-
-    findings: list[str] = []
-    lines = path.read_text(encoding="utf-8").splitlines()
-    test_only = _test_only_lines(lines)
-    comment_depth = 0
-    for line_index, line in enumerate(lines):
-        structural, comment_depth = _structural_characters(line, comment_depth)
-        if line_index in test_only:
-            continue
-        number = line_index + 1
-        if "user_audit" not in structural and "user-audit" not in structural:
-            continue
-        if FORBIDDEN.search(structural):
-            findings.append(f"{path}:{number}: forbidden panic path in user-audit wiring")
-        if INDEX.search(structural):
-            findings.append(f"{path}:{number}: direct index in user-audit wiring")
     return findings
 
 
@@ -520,7 +523,9 @@ def check(root: Path, *, require_complete: bool = True) -> list[str]:
     for relative in SERVICE_WIRING_FILES:
         service_file = root / relative
         if service_file.is_file():
-            findings.extend(_check_wiring_file(service_file))
+            # Audit wiring here is a handful of statements inside very large
+            # upstream functions; scan the complete cfg item or statement.
+            findings.extend(_check_wiring_file(service_file, whole_function=False))
             scanned.add(service_file)
     for relative in SERVICE_RELAY_WIRING_FILES:
         service_file = root / relative
@@ -529,7 +534,7 @@ def check(root: Path, *, require_complete: bool = True) -> list[str]:
             # larger function. Checking only the attribute item or a marker
             # neighborhood misses later statements in multiline if-let/match
             # blocks, so audit every complete function containing a marker.
-            findings.extend(_check_wiring_file_functions(service_file))
+            findings.extend(_check_wiring_file(service_file, whole_function=True))
             scanned.add(service_file)
     if not scanned:
         findings.append(f"{root}: no audit production Rust sources found")
