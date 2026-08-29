@@ -19651,10 +19651,10 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..fe9b793919b2c697acb463dce34c012d
  }
 diff --git a/crates/shadowsocks-service/src/server/user_audit.rs b/crates/shadowsocks-service/src/server/user_audit.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..fe8199f486c3e85ae17cb8c749473cb2111b8763
+index 0000000000000000000000000000000000000000..4a5d39945fa2689df5f3cd97703cfbf458ae411e
 --- /dev/null
 +++ b/crates/shadowsocks-service/src/server/user_audit.rs
-@@ -0,0 +1,4806 @@
+@@ -0,0 +1,4817 @@
 +//! Non-blocking successful-target access auditing for the server data path.
 +//!
 +//! The relay only constructs a small draft and performs bounded atomic/cache
@@ -21136,6 +21136,17 @@ index 0000000000000000000000000000000000000000..fe8199f486c3e85ae17cb8c749473cb2
 +
 +        // IDNA normalization allocates only after a borrowed raw miss. A
 +        // failed normalization deliberately falls back to the raw spelling.
++        //
++        // Deliberate trade-off (m-91 -> m-151 -> m-171): normalization runs
++        // inside the shard critical section.  Doing it outside would require
++        // either a second `try_lock()` for the same datagram -- which §6.4
++        // forbids ("每个完整 UDP send 成功后只调用一次 try_lock()") -- or an
++        // unconditional owned allocation on every packet, which is what the
++        // alias cache exists to avoid.  §6.4 only bars serialization, queue
++        // and socket work from the critical section; UTS #46 mapping is
++        // CPU-only and bounded by the 255-byte domain limit.  The primary plus
++        // one alternate spelling therefore hit without normalizing at all, and
++        // only a third or later spelling pays for it under the lock.
 +        let canonical_domain = match host {
 +            UdpAuditHost::Ip(_) => None,
 +            UdpAuditHost::Domain(raw) => Some(match normalize_domain(raw) {
