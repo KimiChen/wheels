@@ -7813,10 +7813,10 @@ index 0000000000000000000000000000000000000000..6cf8d005dfef917c852be4f611d5b945
 +}
 diff --git a/crates/shadowsocks-auditd/src/spool.rs b/crates/shadowsocks-auditd/src/spool.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..1cc2b3841073795dc9e7ba5f43f48b31932ba5d9
+index 0000000000000000000000000000000000000000..29b6ea836c2944186a43db0474f1e64e677449d8
 --- /dev/null
 +++ b/crates/shadowsocks-auditd/src/spool.rs
-@@ -0,0 +1,7705 @@
+@@ -0,0 +1,7770 @@
 +//! Durable, node-local audit spool.
 +//!
 +//! The spool is deliberately synchronous.  Ingest and export perform their
@@ -10563,6 +10563,15 @@ index 0000000000000000000000000000000000000000..1cc2b3841073795dc9e7ba5f43f48b31
 +        }
 +    }
 +
++    /// Bytes a cleanup candidate actually handed back to the filesystem.  A
++    /// rename into `quarantine/` frees nothing, and a candidate whose durable
++    /// gap costs more than it releases is not progress either.  The caller
++    /// sums these per-candidate amounts so one such write cannot cancel out
++    /// the bytes the other candidates released in the same iteration.
++    fn released_bytes(inner: &SpoolInner, start_bytes: u64) -> u64 {
++        start_bytes.saturating_sub(inner.spool_bytes)
++    }
++
 +    fn cleanup_locked(&self, inner: &mut SpoolInner, additional: u64) -> Result<(), SpoolError> {
 +        let now_seconds = match unix_seconds() {
 +            Ok(value) => value,
@@ -10614,7 +10623,13 @@ index 0000000000000000000000000000000000000000..1cc2b3841073795dc9e7ba5f43f48b31
 +                break;
 +            }
 +            iterations += 1;
-+            let iteration_start_bytes = inner.spool_bytes;
++            // Track what this iteration really released.  Comparing the
++            // iteration's start and end totals charges every candidate with
++            // the corruption gap another candidate had to write, which made
++            // the §24 scenario (one corrupt acked batch plus two healthy
++            // sealed batches) need a second cleanup call before capacity
++            // recovered.
++            let mut iteration_released = 0_u64;
 +            let mut progressed = false;
 +            let mut paths = match list_batch_dirs(&self.root.join("acked")) {
 +                Ok(value) => value,
@@ -10641,15 +10656,14 @@ index 0000000000000000000000000000000000000000..1cc2b3841073795dc9e7ba5f43f48b31
 +                };
 +                let Some(info) = info else {
 +                    inner.degraded = true;
-+                    match self.quarantine_batch_locked(inner, &path, "acked-corrupt") {
-+                        Ok(()) => progressed = inner.spool_bytes < candidate_start_bytes,
-+                        Err(error) => {
-+                            first_error.get_or_insert(error);
-+                            inner.storage_rejected_attempts = saturating_inc(inner.storage_rejected_attempts);
-+                        }
++                    if let Err(error) = self.quarantine_batch_locked(inner, &path, "acked-corrupt") {
++                        first_error.get_or_insert(error);
++                        inner.storage_rejected_attempts = saturating_inc(inner.storage_rejected_attempts);
 +                    }
-+                    if self.capacity_ok(inner, additional) || inner.spool_bytes < candidate_start_bytes {
-+                        progressed = inner.spool_bytes < candidate_start_bytes;
++                    let freed = Self::released_bytes(inner, candidate_start_bytes);
++                    iteration_released = iteration_released.saturating_add(freed);
++                    progressed = freed > 0;
++                    if self.capacity_ok(inner, additional) || progressed {
 +                        break;
 +                    }
 +                    continue;
@@ -10668,6 +10682,8 @@ index 0000000000000000000000000000000000000000..1cc2b3841073795dc9e7ba5f43f48b31
 +                match Self::remove_tree_tracked(inner, &path) {
 +                    Ok(_) => {
 +                        inner.stored_records = inner.stored_records.saturating_sub(info.event_count);
++                        iteration_released =
++                            iteration_released.saturating_add(Self::released_bytes(inner, candidate_start_bytes));
 +                        progressed = true;
 +                        if let Err(error) = sync_dir(&self.root.join("acked")) {
 +                            first_error.get_or_insert(error.into());
@@ -10690,7 +10706,7 @@ index 0000000000000000000000000000000000000000..1cc2b3841073795dc9e7ba5f43f48b31
 +                if self.capacity_ok(inner, additional) {
 +                    break;
 +                }
-+                if inner.spool_bytes >= iteration_start_bytes {
++                if iteration_released == 0 {
 +                    break;
 +                }
 +                continue;
@@ -10709,16 +10725,16 @@ index 0000000000000000000000000000000000000000..1cc2b3841073795dc9e7ba5f43f48b31
 +            });
 +            for path in quarantine {
 +                let candidate_start_bytes = inner.spool_bytes;
-+                match self.evict_quarantine_locked(inner, &path) {
-+                    Ok(()) => progressed = inner.spool_bytes < candidate_start_bytes,
-+                    Err(error) => {
-+                        first_error.get_or_insert(error);
-+                        inner.degraded = true;
-+                        inner.non_gap_degraded = true;
-+                        inner.storage_rejected_attempts = saturating_inc(inner.storage_rejected_attempts);
-+                    }
++                if let Err(error) = self.evict_quarantine_locked(inner, &path) {
++                    first_error.get_or_insert(error);
++                    inner.degraded = true;
++                    inner.non_gap_degraded = true;
++                    inner.storage_rejected_attempts = saturating_inc(inner.storage_rejected_attempts);
 +                }
-+                if progressed || self.capacity_ok(inner, additional) || inner.spool_bytes < candidate_start_bytes {
++                let freed = Self::released_bytes(inner, candidate_start_bytes);
++                iteration_released = iteration_released.saturating_add(freed);
++                progressed = freed > 0;
++                if progressed || self.capacity_ok(inner, additional) {
 +                    progressed = true;
 +                    break;
 +                }
@@ -10727,7 +10743,7 @@ index 0000000000000000000000000000000000000000..1cc2b3841073795dc9e7ba5f43f48b31
 +                if self.capacity_ok(inner, additional) {
 +                    break;
 +                }
-+                if inner.spool_bytes >= iteration_start_bytes {
++                if iteration_released == 0 {
 +                    break;
 +                }
 +                continue;
@@ -10763,16 +10779,16 @@ index 0000000000000000000000000000000000000000..1cc2b3841073795dc9e7ba5f43f48b31
 +            });
 +            for (_, path) in sealed {
 +                let candidate_start_bytes = inner.spool_bytes;
-+                match self.evict_sealed_locked(inner, &path) {
-+                    Ok(()) => progressed = inner.spool_bytes < candidate_start_bytes,
-+                    Err(error) => {
-+                        first_error.get_or_insert(error);
-+                        inner.degraded = true;
-+                        inner.non_gap_degraded = true;
-+                        inner.storage_rejected_attempts = saturating_inc(inner.storage_rejected_attempts);
-+                    }
++                if let Err(error) = self.evict_sealed_locked(inner, &path) {
++                    first_error.get_or_insert(error);
++                    inner.degraded = true;
++                    inner.non_gap_degraded = true;
++                    inner.storage_rejected_attempts = saturating_inc(inner.storage_rejected_attempts);
 +                }
-+                if progressed || self.capacity_ok(inner, additional) || inner.spool_bytes < candidate_start_bytes {
++                let freed = Self::released_bytes(inner, candidate_start_bytes);
++                iteration_released = iteration_released.saturating_add(freed);
++                progressed = freed > 0;
++                if progressed || self.capacity_ok(inner, additional) {
 +                    progressed = true;
 +                    break;
 +                }
@@ -10781,7 +10797,7 @@ index 0000000000000000000000000000000000000000..1cc2b3841073795dc9e7ba5f43f48b31
 +                if self.capacity_ok(inner, additional) {
 +                    break;
 +                }
-+                if inner.spool_bytes >= iteration_start_bytes {
++                if iteration_released == 0 {
 +                    break;
 +                }
 +                continue;
@@ -15106,6 +15122,55 @@ index 0000000000000000000000000000000000000000..1cc2b3841073795dc9e7ba5f43f48b31
 +        spool
 +            .write_gap_locked(&mut inner, &spec)
 +            .expect("indexed duplicate avoids storage scan");
++    }
++
++    /// m-174/m-190: one corrupt acked batch plus healthy sealed batches must be
++    /// reclaimed by a single cleanup pass.  A rename into `quarantine/` frees
++    /// nothing, and the corruption gaps the transaction has to write must not
++    /// be charged against the bytes the other candidates released.
++    #[test]
++    fn one_cleanup_pass_reclaims_capacity_around_a_corrupt_acked_batch() {
++        let dir = tempfile::tempdir().expect("tempdir");
++        let spool = Spool::open(config(dir.path())).expect("spool");
++        // A single-event acked batch: once its metadata is destroyed it
++        // releases fewer bytes than the two gaps its isolation costs.
++        spool.append(&event(1), 1).expect("append");
++        let lease = spool.lease().expect("lease").expect("batch");
++        assert_eq!(
++            spool.ack(&lease.info.batch_id, &lease.info.body_sha256).expect("ack"),
++            AckOutcome::Acked
++        );
++        // Two sealed batches, each far larger than a diagnostic gap.
++        let mut sequence = 2;
++        for _ in 0..2 {
++            for _ in 0..40 {
++                spool.append(&event(sequence), sequence).expect("append");
++                sequence += 1;
++            }
++            {
++                let mut inner = lock(&spool.inner);
++                spool.seal_locked(&mut inner).expect("seal");
++            }
++        }
++        let acked = list_batch_dirs(&dir.path().join("acked")).expect("acked");
++        assert_eq!(acked.len(), 1);
++        fs::write(acked[0].join("meta.json"), b"{").expect("corrupt acked meta");
++
++        let mut inner = lock(&spool.inner);
++        // Ask for more headroom than the corrupt object can release, so the
++        // pass has to reach the sealed batches behind it.
++        let additional = spool.config.max_spool_bytes - inner.spool_bytes + 8_192;
++        assert!(
++            !spool.capacity_ok(&inner, additional),
++            "the fixture must start over the watermark"
++        );
++        spool.cleanup_locked(&mut inner, additional).expect("cleanup");
++        assert!(
++            spool.capacity_ok(&inner, additional),
++            "a single cleanup pass must reclaim capacity: spool_bytes {} + {additional} > max {}",
++            inner.spool_bytes,
++            spool.config.max_spool_bytes
++        );
 +    }
 +
 +    #[test]
