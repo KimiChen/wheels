@@ -459,6 +459,29 @@ HTTP、信号或文件接口，只在进程退出、全部 relay join 之后由�
 轮询的告警指标；运行期只能依赖上面三条限频 journald warn 和 auditd 侧 health，而退出时的那条聚合
 记录应在每次重启后解析并归档为该运行周期的最终审计缺口证据。
 
+### auditd durability fail-closed 退出
+
+写屏障（`fdatasync`、rename 之后的目录 `fsync`）的结果无法判定时，auditd 置一个不可清除的 sticky
+状态并 fail closed，而不是猜测磁盘上发生了什么：此后所有 append/lease/ACK/清理调用一律返回
+`spool durability is uncertain; daemon restart is required`，health 保持 degraded 且继续累计
+`storage_rejected_attempts`，ingest 对 producer 回可重试的 `storage_unavailable` NACK，export 的
+lease/ACK 返回 500 `internal_error`，health 轮询本身也降级为只读。守护进程的 fatal watcher 随即关停
+两个 socket server，以退出码 1 结束，并在 stderr/journald 留下
+`shadowsocks-auditd: spool durability is uncertain; daemon restart is required`。
+
+运维处置：
+
+- 这是设计内的 fail-closed，不是崩溃。`Restart=on-failure` 会重启 auditd，启动时的 spool recovery
+  负责判定磁盘真实状态并按第 9 节补写 gap；不要靠调小 `RestartSec` 或手工循环重启掩盖它，也不要
+  删除 spool 目录“清状态”；
+- ssserver 不受影响，代理数据面继续工作。重启窗口内的审计事件按第 7.1 节属于允许的漏记，producer
+  保留 in-flight 并在 auditd 回来后重放；
+- 同一节点短时间内反复触发，说明存储或文件系统本身不可靠（只读 remount、设备错误、配额耗尽、
+  把 `spool_dir` 放在网络文件系统上）。必须先查 `dmesg`、文件系统状态和 `spool_dir` 可写性，再恢复
+  该节点的采集；
+- 重启后核对 auditd health 与 controller 侧 `spool_epoch`/`spool_sequence` 的连续性。出现
+  `spool_gap` 是预期证据，必须归档而不是清除。
+
 ## 计划重启与升级屏障
 
 计划停止、升级或密钥轮换按以下顺序执行：

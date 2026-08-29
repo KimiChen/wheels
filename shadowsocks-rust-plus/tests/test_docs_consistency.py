@@ -158,5 +158,29 @@ class ProducerHealthDocsTests(unittest.TestCase):
             self.assertIn(flat(message), operations)
 
 
+class AuditdFatalDocsTests(unittest.TestCase):
+    """第六轮引入的 sticky durability fail-closed 必须有运维说明，且引用真实错误文本。"""
+
+    SPOOL = "crates/shadowsocks-auditd/src/spool.rs"
+
+    def durability_uncertain_message(self) -> str:
+        lines = patch_added_lines()[self.SPOOL]
+        for index, line in enumerate(lines):
+            if line.strip() != "DurabilityUncertain," or index == 0:
+                continue
+            attribute = re.fullmatch(r'\s*#\[error\("([^"]+)"\)\]', lines[index - 1])
+            if attribute is not None:
+                return attribute.group(1)
+        self.fail("补丁中找不到 SpoolError::DurabilityUncertain 的错误文本")
+
+    def test_operations_documents_the_sticky_fatal_failure_mode(self) -> None:
+        message = self.durability_uncertain_message()
+        operations = flat(read(DOCS / "OPERATIONS.md"))
+        self.assertIn(flat("### auditd durability fail-closed 退出"), operations)
+        self.assertIn(flat(message), operations)
+        for expected in ("storage_unavailable", "Restart=on-failure", "spool recovery"):
+            self.assertIn(flat(expected), operations)
+
+
 if __name__ == "__main__":
     unittest.main()
