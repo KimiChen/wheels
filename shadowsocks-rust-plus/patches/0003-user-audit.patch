@@ -19238,10 +19238,10 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..5b0ebb7924e76785c6e14e5826db6b88
  }
 diff --git a/crates/shadowsocks-service/src/server/user_audit.rs b/crates/shadowsocks-service/src/server/user_audit.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..a70f9265fcd831587605b39800bcceff9500a292
+index 0000000000000000000000000000000000000000..274c2463c39cd23a82492b5675989363707b83c8
 --- /dev/null
 +++ b/crates/shadowsocks-service/src/server/user_audit.rs
-@@ -0,0 +1,4491 @@
+@@ -0,0 +1,4548 @@
 +//! Non-blocking successful-target access auditing for the server data path.
 +//!
 +//! The relay only constructs a small draft and performs bounded atomic/cache
@@ -22435,7 +22435,7 @@ index 0000000000000000000000000000000000000000..a70f9265fcd831587605b39800bcceff
 +    use super::*;
 +    use crate::config::UserAuditConfig;
 +    #[cfg(unix)]
-+    use shadowsocks_audit_protocol::{EventAck, EventNack, HelloAck};
++    use shadowsocks_audit_protocol::{EventAck, EventNack, HelloAck, HelloErrorCode, HelloNack};
 +    #[cfg(unix)]
 +    use tempfile::tempdir;
 +    #[cfg(unix)]
@@ -23490,6 +23490,63 @@ index 0000000000000000000000000000000000000000..a70f9265fcd831587605b39800bcceff
 +            .await
 +            .expect("supervisor did not stop")
 +            .expect("supervisor task failed");
++    }
++
++    #[cfg(unix)]
++    #[tokio::test]
++    async fn hello_nack_health_is_counted_at_runtime_and_frozen_during_shutdown() {
++        let directory = tempdir().expect("temporary directory");
++        let socket_path = directory.path().join("ingest.sock");
++        let listener = UnixListener::bind(&socket_path).expect("listener");
++        let config = UserAuditConfig::new(&socket_path, test_auditd_user());
++        let emitter = AuditEmitter::new(runtime(), &config);
++        emitter.try_push(tcp_draft(&emitter, 172));
++
++        // Every session answers with the same non-retryable hello NACK.
++        let sessions = Arc::new(AtomicU64::new(0));
++        let server_sessions = sessions.clone();
++        let server = tokio::spawn(async move {
++            loop {
++                let Ok((stream, _)) = listener.accept().await else {
++                    break;
++                };
++                let (mut reader, mut writer) = stream.into_split();
++                if read_frame(&mut reader).await.is_err() {
++                    continue;
++                }
++                let nack = HelloNack::new(HelloErrorCode::NodeMismatch);
++                let nack = serialize_canonical(&nack).expect("hello nack");
++                if write_frame(&mut writer, &nack).await.is_err() {
++                    continue;
++                }
++                server_sessions.fetch_add(1, Ordering::AcqRel);
++            }
++        });
++
++        let supervisor = emitter.spawn_supervisor();
++        // The running producer books exactly one sticky hello NACK.
++        for _ in 0..400 {
++            if emitter.hello_nack_health().0 != 0 {
++                break;
++            }
++            tokio::time::sleep(Duration::from_millis(10)).await;
++        }
++        assert_eq!(emitter.hello_nack_health(), (1, true));
++        let sessions_before_close = sessions.load(Ordering::Acquire);
++
++        // The bounded shutdown drain keeps retrying the hello, but a NACK
++        // received while closing belongs to teardown, not to runtime health.
++        emitter.close_emitter();
++        tokio::time::timeout(SHUTDOWN_DRAIN_BUDGET * 3, supervisor)
++            .await
++            .expect("supervisor did not stop")
++            .expect("supervisor task failed");
++        assert!(
++            sessions.load(Ordering::Acquire) > sessions_before_close,
++            "shutdown must actually reach the hello NACK path again"
++        );
++        assert_eq!(emitter.hello_nack_health(), (1, true));
++        server.abort();
 +    }
 +
 +    #[cfg(unix)]
