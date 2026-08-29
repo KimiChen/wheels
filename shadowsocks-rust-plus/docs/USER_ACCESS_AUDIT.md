@@ -4106,6 +4106,11 @@ bash scripts/check-sensitive.sh                                       # 通过
 python3 scripts/check-patch-deletions.py patches/0003-user-audit.patch # 通过
 ```
 
+`m-173` 的两条新测试另做了独立变异检验（不只采信生成方报告）：把
+`rebuild_runtime_indexes_locked` 从启动 flush 块之前挪到之后，只有 M-41 那条变红；去掉 cleanup
+预循环 seal 的 `open_has_non_gap` 守卫，只有 M-44 那条变红；分别还原后均恢复全绿——两条互相独立、
+各自绑定一条实现。
+
 producer（`shadowsocks-service` 的 `user-audit`）按合同是 Linux-only，本机无交叉 C 工具链
 （`x86_64-linux-gnu-gcc`/`zig` 均不存在，`ring` 的交叉编译被阻断），因此本轮用**打桩 native 副本**
 （去 `compile_error!` + `SO_PEERCRED`/`ucred` shim）运行其单元测试：**113 passed**。该打桩副本只用于
