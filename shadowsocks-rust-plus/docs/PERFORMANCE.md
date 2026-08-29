@@ -59,11 +59,16 @@ UDP uplink/downlink:  57,600,000 /  57,600,000 bytes
 
 ### user-audit 对照与场景
 
-目标 Linux 节点必须分别运行 feature-off 与 `--features user-audit` 构建，覆盖 auditd healthy、
-offline、慢 ACK、producer queue 接近上限和 spool 接近容量上限五种场景。每种场景至少 30 次重复，
-记录 p50/p95/p99、代理成功率、queue 深度、spool bytes、auditd RSS 与错误计数；审计故障不得增加
-代理请求错误，达到水位时只能产生规范 gap/health degraded。当前 macOS 参考表不是目标机门槛，
-不得据此伪造 Linux 验收结果；原始 JSON 必须注明 CPU、内核、磁盘和工具链。
+目标 Linux 节点必须按 [`../tests/benchmark_data_path.py`](../tests/benchmark_data_path.py) 与发布门禁
+[`../tests/benchmark_audit.py`](../tests/benchmark_audit.py) 的三案口径复测，case 名与工具保持一致：
+`locked_upstream`（锁定 commit 的原始上游 release）、`plus_compiled_runtime_disabled`（编译了
+`user-audit` 但运行时不配置 `user_stats`/`user_audit` 的 plus 二进制）与 `plus_runtime_enabled`
+（同一个 plus 二进制、运行时同时开启统计与审计）。阈值以 `locked_upstream` 为主基线；不得退回
+feature-off/feature-on 两案口径，也不得用两个不同二进制冒充 runtime-off 对照。三案之上还要覆盖
+auditd healthy、offline、慢 ACK、producer queue 接近上限和 spool 接近容量上限五种场景。每种场景
+至少 30 次重复，记录 p50/p95/p99、代理成功率、queue 深度、spool bytes、auditd RSS 与错误计数；
+审计故障不得增加代理请求错误，达到水位时只能产生规范 gap/health degraded。当前 macOS 参考表不是
+目标机门槛，不得据此伪造 Linux 验收结果；原始 JSON 必须注明 CPU、内核、磁盘和工具链。
 
 本机结果没有发现可见的数据面回归，并验证了 benchmark 开启统计时的精确计数断言。由于每个
 样本仅约 0.33–0.37 秒、仅覆盖单机 loopback，结果不能评估真实 RTT、丢包、拥塞、NUMA、长期

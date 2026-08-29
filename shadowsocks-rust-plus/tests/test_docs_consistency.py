@@ -182,5 +182,23 @@ class AuditdFatalDocsTests(unittest.TestCase):
             self.assertIn(flat(expected), operations)
 
 
+class PerformanceDocsTests(unittest.TestCase):
+    """PERFORMANCE.md 的复测口径必须与发布门禁的 case 名一致。"""
+
+    def test_data_path_case_ids_match_the_release_gate(self) -> None:
+        gate = read(TESTS / "benchmark_audit.py")
+        block = re.search(r"DATA_PATH_CASES = \(([^)]*)\)", gate)
+        self.assertIsNotNone(block, "benchmark_audit.py 不再声明 DATA_PATH_CASES")
+        cases = re.findall(r'"([a-z_]+)"', block.group(1))
+        self.assertEqual(len(cases), 3, cases)
+        performance = read(DOCS / "PERFORMANCE.md")
+        for case in cases:
+            self.assertIn(f"`{case}`", performance)
+        self.assertFalse(
+            flat("必须分别运行 feature-off 与 `--features user-audit` 构建") in flat(performance),
+            "PERFORMANCE.md 仍写 feature-off/on 两案口径",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
