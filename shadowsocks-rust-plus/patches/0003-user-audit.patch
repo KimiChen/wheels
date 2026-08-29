@@ -19238,10 +19238,10 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..5b0ebb7924e76785c6e14e5826db6b88
  }
 diff --git a/crates/shadowsocks-service/src/server/user_audit.rs b/crates/shadowsocks-service/src/server/user_audit.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..99bff33446efc48033881cfd089e09698b32ad37
+index 0000000000000000000000000000000000000000..1dbfe85859cf66317fb69d24b37e9e1e4abb14bf
 --- /dev/null
 +++ b/crates/shadowsocks-service/src/server/user_audit.rs
-@@ -0,0 +1,4304 @@
+@@ -0,0 +1,4376 @@
 +//! Non-blocking successful-target access auditing for the server data path.
 +//!
 +//! The relay only constructs a small draft and performs bounded atomic/cache
@@ -20714,9 +20714,15 @@ index 0000000000000000000000000000000000000000..99bff33446efc48033881cfd089e0969
 +    pending: VecDeque<PendingEvent>,
 +    backoff: Duration,
 +    diagnostic_next_due: [Instant; DIAGNOSTIC_BUCKETS.len()],
++    /// Independent per-bucket 60 second stamp for the aggregate producer-gap
++    /// journald line.  `diagnostic_next_due` cannot be reused: producer-gap
++    /// snapshots are deliberately not rate limited on the wire.
++    gap_log_next_due: [Instant; DIAGNOSTIC_BUCKETS.len()],
 +    diagnostic_cursor: usize,
 +    force_final_diagnostics: bool,
 +    final_diagnostic_attempted: u8,
++    #[cfg(test)]
++    gap_logs: u64,
 +}
 +
 +impl SupervisorState {
@@ -20725,9 +20731,12 @@ index 0000000000000000000000000000000000000000..99bff33446efc48033881cfd089e0969
 +            pending: VecDeque::new(),
 +            backoff: INITIAL_RECONNECT_BACKOFF,
 +            diagnostic_next_due: [Instant::now(); DIAGNOSTIC_BUCKETS.len()],
++            gap_log_next_due: [Instant::now(); DIAGNOSTIC_BUCKETS.len()],
 +            diagnostic_cursor: 0,
 +            force_final_diagnostics: false,
 +            final_diagnostic_attempted: 0,
++            #[cfg(test)]
++            gap_logs: 0,
 +        }
 +    }
 +
@@ -21830,6 +21839,34 @@ index 0000000000000000000000000000000000000000..99bff33446efc48033881cfd089e0969
 +                    last_seen_unix_ms,
 +                );
 +            }
++            if let AuditEventDraft::ProducerGap {
++                reason,
++                permanent_nack_code,
++                dropped_events,
++                first_seen_unix_ms,
++                last_seen_unix_ms,
++                ..
++            } = &candidate.draft
++                && state.gap_log_next_due[candidate.bucket.index()] <= now
++            {
++                // Sections 7.1/7.2 require health *and* a rate-limited
++                // aggregate journald line for every abandoned-event bucket, not
++                // only the wire diagnostic.  Counts, time range and error class
++                // only: never identity, target, event body or credentials.
++                state.gap_log_next_due[candidate.bucket.index()] = deadline_after(now, DIAGNOSTIC_INTERVAL);
++                #[cfg(test)]
++                {
++                    state.gap_logs += 1;
++                }
++                log::warn!(
++                    "user audit producer gap reason={} permanent_nack_code={} dropped_events={} first_seen_unix_ms={} last_seen_unix_ms={}",
++                    reason,
++                    permanent_nack_code.as_deref().unwrap_or("null"),
++                    dropped_events,
++                    first_seen_unix_ms,
++                    last_seen_unix_ms,
++                );
++            }
 +            if state.force_final_diagnostics {
 +                state.final_diagnostic_attempted |= candidate.bucket.bit();
 +            }
@@ -22879,6 +22916,41 @@ index 0000000000000000000000000000000000000000..99bff33446efc48033881cfd089e0969
 +        state.mark_diagnostic_attempt(bucket, Instant::now());
 +        assert_eq!(state.diagnostic_next_due[bucket.index()], deadline);
 +        assert_eq!(state.diagnostic_cursor, bucket.index() + 1);
++    }
++
++    #[test]
++    fn producer_gap_buckets_write_a_rate_limited_journald_line() {
++        let config = UserAuditConfig::new("/tmp/audit.sock", test_auditd_user());
++        let emitter = AuditEmitter::new(runtime(), &config);
++        let mut state = SupervisorState::new();
++
++        // The first queue-overflow snapshot reports its aggregate immediately.
++        emitter.queue_overflow.add(3, Some(1), 1_787_587_200_000);
++        fill_pending(&emitter, &mut state);
++        assert_eq!(state.gap_logs, 1);
++
++        // A second snapshot of the same bucket inside the 60 second window is
++        // suppressed, even though the wire diagnostic itself is not limited.
++        state.pending.clear();
++        emitter.diagnostic_inflight.store(0, Ordering::Release);
++        emitter.queue_overflow.add(5, Some(2), 1_787_587_260_000);
++        fill_pending(&emitter, &mut state);
++        assert_eq!(state.gap_logs, 1);
++
++        // A different bucket keeps its own stamp.
++        state.pending.clear();
++        emitter.diagnostic_inflight.store(0, Ordering::Release);
++        emitter.encode_error.add(1, Some(3), 1_787_587_320_000);
++        fill_pending(&emitter, &mut state);
++        assert_eq!(state.gap_logs, 2);
++
++        // Once the window has elapsed the same bucket reports again.
++        state.pending.clear();
++        emitter.diagnostic_inflight.store(0, Ordering::Release);
++        state.gap_log_next_due = [Instant::now(); DIAGNOSTIC_BUCKETS.len()];
++        emitter.queue_overflow.add(2, Some(4), 1_787_587_380_000);
++        fill_pending(&emitter, &mut state);
++        assert_eq!(state.gap_logs, 3);
 +    }
 +
 +    #[test]
