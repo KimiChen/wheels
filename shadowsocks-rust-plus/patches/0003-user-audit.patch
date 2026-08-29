@@ -18727,7 +18727,7 @@ index 94e2768a80505279b6e5df01333569c9df9faf75..3b517f0234d60a69be4634d65d36652d
 +    }
  }
 diff --git a/crates/shadowsocks-service/src/server/udprelay.rs b/crates/shadowsocks-service/src/server/udprelay.rs
-index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..5b0ebb7924e76785c6e14e5826db6b885ceb78ed 100644
+index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..fe9b793919b2c697acb463dce34c012df5f7f4ce 100644
 --- a/crates/shadowsocks-service/src/server/udprelay.rs
 +++ b/crates/shadowsocks-service/src/server/udprelay.rs
 @@ -33,6 +33,9 @@ use crate::net::{
@@ -19152,10 +19152,85 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..5b0ebb7924e76785c6e14e5826db6b88
  
          match self.client_session {
              None => {
-@@ -1340,4 +1458,83 @@ mod tests {
+@@ -1340,4 +1458,158 @@ mod tests {
              );
          }
      }
++
++    #[cfg(feature = "user-audit")]
++    fn audit_context(
++        user_name: &str,
++    ) -> (
++        ServiceContext,
++        Arc<crate::server::user_audit::AuditEmitter>,
++        Arc<crate::server::user_stats::UserStatsRegistry>,
++    ) {
++        use crate::config::UserAuditConfig;
++        use crate::server::user_audit::AuditEmitter;
++
++        // The audit runtime origin must come from the registry, exactly like
++        // the production wiring: identity handles exist only for a registry
++        // created with audit metadata.
++        let registry = crate::server::user_stats::UserStatsRegistry::new_with_audit("node-a", 4).unwrap();
++        let server = registry.register_server("server-a", "127.0.0.1:8388").unwrap();
++        server.register_user(user_name).unwrap();
++        let runtime = registry.audit_runtime_metadata().expect("audit runtime metadata");
++        let auditd_user = std::env::var("USER").unwrap_or_else(|_| "root".to_owned());
++        let emitter = AuditEmitter::new(runtime, &UserAuditConfig::new("/tmp/audit.sock", auditd_user));
++        let mut context = ServiceContext::new();
++        context.set_user_stats(server);
++        context.set_user_audit_emitter(emitter.clone());
++        (context, emitter, registry)
++    }
++
++    /// Section 6.4: an empty successful UDP datagram is still forwarded but
++    /// carries no audit evidence, so it must not produce a `udp_target_success`.
++    /// The non-empty control case proves the same path does emit one.
++    #[cfg(feature = "user-audit")]
++    #[tokio::test]
++    async fn empty_udp_payload_forwards_without_an_audit_event() {
++        for (payload, expected_events) in [(Bytes::new(), 0usize), (Bytes::from_static(b"query"), 1usize)] {
++            let (context, emitter, _registry) = audit_context("user-a");
++            let mut server = udp_server_with_context(context).await;
++            let target = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
++            let target_addr = Address::SocketAddress(target.local_addr().unwrap());
++            let listener = server.listener.clone();
++            let expected_len = payload.len();
++
++            server
++                .send_packet(
++                    &listener,
++                    "127.0.0.1:12345".parse().unwrap(),
++                    target_addr,
++                    Some(control_for_user(7, "user-a")),
++                    payload,
++                )
++                .await
++                .unwrap();
++
++            let mut buffer = [0u8; 64];
++            let (received, _) = tokio::time::timeout(Duration::from_secs(5), target.recv_from(&mut buffer))
++                .await
++                .expect("the datagram must still be forwarded")
++                .expect("receive failed");
++            assert_eq!(received, expected_len);
++
++            if expected_events == 0 {
++                // The audit hook runs right after the send, so give it time and
++                // then require that nothing was enqueued.
++                tokio::time::sleep(Duration::from_millis(200)).await;
++                assert_eq!(emitter.queue.len(), 0, "an empty payload must not be audited");
++            } else {
++                for _ in 0..200 {
++                    if emitter.queue.len() == expected_events {
++                        break;
++                    }
++                    tokio::time::sleep(Duration::from_millis(10)).await;
++                }
++                assert_eq!(emitter.queue.len(), expected_events);
++            }
++        }
++    }
 +
 +    #[tokio::test]
 +    async fn zero_length_udp_datagram_has_the_same_receive_behavior_in_all_builds() {
