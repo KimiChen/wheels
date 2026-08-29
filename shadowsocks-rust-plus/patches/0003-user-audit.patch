@@ -3980,7 +3980,7 @@ index 0000000000000000000000000000000000000000..765bfee9c2ef4a0b304d77041870e684
 +tempfile = "3"
 diff --git a/crates/shadowsocks-auditd/src/config.rs b/crates/shadowsocks-auditd/src/config.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..1050d0fe7e79f811fdfac8ecbce5cd850640277a
+index 0000000000000000000000000000000000000000..bb6d17adea85cc5498c671ded6bc76c113c021d1
 --- /dev/null
 +++ b/crates/shadowsocks-auditd/src/config.rs
 @@ -0,0 +1,1227 @@
@@ -4011,13 +4011,13 @@ index 0000000000000000000000000000000000000000..1050d0fe7e79f811fdfac8ecbce5cd85
 +
 +// Wire-size limits live in the shared protocol crate.  Re-export aliases here
 +// for auditd callers without introducing a second independently drifting value.
++pub use wire::MAX_EVENT_BYTES;
 +pub use wire::{
 +    ACKED_RETENTION_SECONDS, EVENT_DEDUP_CAPACITY as MAX_DEDUP_ENTRIES,
 +    EXPORT_MAX_CONNECTIONS as MAX_EXPORT_CONNECTIONS, INGEST_MAX_CONNECTIONS as MAX_INGEST_CONNECTIONS,
 +    NONCE_CACHE_CAPACITY as MAX_NONCES, NONCE_CACHE_TTL_SECONDS as NONCE_TTL_SECONDS,
 +    TOMBSTONE_CAPACITY as MAX_TOMBSTONES,
 +};
-+pub use wire::{MAX_EVENT_BYTES, MAX_FRAME_BYTES};
 +
 +pub const DEFAULT_MAX_SPOOL_BYTES: u64 = 5_368_709_120;
 +pub const DEFAULT_MIN_FREE_BYTES: u64 = 1_073_741_824;
@@ -6593,10 +6593,10 @@ index 0000000000000000000000000000000000000000..a544cd37b7a0f2e1784bb2f69a118650
 +}
 diff --git a/crates/shadowsocks-auditd/src/ingest.rs b/crates/shadowsocks-auditd/src/ingest.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..fbf6d9650a152c53295655ac1448fe2bcfe5d85e
+index 0000000000000000000000000000000000000000..e036ec45192b8b9bcc657fb1734fd6e0fff7d121
 --- /dev/null
 +++ b/crates/shadowsocks-auditd/src/ingest.rs
-@@ -0,0 +1,793 @@
+@@ -0,0 +1,859 @@
 +//! Unix-stream ingest endpoint used by the ssserver producer.
 +
 +use std::{
@@ -7382,6 +7382,72 @@ index 0000000000000000000000000000000000000000..fbf6d9650a152c53295655ac1448fe2b
 +        );
 +    }
 +
++    #[tokio::test]
++    async fn ingest_frame_reader_rejects_out_of_range_lengths() {
++        // These are the framing bounds the producer connection actually goes
++        // through; the check lives in `read_frame_payload` and is shared by
++        // the hello reader and the per-event reader.
++        let oversize = u32::try_from(MAX_AUDIT_PAYLOAD_BYTES + 1).expect("ceiling fits in u32");
++
++        let (mut server, mut client) = UnixStream::pair().expect("socket pair");
++        client.write_all(&0_u32.to_be_bytes()).await.expect("write header");
++        drop(client);
++        let error = read_frame_boundary(&mut server)
++            .await
++            .expect_err("zero-length frame must be rejected");
++        assert!(
++            matches!(&error, IngestError::Protocol(message) if message == "invalid frame length"),
++            "unexpected error: {error}"
++        );
++
++        let (mut server, mut client) = UnixStream::pair().expect("socket pair");
++        client.write_all(&oversize.to_be_bytes()).await.expect("write header");
++        drop(client);
++        let error = read_frame_boundary(&mut server)
++            .await
++            .expect_err("oversize frame must be rejected on the header alone");
++        assert!(
++            matches!(&error, IngestError::Protocol(message) if message == "invalid frame length"),
++            "unexpected error: {error}"
++        );
++
++        let (mut server, mut client) = UnixStream::pair().expect("socket pair");
++        client.write_all(&oversize.to_be_bytes()).await.expect("write header");
++        drop(client);
++        let error = read_frame_initial(&mut server)
++            .await
++            .expect_err("oversize hello frame must be rejected");
++        assert!(
++            matches!(&error, IngestError::Protocol(message) if message == "invalid frame length"),
++            "unexpected error: {error}"
++        );
++    }
++
++    #[tokio::test]
++    async fn ingest_frame_round_trip_accepts_the_maximum_payload() {
++        let (mut server, mut client) = UnixStream::pair().expect("socket pair");
++        let payload = vec![b'x'; MAX_AUDIT_PAYLOAD_BYTES];
++        // Read and write concurrently: one maximum frame is larger than the
++        // socket buffer on some platforms.
++        let (written, received) = tokio::join!(write_frame(&mut client, &payload), read_frame_boundary(&mut server));
++        written.expect("write maximum frame");
++        assert_eq!(received.expect("read frame"), Some(payload));
++
++        // The responder refuses exactly the sizes the reader refuses, so an
++        // auditd reply can never sit outside the producer's frame contract.
++        // Assert the specific rejection: a size that merely stalls the socket
++        // until the deadline would not prove the bound is enforced.
++        for oversize in [Vec::new(), vec![0_u8; MAX_AUDIT_PAYLOAD_BYTES + 1]] {
++            let error = write_frame(&mut client, &oversize)
++                .await
++                .expect_err("out-of-range response must be refused");
++            assert!(
++                matches!(&error, IngestError::Protocol(message) if message == "response too large"),
++                "unexpected error: {error}"
++            );
++        }
++    }
++
 +    #[test]
 +    fn hello_version_outside_u8_range_gets_unsupported_version_nack() {
 +        let raw = br#"{"protocol_version":256,"frame_type":"hello","node_id":"node","runtime_id":"0123456789abcdef0123456789abcdef"}"#;
@@ -7621,23 +7687,21 @@ index 0000000000000000000000000000000000000000..e91629beb465ae748cebb53a43eed9c6
 +}
 diff --git a/crates/shadowsocks-auditd/src/protocol.rs b/crates/shadowsocks-auditd/src/protocol.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..c570dac908e4344222ca38dd134be85b03850bf6
+index 0000000000000000000000000000000000000000..6cf8d005dfef917c852be4f611d5b945a944066d
 --- /dev/null
 +++ b/crates/shadowsocks-auditd/src/protocol.rs
-@@ -0,0 +1,154 @@
+@@ -0,0 +1,120 @@
 +//! Adapter around the shared, strict audit wire protocol.
 +//!
 +//! The daemon must not maintain a second interpretation of event JSON.  This
 +//! module only adds the small amount of routing metadata needed by ingest and
 +//! translates the shared error into the daemon's error type.
 +
-+use serde::Serialize;
-+use serde_json::Value;
 +use thiserror::Error;
 +
 +use shadowsocks_audit_protocol as wire;
 +
-+use crate::config::{MAX_EVENT_BYTES, MAX_FRAME_BYTES};
++use crate::config::MAX_EVENT_BYTES;
 +
 +#[allow(unused_imports)]
 +pub use wire::{
@@ -7734,32 +7798,6 @@ index 0000000000000000000000000000000000000000..c570dac908e4344222ca38dd134be85b
 +    })
 +}
 +
-+/// Strictly parse one JSON value (duplicate keys and trailing data rejected).
-+#[allow(dead_code)]
-+pub fn parse_strict_json(raw: &[u8]) -> Result<Value, ProtocolError> {
-+    Ok(wire::parse_json_exact(raw)?)
-+}
-+
-+#[allow(dead_code)]
-+pub fn compact_json<T: Serialize>(value: &T) -> Result<Vec<u8>, ProtocolError> {
-+    Ok(wire::serialize_canonical(value)?)
-+}
-+
-+#[allow(dead_code)]
-+pub fn encode_frame(payload: &[u8]) -> Result<Vec<u8>, ProtocolError> {
-+    if payload.is_empty() || payload.len() > MAX_FRAME_BYTES {
-+        return Err(ProtocolError::Invalid(format!(
-+            "frame payload length is outside 1..={MAX_FRAME_BYTES}"
-+        )));
-+    }
-+    Ok(wire::encode_frame(payload)?)
-+}
-+
-+#[allow(dead_code)]
-+pub fn decode_frame(input: &[u8]) -> Result<&[u8], ProtocolError> {
-+    Ok(wire::decode_frame(input)?)
-+}
-+
 +#[cfg(test)]
 +mod tests {
 +    use super::*;
@@ -7771,12 +7809,6 @@ index 0000000000000000000000000000000000000000..c570dac908e4344222ca38dd134be85b
 +        let info = parse_event(EVENT).expect("valid event");
 +        assert_eq!(info.kind, EventKind::AccessTcp);
 +        assert_eq!(info.audit_sequence, Some(1));
-+    }
-+
-+    #[test]
-+    fn framing_is_bounded() {
-+        assert!(encode_frame(&[]).is_err());
-+        assert!(encode_frame(&vec![0; MAX_FRAME_BYTES + 1]).is_err());
 +    }
 +}
 diff --git a/crates/shadowsocks-auditd/src/spool.rs b/crates/shadowsocks-auditd/src/spool.rs
