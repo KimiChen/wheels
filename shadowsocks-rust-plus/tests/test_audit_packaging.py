@@ -99,6 +99,34 @@ class AuditPackagingTest(unittest.TestCase):
         self.assertRegex(tmpfiles, r"d /run/shadowsocks-audit/ingest 0750 shadowsocks-audit shadowsocks-audit-ingest")
         self.assertRegex(tmpfiles, r"d /run/shadowsocks-audit/export 0750 shadowsocks-audit shadowsocks-audit-export")
 
+    def test_runtime_parent_is_traversable_by_both_socket_peers(self) -> None:
+        """C-7: neither the producer nor the export peer joins shadowsocks-audit.
+
+        Both reach their socket through /run/shadowsocks-audit, so that shared
+        parent must grant search permission to "other".  A 0750 parent silently
+        denies traversal and makes both endpoints unreachable even though the
+        0750 group-isolated subdirectories look correct.
+        """
+
+        tmpfiles = (ROOT / "packaging/shadowsocks-auditd.tmpfiles").read_text(encoding="utf-8")
+        unit = (ROOT / "packaging/shadowsocks-auditd.service").read_text(encoding="utf-8")
+        match = re.search(r"^d /run/shadowsocks-audit (\d{4}) ", tmpfiles, re.MULTILINE)
+        self.assertIsNotNone(match, "tmpfiles must declare the shared runtime parent")
+        parent_mode = int(match.group(1), 8)
+        self.assertTrue(parent_mode & 0o001, "shared runtime parent must be traversable by other")
+        for group in ("shadowsocks-audit-ingest", "shadowsocks-audit-export"):
+            self.assertRegex(
+                tmpfiles,
+                r"d /run/shadowsocks-audit/(?:ingest|export) 0750 shadowsocks-audit " + group,
+            )
+        unit_match = re.search(r"^RuntimeDirectoryMode=(\d{4})$", unit, re.MULTILINE)
+        self.assertIsNotNone(unit_match, "auditd unit must pin RuntimeDirectoryMode")
+        self.assertEqual(
+            int(unit_match.group(1), 8),
+            parent_mode,
+            "RuntimeDirectoryMode must match the tmpfiles mode for the same directory",
+        )
+
     def test_shared_golden_vectors_are_present_and_canonical(self) -> None:
         vectors = json.loads((ROOT / "tests/golden_vectors.json").read_text(encoding="utf-8"))
         self.assertTrue({"hmac_key_hex", "request", "response", "records"}.issubset(vectors))

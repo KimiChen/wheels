@@ -1,5 +1,9 @@
 # Runtime socket directories and the private spool/config roots.
-d /run/shadowsocks-audit 0750 shadowsocks-audit shadowsocks-audit -
+# The shared parent is 0751 so the producer (shadowsocks) and the export peer
+# (audit-exporter) can traverse into their own 0750 group-isolated subdirectory;
+# neither account is a member of the shadowsocks-audit group, so 0750 here would
+# deny path traversal and make both sockets unreachable.
+d /run/shadowsocks-audit 0751 shadowsocks-audit shadowsocks-audit -
 d /run/shadowsocks-audit/ingest 0750 shadowsocks-audit shadowsocks-audit-ingest -
 d /run/shadowsocks-audit/export 0750 shadowsocks-audit shadowsocks-audit-export -
 d /var/lib/shadowsocks-audit 0700 shadowsocks-audit shadowsocks-audit -

@@ -27,7 +27,7 @@ MemoryDenyWriteExecute=true
 RestrictAddressFamilies=AF_UNIX
 
 RuntimeDirectory=shadowsocks-audit
-RuntimeDirectoryMode=0750
+RuntimeDirectoryMode=0751
 RuntimeDirectoryPreserve=yes
 StateDirectory=shadowsocks-audit
 StateDirectoryMode=0700
