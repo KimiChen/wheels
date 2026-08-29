@@ -335,6 +335,12 @@ def main() -> int:
             os.chown(path, daemon_user.pw_uid, gid)
             os.chmod(path, 0o750)
         spool = root / "spool"
+        # auditd runs unprivileged, and the enclosing temp directory is
+        # root-owned 0755, so it cannot create its own spool here.  Stage the
+        # directory with the daemon's own ownership and the §11 0700 mode.
+        spool.mkdir()
+        os.chown(spool, daemon_user.pw_uid, daemon_group)
+        os.chmod(spool, 0o700)
         config_dir = root / "config"
         config_dir.mkdir()
         os.chown(config_dir, 0, daemon_group)
@@ -347,7 +353,14 @@ def main() -> int:
         config.update({"producer_user": producer_user.pw_name, "export_peer_user": exporter_user.pw_name,
                        "ingest_socket_path": str(run / "ingest/ingest.sock"),
                        "export_socket_path": str(run / "export/export.sock"),
-                       "spool_dir": str(spool), "export_hmac_key_file": str(key)})
+                       "spool_dir": str(spool), "export_hmac_key_file": str(key),
+                       # The spool lives on /run, a tmpfs far smaller than the
+                       # production 5 GiB/1 GiB profile; auditd rejects a
+                       # min_free_bytes above the filesystem's total capacity.
+                       # §5.3 explicitly allows automated tests to use the lower
+                       # end of the permitted ranges.
+                       "max_spool_bytes": 67_108_864,
+                       "min_free_bytes": 268_435_456})
         config_path = config_dir / "auditd.json"
         config_path.write_text(json.dumps(config), encoding="utf-8")
         os.chown(config_path, 0, daemon_group)
