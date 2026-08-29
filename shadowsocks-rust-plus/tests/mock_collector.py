@@ -13,6 +13,7 @@ import argparse
 import copy
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import re
@@ -34,6 +35,21 @@ DECIMAL = re.compile(r"0|[1-9][0-9]*\Z")
 POSITIVE_DECIMAL = re.compile(r"[1-9][0-9]*\Z")
 U64_MAX = 2**64 - 1
 IDENTIFIER = re.compile(r"[!-~]{1,128}\Z")
+MAX_IDENTIFIER_BYTES = 128
+MAX_DOMAIN_BYTES = 255
+TARGET_ORDER = ("kind", "host", "normalized_host", "port", "remote_ip")
+PRODUCER_GAP_REASONS = frozenset({"queue_overflow", "encode_error", "permanent_nack"})
+PERMANENT_NACK_CODES = frozenset({"invalid_schema", "event_id_conflict", "runtime_mismatch"})
+SPOOL_GAP_REASONS = frozenset(
+    {
+        "capacity_eviction",
+        "min_free_eviction",
+        "quarantine_eviction",
+        "tail_truncation",
+        "segment_corruption",
+        "state_reset",
+    }
+)
 
 
 class CollectorError(ValueError):
@@ -506,21 +522,233 @@ def _canonical_event(event: dict[str, Any]) -> bytes:
             "lost_batch_id",
         ),
     }
+    if not isinstance(event_type, str):
+        raise CollectorError("event_type must be present as a string")
     order = orders.get(event_type)
     if order is None:
-        # Compatibility for unit-level idempotency fixtures that do not model a
-        # complete wire event. Real protocol events always select a fixed order.
-        return canonical_json(event)
+        # §12 requires strongly typed per-line parsing: an event the wire
+        # contract does not define is rejected, never re-encoded as-is.
+        raise CollectorError(f"unknown event type: {event_type}")
     _exact_keys(event, set(order), "event")
+    _validate_event(event, event_type)
     ordered = {name: event[name] for name in order}
     if event_type in {"tcp_target_success", "udp_target_success"}:
-        target = event["target"]
-        if not isinstance(target, dict):
-            raise CollectorError("event target must be an object")
-        target_order = ("kind", "host", "normalized_host", "port", "remote_ip")
-        _exact_keys(target, set(target_order), "event target")
-        ordered["target"] = {name: target[name] for name in target_order}
+        ordered["target"] = {name: event["target"][name] for name in TARGET_ORDER}
     return canonical_json(ordered)
+
+
+def _enum(value: Any, allowed: frozenset[str], name: str) -> str:
+    """Accept one of a closed string set, mirroring a serde unit-variant enum."""
+
+    if not isinstance(value, str) or value not in allowed:
+        raise CollectorError(f"invalid {name}")
+    return value
+
+
+def _bounded_integer(value: Any, name: str, *, minimum: int, maximum: int) -> int:
+    """Accept a JSON integer in range.  `true`/`false` are not integers here."""
+
+    if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+        raise CollectorError(f"invalid {name}")
+    return value
+
+
+def _utf8_length(value: str, name: str) -> int:
+    try:
+        return len(value.encode("utf-8"))
+    except UnicodeEncodeError as exc:
+        # A lone surrogate decoded from a \uD800 escape has no UTF-8 form.
+        raise CollectorError(f"invalid {name}") from exc
+
+
+def _identifier(value: Any, name: str) -> str:
+    """Mirror protocol::validate_identifier: 1..=128 printable ASCII bytes."""
+
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > MAX_IDENTIFIER_BYTES
+        or any(not 0x21 <= ord(character) <= 0x7E for character in value)
+    ):
+        raise CollectorError(f"invalid {name}")
+    return value
+
+
+def _event_id(value: Any, runtime_id: str, audit_sequence: str) -> str:
+    if not isinstance(value, str) or len(value) > 64 or value != f"{runtime_id}:{audit_sequence}":
+        raise CollectorError("invalid event_id")
+    return value
+
+
+def _canonical_ip(value: Any, name: str) -> str:
+    """Return the canonical `IpAddr::to_string()` spelling of an IP literal."""
+
+    # A zone identifier is accepted by `ipaddress` but not by `IpAddr::from_str`.
+    if not isinstance(value, str) or "%" in value:
+        raise CollectorError(f"invalid {name}")
+    try:
+        return str(ipaddress.ip_address(value))
+    except ValueError as exc:
+        raise CollectorError(f"invalid {name}") from exc
+
+
+def _normalize_ascii_domain(host: str) -> str | None:
+    """Apply the §6.2 ASCII rule; return None when normalization fails."""
+
+    if not host or len(host) > MAX_DOMAIN_BYTES:
+        return None
+    lowered = host.lower()
+    lowered = lowered[:-1] if lowered.endswith(".") else lowered
+    if not lowered or any(label == "" for label in lowered.split(".")):
+        return None
+    return lowered
+
+
+def _validate_target(target: Any) -> None:
+    if not isinstance(target, dict):
+        raise CollectorError("event target must be an object")
+    _exact_keys(target, set(TARGET_ORDER), "event target")
+    kind = _enum(target["kind"], frozenset({"domain", "ip"}), "target.kind")
+    host = target["host"]
+    if not isinstance(host, str) or not host or _utf8_length(host, "target.host") > MAX_DOMAIN_BYTES:
+        raise CollectorError("invalid target.host")
+    normalized = target["normalized_host"]
+    if normalized is not None and not isinstance(normalized, str):
+        raise CollectorError("invalid target.normalized_host")
+    _bounded_integer(target["port"], "target.port", minimum=1, maximum=65535)
+    if _canonical_ip(target["remote_ip"], "target.remote_ip") != target["remote_ip"]:
+        raise CollectorError("invalid target.remote_ip")
+    if kind == "ip":
+        if _canonical_ip(host, "target.host") != host or normalized != host:
+            raise CollectorError("IP host and normalized_host must use the same canonical IP text")
+        return
+    if host.isascii():
+        if normalized != _normalize_ascii_domain(host):
+            raise CollectorError("invalid target.normalized_host")
+    elif normalized is not None and _normalize_ascii_domain(normalized) != normalized:
+        # UTS #46 non-transitional + STD3 has no standard-library equivalent and
+        # this collector takes no dependencies, so a Unicode host is checked
+        # structurally: the declared A-label spelling must be null or already be
+        # its own normal form.  This is the one §6.2 rule the mock cannot recompute.
+        raise CollectorError("invalid target.normalized_host")
+
+
+def _validate_access_event(event: dict[str, Any], event_type: str) -> None:
+    _bounded_integer(event["schema_version"], "schema_version", minimum=SCHEMA_VERSION, maximum=SCHEMA_VERSION)
+    _enum(event["record_type"], frozenset({"access"}), "record_type")
+    runtime_id = _field(event["runtime_id"], HEX32, "runtime_id")
+    audit_sequence = _strict_decimal(event["audit_sequence"], positive=True)
+    _event_id(event["event_id"], runtime_id, audit_sequence)
+    _strict_decimal(event["occurred_at_unix_ms"])
+    _strict_decimal(event["runtime_monotonic_ms"])
+    _identifier(event["node_id"], "node_id")
+    _identifier(event["server_id"], "server_id")
+    _identifier(event["identity_name"], "identity_name")
+    _enum(event["identity_kind"], frozenset({"user"}), "identity_kind")
+    _bounded_integer(event["server_generation"], "server_generation", minimum=1, maximum=1)
+    _bounded_integer(event["identity_generation"], "identity_generation", minimum=1, maximum=1)
+    if event_type == "tcp_target_success":
+        _enum(event["transport"], frozenset({"tcp"}), "transport")
+        _enum(event["success_evidence"], frozenset({"tcp_bidirectional_payload"}), "success_evidence")
+    else:
+        _enum(event["transport"], frozenset({"udp"}), "transport")
+        _enum(event["success_evidence"], frozenset({"udp_send_ok"}), "success_evidence")
+        _field(event["association_id"], HEX32, "association_id")
+    _validate_target(event["target"])
+
+
+def _validate_sequence_bounds(first: Any, last: Any, name: str) -> None:
+    """Both members are required to be present together and ordered."""
+
+    if (first is None) != (last is None):
+        raise CollectorError(f"{name} must both be values or both be null")
+    if first is None:
+        return
+    if int(_strict_decimal(first, positive=True)) > int(_strict_decimal(last, positive=True)):
+        raise CollectorError(f"{name} must satisfy first <= last")
+
+
+def _validate_observation_window(event: dict[str, Any], label: str) -> None:
+    occurred = int(_strict_decimal(event["occurred_at_unix_ms"]))
+    first_seen = int(_strict_decimal(event["first_seen_unix_ms"]))
+    last_seen = int(_strict_decimal(event["last_seen_unix_ms"]))
+    if not first_seen <= last_seen <= occurred:
+        raise CollectorError(f"{label} requires first_seen <= last_seen <= occurred_at")
+
+
+def _validate_producer_gap(event: dict[str, Any]) -> None:
+    _bounded_integer(event["schema_version"], "schema_version", minimum=SCHEMA_VERSION, maximum=SCHEMA_VERSION)
+    _enum(event["record_type"], frozenset({"diagnostic"}), "record_type")
+    runtime_id = _field(event["runtime_id"], HEX32, "runtime_id")
+    _identifier(event["node_id"], "node_id")
+    audit_sequence = _strict_decimal(event["audit_sequence"], positive=True)
+    _event_id(event["event_id"], runtime_id, audit_sequence)
+    _strict_decimal(event["dropped_events"], positive=True)
+    _validate_observation_window(event, "producer_gap")
+    reason = _enum(event["reason"], PRODUCER_GAP_REASONS, "producer gap reason")
+    code = event["permanent_nack_code"]
+    if reason == "permanent_nack":
+        _enum(code, PERMANENT_NACK_CODES, "permanent_nack_code")
+    elif code is not None:
+        raise CollectorError("permanent_nack_code must be null for this reason")
+    _validate_sequence_bounds(
+        event["first_dropped_sequence"],
+        event["last_dropped_sequence"],
+        "first_dropped_sequence/last_dropped_sequence",
+    )
+
+
+def _validate_udp_window_contention(event: dict[str, Any]) -> None:
+    _bounded_integer(event["schema_version"], "schema_version", minimum=SCHEMA_VERSION, maximum=SCHEMA_VERSION)
+    _enum(event["record_type"], frozenset({"diagnostic"}), "record_type")
+    runtime_id = _field(event["runtime_id"], HEX32, "runtime_id")
+    _identifier(event["node_id"], "node_id")
+    audit_sequence = _strict_decimal(event["audit_sequence"], positive=True)
+    _event_id(event["event_id"], runtime_id, audit_sequence)
+    _strict_decimal(event["skipped_successful_datagrams"], positive=True)
+    _validate_observation_window(event, "udp_window_contention")
+
+
+def _validate_spool_gap(event: dict[str, Any]) -> None:
+    _bounded_integer(event["schema_version"], "schema_version", minimum=SCHEMA_VERSION, maximum=SCHEMA_VERSION)
+    _enum(event["record_type"], frozenset({"diagnostic"}), "record_type")
+    _identifier(event["node_id"], "node_id")
+    _field(event["spool_epoch"], HEX32, "spool_epoch")
+    event_id = event["event_id"]
+    if not isinstance(event_id, str) or not event_id.startswith("spool:"):
+        raise CollectorError("invalid event_id")
+    _field(event_id[len("spool:") :], HEX32, "event_id")
+    _strict_decimal(event["occurred_at_unix_ms"])
+    for name in ("lost_spool_epoch", "lost_batch_id"):
+        if event[name] is not None:
+            _field(event[name], HEX32, name)
+    _validate_sequence_bounds(
+        event["first_lost_spool_sequence"],
+        event["last_lost_spool_sequence"],
+        "first_lost_spool_sequence/last_lost_spool_sequence",
+    )
+    for name in ("lost_events", "lost_bytes"):
+        if event[name] is not None:
+            _strict_decimal(event[name], positive=True)
+    _enum(event["reason"], SPOOL_GAP_REASONS, "spool gap reason")
+
+
+def _validate_event(event: dict[str, Any], event_type: str) -> None:
+    """Apply the §6 variant rules that `protocol::parse_canonical_record` enforces.
+
+    The field set and member order are checked by the caller; this function adds
+    the value-domain and cross-field rules so the collector rejects exactly what
+    the Rust parser rejects.
+    """
+
+    if event_type in {"tcp_target_success", "udp_target_success"}:
+        _validate_access_event(event, event_type)
+    elif event_type == "producer_gap":
+        _validate_producer_gap(event)
+    elif event_type == "udp_window_contention":
+        _validate_udp_window_contention(event)
+    else:
+        _validate_spool_gap(event)
 
 
 def _secure_state_write(path: Path, value: dict[str, Any]) -> None:

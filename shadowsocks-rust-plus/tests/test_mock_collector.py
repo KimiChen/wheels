@@ -13,6 +13,7 @@ from mock_collector import (
     MockCollector,
     ResponseMetadata,
     U64_MAX,
+    _canonical_event,
     _strict_decimal,
     canonical_json,
     canonical_request,
@@ -26,6 +27,7 @@ from mock_collector import (
 
 
 VECTORS_PATH = Path(__file__).with_name("golden_vectors.json")
+REMOVE = object()
 
 
 def vectors() -> dict:
@@ -52,6 +54,27 @@ def wrapper_bytes(event_bytes: bytes, sequence: int, *, received_at: int = 1) ->
         + event_bytes
         + b"}\n"
     )
+
+
+def golden_event(name: str) -> dict:
+    """Return one golden record parsed into a dict with its canonical order."""
+
+    return strict_json(_GOLDEN_VECTORS["records"][name]["canonical"])
+
+
+def access_event(sequence: int, *, port: int = 443) -> bytes:
+    """Return canonical `tcp_target_success` bytes for a synthetic event.
+
+    `parse_lease` applies the full §6 variant rules, so unit fixtures have to be
+    real wire events.  `port` gives two events the same `event_id` with
+    different payload bytes, which is what the idempotency cases need.
+    """
+
+    event = golden_event("tcp_access")
+    event["event_id"] = f"{event['runtime_id']}:{sequence}"
+    event["audit_sequence"] = str(sequence)
+    event["target"]["port"] = port
+    return canonical_json(event)
 
 
 def lease_metadata(body: bytes, batch_id: str, first: int, last: int, count: int) -> ResponseMetadata:
@@ -265,7 +288,7 @@ class MockCollectorProtocolTest(unittest.TestCase):
             _strict_decimal("0", positive=True)
 
     def test_lease_parser_rejects_noncanonical_wrapper_and_event_escaping(self) -> None:
-        event = b'{"event_id":"' + (b"0" * 32) + b':1","label":"a"}'
+        event = access_event(1)
         canonical = wrapper_bytes(event, 1)
         metadata = lease_metadata(canonical, "b" * 32, 1, 1, 1)
         self.assertEqual(len(parse_lease(canonical, metadata)), 1)
@@ -284,7 +307,7 @@ class MockCollectorProtocolTest(unittest.TestCase):
         with self.assertRaisesRegex(CollectorError, "canonical"):
             parse_lease(reordered, lease_metadata(reordered, "c" * 32, 1, 1, 1))
 
-        escaped_event = event.replace(b'"label":"a"', b'"label":"\\u0061"')
+        escaped_event = event.replace(b'"identity_kind":"user"', b'"identity_kind":"use\\u0072"')
         escaped = wrapper_bytes(escaped_event, 1)
         with self.assertRaisesRegex(CollectorError, "canonical"):
             parse_lease(escaped, lease_metadata(escaped, "d" * 32, 1, 1, 1))
@@ -301,8 +324,8 @@ class MockCollectorProtocolTest(unittest.TestCase):
             )
 
     def test_event_and_batch_conflicts_are_isolated(self) -> None:
-        event = {"event_id": "0" * 32 + ":1", "value": 1}
-        event_bytes = b'{"event_id":"' + b"0" * 32 + b':1","value":1}'
+        event_bytes = access_event(1)
+        event = strict_json(event_bytes)
         wrapper = (
             b'{"spool_schema_version":1,"spool_epoch":"'
             + b"c" * 32
@@ -334,10 +357,9 @@ class MockCollectorProtocolTest(unittest.TestCase):
             collector.accept_records(records, metadata)
             collector.accept_records(records, metadata)  # idempotent replay
             self.assertEqual(len(collector.events), 1)
-            conflicting = dict(event)
-            conflicting["value"] = 2
+            conflict_bytes = access_event(1, port=444)
+            conflicting = strict_json(conflict_bytes)
             self.assertNotEqual(conflicting, event)
-            conflict_bytes = b'{"event_id":"' + b"0" * 32 + b':1","value":2}'
             conflict_wrapper = (
                 b'{"spool_schema_version":1,"spool_epoch":"' + b"c" * 32
                 + b'","spool_sequence":"2","received_at_unix_ms":"1","event_payload_sha256":"'
@@ -386,8 +408,8 @@ class MockCollectorProtocolTest(unittest.TestCase):
             self.assertEqual(collector.health()["isolated_batch_count"], isolated_count)
 
     def test_sequence_conflict_uses_raw_wrapper_hash(self) -> None:
-        event_id = "0" * 32 + ":1"
-        event_bytes = b'{"event_id":"' + event_id.encode("ascii") + b'","value":1}'
+        event_bytes = access_event(1)
+        event_id = strict_json(event_bytes)["event_id"]
         first = wrapper_bytes(event_bytes, 1, received_at=1)
         second = wrapper_bytes(event_bytes, 1, received_at=2)
         self.assertNotEqual(first, second)
@@ -397,14 +419,14 @@ class MockCollectorProtocolTest(unittest.TestCase):
             collector = MockCollector(NODE, KEY, Path(directory) / "collector.json")
             collector.accept_records(parse_lease(first, first_metadata), first_metadata)
             collector.accept_records(parse_lease(second, second_metadata), second_metadata)
-            self.assertEqual(collector.events[event_id][1]["value"], 1)
+            self.assertEqual(collector.events[event_id][1]["target"]["port"], 443)
             self.assertTrue(any(item["kind"] == "spool_sequence_conflict" for item in collector.conflicts))
             self.assertEqual(collector.health()["isolated_wrapper_count"], 1)
 
     def test_same_batch_event_conflict_isolated_and_acked_atomically(self) -> None:
-        event_id = "0" * 32 + ":1"
-        first_event = json.dumps({"event_id": event_id, "value": 1}, separators=(",", ":")).encode()
-        second_event = json.dumps({"event_id": event_id, "value": 2}, separators=(",", ":")).encode()
+        first_event = access_event(1)
+        second_event = access_event(1, port=444)
+        event_id = strict_json(first_event)["event_id"]
         body = wrapper_bytes(first_event, 1) + wrapper_bytes(second_event, 2)
         metadata = lease_metadata(body, "3" * 32, 1, 2, 2)
         with tempfile.TemporaryDirectory(prefix="ssrp-collector-batch-conflict-") as directory:
@@ -413,7 +435,7 @@ class MockCollectorProtocolTest(unittest.TestCase):
             records = parse_lease(body, metadata)
             collector.accept_records(records, metadata)
             conflict_count = len(collector.conflicts)
-            self.assertEqual(collector.events[event_id][1]["value"], 1)
+            self.assertEqual(collector.events[event_id][1]["target"]["port"], 443)
             self.assertEqual(collector.health()["isolated_wrapper_count"], 1)
             self.assertEqual(collector.batches[metadata.batch_id][0], metadata.lease_body_sha256)
             # A retry of the now-durable batch is an idempotent replay, not a
@@ -421,7 +443,7 @@ class MockCollectorProtocolTest(unittest.TestCase):
             collector.accept_records(parse_lease(body, metadata), metadata)
             self.assertEqual(len(collector.conflicts), conflict_count)
             restored = MockCollector(NODE, KEY, state)
-            self.assertEqual(restored.events[event_id][1]["value"], 1)
+            self.assertEqual(restored.events[event_id][1]["target"]["port"], 443)
             self.assertEqual(restored.health()["isolated_wrapper_count"], 1)
 
     def test_durable_failure_rolls_back_in_memory_state(self) -> None:
@@ -486,6 +508,225 @@ class MockCollectorProtocolTest(unittest.TestCase):
         )
         with self.assertRaises(CollectorError):
             collector.record_diagnostic("invalid\nkind")
+
+
+class EventValidationTest(unittest.TestCase):
+    """`parse_lease` must apply the §6 variant rules to every embedded event.
+
+    Every case below is a single-field mutation of a golden record, so dropping
+    any one rule from the collector leaves exactly that case green.
+    """
+
+    def parse_one(self, event: dict) -> list:
+        raw = canonical_json(event)
+        body = wrapper_bytes(raw, 1)
+        return parse_lease(body, lease_metadata(body, "b" * 32, 1, 1, 1))
+
+    def assert_rejected(self, event: dict) -> None:
+        with self.assertRaises(CollectorError):
+            self.parse_one(event)
+
+    def mutate(self, name: str, path: tuple[str, ...], value: object) -> dict:
+        event = golden_event(name)
+        holder = event
+        for key in path[:-1]:
+            holder = holder[key]
+        if value is REMOVE:
+            del holder[path[-1]]
+        else:
+            holder[path[-1]] = value
+        return event
+
+    def assert_each_mutation_rejected(self, name: str, cases: tuple) -> None:
+        for path, value in cases:
+            with self.subTest(record=name, field=".".join(path), value=repr(value)):
+                self.assert_rejected(self.mutate(name, path, value))
+
+    def test_every_golden_record_is_accepted_by_the_lease_parser(self) -> None:
+        for name in _GOLDEN_VECTORS["records"]:
+            with self.subTest(record=name):
+                self.assertEqual(len(self.parse_one(golden_event(name))), 1)
+
+    def test_unknown_or_missing_event_type_is_rejected(self) -> None:
+        for value in ("tcp_target_failure", "", "TCP_TARGET_SUCCESS", 1, None, REMOVE):
+            with self.subTest(event_type=repr(value)):
+                self.assert_rejected(self.mutate("tcp_access", ("event_type",), value))
+
+    def test_access_common_field_rules(self) -> None:
+        self.assert_each_mutation_rejected(
+            "tcp_access",
+            (
+                (("schema_version",), 2),
+                (("schema_version",), "1"),
+                (("schema_version",), True),
+                (("schema_version",), 1.0),
+                (("record_type",), "diagnostic"),
+                (("record_type",), None),
+                (("event_id",), "0123456789abcdef0123456789abcdef:43"),
+                (("event_id",), "0123456789abcdef0123456789abcdef"),
+                (("event_id",), 42),
+                (("audit_sequence",), "0"),
+                (("audit_sequence",), "042"),
+                (("audit_sequence",), "+42"),
+                (("audit_sequence",), 42),
+                (("audit_sequence",), str(U64_MAX + 1)),
+                (("occurred_at_unix_ms",), 1787587200000),
+                (("occurred_at_unix_ms",), "01"),
+                (("runtime_monotonic_ms",), " 1"),
+                (("runtime_monotonic_ms",), None),
+                (("node_id",), ""),
+                (("node_id",), "node example"),
+                (("node_id",), "x" * 129),
+                (("node_id",), "nodé"),
+                (("runtime_id",), "0123456789ABCDEF0123456789abcdef"),
+                (("runtime_id",), "0123456789abcdef"),
+                (("server_id",), ""),
+                (("server_generation",), 2),
+                (("server_generation",), "1"),
+                (("identity_kind",), "admin"),
+                (("identity_name",), ""),
+                (("identity_generation",), 0),
+                (("transport",), "udp"),
+                (("transport",), None),
+                (("success_evidence",), "udp_send_ok"),
+            ),
+        )
+
+    def test_access_target_rules(self) -> None:
+        self.assert_each_mutation_rejected(
+            "tcp_access",
+            (
+                (("target",), None),
+                (("target", "kind"), "hostname"),
+                (("target", "host"), ""),
+                (("target", "host"), "x" * 256),
+                (("target", "host"), 443),
+                (("target", "normalized_host"), None),
+                (("target", "normalized_host"), "Example.com"),
+                (("target", "normalized_host"), "example.com."),
+                (("target", "normalized_host"), 1),
+                (("target", "port"), 0),
+                (("target", "port"), 65536),
+                (("target", "port"), "443"),
+                (("target", "port"), True),
+                (("target", "remote_ip"), "192.000.2.10"),
+                (("target", "remote_ip"), "999.0.2.10"),
+                (("target", "remote_ip"), "192.0.2.10 "),
+                (("target", "remote_ip"), "example.com"),
+                (("target", "remote_ip"), "fe80::1%eth0"),
+                (("target", "remote_ip"), None),
+                (("target", "extra"), 1),
+            ),
+        )
+        # A domain that cannot be normalized must carry a null normalized_host.
+        self.assert_rejected(
+            self.mutate("tcp_access_null_normalized", ("target", "normalized_host"), "invalid.example")
+        )
+        # An IP target repeats the same canonical text in both members.
+        self.assert_each_mutation_rejected(
+            "udp_access",
+            (
+                (("target", "host"), "192.0.2.53."),
+                (("target", "normalized_host"), "192.0.2.54"),
+                (("target", "normalized_host"), None),
+            ),
+        )
+
+    def test_udp_access_association_rules(self) -> None:
+        self.assert_each_mutation_rejected(
+            "udp_access",
+            (
+                (("association_id",), REMOVE),
+                (("association_id",), None),
+                (("association_id",), "abcdefabcdefabcdefabcdefabcdefAB"),
+                (("association_id",), "abcdef"),
+                (("transport",), "tcp"),
+                (("success_evidence",), "tcp_bidirectional_payload"),
+            ),
+        )
+        # A TCP event must not carry an association at all.
+        tcp = golden_event("tcp_access")
+        tcp["association_id"] = "abcdefabcdefabcdefabcdefabcdefab"
+        self.assert_rejected(tcp)
+
+    def test_producer_gap_rules(self) -> None:
+        self.assert_each_mutation_rejected(
+            "producer_gap",
+            (
+                (("record_type",), "access"),
+                (("event_type",), "spool_gap"),
+                (("event_id",), "0123456789abcdef0123456789abcdef:98"),
+                (("audit_sequence",), "0"),
+                (("dropped_events",), "0"),
+                (("dropped_events",), None),
+                (("runtime_id",), "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"),
+                (("node_id",), ""),
+                (("reason",), "unknown_reason"),
+                (("reason",), None),
+                (("permanent_nack_code",), "invalid_schema"),
+                (("first_dropped_sequence",), None),
+                (("first_dropped_sequence",), "99"),
+                (("first_dropped_sequence",), "0"),
+                (("last_dropped_sequence",), None),
+                (("first_seen_unix_ms",), "1787587209001"),
+                (("last_seen_unix_ms",), "1787587210001"),
+            ),
+        )
+        self.assert_each_mutation_rejected(
+            "producer_gap_permanent_nack",
+            (
+                (("permanent_nack_code",), None),
+                (("permanent_nack_code",), "not_a_code"),
+                (("reason",), "queue_overflow"),
+            ),
+        )
+
+    def test_udp_window_contention_rules(self) -> None:
+        self.assert_each_mutation_rejected(
+            "udp_window_contention",
+            (
+                (("record_type",), "access"),
+                (("event_id",), "0123456789abcdef0123456789abcdef:99"),
+                (("audit_sequence",), "0"),
+                (("skipped_successful_datagrams",), "0"),
+                (("skipped_successful_datagrams",), 17),
+                (("first_seen_unix_ms",), "1787587210001"),
+                (("last_seen_unix_ms",), "1787587211001"),
+                (("node_id",), "node id"),
+            ),
+        )
+
+    def test_spool_gap_rules(self) -> None:
+        self.assert_each_mutation_rejected(
+            "spool_gap",
+            (
+                (("record_type",), "access"),
+                (("event_id",), "gap:fedcba9876543210fedcba9876543210"),
+                (("event_id",), "spool:fedcba98765432"),
+                (("event_id",), None),
+                (("node_id",), ""),
+                (("spool_epoch",), "89ABCDEF0123456789abcdef01234567"),
+                (("lost_spool_epoch",), "zz"),
+                (("lost_batch_id",), "fedcba98"),
+                (("reason",), "unknown_reason"),
+                (("first_lost_spool_sequence",), None),
+                (("first_lost_spool_sequence",), "1001"),
+                (("first_lost_spool_sequence",), "0"),
+                (("last_lost_spool_sequence",), None),
+                (("lost_events",), "0"),
+                (("lost_bytes",), "0"),
+                (("lost_events",), 1000),
+                (("occurred_at_unix_ms",), "-1"),
+            ),
+        )
+        # The nullable variant keeps every optional member null together.
+        self.assert_each_mutation_rejected(
+            "nullable_spool_gap",
+            (
+                (("first_lost_spool_sequence",), "1"),
+                (("lost_events",), "0"),
+            ),
+        )
 
 
 if __name__ == "__main__":
