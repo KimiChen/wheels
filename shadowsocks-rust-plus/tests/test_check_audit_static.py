@@ -259,5 +259,29 @@ fn production() {
         self.assertEqual(defined - called, set())
 
 
+    def test_rejects_additional_panic_and_abort_spellings(self) -> None:
+        # m-216：assert 系列、unwrap_err/expect_err/unwrap_unchecked 与 process::abort。
+        findings = self.check_source(
+            """
+fn checks(value: Result<u8, u8>, slice: &[u8]) {
+    assert!(slice.is_empty());
+    assert_eq!(slice.len(), 0);
+    assert_ne!(slice.len(), 1);
+    debug_assert!(slice.is_empty());
+    debug_assert_eq!(slice.len(), 0);
+    debug_assert_ne!(slice.len(), 1);
+    let _ = value.unwrap_err();
+    let _ = value.expect_err("must fail");
+    let _ = unsafe { value.ok().unwrap_unchecked() };
+    std::process::abort();
+}
+"""
+        )
+        self.assertEqual(
+            sorted(int(item.rsplit(":", 2)[1]) for item in findings),
+            [3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

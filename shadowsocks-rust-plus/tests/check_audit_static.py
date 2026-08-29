@@ -9,7 +9,10 @@ from pathlib import Path
 
 
 FORBIDDEN = re.compile(
-    r"\b(?:unwrap|expect)\s*\(|\b(?:panic|unreachable|todo|unimplemented)!\s*\("
+    r"\b(?:unwrap|expect|unwrap_err|expect_err|unwrap_unchecked|unwrap_err_unchecked)\s*\("
+    r"|\b(?:panic|unreachable|todo|unimplemented|assert|assert_eq|assert_ne"
+    r"|debug_assert|debug_assert_eq|debug_assert_ne)!\s*\("
+    r"|\bprocess::abort\s*\("
 )
 INDEX = re.compile(
     r"\b(?P<name>[A-Za-z_][A-Za-z0-9_]*)\[(?P<expression>[^\]\n]+)\]"
