@@ -19238,10 +19238,10 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..5b0ebb7924e76785c6e14e5826db6b88
  }
 diff --git a/crates/shadowsocks-service/src/server/user_audit.rs b/crates/shadowsocks-service/src/server/user_audit.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..302fb149750cd3df3b3740981f7d722e3fefe1f7
+index 0000000000000000000000000000000000000000..a70f9265fcd831587605b39800bcceff9500a292
 --- /dev/null
 +++ b/crates/shadowsocks-service/src/server/user_audit.rs
-@@ -0,0 +1,4464 @@
+@@ -0,0 +1,4491 @@
 +//! Non-blocking successful-target access auditing for the server data path.
 +//!
 +//! The relay only constructs a small draft and performs bounded atomic/cache
@@ -21924,8 +21924,14 @@ index 0000000000000000000000000000000000000000..302fb149750cd3df3b3740981f7d722e
 +        }
 +    }
 +
++    // The final pass is complete once every bucket has either been attempted or
++    // is empty.  Requiring a bit for *all* buckets was unreachable (an empty
++    // bucket never produces a candidate), which kept the 10ms force-final
++    // polling cadence running for the whole drain window.
 +    if state.force_final_diagnostics
-+        && state.final_diagnostic_attempted == DIAGNOSTIC_BUCKETS.iter().fold(0u8, |mask, bucket| mask | bucket.bit())
++        && DIAGNOSTIC_BUCKETS.iter().all(|bucket| {
++            state.final_diagnostic_attempted & bucket.bit() != 0 || !emitter.accumulator(*bucket).is_nonempty()
++        })
 +    {
 +        state.force_final_diagnostics = false;
 +    }
@@ -23010,6 +23016,27 @@ index 0000000000000000000000000000000000000000..302fb149750cd3df3b3740981f7d722e
 +        fill_pending(&emitter, &mut state);
 +        assert_eq!(state.diagnostic_next_due[bucket.index()], first_deadline);
 +        assert_eq!(emitter.diagnostic_retry_buckets.load(Ordering::Acquire), 0);
++    }
++
++    #[test]
++    fn force_final_pass_completes_once_every_non_empty_bucket_was_attempted() {
++        let config = UserAuditConfig::new("/tmp/audit.sock", test_auditd_user());
++        let emitter = AuditEmitter::new(runtime(), &config);
++        let mut state = SupervisorState::new();
++        // Only one bucket is ever non-empty, which is the normal shutdown case.
++        emitter.queue_overflow.add(2, Some(1), 1_787_587_200_000);
++        emitter.diagnostic_shutdown_requested.store(true, Ordering::Release);
++
++        fill_pending(&emitter, &mut state);
++
++        assert_eq!(state.pending.len(), 1);
++        assert_ne!(
++            state.final_diagnostic_attempted & DiagnosticBucket::QueueOverflow.bit(),
++            0
++        );
++        // Without a reachable completion condition the supervisor keeps the
++        // 10ms force-final cadence for the whole shutdown window.
++        assert!(!state.force_final_diagnostics);
 +    }
 +
 +    #[test]
