@@ -30,10 +30,24 @@ SERVICE_RELAY_WIRING_FILES = (
     "crates/shadowsocks-service/src/server/context.rs",
 )
 REQUIRED_PRODUCTION_FILES = (
+    "Cargo.toml",
+    "Cargo.lock",
+    "crates/shadowsocks-audit-protocol/Cargo.toml",
     "crates/shadowsocks-audit-protocol/src/lib.rs",
+    "crates/shadowsocks-auditd/Cargo.toml",
     "crates/shadowsocks-auditd/src/lib.rs",
+    "crates/shadowsocks-auditd/src/config.rs",
+    "crates/shadowsocks-auditd/src/export.rs",
+    "crates/shadowsocks-auditd/src/ingest.rs",
+    "crates/shadowsocks-auditd/src/protocol.rs",
     "crates/shadowsocks-auditd/src/spool.rs",
+    "crates/shadowsocks-service/Cargo.toml",
+    "crates/shadowsocks-service/src/config.rs",
+    "crates/shadowsocks-service/src/lib.rs",
+    "crates/shadowsocks-service/src/server/mod.rs",
+    "crates/shadowsocks-service/src/server/server.rs",
     "crates/shadowsocks-service/src/server/user_audit.rs",
+    "crates/shadowsocks-service/src/server/user_stats.rs",
     "crates/shadowsocks-service/src/server/tcprelay.rs",
     "crates/shadowsocks-service/src/server/udprelay.rs",
     "crates/shadowsocks-service/src/server/context.rs",
@@ -94,11 +108,12 @@ def _structural_characters(line: str, block_comment_depth: int) -> tuple[str, in
 
 
 def _test_only_lines(lines: list[str]) -> set[int]:
-    """Find complete Rust items guarded by a standalone #[cfg(test)] attribute."""
+    """Find complete Rust items whose cfg predicate includes ``test``."""
     skipped: set[int] = set()
     cursor = 0
     while cursor < len(lines):
-        if lines[cursor].strip() != "#[cfg(test)]":
+        attribute = lines[cursor].strip()
+        if re.fullmatch(r"#\[cfg\([^\]]*\btest\b[^\]]*\)\]", attribute) is None:
             cursor += 1
             continue
         start = cursor
@@ -339,7 +354,12 @@ def _check_wiring_file_functions(path: Path) -> list[str]:
     ]
     audited_lines: set[int] = set()
     for marker_index, structural in enumerate(structural_lines):
-        if AUDIT_MARKER.search(structural) is None:
+        raw_attribute = lines[marker_index].strip()
+        audit_cfg = raw_attribute in {
+            '#[cfg(feature = "user-audit")]',
+            '#[cfg(all(feature = "user-audit", target_os = "linux"))]',
+        }
+        if AUDIT_MARKER.search(structural) is None and not audit_cfg:
             continue
         candidates = [
             start
@@ -500,7 +520,11 @@ def check(root: Path, *, require_complete: bool = True) -> list[str]:
     for relative in SERVICE_RELAY_WIRING_FILES:
         service_file = root / relative
         if service_file.is_file():
-            findings.extend(_check_relay_wiring_file(service_file))
+            # Relay audit code is commonly a local cfg-gated block inside a
+            # larger function. Checking only the attribute item or a marker
+            # neighborhood misses later statements in multiline if-let/match
+            # blocks, so audit every complete function containing a marker.
+            findings.extend(_check_wiring_file_functions(service_file))
             scanned.add(service_file)
     if not scanned:
         findings.append(f"{root}: no audit production Rust sources found")

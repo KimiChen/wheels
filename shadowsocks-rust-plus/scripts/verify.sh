@@ -45,28 +45,7 @@ for patch_path in "$SHADOWSOCKS_RUST_PLUS_ROOT"/patches/*.patch; do
   patch_name="$(basename "$patch_path")"
   grep -Fxq "$patch_name" "$SHADOWSOCKS_RUST_PLUS_ROOT/patches/series" || \
     die "补丁未列入 series：$patch_name"
-  # A deletion stanza without a hunk (or a binary payload) is a ghost entry:
-  # `git apply` rejects it even when the patch(1) replay path silently skips
-  # it. Keep the overlay consumable by both replay implementations.
-  if ! awk '
-    function finish() {
-      if (deleted && !body) {
-        invalid = 1
-      }
-    }
-    /^diff --git / {
-      finish()
-      deleted = 0
-      body = 0
-    }
-    /^deleted file mode / { deleted = 1 }
-    /^@@ / { if (deleted) body = 1 }
-    /^GIT binary patch$/ { if (deleted) body = 1 }
-    END {
-      finish()
-      exit invalid ? 1 : 0
-    }
-  ' "$patch_path"; then
+  if ! python3 "$SHADOWSOCKS_RUST_PLUS_ROOT/scripts/check-patch-deletions.py" "$patch_path"; then
     die "补丁包含没有实际内容的删除 stanza：$patch_name"
   fi
 done
@@ -87,6 +66,15 @@ temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/shadowsocks-rust-plus.XXXXXX")"
 trap 'safe_remove_temp_dir "$temp_dir"' EXIT
 source_dir="$temp_dir/source"
 "$SHADOWSOCKS_RUST_PLUS_ROOT/scripts/prepare-source.sh" "$source_dir"
+expected_prepared_tree_sha256="$(lock_value prepared_tree_sha256)"
+[[ "$expected_prepared_tree_sha256" =~ ^[0-9a-f]{64}$ ]] || \
+  die "upstream.lock prepared_tree_sha256 格式错误"
+actual_prepared_tree_sha256="$(
+  "$SHADOWSOCKS_RUST_PLUS_ROOT/scripts/release-artifact.py" source-tree-sha256 \
+    --source-root "$source_dir"
+)" || die "无法计算 fresh prepared source tree SHA-256"
+[[ "$actual_prepared_tree_sha256" == "$expected_prepared_tree_sha256" ]] || \
+  die "fresh prepared source tree SHA-256 与 upstream.lock 不一致"
 
 # v1.24.0 predates the rustfmt bundled with the current toolchain; formatting the
 # untouched upstream tree changes unrelated let-chains and imports. Keep strict

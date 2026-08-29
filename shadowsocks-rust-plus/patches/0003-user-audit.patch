@@ -1,5 +1,5 @@
 diff --git a/Cargo.lock b/Cargo.lock
-index 7fe33af96fabaffee02712235341fad1998cbbec..da51c0d79de6c6c411c55c0311cfd9726513eddf 100644
+index 7fe33af96fabaffee02712235341fad1998cbbec..b3cad61f7288cb4a97e5340611af8abe48f0854e 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
 @@ -672,6 +672,15 @@ dependencies = [
@@ -82,7 +82,7 @@ index 7fe33af96fabaffee02712235341fad1998cbbec..da51c0d79de6c6c411c55c0311cfd972
   "shadowsocks-service",
   "snmalloc-rs",
   "sysexits",
-@@ -3127,6 +3179,7 @@ dependencies = [
+@@ -3127,10 +3179,12 @@ dependencies = [
   "byteorder",
   "bytes",
   "cfg-if",
@@ -90,7 +90,12 @@ index 7fe33af96fabaffee02712235341fad1998cbbec..da51c0d79de6c6c411c55c0311cfd972
   "env_logger",
   "etherparse",
   "flate2",
-@@ -3155,6 +3208,7 @@ dependencies = [
+  "futures",
++ "hashbrown",
+  "hickory-resolver",
+  "http",
+  "http-body-util",
+@@ -3155,6 +3209,7 @@ dependencies = [
   "serde",
   "serde_json",
   "shadowsocks",
@@ -3975,10 +3980,10 @@ index 0000000000000000000000000000000000000000..765bfee9c2ef4a0b304d77041870e684
 +tempfile = "3"
 diff --git a/crates/shadowsocks-auditd/src/config.rs b/crates/shadowsocks-auditd/src/config.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..98323dd34a75994a328a28b7eca45376c270ea6f
+index 0000000000000000000000000000000000000000..1050d0fe7e79f811fdfac8ecbce5cd850640277a
 --- /dev/null
 +++ b/crates/shadowsocks-auditd/src/config.rs
-@@ -0,0 +1,1224 @@
+@@ -0,0 +1,1227 @@
 +use std::{
 +    ffi::CString,
 +    fs::{self, File, OpenOptions},
@@ -4314,16 +4319,7 @@ index 0000000000000000000000000000000000000000..98323dd34a75994a328a28b7eca45376
 +            DEFAULT_MAX_SPOOL_BYTES,
 +            "min_free_bytes",
 +        )?;
-+        let protocol_minimum = wire::MAX_SPOOL_RECORD_BYTES
-+            .checked_add(1)
-+            .ok_or_else(|| ConfigError::Invalid("protocol spool record size overflow".to_owned()))?;
-+        let protocol_minimum = u64::try_from(protocol_minimum)
-+            .map_err(|_| ConfigError::Invalid("protocol spool record size exceeds u64".to_owned()))?;
-+        // Keep both contracts visible: a segment must fit one complete wire
-+        // record and must not be configured below the 16 KiB operational floor.
-+        // Taking the maximum once avoids a misleading, unreachable intermediate
-+        // boundary when the current protocol record limit is smaller.
-+        let minimum_segment = 16_384u64.max(protocol_minimum);
++        let minimum_segment = minimum_segment_bytes(wire::MAX_SPOOL_RECORD_BYTES)?;
 +        bounded(
 +            self.segment_max_bytes,
 +            minimum_segment,
@@ -4427,6 +4423,17 @@ index 0000000000000000000000000000000000000000..98323dd34a75994a328a28b7eca45376
 +        return Err(ConfigError::Invalid(format!("{name} must be between {min} and {max}")));
 +    }
 +    Ok(())
++}
++
++fn minimum_segment_bytes(max_spool_record_bytes: usize) -> Result<u64, ConfigError> {
++    let protocol_minimum = max_spool_record_bytes
++        .checked_add(1)
++        .ok_or_else(|| ConfigError::Invalid("protocol spool record size overflow".to_owned()))?;
++    let protocol_minimum = u64::try_from(protocol_minimum)
++        .map_err(|_| ConfigError::Invalid("protocol spool record size exceeds u64".to_owned()))?;
++    // A segment must fit one complete newline-terminated wire record and must
++    // not be configured below the 16 KiB operational floor.
++    Ok(16_384u64.max(protocol_minimum))
 +}
 +
 +pub fn validate_identifier(value: &str, field: &str) -> Result<(), ConfigError> {
@@ -4993,15 +5000,16 @@ index 0000000000000000000000000000000000000000..98323dd34a75994a328a28b7eca45376
 +    #[test]
 +    fn segment_bound_includes_newline() {
 +        let mut config = AuditdConfig::default();
-+        let protocol_minimum = wire::MAX_SPOOL_RECORD_BYTES
-+            .checked_add(1)
-+            .and_then(|value| u64::try_from(value).ok())
-+            .expect("protocol record bound fits u64");
-+        let configured_minimum = 16_384u64.max(protocol_minimum);
++        let configured_minimum =
++            minimum_segment_bytes(wire::MAX_SPOOL_RECORD_BYTES).expect("protocol record bound fits u64");
 +        config.segment_max_bytes = configured_minimum;
 +        assert!(config.validate().is_ok());
 +        config.segment_max_bytes = configured_minimum - 1;
 +        assert!(config.validate().is_err());
++
++        assert_eq!(minimum_segment_bytes(8_704).unwrap(), 16_384);
++        assert_eq!(minimum_segment_bytes(32_768).unwrap(), 32_769);
++        assert!(minimum_segment_bytes(usize::MAX).is_err());
 +    }
 +
 +    #[test]
@@ -5205,10 +5213,10 @@ index 0000000000000000000000000000000000000000..98323dd34a75994a328a28b7eca45376
 +}
 diff --git a/crates/shadowsocks-auditd/src/export.rs b/crates/shadowsocks-auditd/src/export.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..f4c80e5e8971d72f7028ed7ca07d268c1b86ec2a
+index 0000000000000000000000000000000000000000..a544cd37b7a0f2e1784bb2f69a118650d2c4694e
 --- /dev/null
 +++ b/crates/shadowsocks-auditd/src/export.rs
-@@ -0,0 +1,1373 @@
+@@ -0,0 +1,1374 @@
 +//! Strict HTTP/1.1 export endpoint for the node-local audit spool.
 +
 +use std::{
@@ -6239,6 +6247,7 @@ index 0000000000000000000000000000000000000000..f4c80e5e8971d72f7028ed7ca07d268c
 +        | SpoolError::Json(_)
 +        | SpoolError::Io(_)
 +        | SpoolError::SequenceExhausted
++        | SpoolError::DurabilityUncertain
 +        | SpoolError::StorageUnavailable => (500, "internal_error"),
 +    }
 +}
@@ -6584,7 +6593,7 @@ index 0000000000000000000000000000000000000000..f4c80e5e8971d72f7028ed7ca07d268c
 +}
 diff --git a/crates/shadowsocks-auditd/src/ingest.rs b/crates/shadowsocks-auditd/src/ingest.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..86e587cdd7531e669b7a57dff7d37120175f0bad
+index 0000000000000000000000000000000000000000..dd3c8750da79fd88187b9448d01b89fceea18cd1
 --- /dev/null
 +++ b/crates/shadowsocks-auditd/src/ingest.rs
 @@ -0,0 +1,752 @@
@@ -7027,7 +7036,7 @@ index 0000000000000000000000000000000000000000..86e587cdd7531e669b7a57dff7d37120
 +        };
 +        let stored = match spool.append_parsed(&frame, &info.record, &info.event_id, received_at_unix_ms) {
 +            Ok(value) => value,
-+            Err(SpoolError::StorageUnavailable) => {
++            Err(SpoolError::StorageUnavailable | SpoolError::DurabilityUncertain) => {
 +                let nack = wire::EventNack::new(info.event_id, wire::EventNackCode::StorageUnavailable);
 +                let _ = write_frame(&mut stream, &serialize_wire(&nack)?).await;
 +                break;
@@ -7342,10 +7351,10 @@ index 0000000000000000000000000000000000000000..86e587cdd7531e669b7a57dff7d37120
 +}
 diff --git a/crates/shadowsocks-auditd/src/lib.rs b/crates/shadowsocks-auditd/src/lib.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..9b98bdc92ab22650e1f6db54e3bd3a9a823e7016
+index 0000000000000000000000000000000000000000..e91629beb465ae748cebb53a43eed9c62f03707d
 --- /dev/null
 +++ b/crates/shadowsocks-auditd/src/lib.rs
-@@ -0,0 +1,205 @@
+@@ -0,0 +1,223 @@
 +#![cfg_attr(not(target_os = "linux"), allow(dead_code, unused_imports))]
 +
 +#[cfg(not(target_os = "linux"))]
@@ -7365,6 +7374,17 @@ index 0000000000000000000000000000000000000000..9b98bdc92ab22650e1f6db54e3bd3a9a
 +use std::{io, sync::Arc};
 +
 +use tokio::{select, signal, sync::watch};
++
++async fn wait_for_durability_uncertain(mut receiver: watch::Receiver<bool>) {
++    if *receiver.borrow() {
++        return;
++    }
++    while receiver.changed().await.is_ok() {
++        if *receiver.borrow() {
++            return;
++        }
++    }
++}
 +
 +/// Long-lived audit daemon. The two socket servers share one spool and health state.
 +pub struct AuditDaemon {
@@ -7405,6 +7425,7 @@ index 0000000000000000000000000000000000000000..9b98bdc92ab22650e1f6db54e3bd3a9a
 +
 +        let mut ingest_task = tokio::spawn(ingest.run());
 +        let mut export_task = tokio::spawn(export.run());
++        let durability_uncertain = wait_for_durability_uncertain(spool.durability_uncertain_receiver());
 +
 +        let signal_result = async {
 +            #[cfg(unix)]
@@ -7424,6 +7445,12 @@ index 0000000000000000000000000000000000000000..9b98bdc92ab22650e1f6db54e3bd3a9a
 +        };
 +
 +        select! {
++            _ = durability_uncertain => {
++                let _ = shutdown_tx.send(true);
++                let _ = ingest_task.await;
++                let _ = export_task.await;
++                Err(io::Error::other(SpoolError::DurabilityUncertain))
++            }
 +            result = signal_result => {
 +                let _ = shutdown_tx.send(true);
 +                let _ = ingest_task.await;
@@ -7713,10 +7740,10 @@ index 0000000000000000000000000000000000000000..c570dac908e4344222ca38dd134be85b
 +}
 diff --git a/crates/shadowsocks-auditd/src/spool.rs b/crates/shadowsocks-auditd/src/spool.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..5b34bb724802029cc421294da83934ec0118b3c0
+index 0000000000000000000000000000000000000000..30848bcbc62ed22a7a5c01b2e1978d4cb2c6112d
 --- /dev/null
 +++ b/crates/shadowsocks-auditd/src/spool.rs
-@@ -0,0 +1,5860 @@
+@@ -0,0 +1,6837 @@
 +//! Durable, node-local audit spool.
 +//!
 +//! The spool is deliberately synchronous.  Ingest and export perform their
@@ -7744,6 +7771,7 @@ index 0000000000000000000000000000000000000000..5b34bb724802029cc421294da83934ec
 +use sha2::{Digest, Sha256};
 +use shadowsocks_audit_protocol as wire;
 +use thiserror::Error;
++use tokio::sync::watch;
 +
 +use crate::{
 +    config::{ACKED_RETENTION_SECONDS, AuditdConfig, DEFAULT_EXPORT_MAX_RESPONSE_BYTES, MAX_TOMBSTONES},
@@ -7757,8 +7785,10 @@ index 0000000000000000000000000000000000000000..5b34bb724802029cc421294da83934ec
 +const RETENTION_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 +const INDEX_REBUILD_RETRY_INTERVAL: Duration = Duration::from_secs(60);
 +const MAX_CLEANUP_ITERATIONS: usize = MAX_TOMBSTONES;
-+const RECOVERY_GAP_MARKER_SCHEMA: u8 = 1;
++const RECOVERY_GAP_MARKER_SCHEMA: u8 = 2;
++const LEGACY_RECOVERY_GAP_MARKER_SCHEMA: u8 = 1;
 +const RECOVERY_GAP_MARKER_PREFIX: &str = ".recovery-gap-";
++const ORPHAN_OPEN_SOURCE_PREFIX: &str = "orphan-open:";
 +// Pending eviction/quarantine transactions get their own private marker in
 +// addition to the aggregate tombstone ledger.  The ledger is intentionally a
 +// compact, replace-in-place document; a crash while replacing it must not be
@@ -7783,6 +7813,8 @@ index 0000000000000000000000000000000000000000..5b34bb724802029cc421294da83934ec
 +    Protocol(#[from] ProtocolError),
 +    #[error("spool is temporarily unavailable")]
 +    StorageUnavailable,
++    #[error("spool durability is uncertain; daemon restart is required")]
++    DurabilityUncertain,
 +    #[error("spool sequence exhausted")]
 +    SequenceExhausted,
 +    #[error("batch body digest mismatch")]
@@ -7890,6 +7922,9 @@ index 0000000000000000000000000000000000000000..5b34bb724802029cc421294da83934ec
 +    lost_events: Option<u64>,
 +    lost_bytes: Option<u64>,
 +    lost_batch_id: Option<String>,
++    // Private recovery identity. This is persisted only in the marker and is
++    // deliberately omitted from the exported spool_gap schema.
++    source_fingerprint: Option<String>,
 +}
 +
 +/// Private on-disk intent record for a recovery gap.  This is deliberately
@@ -7909,6 +7944,8 @@ index 0000000000000000000000000000000000000000..5b34bb724802029cc421294da83934ec
 +    lost_events: Option<u64>,
 +    lost_bytes: Option<u64>,
 +    lost_batch_id: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    source_fingerprint: Option<String>,
 +}
 +
 +#[derive(Debug, Clone, Serialize, Deserialize)]
@@ -7965,13 +8002,22 @@ index 0000000000000000000000000000000000000000..5b34bb724802029cc421294da83934ec
 +            lost_events: spec.lost_events,
 +            lost_bytes: spec.lost_bytes,
 +            lost_batch_id: spec.lost_batch_id.clone(),
++            source_fingerprint: spec.source_fingerprint.clone(),
 +        }
 +    }
 +
 +    fn into_spec(self) -> Result<GapSpec, SpoolError> {
-+        if self.marker_schema_version != RECOVERY_GAP_MARKER_SCHEMA {
++        if !matches!(
++            self.marker_schema_version,
++            LEGACY_RECOVERY_GAP_MARKER_SCHEMA | RECOVERY_GAP_MARKER_SCHEMA
++        ) {
 +            return Err(SpoolError::InvalidState(
 +                "unsupported recovery gap marker schema".to_owned(),
++            ));
++        }
++        if self.marker_schema_version == LEGACY_RECOVERY_GAP_MARKER_SCHEMA && self.source_fingerprint.is_some() {
++            return Err(SpoolError::InvalidState(
++                "legacy recovery gap marker cannot contain a source fingerprint".to_owned(),
 +            ));
 +        }
 +        validate_gap_identity(
@@ -7983,7 +8029,7 @@ index 0000000000000000000000000000000000000000..5b34bb724802029cc421294da83934ec
 +            self.lost_bytes,
 +            self.lost_batch_id.as_deref(),
 +        )?;
-+        Ok(GapSpec {
++        let spec = GapSpec {
 +            event_id: self.event_id,
 +            occurred_at_unix_ms: self.occurred_at_unix_ms,
 +            lost_spool_epoch: self.lost_spool_epoch,
@@ -7993,7 +8039,10 @@ index 0000000000000000000000000000000000000000..5b34bb724802029cc421294da83934ec
 +            lost_events: self.lost_events,
 +            lost_bytes: self.lost_bytes,
 +            lost_batch_id: self.lost_batch_id,
-+        })
++            source_fingerprint: self.source_fingerprint,
++        };
++        validate_gap_spec(&spec)?;
++        Ok(spec)
 +    }
 +}
 +
@@ -8062,7 +8111,18 @@ index 0000000000000000000000000000000000000000..5b34bb724802029cc421294da83934ec
 +        spec.lost_events,
 +        spec.lost_bytes,
 +        spec.lost_batch_id.as_deref(),
-+    )
++    )?;
++    if let Some(fingerprint) = spec.source_fingerprint.as_deref() {
++        let valid = fingerprint
++            .strip_prefix(ORPHAN_OPEN_SOURCE_PREFIX)
++            .is_some_and(|suffix| is_hex(suffix, 64));
++        if !valid {
++            return Err(SpoolError::InvalidState(
++                "recovery gap source fingerprint is invalid".to_owned(),
++            ));
++        }
++    }
++    Ok(())
 +}
 +
 +fn recovery_gap_marker_path(root: &Path, event_id: &str) -> Result<PathBuf, SpoolError> {
@@ -8257,6 +8317,7 @@ index 0000000000000000000000000000000000000000..5b34bb724802029cc421294da83934ec
 +            && self.lost_events == other.lost_events
 +            && self.lost_bytes == other.lost_bytes
 +            && self.lost_batch_id == other.lost_batch_id
++            && self.source_fingerprint == other.source_fingerprint
 +    }
 +}
 +
@@ -8282,9 +8343,29 @@ index 0000000000000000000000000000000000000000..5b34bb724802029cc421294da83934ec
 +    // Do not unlink a marker when its size cannot be established.  The byte
 +    // index is part of the capacity contract; treating an unreadable inode as
 +    // zero would make a successful removal silently under-count the spool.
-+    let before = file_len(&path)?;
-+    if remove_recovery_gap_marker(root, event_id)? {
-+        Spool::adjust_spool_bytes(inner, -i128::from(before));
++    let before = match file_len(&path) {
++        Ok(value) => value,
++        Err(error) => {
++            inner.spool_bytes_known = false;
++            return Err(error.into());
++        }
++    };
++    #[cfg(test)]
++    if before != 0 && std::mem::take(&mut inner.faults.recovery_marker_remove_sync) {
++        fs::remove_file(&path)?;
++        inner.spool_bytes_known = false;
++        return Err(io::Error::other("injected recovery marker directory sync failure").into());
++    }
++    match remove_recovery_gap_marker(root, event_id) {
++        Ok(true) => Spool::adjust_spool_bytes(inner, -i128::from(before)),
++        Ok(false) => {}
++        Err(error) => {
++            // remove_file may already have succeeded before the parent fsync
++            // failed. Force a full measurement instead of permanently counting
++            // a marker pathname that is no longer present.
++            inner.spool_bytes_known = false;
++            return Err(error);
++        }
 +    }
 +    Ok(())
 +}
@@ -8363,6 +8444,7 @@ index 0000000000000000000000000000000000000000..5b34bb724802029cc421294da83934ec
 +                    lost_events: None,
 +                    lost_bytes: None,
 +                    lost_batch_id: None,
++                    source_fingerprint: None,
 +                }
 +            }
 +        };
@@ -8424,7 +8506,66 @@ index 0000000000000000000000000000000000000000..5b34bb724802029cc421294da83934ec
 +        lost_events: hint.map(|value| value.event_count),
 +        lost_bytes: hint.map(|value| value.raw_bytes),
 +        lost_batch_id: hint.map(|value| value.batch_id.clone()),
++        source_fingerprint: None,
 +    })
++}
++
++fn orphan_open_source_fingerprint(node_id: &str, metadata: &fs::Metadata) -> String {
++    let mut hasher = Sha256::new();
++    hasher.update(b"shadowsocks-auditd/orphan-open-source/v1\0");
++    hasher.update(node_id.as_bytes());
++    hasher.update([0]);
++    hasher.update(metadata.dev().to_be_bytes());
++    hasher.update(metadata.ino().to_be_bytes());
++    hasher.update(metadata.len().to_be_bytes());
++    hasher.update(metadata.mtime().to_be_bytes());
++    hasher.update(metadata.mtime_nsec().to_be_bytes());
++    format!("{ORPHAN_OPEN_SOURCE_PREFIX}{}", hex::encode(hasher.finalize()))
++}
++
++fn orphan_open_gap_spec(node_id: &str, epoch: &str, metadata: &fs::Metadata) -> GapSpec {
++    // A retry after a marker-directory fsync error must reuse the same event
++    // ID. Bind it to the orphan inode and its stable metadata rather than
++    // drawing another random value on every in-process attempt.
++    let mut hasher = Sha256::new();
++    hasher.update(b"shadowsocks-auditd/orphan-open-gap/v1\0");
++    hasher.update(node_id.as_bytes());
++    hasher.update([0]);
++    hasher.update(epoch.as_bytes());
++    hasher.update(metadata.dev().to_be_bytes());
++    hasher.update(metadata.ino().to_be_bytes());
++    hasher.update(metadata.len().to_be_bytes());
++    hasher.update(metadata.mtime().to_be_bytes());
++    hasher.update(metadata.mtime_nsec().to_be_bytes());
++    let digest = hasher.finalize();
++    let gap_id: String = hex::encode(digest).chars().take(32).collect();
++
++    let occurred_at_unix_ms = u64::try_from(metadata.mtime())
++        .unwrap_or(0)
++        .saturating_mul(1_000)
++        .saturating_add(u64::try_from(metadata.mtime_nsec()).unwrap_or(0) / 1_000_000);
++    GapSpec {
++        event_id: format!("{GAP_ID_PREFIX}{gap_id}"),
++        occurred_at_unix_ms,
++        // The replacement path is not represented by `open_meta`, so its
++        // bytes cannot be trusted to belong to the current epoch.
++        lost_spool_epoch: None,
++        reason: wire::SpoolGapReason::SegmentCorruption,
++        first_lost_spool_sequence: None,
++        last_lost_spool_sequence: None,
++        lost_events: None,
++        lost_bytes: Some(metadata.len()),
++        lost_batch_id: None,
++        source_fingerprint: Some(orphan_open_source_fingerprint(node_id, metadata)),
++    }
++}
++
++fn orphan_open_gap_for_metadata(queue: &VecDeque<GapSpec>, node_id: &str, metadata: &fs::Metadata) -> Option<GapSpec> {
++    let source_fingerprint = orphan_open_source_fingerprint(node_id, metadata);
++    queue
++        .iter()
++        .find(|spec| spec.source_fingerprint.as_deref() == Some(source_fingerprint.as_str()))
++        .cloned()
 +}
 +
 +fn corruption_gap_spec_or_existing(queue: &VecDeque<GapSpec>, hint: Option<&BatchInfo>) -> Result<GapSpec, SpoolError> {
@@ -8432,6 +8573,7 @@ index 0000000000000000000000000000000000000000..5b34bb724802029cc421294da83934ec
 +        .iter()
 +        .filter(|spec| {
 +            spec.reason == wire::SpoolGapReason::SegmentCorruption
++                && spec.source_fingerprint.is_none()
 +                && spec.lost_batch_id.as_deref() == hint.map(|value| value.batch_id.as_str())
 +                && spec.lost_spool_epoch.as_deref() == hint.map(|value| value.spool_epoch.as_str())
 +        })
@@ -8468,6 +8610,7 @@ index 0000000000000000000000000000000000000000..5b34bb724802029cc421294da83934ec
 +        lost_events: None,
 +        lost_bytes: None,
 +        lost_batch_id: None,
++        source_fingerprint: None,
 +    })
 +}
 +
@@ -8518,9 +8661,27 @@ index 0000000000000000000000000000000000000000..5b34bb724802029cc421294da83934ec
 +    sealed_paths: HashMap<String, PathBuf>,
 +    integrity_queue: VecDeque<String>,
 +    durable_gap_reasons: HashMap<String, wire::SpoolGapReason>,
-+    write_barrier_failed: bool,
++    durability_uncertain: bool,
 +    last_spool_measurement: Instant,
 +    last_retention_sweep: Instant,
++    #[cfg(test)]
++    faults: TestFaults,
++}
++
++#[cfg(test)]
++#[derive(Debug, Default)]
++struct TestFaults {
++    partial_write: bool,
++    sync_data: bool,
++    persist_state: bool,
++    persist_state_after_commit: bool,
++    persist_state_accounting: bool,
++    rollback: bool,
++    recovery_marker: bool,
++    orphan_after_marker: bool,
++    orphan_after_rename: bool,
++    orphan_new_open_sync: bool,
++    recovery_marker_remove_sync: bool,
 +}
 +
 +pub struct Spool {
@@ -8531,11 +8692,16 @@ index 0000000000000000000000000000000000000000..5b34bb724802029cc421294da83934ec
 +    // daemons configured with different sockets from mutating one ledger.
 +    spool_lock: SpoolLock,
 +    inner: Mutex<SpoolInner>,
++    durability_uncertain_tx: watch::Sender<bool>,
 +}
 +
 +impl Spool {
 +    pub(crate) fn acquire_lock(root: &Path) -> io::Result<SpoolLock> {
 +        acquire_spool_lock(root)
++    }
++
++    pub(crate) fn durability_uncertain_receiver(&self) -> watch::Receiver<bool> {
++        self.durability_uncertain_tx.subscribe()
 +    }
 +
 +    pub fn open(config: Arc<AuditdConfig>) -> Result<Self, SpoolError> {
@@ -8701,6 +8867,7 @@ index 0000000000000000000000000000000000000000..5b34bb724802029cc421294da83934ec
 +                storage_rejected_attempts = saturating_inc(storage_rejected_attempts);
 +            }
 +        }
++        let (durability_uncertain_tx, _) = watch::channel(false);
 +        let spool = Self {
 +            config,
 +            root,
@@ -8733,14 +8900,17 @@ index 0000000000000000000000000000000000000000..5b34bb724802029cc421294da83934ec
 +                sealed_paths: HashMap::new(),
 +                integrity_queue: VecDeque::new(),
 +                durable_gap_reasons: HashMap::new(),
-+                write_barrier_failed: false,
++                durability_uncertain: false,
 +                last_spool_measurement: Instant::now()
 +                    .checked_sub(INDEX_REBUILD_RETRY_INTERVAL)
 +                    .unwrap_or_else(Instant::now),
 +                last_retention_sweep: Instant::now()
 +                    .checked_sub(RETENTION_SWEEP_INTERVAL)
 +                    .unwrap_or_else(Instant::now),
++                #[cfg(test)]
++                faults: TestFaults::default(),
 +            }),
++            durability_uncertain_tx,
 +        };
 +
 +        // Complete any transaction that was durable before a previous crash.
@@ -8844,13 +9014,10 @@ index 0000000000000000000000000000000000000000..5b34bb724802029cc421294da83934ec
 +        received_at_unix_ms: u64,
 +    ) -> Result<EventAck, SpoolError> {
 +        let mut inner = lock(&self.inner);
++        Self::reject_if_durability_uncertain(&mut inner)?;
 +        if let Err(error) = self.spool_lock.verify() {
 +            mark_storage_rejection(&mut inner, true);
 +            return Err(error.into());
-+        }
-+        if inner.write_barrier_failed && self.try_clear_write_barrier_locked(&mut inner).is_err() {
-+            inner.storage_rejected_attempts = saturating_inc(inner.storage_rejected_attempts);
-+            return Err(SpoolError::StorageUnavailable);
 +        }
 +        self.maybe_sweep_acked_locked(&mut inner);
 +
@@ -8954,13 +9121,10 @@ index 0000000000000000000000000000000000000000..5b34bb724802029cc421294da83934ec
 +    /// lease time so a quiet producer does not strand durable records forever.
 +    pub fn lease(&self) -> Result<Option<BatchLease>, SpoolError> {
 +        let mut inner = lock(&self.inner);
++        Self::reject_if_durability_uncertain(&mut inner)?;
 +        if let Err(error) = self.spool_lock.verify() {
 +            mark_storage_rejection(&mut inner, true);
 +            return Err(error.into());
-+        }
-+        if inner.write_barrier_failed && self.try_clear_write_barrier_locked(&mut inner).is_err() {
-+            inner.storage_rejected_attempts = saturating_inc(inner.storage_rejected_attempts);
-+            return Err(SpoolError::StorageUnavailable);
 +        }
 +        self.maybe_sweep_acked_locked(&mut inner);
 +        if let Err(error) = self.flush_state_reset_locked(&mut inner) {
@@ -9088,13 +9252,10 @@ index 0000000000000000000000000000000000000000..5b34bb724802029cc421294da83934ec
 +    /// poison batch again.
 +    pub fn quarantine_oversized_lease(&self, batch_id: &str, max_bytes: u64) -> Result<bool, SpoolError> {
 +        let mut inner = lock(&self.inner);
++        Self::reject_if_durability_uncertain(&mut inner)?;
 +        if let Err(error) = self.spool_lock.verify() {
 +            mark_storage_rejection(&mut inner, true);
 +            return Err(error.into());
-+        }
-+        if inner.write_barrier_failed && self.try_clear_write_barrier_locked(&mut inner).is_err() {
-+            inner.storage_rejected_attempts = saturating_inc(inner.storage_rejected_attempts);
-+            return Err(SpoolError::StorageUnavailable);
 +        }
 +        if inner.leased_batch.as_deref() != Some(batch_id) {
 +            return Ok(false);
@@ -9143,13 +9304,10 @@ index 0000000000000000000000000000000000000000..5b34bb724802029cc421294da83934ec
 +            return Ok(AckOutcome::Unknown);
 +        }
 +        let mut inner = lock(&self.inner);
++        Self::reject_if_durability_uncertain(&mut inner)?;
 +        if let Err(error) = self.spool_lock.verify() {
 +            mark_storage_rejection(&mut inner, true);
 +            return Err(error.into());
-+        }
-+        if inner.write_barrier_failed && self.try_clear_write_barrier_locked(&mut inner).is_err() {
-+            inner.storage_rejected_attempts = saturating_inc(inner.storage_rejected_attempts);
-+            return Err(SpoolError::StorageUnavailable);
 +        }
 +        self.maybe_sweep_acked_locked(&mut inner);
 +        if let Err(error) = self.flush_state_reset_locked(&mut inner) {
@@ -9365,7 +9523,12 @@ index 0000000000000000000000000000000000000000..5b34bb724802029cc421294da83934ec
 +        if self.spool_lock.verify().is_err() {
 +            mark_storage_rejection(&mut inner, true);
 +        }
-+        self.check_one_sealed_integrity_locked(&mut inner);
++        // Once a write barrier is ambiguous, even health polling must remain
++        // read-only. The daemon-level fatal watcher will terminate the process
++        // and startup recovery will resolve the on-disk state.
++        if !inner.durability_uncertain {
++            self.check_one_sealed_integrity_locked(&mut inner);
++        }
 +        let spool_bytes = inner.spool_bytes;
 +        let status = if inner.degraded
 +            || inner.gap_degraded
@@ -9545,7 +9708,7 @@ index 0000000000000000000000000000000000000000..5b34bb724802029cc421294da83934ec
 +                        inner.integrity_queue.push_back(batch_id);
 +                    }
 +                }
-+                Err(SpoolError::Io(_)) | Err(SpoolError::StorageUnavailable) => {
++                Err(SpoolError::Io(_)) | Err(SpoolError::StorageUnavailable) | Err(SpoolError::DurabilityUncertain) => {
 +                    mark_storage_rejection(inner, true);
 +                    inner.integrity_queue.push_back(batch_id);
 +                }
@@ -9749,6 +9912,7 @@ index 0000000000000000000000000000000000000000..5b34bb724802029cc421294da83934ec
 +                    lost_events: pending.event_count.map(|value| value.0),
 +                    lost_bytes: pending.raw_bytes.map(|value| value.0),
 +                    lost_batch_id: pending.batch_id.clone(),
++                    source_fingerprint: None,
 +                },
 +                Err(error) => {
 +                    // The marker carries the fixed transaction identity. Do
@@ -9859,13 +10023,9 @@ index 0000000000000000000000000000000000000000..5b34bb724802029cc421294da83934ec
 +        let old_len = inner.open_file.metadata()?.len();
 +        let old_meta = inner.open_meta.clone();
 +        let old_next_sequence = inner.next_sequence;
-+        if let Err(error) = inner
-+            .open_file
-+            .write_all(wrapper)
-+            .and_then(|_| inner.open_file.sync_data())
-+        {
-+            if rollback_open_record(&self.root, &mut inner.open_file, old_len).is_err() {
-+                inner.degraded = true;
++        if let Err(error) = Self::write_and_sync_open_locked(inner, wrapper) {
++            if self.rollback_open_record_locked(inner, old_len).is_err() {
++                return Err(self.mark_durability_uncertain_locked(inner));
 +            }
 +            inner.open_meta = old_meta;
 +            inner.next_sequence = old_next_sequence;
@@ -9893,22 +10053,72 @@ index 0000000000000000000000000000000000000000..5b34bb724802029cc421294da83934ec
 +        let next = sequence.checked_add(1).ok_or(SpoolError::SequenceExhausted)?;
 +        inner.next_sequence = next;
 +        if let Err(error) = self.persist_state_locked(inner, inner.pending_state_reset.clone()) {
-+            let rollback = rollback_open_record(&self.root, &mut inner.open_file, old_len);
-+            if rollback.is_ok() {
-+                Self::adjust_spool_bytes(inner, -i128::from(wrapper.len() as u64));
-+                inner.stored_records = inner.stored_records.saturating_sub(1);
-+                inner.open_meta = old_meta;
-+                inner.next_sequence = old_next_sequence;
-+            } else {
-+                // The pathname now contains bytes whose cursor was not made
-+                // durable. Freeze every spool mutation until restart recovery
-+                // can quarantine/reset the epoch and emit its fixed gap; any
-+                // in-process retry could otherwise export duplicate event IDs.
-+                inner.write_barrier_failed = true;
-+                inner.spool_bytes_known = false;
-+                mark_storage_rejection(inner, true);
++            match error {
++                AtomicWriteError::BeforeRename(error) => {
++                    let rollback = self.rollback_open_record_locked(inner, old_len);
++                    if rollback.is_ok() {
++                        Self::adjust_spool_bytes(inner, -i128::from(wrapper.len() as u64));
++                        inner.stored_records = inner.stored_records.saturating_sub(1);
++                        inner.open_meta = old_meta;
++                        inner.next_sequence = old_next_sequence;
++                    } else {
++                        return Err(self.mark_durability_uncertain_locked(inner));
++                    }
++                    return Err(error);
++                }
++                AtomicWriteError::AfterRename(_) => {
++                    // The new state cursor is already visible and may become
++                    // durable despite the reported error. Keep the matching
++                    // open record and advanced in-memory cursor intact; a
++                    // rollback here could leave a silent sequence hole or let
++                    // this process reuse a cursor already committed to disk.
++                    return Err(self.mark_durability_uncertain_locked(inner));
++                }
 +            }
-+            return Err(error);
++        }
++        Ok(())
++    }
++
++    fn write_and_sync_open_locked(inner: &mut SpoolInner, wrapper: &[u8]) -> io::Result<()> {
++        #[cfg(test)]
++        if std::mem::take(&mut inner.faults.partial_write) {
++            let partial = wrapper.len().div_ceil(2).min(wrapper.len());
++            inner.open_file.write_all(wrapper.get(..partial).unwrap_or(wrapper))?;
++            return Err(io::Error::other("injected partial open-segment write"));
++        }
++
++        inner.open_file.write_all(wrapper)?;
++        #[cfg(test)]
++        if std::mem::take(&mut inner.faults.sync_data) {
++            return Err(io::Error::other("injected open-segment sync failure"));
++        }
++        inner.open_file.sync_data()
++    }
++
++    fn rollback_open_record_locked(&self, inner: &mut SpoolInner, old_len: u64) -> io::Result<()> {
++        #[cfg(test)]
++        if std::mem::take(&mut inner.faults.rollback) {
++            return Err(io::Error::other("injected open-segment rollback failure"));
++        }
++        rollback_open_record(&self.root, &mut inner.open_file, old_len)
++    }
++
++    fn mark_durability_uncertain_locked(&self, inner: &mut SpoolInner) -> SpoolError {
++        if !inner.durability_uncertain {
++            inner.durability_uncertain = true;
++            inner.spool_bytes_known = false;
++            mark_storage_rejection(inner, true);
++            self.durability_uncertain_tx.send_replace(true);
++        }
++        SpoolError::DurabilityUncertain
++    }
++
++    fn reject_if_durability_uncertain(inner: &mut SpoolInner) -> Result<(), SpoolError> {
++        if inner.durability_uncertain {
++            // Every caller-visible rejection is part of the cumulative health
++            // contract, even during the short interval before daemon shutdown.
++            mark_storage_rejection(inner, true);
++            return Err(SpoolError::DurabilityUncertain);
 +        }
 +        Ok(())
 +    }
@@ -9917,34 +10127,57 @@ index 0000000000000000000000000000000000000000..5b34bb724802029cc421294da83934ec
 +        &self,
 +        inner: &mut SpoolInner,
 +        pending_state_reset: Option<PendingStateReset>,
-+    ) -> Result<(), SpoolError> {
++    ) -> Result<(), AtomicWriteError> {
++        #[cfg(test)]
++        if std::mem::take(&mut inner.faults.persist_state) {
++            return Err(AtomicWriteError::BeforeRename(
++                io::Error::other("injected state persistence failure").into(),
++            ));
++        }
 +        let path = self.root.join("state.json");
-+        let before = file_len(&path)?;
-+        let result = persist_state(&self.root, &inner.epoch, inner.next_sequence, pending_state_reset);
-+        if let Err(error) = Spool::update_path_size(inner, &path, before) {
-+            mark_storage_rejection(inner, true);
-+            return Err(error.into());
++        let before = file_len(&path).map_err(|error| AtomicWriteError::BeforeRename(error.into()))?;
++        let result = persist_state_atomic(&self.root, &inner.epoch, inner.next_sequence, pending_state_reset);
++        #[cfg(test)]
++        let result = if result.is_ok() && std::mem::take(&mut inner.faults.persist_state_after_commit) {
++            Err(AtomicWriteError::AfterRename(
++                io::Error::other("injected state failure after durable commit").into(),
++            ))
++        } else {
++            result
++        };
++
++        // Once rename has succeeded, even a later accounting read failure is
++        // commit-uncertain: state.json may already contain the advanced cursor
++        // and the caller must not roll back the corresponding open record.
++        if result.is_ok() || matches!(&result, Err(AtomicWriteError::AfterRename(_))) {
++            #[cfg(test)]
++            let accounting = if std::mem::take(&mut inner.faults.persist_state_accounting) {
++                Err(io::Error::other("injected state path-size accounting failure"))
++            } else {
++                Spool::update_path_size(inner, &path, before)
++            };
++            #[cfg(not(test))]
++            let accounting = Spool::update_path_size(inner, &path, before);
++            if let Err(error) = accounting {
++                inner.spool_bytes_known = false;
++                return Err(AtomicWriteError::AfterRename(error.into()));
++            }
 +        }
 +        result
-+    }
-+
-+    fn try_clear_write_barrier_locked(&self, inner: &mut SpoolInner) -> Result<(), SpoolError> {
-+        self.ensure_open_file_bound(inner)?;
-+        self.refresh_spool_bytes_locked(inner)?;
-+        self.persist_state_locked(inner, inner.pending_state_reset.clone())?;
-+        inner.write_barrier_failed = false;
-+        Ok(())
 +    }
 +
 +    fn ensure_open_file_bound(&self, inner: &mut SpoolInner) -> Result<(), SpoolError> {
 +        let path = self.root.join("open/current.ndjson");
 +        let opened = inner.open_file.metadata()?;
 +        let current = fs::symlink_metadata(&path);
-+        if current
++        let descriptor_is_bound = current
 +            .as_ref()
 +            .is_ok_and(|value| value.is_file() && value.dev() == opened.dev() && value.ino() == opened.ino())
-+            && opened.len() == inner.open_meta.bytes
-+        {
++            && opened.len() == inner.open_meta.bytes;
++        if descriptor_is_bound {
++            if !inner.spool_bytes_known {
++                self.refresh_spool_bytes_locked(inner)?;
++            }
 +            return Ok(());
 +        }
 +        if inner.open_meta.event_count > 0 || inner.open_meta.bytes > 0 {
@@ -9962,41 +10195,79 @@ index 0000000000000000000000000000000000000000..5b34bb724802029cc421294da83934ec
 +        set_file_mode(&path, 0o600)?;
 +        file.sync_all()?;
 +        sync_dir(&self.root.join("open"))?;
-+        if file.metadata()?.len() != 0 {
++        let file_metadata = file.metadata()?;
++        if file_metadata.len() != 0 {
++            let spec = orphan_open_gap_spec(&self.config.node_id, &inner.epoch, &file_metadata);
 +            let orphan = self
 +                .root
 +                .join("quarantine")
 +                .join(format!("orphan-open-{}", random_hex_id()?));
++
++            #[cfg(test)]
++            if std::mem::take(&mut inner.faults.recovery_marker) {
++                return Err(io::Error::other("injected recovery marker failure").into());
++            }
++            // The fixed marker is the recovery proof for every crash window
++            // below. Never move the only copy of ambiguous bytes before this
++            // intent and its parent-directory barrier are durable.
++            self.persist_recovery_gap_marker_locked(inner, &spec)?;
++            if !inner
++                .recovery_gaps
++                .iter()
++                .any(|queued| queued.event_id == spec.event_id)
++            {
++                inner.recovery_gaps.push_back(spec.clone());
++            }
++            inner.spool_bytes_known = false;
++            #[cfg(test)]
++            if std::mem::take(&mut inner.faults.orphan_after_marker) {
++                return Err(io::Error::other("injected failure after orphan marker").into());
++            }
++
 +            fs::rename(&path, &orphan)?;
 +            sync_dir(&self.root.join("open"))?;
 +            sync_dir(&self.root.join("quarantine"))?;
++            #[cfg(test)]
++            if std::mem::take(&mut inner.faults.orphan_after_rename) {
++                return Err(io::Error::other("injected failure after orphan rename").into());
++            }
++
 +            inner.degraded = true;
++            inner.gap_degraded = true;
 +            inner.non_gap_degraded = true;
 +            let new_file = OpenOptions::new()
-+                .create(true)
++                .create_new(true)
 +                .read(true)
 +                .append(true)
 +                .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
 +                .mode(0o600)
 +                .open(&path)?;
-+            set_file_mode(&path, 0o600)?;
++            new_file.set_permissions(fs::Permissions::from_mode(0o600))?;
++            #[cfg(test)]
++            if std::mem::take(&mut inner.faults.orphan_new_open_sync) {
++                return Err(io::Error::other("injected replacement open sync failure").into());
++            }
++            new_file.sync_all()?;
++            sync_dir(&self.root.join("open"))?;
 +            inner.open_meta = OpenMetadata::empty();
 +            inner.open_file = new_file;
-+            let spec = GapSpec {
-+                event_id: format!("{}{}", GAP_ID_PREFIX, random_hex_id()?),
-+                occurred_at_unix_ms: unix_millis()?,
-+                lost_spool_epoch: None,
-+                reason: wire::SpoolGapReason::SegmentCorruption,
-+                first_lost_spool_sequence: None,
-+                last_lost_spool_sequence: None,
-+                lost_events: None,
-+                lost_bytes: None,
-+                lost_batch_id: None,
-+            };
-+            self.write_gap_locked(inner, &spec)?;
-+            return Ok(());
++            // The rename retains every byte under quarantine, so incremental
++            // accounting would be easy to get wrong after any intermediate
++            // failure. Re-measure once before admitting another mutation.
++            self.refresh_spool_bytes_locked(inner)?;
++            // Do not recursively flush the queue from inside the gap writer's
++            // own inode-binding check. Returning one retryable failure makes
++            // the next top-level mutation durably write this fixed gap first;
++            // otherwise an outer write_gap call could append the same ID again
++            // after an inner flush completed it.
++            return Err(SpoolError::StorageUnavailable);
 +        }
++        // Rebind before the fallible measurement so no later retry can write
++        // through the old descriptor after the pathname was moved.
 +        inner.open_file = file;
++        if !inner.spool_bytes_known {
++            self.refresh_spool_bytes_locked(inner)?;
++        }
 +        Ok(())
 +    }
 +
@@ -10018,6 +10289,7 @@ index 0000000000000000000000000000000000000000..5b34bb724802029cc421294da83934ec
 +                lost_events: None,
 +                lost_bytes: None,
 +                lost_batch_id: None,
++                source_fingerprint: None,
 +            };
 +            self.write_gap_locked(inner, &spec)?;
 +        }
@@ -10027,8 +10299,13 @@ index 0000000000000000000000000000000000000000..5b34bb724802029cc421294da83934ec
 +        // unproven cursor.
 +        inner.pending_state_reset = None;
 +        if let Err(error) = self.persist_state_locked(inner, None) {
-+            inner.pending_state_reset = Some(pending);
-+            return Err(error);
++            return match error {
++                AtomicWriteError::BeforeRename(error) => {
++                    inner.pending_state_reset = Some(pending);
++                    Err(error)
++                }
++                AtomicWriteError::AfterRename(_) => Err(self.mark_durability_uncertain_locked(inner)),
++            };
 +        }
 +        Ok(())
 +    }
@@ -10057,6 +10334,9 @@ index 0000000000000000000000000000000000000000..5b34bb724802029cc421294da83934ec
 +            // operation retryable without generating a second event ID.
 +            remove_recovery_gap_marker_locked(&self.root, inner, &spec.event_id)?;
 +            inner.recovery_gaps.pop_front();
++        }
++        if !inner.spool_bytes_known {
++            self.refresh_spool_bytes_locked(inner)?;
 +        }
 +        Ok(())
 +    }
@@ -10914,6 +11194,7 @@ index 0000000000000000000000000000000000000000..5b34bb724802029cc421294da83934ec
 +            lost_events: Some(info.event_count),
 +            lost_bytes: Some(info.raw_bytes),
 +            lost_batch_id: Some(info.batch_id.clone()),
++            source_fingerprint: None,
 +        };
 +        inner.gap_degraded = true;
 +        if let Err(error) = self.write_gap_locked(inner, &spec) {
@@ -10981,6 +11262,7 @@ index 0000000000000000000000000000000000000000..5b34bb724802029cc421294da83934ec
 +            lost_events: pending.event_count.map(|value| value.0),
 +            lost_bytes: pending.raw_bytes.map(|value| value.0),
 +            lost_batch_id: pending.batch_id.clone(),
++            source_fingerprint: None,
 +        };
 +        inner.gap_degraded = true;
 +        self.write_gap_locked(inner, &spec)?;
@@ -11044,6 +11326,7 @@ index 0000000000000000000000000000000000000000..5b34bb724802029cc421294da83934ec
 +                            lost_events: Some(pending.event_count.0),
 +                            lost_bytes: Some(pending.raw_bytes.0),
 +                            lost_batch_id: Some(pending.batch_id.clone()),
++                            source_fingerprint: None,
 +                        };
 +                        if !inner.durable_gap_reasons.contains_key(&pending.gap_event_id) {
 +                            self.write_gap_locked(inner, &spec)?;
@@ -11163,6 +11446,7 @@ index 0000000000000000000000000000000000000000..5b34bb724802029cc421294da83934ec
 +                            lost_events: pending.event_count.map(|v| v.0),
 +                            lost_bytes: pending.raw_bytes.map(|v| v.0),
 +                            lost_batch_id: pending.batch_id.clone(),
++                            source_fingerprint: None,
 +                        });
 +                        if durable_reason.is_none() && !inner.durable_gap_reasons.contains_key(&pending.gap_event_id) {
 +                            self.write_gap_locked(inner, &spec)?;
@@ -11586,54 +11870,76 @@ index 0000000000000000000000000000000000000000..5b34bb724802029cc421294da83934ec
 +    }
 +
 +    let open_path = root.join("open/current.ndjson");
-+    let open_is_symlink = match fs::symlink_metadata(&open_path) {
-+        Ok(metadata) => metadata.file_type().is_symlink(),
-+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
++    let open_metadata = match fs::symlink_metadata(&open_path) {
++        Ok(metadata) => Some(metadata),
++        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
 +        Err(_) => {
 +            // The subsequent read will fail as well, but record the metadata
 +            // uncertainty explicitly instead of silently treating it as a
 +            // normal regular-file corruption.
 +            degraded = true;
 +            storage_rejected_attempts = saturating_inc(storage_rejected_attempts);
-+            false
++            None
 +        }
 +    };
-+    let open_bytes = match read_regular_file(&open_path) {
-+        Ok(bytes) => bytes,
-+        Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
-+        Err(_) if open_is_symlink => {
-+            degraded = true;
-+            history_untrusted = true;
-+            let spec = corruption_gap_spec_or_existing(&recovery_gaps, None)?;
-+            enqueue_recovery_gap(root, &mut recovery_gaps, spec, &mut degraded)?;
-+            quarantine_recovery_path(
-+                root,
-+                &open_path,
-+                "open-symlink",
-+                &mut degraded,
-+                &mut storage_rejected_attempts,
-+            );
-+            Vec::new()
-+        }
-+        Err(_) => {
-+            // A regular open file that is too large, malformed, or otherwise
-+            // unreadable is untrusted history. Isolate it and continue in a
-+            // fresh epoch when possible; refusing to start would turn an
-+            // audit-storage fault into a data-plane outage. If the rename
-+            // itself fails, propagate that bounded I/O error instead of
-+            // silently discarding the inode.
-+            degraded = true;
-+            history_untrusted = true;
-+            let spec = corruption_gap_spec_or_existing(&recovery_gaps, None)?;
-+            enqueue_recovery_gap(root, &mut recovery_gaps, spec, &mut degraded)?;
-+            quarantine_recovery_path(
-+                root,
-+                &open_path,
-+                "open-corrupt",
-+                &mut degraded,
-+                &mut storage_rejected_attempts,
-+            );
-+            Vec::new()
++    let open_is_symlink = open_metadata
++        .as_ref()
++        .is_some_and(|metadata| metadata.file_type().is_symlink());
++    let pending_orphan_gap = open_metadata
++        .as_ref()
++        .filter(|metadata| metadata.is_file() && metadata.len() != 0)
++        .and_then(|metadata| orphan_open_gap_for_metadata(&recovery_gaps, node_id, metadata));
++    let open_bytes = if pending_orphan_gap.is_some() {
++        // A source-bound marker proves this exact inode was classified before
++        // a previous crash. Finish that transaction without letting an
++        // unrelated generic corruption marker claim the object.
++        degraded = true;
++        quarantine_recovery_path(
++            root,
++            &open_path,
++            "orphan-open",
++            &mut degraded,
++            &mut storage_rejected_attempts,
++        );
++        Vec::new()
++    } else {
++        match read_regular_file(&open_path) {
++            Ok(bytes) => bytes,
++            Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
++            Err(_) if open_is_symlink => {
++                degraded = true;
++                history_untrusted = true;
++                let spec = corruption_gap_spec_or_existing(&recovery_gaps, None)?;
++                enqueue_recovery_gap(root, &mut recovery_gaps, spec, &mut degraded)?;
++                quarantine_recovery_path(
++                    root,
++                    &open_path,
++                    "open-symlink",
++                    &mut degraded,
++                    &mut storage_rejected_attempts,
++                );
++                Vec::new()
++            }
++            Err(_) => {
++                // A regular open file that is too large, malformed, or otherwise
++                // unreadable is untrusted history. Isolate it and continue in a
++                // fresh epoch when possible; refusing to start would turn an
++                // audit-storage fault into a data-plane outage. If the rename
++                // itself fails, propagate that bounded I/O error instead of
++                // silently discarding the inode.
++                degraded = true;
++                history_untrusted = true;
++                let spec = corruption_gap_spec_or_existing(&recovery_gaps, None)?;
++                enqueue_recovery_gap(root, &mut recovery_gaps, spec, &mut degraded)?;
++                quarantine_recovery_path(
++                    root,
++                    &open_path,
++                    "open-corrupt",
++                    &mut degraded,
++                    &mut storage_rejected_attempts,
++                );
++                Vec::new()
++            }
 +        }
 +    };
 +    let open_scan = match scan_open_bytes(&open_bytes, node_id) {
@@ -12224,6 +12530,15 @@ index 0000000000000000000000000000000000000000..5b34bb724802029cc421294da83934ec
 +    next_sequence: u64,
 +    pending_state_reset: Option<PendingStateReset>,
 +) -> Result<(), SpoolError> {
++    persist_state_atomic(root, epoch, next_sequence, pending_state_reset).map_err(AtomicWriteError::into_spool_error)
++}
++
++fn persist_state_atomic(
++    root: &Path,
++    epoch: &str,
++    next_sequence: u64,
++    pending_state_reset: Option<PendingStateReset>,
++) -> Result<(), AtomicWriteError> {
 +    let state = wire::SpoolState {
 +        state_schema_version: STATE_SCHEMA_VERSION,
 +        spool_epoch: epoch.to_owned(),
@@ -12232,8 +12547,8 @@ index 0000000000000000000000000000000000000000..5b34bb724802029cc421294da83934ec
 +    };
 +    let bytes = state
 +        .canonical_bytes()
-+        .map_err(|error| SpoolError::Protocol(ProtocolError::from(error)))?;
-+    write_atomic_file(&root.join("state.json"), &bytes, 0o600)
++        .map_err(|error| AtomicWriteError::BeforeRename(SpoolError::Protocol(ProtocolError::from(error))))?;
++    write_atomic_file_staged(&root.join("state.json"), &bytes, 0o600)
 +}
 +
 +fn load_tombstones(root: &Path) -> Result<Vec<TombstoneEntry>, SpoolError> {
@@ -12484,36 +12799,54 @@ index 0000000000000000000000000000000000000000..5b34bb724802029cc421294da83934ec
 +    fs::set_permissions(path, fs::Permissions::from_mode(mode))
 +}
 +
++#[derive(Debug)]
++enum AtomicWriteError {
++    BeforeRename(SpoolError),
++    AfterRename(SpoolError),
++}
++
++impl AtomicWriteError {
++    fn into_spool_error(self) -> SpoolError {
++        match self {
++            Self::BeforeRename(error) | Self::AfterRename(error) => error,
++        }
++    }
++}
++
 +fn write_atomic_file(path: &Path, bytes: &[u8], mode: u32) -> Result<(), SpoolError> {
++    write_atomic_file_staged(path, bytes, mode).map_err(AtomicWriteError::into_spool_error)
++}
++
++fn write_atomic_file_staged(path: &Path, bytes: &[u8], mode: u32) -> Result<(), AtomicWriteError> {
 +    let parent = path
 +        .parent()
-+        .ok_or_else(|| SpoolError::InvalidState("file has no parent".to_owned()))?;
++        .ok_or_else(|| AtomicWriteError::BeforeRename(SpoolError::InvalidState("file has no parent".to_owned())))?;
 +    let name = path
 +        .file_name()
 +        .and_then(|value| value.to_str())
-+        .ok_or_else(|| SpoolError::InvalidState("invalid file name".to_owned()))?;
++        .ok_or_else(|| AtomicWriteError::BeforeRename(SpoolError::InvalidState("invalid file name".to_owned())))?;
 +    let temp = parent.join(format!(".{name}.tmp-{}-{}", std::process::id(), unix_nanos()));
 +    let mut file = OpenOptions::new()
 +        .write(true)
 +        .create_new(true)
 +        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
 +        .mode(mode)
-+        .open(&temp)?;
++        .open(&temp)
++        .map_err(|error| AtomicWriteError::BeforeRename(error.into()))?;
 +    if let Err(error) = file.write_all(bytes).and_then(|_| file.sync_all()) {
 +        let _ = fs::remove_file(&temp);
-+        return Err(error.into());
++        return Err(AtomicWriteError::BeforeRename(error.into()));
 +    }
 +    drop(file);
 +    if let Err(error) = fs::rename(&temp, path) {
 +        let _ = fs::remove_file(&temp);
-+        return Err(error.into());
++        return Err(AtomicWriteError::BeforeRename(error.into()));
 +    }
 +    // The renamed inode was created with the requested private mode.  Do not
 +    // chmod the destination by pathname here: a privileged actor replacing
 +    // the path between rename and chmod could make that operation follow a
 +    // symlink outside the spool tree.
-+    sync_dir(parent)?;
-+    Ok(())
++    sync_dir(parent).map_err(|error| AtomicWriteError::AfterRename(error.into()))
 +}
 +
 +fn read_regular_file(path: &Path) -> io::Result<Vec<u8>> {
@@ -12995,6 +13328,70 @@ index 0000000000000000000000000000000000000000..5b34bb724802029cc421294da83934ec
 +        .into_bytes()
 +    }
 +
++    fn records_from_body(body: &[u8]) -> Vec<wire::AuditRecord> {
++        body.split_inclusive(|byte| *byte == b'\n')
++            .map(|line| {
++                wire::parse_spool_line(line)
++                    .expect("spool line")
++                    .event_record()
++                    .expect("stored event")
++            })
++            .collect()
++    }
++
++    fn drain_records(spool: &Spool) -> Vec<wire::AuditRecord> {
++        let mut records = Vec::new();
++        for _ in 0..16 {
++            let Some(lease) = spool.lease().expect("lease") else {
++                return records;
++            };
++            records.extend(records_from_body(&lease.body));
++            assert_eq!(
++                spool.ack(&lease.info.batch_id, &lease.info.body_sha256).expect("ack"),
++                AckOutcome::Acked
++            );
++        }
++        panic!("spool did not drain within the bounded test loop");
++    }
++
++    fn drain_record_positions(spool: &Spool) -> Vec<(String, u64, String)> {
++        let mut records = Vec::new();
++        for _ in 0..16 {
++            let Some(lease) = spool.lease().expect("lease") else {
++                return records;
++            };
++            records.extend(lease.body.split_inclusive(|byte| *byte == b'\n').map(|line| {
++                let wrapper = wire::parse_spool_line(line).expect("spool line");
++                let event_id = wrapper.event_record().expect("stored event").event_id().to_owned();
++                (wrapper.spool_epoch, wrapper.spool_sequence.0, event_id)
++            }));
++            assert_eq!(
++                spool.ack(&lease.info.batch_id, &lease.info.body_sha256).expect("ack"),
++                AckOutcome::Acked
++            );
++        }
++        panic!("spool did not drain within the bounded test loop");
++    }
++
++    fn replace_open_with_orphan(root: &Path, bytes: &[u8]) {
++        let path = root.join("open/current.ndjson");
++        fs::remove_file(&path).expect("unlink bound open path");
++        fs::write(&path, bytes).expect("replacement orphan");
++    }
++
++    fn recovery_marker_count(root: &Path) -> usize {
++        fs::read_dir(root)
++            .expect("spool root")
++            .filter_map(Result::ok)
++            .filter(|entry| {
++                entry
++                    .file_name()
++                    .to_str()
++                    .is_some_and(|name| name.starts_with(RECOVERY_GAP_MARKER_PREFIX))
++            })
++            .count()
++    }
++
 +    #[test]
 +    fn append_seal_lease_and_ack_are_idempotent() {
 +        let dir = tempfile::tempdir().expect("tempdir");
@@ -13010,6 +13407,580 @@ index 0000000000000000000000000000000000000000..5b34bb724802029cc421294da83934ec
 +            .expect("idempotent ack");
 +        assert_eq!(second, AckOutcome::Acked);
 +        assert!(spool.lease().expect("lease after ack").is_none());
++    }
++
++    #[tokio::test]
++    async fn ambiguous_write_barriers_are_fatal_sticky_and_recover_without_duplicate_event_ids() {
++        for (case, partial_write, sync_data, persist_state) in [
++            ("partial-write", true, false, false),
++            ("sync-data", false, true, false),
++            ("persist-state", false, false, true),
++        ] {
++            let dir = tempfile::tempdir().expect("tempdir");
++            let spool_config = config(dir.path());
++            let spool = Spool::open(spool_config.clone()).expect("spool");
++            {
++                let mut inner = lock(&spool.inner);
++                inner.faults.partial_write = partial_write;
++                inner.faults.sync_data = sync_data;
++                inner.faults.persist_state = persist_state;
++                inner.faults.rollback = true;
++            }
++
++            assert!(
++                matches!(spool.append(&event(1), 1), Err(SpoolError::DurabilityUncertain)),
++                "{case} must surface the ambiguous durability state"
++            );
++            // Subscribe after the fault to prove `send_replace` retained the
++            // fatal value even though no receiver existed at notification time.
++            let fatal = spool.durability_uncertain_receiver();
++            tokio::time::timeout(Duration::from_secs(1), crate::wait_for_durability_uncertain(fatal))
++                .await
++                .expect("daemon fatal watcher notification");
++
++            let open_after_failure = fs::read(dir.path().join("open/current.ndjson")).expect("ambiguous open bytes");
++            let state_after_failure = fs::read(dir.path().join("state.json")).ok();
++            let cursor_after_failure = {
++                let inner = lock(&spool.inner);
++                (
++                    inner.epoch.clone(),
++                    inner.next_sequence,
++                    inner.open_meta.bytes,
++                    inner.open_meta.event_count,
++                    inner.stored_records,
++                )
++            };
++            let rejections_after_failure = lock(&spool.inner).storage_rejected_attempts;
++
++            assert!(matches!(
++                spool.append(&event(2), 2),
++                Err(SpoolError::DurabilityUncertain)
++            ));
++            assert!(matches!(spool.lease(), Err(SpoolError::DurabilityUncertain)));
++            assert!(matches!(
++                spool.quarantine_oversized_lease("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1),
++                Err(SpoolError::DurabilityUncertain)
++            ));
++            assert!(matches!(
++                spool.ack(
++                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
++                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
++                ),
++                Err(SpoolError::DurabilityUncertain)
++            ));
++            assert_eq!(
++                fs::read(dir.path().join("open/current.ndjson")).expect("unchanged open bytes"),
++                open_after_failure,
++                "{case} mutated open bytes after the fatal barrier"
++            );
++            assert_eq!(
++                fs::read(dir.path().join("state.json")).ok(),
++                state_after_failure,
++                "{case} mutated the durable cursor after the fatal barrier"
++            );
++            let cursor_after_rejections = {
++                let inner = lock(&spool.inner);
++                (
++                    inner.epoch.clone(),
++                    inner.next_sequence,
++                    inner.open_meta.bytes,
++                    inner.open_meta.event_count,
++                    inner.stored_records,
++                )
++            };
++            assert_eq!(cursor_after_rejections, cursor_after_failure, "{case}");
++            assert_eq!(
++                lock(&spool.inner).storage_rejected_attempts,
++                rejections_after_failure.saturating_add(4),
++                "{case} must count every caller-visible sticky rejection"
++            );
++            drop(spool);
++
++            let recovered = Spool::open(spool_config).expect("restart recovery");
++            recovered.append(&event(1), 2).expect("producer retry after restart");
++            let records = drain_records(&recovered);
++            let producer_event_id = "0123456789abcdef0123456789abcdef:1";
++            assert_eq!(
++                records
++                    .iter()
++                    .filter(|record| record.event_id() == producer_event_id)
++                    .count(),
++                1,
++                "{case} exported the retried producer event more than once"
++            );
++            assert!(
++                records
++                    .iter()
++                    .any(|record| matches!(record, wire::AuditRecord::SpoolGap(_))),
++                "{case} restart recovery did not emit loss evidence"
++            );
++        }
++    }
++
++    #[test]
++    fn committed_state_errors_keep_the_record_and_never_reuse_epoch_sequence() {
++        for (case, fail_after_commit, fail_accounting) in
++            [("after-commit", true, false), ("path-size-accounting", false, true)]
++        {
++            let dir = tempfile::tempdir().expect("tempdir");
++            let spool_config = config(dir.path());
++            let spool = Spool::open(spool_config.clone()).expect("spool");
++            {
++                let mut inner = lock(&spool.inner);
++                inner.faults.persist_state_after_commit = fail_after_commit;
++                inner.faults.persist_state_accounting = fail_accounting;
++            }
++
++            assert!(
++                matches!(spool.append(&event(1), 1), Err(SpoolError::DurabilityUncertain)),
++                "{case} must make the daemon fatal"
++            );
++            let committed_state = load_state(&dir.path().join("state.json"))
++                .expect("state read")
++                .expect("committed state");
++            assert_eq!(committed_state.next_spool_sequence.0, 2, "{case}");
++            let original_epoch = committed_state.spool_epoch;
++            let open_after_failure = fs::read(dir.path().join("open/current.ndjson")).expect("committed open record");
++            let wrapper = wire::parse_spool_line(&open_after_failure).expect("committed spool line");
++            assert_eq!(wrapper.spool_epoch, original_epoch, "{case}");
++            assert_eq!(wrapper.spool_sequence.0, 1, "{case}");
++            {
++                let inner = lock(&spool.inner);
++                assert!(inner.durability_uncertain, "{case}");
++                assert_eq!(inner.next_sequence, 2, "{case}");
++                assert_eq!(inner.open_meta.event_count, 1, "{case}");
++            }
++
++            let rejections = lock(&spool.inner).storage_rejected_attempts;
++            assert!(
++                matches!(spool.append(&event(2), 2), Err(SpoolError::DurabilityUncertain)),
++                "{case} must reject same-process sequence reuse"
++            );
++            assert_eq!(
++                lock(&spool.inner).storage_rejected_attempts,
++                rejections.saturating_add(1),
++                "{case} sticky rejection count"
++            );
++            assert_eq!(
++                fs::read(dir.path().join("open/current.ndjson")).expect("unchanged committed open record"),
++                open_after_failure,
++                "{case} changed the retained record before restart"
++            );
++            drop(spool);
++
++            let recovered = Spool::open(spool_config).expect("restart recovery");
++            let retry = recovered.append(&event(1), 2).expect("producer retry");
++            assert_eq!(retry.spool_epoch, original_epoch, "{case}");
++            assert_eq!(retry.spool_sequence, 2, "{case}");
++
++            let producer_id = "0123456789abcdef0123456789abcdef:1";
++            let positions: Vec<_> = drain_record_positions(&recovered)
++                .into_iter()
++                .filter(|(_, _, event_id)| event_id == producer_id)
++                .collect();
++            // §8.3 permits an event_id replay after auditd restart. The spool
++            // key, unlike event_id, must remain unique within an epoch.
++            assert_eq!(positions.len(), 2, "{case}");
++            assert_eq!(
++                positions[0],
++                (original_epoch.clone(), 1, producer_id.to_owned()),
++                "{case}"
++            );
++            assert_eq!(positions[1], (original_epoch, 2, producer_id.to_owned()), "{case}");
++        }
++    }
++
++    #[test]
++    fn orphan_open_marker_failure_prevents_rename_and_retry_accounts_every_byte() {
++        let dir = tempfile::tempdir().expect("tempdir");
++        let spool = Spool::open(config(dir.path())).expect("spool");
++        let orphan_bytes = b"ambiguous orphan bytes\n";
++        replace_open_with_orphan(dir.path(), orphan_bytes);
++        {
++            let mut inner = lock(&spool.inner);
++            inner.faults.recovery_marker = true;
++        }
++
++        assert!(spool.append(&event(1), 1).is_err());
++        assert_eq!(
++            fs::read(dir.path().join("open/current.ndjson")).expect("orphan retained"),
++            orphan_bytes
++        );
++        assert_eq!(recovery_marker_count(dir.path()), 0);
++        assert_eq!(fs::read_dir(dir.path().join("quarantine")).unwrap().count(), 0);
++
++        assert!(matches!(
++            spool.append(&event(1), 1),
++            Err(SpoolError::StorageUnavailable)
++        ));
++        assert_eq!(fs::read_dir(dir.path().join("quarantine")).unwrap().count(), 1);
++        assert_eq!(recovery_marker_count(dir.path()), 1);
++        {
++            let inner = lock(&spool.inner);
++            let (measured, skipped) = directory_size_status(dir.path()).expect("measure spool");
++            assert!(!skipped);
++            assert!(inner.spool_bytes_known);
++            assert_eq!(inner.spool_bytes, measured);
++        }
++
++        spool.append(&event(1), 1).expect("retry after durable orphan gap");
++        assert_eq!(recovery_marker_count(dir.path()), 0);
++        let records = drain_records(&spool);
++        assert_eq!(
++            records
++                .iter()
++                .filter(|record| {
++                    matches!(
++                        record,
++                        wire::AuditRecord::SpoolGap(gap)
++                            if gap.reason == wire::SpoolGapReason::SegmentCorruption
++                                && gap.lost_bytes.is_some_and(|value| value.0 == orphan_bytes.len() as u64)
++                    )
++                })
++                .count(),
++            1
++        );
++        assert_eq!(
++            records
++                .iter()
++                .filter(|record| record.event_id() == "0123456789abcdef0123456789abcdef:1")
++                .count(),
++            1
++        );
++    }
++
++    #[test]
++    fn orphan_open_rename_failure_reuses_marker_on_same_process_retry() {
++        let dir = tempfile::tempdir().expect("tempdir");
++        let spool = Spool::open(config(dir.path())).expect("spool");
++        let orphan_bytes = b"rename-failure orphan\n";
++        replace_open_with_orphan(dir.path(), orphan_bytes);
++        {
++            let mut inner = lock(&spool.inner);
++            // This leaves the same state as a failing rename: the fixed marker
++            // is durable while the replacement pathname remains in open/.
++            inner.faults.orphan_after_marker = true;
++        }
++
++        assert!(spool.append(&event(1), 1).is_err());
++        let marker_name = fs::read_dir(dir.path())
++            .unwrap()
++            .filter_map(Result::ok)
++            .map(|entry| entry.file_name())
++            .find(|name| {
++                name.to_str()
++                    .is_some_and(|value| value.starts_with(RECOVERY_GAP_MARKER_PREFIX))
++            })
++            .expect("fixed marker");
++        assert_eq!(fs::read(dir.path().join("open/current.ndjson")).unwrap(), orphan_bytes);
++
++        assert!(matches!(
++            spool.append(&event(1), 1),
++            Err(SpoolError::StorageUnavailable)
++        ));
++        assert!(
++            dir.path().join(marker_name).exists(),
++            "retry must retain the same marker"
++        );
++        assert_eq!(fs::read_dir(dir.path().join("quarantine")).unwrap().count(), 1);
++
++        spool
++            .append(&event(1), 1)
++            .expect("third attempt flushes gap before producer event");
++        let records = drain_records(&spool);
++        assert_eq!(
++            records
++                .iter()
++                .filter(|record| {
++                    matches!(
++                        record,
++                        wire::AuditRecord::SpoolGap(gap) if gap.reason == wire::SpoolGapReason::SegmentCorruption
++                    )
++                })
++                .count(),
++            1
++        );
++        assert_eq!(recovery_marker_count(dir.path()), 0);
++    }
++
++    #[test]
++    fn orphan_open_after_marker_crash_reopens_with_exact_gap_and_accounting() {
++        let dir = tempfile::tempdir().expect("tempdir");
++        let spool = Spool::open(config(dir.path())).expect("spool");
++        let orphan_bytes = b"after-marker crash orphan\n";
++        replace_open_with_orphan(dir.path(), orphan_bytes);
++        {
++            let mut inner = lock(&spool.inner);
++            inner.faults.orphan_after_marker = true;
++        }
++
++        assert!(spool.append(&event(1), 1).is_err());
++        let (markers, degraded, _) = load_recovery_gap_markers(dir.path()).expect("load marker");
++        assert!(!degraded);
++        assert_eq!(markers.len(), 1);
++        let event_id = markers[0].event_id.clone();
++        assert_eq!(recovery_marker_count(dir.path()), 1);
++        assert_eq!(fs::read(dir.path().join("open/current.ndjson")).unwrap(), orphan_bytes);
++        assert_eq!(fs::read_dir(dir.path().join("quarantine")).unwrap().count(), 0);
++
++        drop(spool);
++        let recovered = Spool::open(config(dir.path())).expect("reopen spool");
++        assert_eq!(recovery_marker_count(dir.path()), 0);
++        assert_eq!(fs::read_dir(dir.path().join("quarantine")).unwrap().count(), 1);
++        {
++            let inner = lock(&recovered.inner);
++            let (measured, skipped) = directory_size_status(dir.path()).expect("measure spool");
++            assert!(!skipped);
++            assert!(inner.spool_bytes_known);
++            assert_eq!(inner.spool_bytes, measured);
++        }
++
++        let records = drain_records(&recovered);
++        assert_eq!(records.iter().filter(|record| record.event_id() == event_id).count(), 1);
++        assert!(records.iter().any(|record| {
++            matches!(
++                record,
++                wire::AuditRecord::SpoolGap(gap)
++                    if gap.event_id == event_id
++                        && gap.reason == wire::SpoolGapReason::SegmentCorruption
++                        && gap.lost_bytes.is_some_and(|value| value.0 == orphan_bytes.len() as u64)
++            )
++        }));
++        assert_eq!(recovery_marker_count(dir.path()), 0);
++        assert_eq!(fs::read_dir(dir.path().join("quarantine")).unwrap().count(), 1);
++        let inner = lock(&recovered.inner);
++        let (measured, skipped) = directory_size_status(dir.path()).expect("measure drained spool");
++        assert!(!skipped);
++        assert!(inner.spool_bytes_known);
++        assert_eq!(inner.spool_bytes, measured);
++    }
++
++    #[test]
++    fn orphan_marker_is_not_reused_for_an_unrelated_corrupt_batch() {
++        let dir = tempfile::tempdir().expect("tempdir");
++        let spool = Spool::open(config(dir.path())).expect("spool");
++        let orphan_bytes = b"source-bound orphan bytes\n";
++        replace_open_with_orphan(dir.path(), orphan_bytes);
++        {
++            let mut inner = lock(&spool.inner);
++            inner.faults.orphan_after_marker = true;
++        }
++        assert!(spool.append(&event(1), 1).is_err());
++        let (markers, _, _) = load_recovery_gap_markers(dir.path()).expect("load orphan marker");
++        assert_eq!(markers.len(), 1);
++        assert!(markers[0].source_fingerprint.is_some());
++        let orphan_event_id = markers[0].event_id.clone();
++
++        let corrupt = dir.path().join("sealed/corrupt-without-meta-hint");
++        fs::create_dir(&corrupt).expect("corrupt batch directory");
++        fs::set_permissions(&corrupt, fs::Permissions::from_mode(0o700)).expect("corrupt directory mode");
++        for (name, bytes) in [
++            ("meta.json", b"{broken".as_slice()),
++            ("segment.ndjson", b"corrupt\n".as_slice()),
++        ] {
++            let path = corrupt.join(name);
++            fs::write(&path, bytes).expect("corrupt batch file");
++            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).expect("corrupt file mode");
++        }
++        drop(spool);
++
++        let recovered = Spool::open(config(dir.path())).expect("recover independent corrupt objects");
++        let records = drain_records(&recovered);
++        let corruption_gaps: Vec<_> = records
++            .iter()
++            .filter_map(|record| match record {
++                wire::AuditRecord::SpoolGap(gap) if gap.reason == wire::SpoolGapReason::SegmentCorruption => Some(gap),
++                _ => None,
++            })
++            .collect();
++        assert_eq!(
++            corruption_gaps.len(),
++            2,
++            "the orphan inode and unrelated corrupt batch require distinct evidence"
++        );
++        assert_eq!(
++            corruption_gaps
++                .iter()
++                .filter(|gap| gap.event_id == orphan_event_id)
++                .count(),
++            1
++        );
++        assert_eq!(recovery_marker_count(dir.path()), 0);
++    }
++
++    #[test]
++    fn orphan_open_after_rename_crash_reopens_with_exact_gap_and_accounting() {
++        let dir = tempfile::tempdir().expect("tempdir");
++        let spool = Spool::open(config(dir.path())).expect("spool");
++        let orphan_bytes = b"after-rename crash orphan\n";
++        replace_open_with_orphan(dir.path(), orphan_bytes);
++        {
++            let mut inner = lock(&spool.inner);
++            inner.faults.orphan_after_rename = true;
++        }
++
++        assert!(spool.append(&event(1), 1).is_err());
++        let (markers, degraded, _) = load_recovery_gap_markers(dir.path()).expect("load marker");
++        assert!(!degraded);
++        assert_eq!(markers.len(), 1);
++        let event_id = markers[0].event_id.clone();
++        assert_eq!(recovery_marker_count(dir.path()), 1);
++        assert!(!dir.path().join("open/current.ndjson").exists());
++        assert_eq!(fs::read_dir(dir.path().join("quarantine")).unwrap().count(), 1);
++
++        drop(spool);
++        let recovered = Spool::open(config(dir.path())).expect("reopen spool");
++        assert_eq!(recovery_marker_count(dir.path()), 0);
++        assert_eq!(fs::read_dir(dir.path().join("quarantine")).unwrap().count(), 1);
++        {
++            let inner = lock(&recovered.inner);
++            let (measured, skipped) = directory_size_status(dir.path()).expect("measure spool");
++            assert!(!skipped);
++            assert!(inner.spool_bytes_known);
++            assert_eq!(inner.spool_bytes, measured);
++        }
++
++        let records = drain_records(&recovered);
++        assert_eq!(records.iter().filter(|record| record.event_id() == event_id).count(), 1);
++        assert!(records.iter().any(|record| {
++            matches!(
++                record,
++                wire::AuditRecord::SpoolGap(gap)
++                    if gap.event_id == event_id
++                        && gap.reason == wire::SpoolGapReason::SegmentCorruption
++                        && gap.lost_bytes.is_some_and(|value| value.0 == orphan_bytes.len() as u64)
++            )
++        }));
++        assert_eq!(recovery_marker_count(dir.path()), 0);
++        assert_eq!(fs::read_dir(dir.path().join("quarantine")).unwrap().count(), 1);
++        let inner = lock(&recovered.inner);
++        let (measured, skipped) = directory_size_status(dir.path()).expect("measure drained spool");
++        assert!(!skipped);
++        assert!(inner.spool_bytes_known);
++        assert_eq!(inner.spool_bytes, measured);
++    }
++
++    #[test]
++    fn orphan_open_recovers_when_replacement_creation_or_sync_fails() {
++        for (case, fail_before_create, fail_sync) in [("create", true, false), ("sync", false, true)] {
++            let dir = tempfile::tempdir().expect("tempdir");
++            let spool = Spool::open(config(dir.path())).expect("spool");
++            replace_open_with_orphan(dir.path(), format!("{case}-failure orphan\n").as_bytes());
++            {
++                let mut inner = lock(&spool.inner);
++                inner.faults.orphan_after_rename = fail_before_create;
++                inner.faults.orphan_new_open_sync = fail_sync;
++            }
++
++            assert!(spool.append(&event(1), 1).is_err(), "{case}");
++            assert_eq!(recovery_marker_count(dir.path()), 1, "{case}");
++            assert_eq!(
++                fs::read_dir(dir.path().join("quarantine")).unwrap().count(),
++                1,
++                "{case}"
++            );
++
++            spool.append(&event(1), 1).expect("same-process recovery");
++            assert_eq!(recovery_marker_count(dir.path()), 0, "{case}");
++            let records = drain_records(&spool);
++            assert_eq!(
++                records
++                    .iter()
++                    .filter(|record| {
++                        matches!(
++                            record,
++                            wire::AuditRecord::SpoolGap(gap)
++                                if gap.reason == wire::SpoolGapReason::SegmentCorruption
++                        )
++                    })
++                    .count(),
++                1,
++                "{case}"
++            );
++            let inner = lock(&spool.inner);
++            let (measured, skipped) = directory_size_status(dir.path()).expect("measure spool");
++            assert!(!skipped, "{case}");
++            assert!(inner.spool_bytes_known, "{case}");
++            assert_eq!(inner.spool_bytes, measured, "{case}");
++        }
++    }
++
++    #[test]
++    fn orphan_rebind_via_lease_refreshes_capacity_accounting() {
++        let dir = tempfile::tempdir().expect("tempdir");
++        let spool = Spool::open(config(dir.path())).expect("spool");
++        replace_open_with_orphan(dir.path(), b"lease-triggered orphan\n");
++        {
++            let mut inner = lock(&spool.inner);
++            inner.faults.orphan_after_rename = true;
++        }
++        assert!(spool.append(&event(1), 1).is_err());
++        assert!(!lock(&spool.inner).spool_bytes_known);
++
++        let lease = spool.lease().expect("lease-triggered recovery").expect("gap lease");
++        assert!(records_from_body(&lease.body).iter().any(|record| {
++            matches!(
++                record,
++                wire::AuditRecord::SpoolGap(gap) if gap.reason == wire::SpoolGapReason::SegmentCorruption
++            )
++        }));
++        let inner = lock(&spool.inner);
++        let (measured, skipped) = directory_size_status(dir.path()).expect("measure spool");
++        assert!(!skipped);
++        assert!(inner.spool_bytes_known);
++        assert_eq!(inner.spool_bytes, measured);
++    }
++
++    #[test]
++    fn orphan_rebind_via_ack_refreshes_capacity_accounting() {
++        let dir = tempfile::tempdir().expect("tempdir");
++        let spool = Spool::open(config(dir.path())).expect("spool");
++        spool.append(&event(1), 1).expect("seed batch");
++        let existing = spool.lease().expect("seed lease").expect("seed batch");
++        replace_open_with_orphan(dir.path(), b"ack-triggered orphan\n");
++        {
++            let mut inner = lock(&spool.inner);
++            inner.faults.orphan_after_rename = true;
++        }
++        assert!(spool.append(&event(2), 2).is_err());
++        assert!(!lock(&spool.inner).spool_bytes_known);
++
++        assert_eq!(
++            spool
++                .ack(&existing.info.batch_id, &existing.info.body_sha256)
++                .expect("ack-triggered recovery"),
++            AckOutcome::Acked
++        );
++        let inner = lock(&spool.inner);
++        let (measured, skipped) = directory_size_status(dir.path()).expect("measure spool");
++        assert!(!skipped);
++        assert!(inner.spool_bytes_known);
++        assert_eq!(inner.spool_bytes, measured);
++    }
++
++    #[test]
++    fn marker_unlink_sync_failure_invalidates_and_rebuilds_byte_index() {
++        let dir = tempfile::tempdir().expect("tempdir");
++        let spool = Spool::open(config(dir.path())).expect("spool");
++        replace_open_with_orphan(dir.path(), b"marker-unlink orphan\n");
++        {
++            let mut inner = lock(&spool.inner);
++            inner.faults.orphan_after_rename = true;
++        }
++        assert!(spool.append(&event(1), 1).is_err());
++        {
++            let mut inner = lock(&spool.inner);
++            inner.faults.recovery_marker_remove_sync = true;
++        }
++        assert!(spool.lease().is_err(), "injected marker unlink barrier must fail");
++        assert!(!lock(&spool.inner).spool_bytes_known);
++
++        let _ = spool.lease().expect("retry marker cleanup").expect("gap lease");
++        let inner = lock(&spool.inner);
++        let (measured, skipped) = directory_size_status(dir.path()).expect("measure spool");
++        assert!(!skipped);
++        assert!(inner.spool_bytes_known);
++        assert_eq!(inner.spool_bytes, measured);
 +    }
 +
 +    #[test]
@@ -13082,6 +14053,7 @@ index 0000000000000000000000000000000000000000..5b34bb724802029cc421294da83934ec
 +                lost_events: None,
 +                lost_bytes: None,
 +                lost_batch_id: None,
++                source_fingerprint: None,
 +            });
 +        }
 +
@@ -13217,6 +14189,7 @@ index 0000000000000000000000000000000000000000..5b34bb724802029cc421294da83934ec
 +                lost_events: None,
 +                lost_bytes: None,
 +                lost_batch_id: None,
++                source_fingerprint: None,
 +            });
 +        }
 +        let lease = spool.lease().expect("lease").expect("gap batch");
@@ -13337,6 +14310,7 @@ index 0000000000000000000000000000000000000000..5b34bb724802029cc421294da83934ec
 +                lost_events: Some(1),
 +                lost_bytes: Some(1),
 +                lost_batch_id: Some("88888888888888888888888888888888".to_owned()),
++                source_fingerprint: None,
 +            };
 +            spool
 +                .write_gap_locked(&mut inner, &spec)
@@ -13465,6 +14439,7 @@ index 0000000000000000000000000000000000000000..5b34bb724802029cc421294da83934ec
 +            lost_events: None,
 +            lost_bytes: None,
 +            lost_batch_id: None,
++            source_fingerprint: None,
 +        };
 +        let mut inner = lock(&spool.inner);
 +        spool.write_gap_locked(&mut inner, &spec).expect("first gap");
@@ -13494,8 +14469,37 @@ index 0000000000000000000000000000000000000000..5b34bb724802029cc421294da83934ec
 +        let spool = Spool::open(config(dir.path())).expect("spool");
 +        spool.append(&event(1), 1).expect("append");
 +        let lease = spool.lease().expect("lease").expect("sealed batch");
++        let corrupt_batch_id = lease.info.batch_id.clone();
++        let corrupt_path = lease.info.path.clone();
 +        fs::write(lease.info.path.join("segment.ndjson"), b"corrupt\n").expect("corrupt body");
 +        assert_eq!(spool.health().status, "degraded");
++        assert!(
++            !corrupt_path.exists(),
++            "health sweep must remove the damaged batch from sealed rotation"
++        );
++        assert!(
++            fs::read_dir(dir.path().join("quarantine"))
++                .expect("quarantine")
++                .filter_map(Result::ok)
++                .any(|entry| entry.path().is_dir()),
++            "damaged bytes must remain isolated for operator recovery"
++        );
++
++        let gap_lease = spool.lease().expect("gap lease").expect("durable corruption gap");
++        assert_ne!(gap_lease.info.batch_id, corrupt_batch_id);
++        assert!(records_from_body(&gap_lease.body).iter().any(|record| {
++            matches!(
++                record,
++                wire::AuditRecord::SpoolGap(gap) if gap.reason == wire::SpoolGapReason::SegmentCorruption
++            )
++        }));
++        assert_eq!(
++            spool
++                .ack(&gap_lease.info.batch_id, &gap_lease.info.body_sha256)
++                .expect("ack corruption gap"),
++            AckOutcome::Acked
++        );
++        assert!(spool.lease().expect("post-corruption lease").is_none());
 +    }
 +
 +    #[test]
@@ -13578,10 +14582,10 @@ index 0000000000000000000000000000000000000000..5b34bb724802029cc421294da83934ec
 +    }
 +}
 diff --git a/crates/shadowsocks-service/Cargo.toml b/crates/shadowsocks-service/Cargo.toml
-index 2da037bf42bbdae5e6ed0ffd718498e99b3f97ca..b6ef7797eefba566f1c237e01d962a8b31cf9742 100644
+index 2da037bf42bbdae5e6ed0ffd718498e99b3f97ca..2cacc9cf5d4dbe7e7378a947a73d9cb526c1d38c 100644
 --- a/crates/shadowsocks-service/Cargo.toml
 +++ b/crates/shadowsocks-service/Cargo.toml
-@@ -44,6 +44,12 @@ user-stats = [
+@@ -44,6 +44,13 @@ user-stats = [
      "dep:http-body-util",
      "dep:httparse",
  ]
@@ -13590,16 +14594,18 @@ index 2da037bf42bbdae5e6ed0ffd718498e99b3f97ca..b6ef7797eefba566f1c237e01d962a8b
 +    "user-stats",
 +    "dep:shadowsocks-audit-protocol",
 +    "dep:crossbeam-queue",
++    "dep:hashbrown",
 +]
  # Enable manager server
  manager = ["server"]
  
-@@ -176,6 +182,8 @@ hyper = { version = "1.4", optional = true, features = ["full"] }
+@@ -176,6 +183,9 @@ hyper = { version = "1.4", optional = true, features = ["full"] }
  http-body-util = { version = "0.1", optional = true }
  http = { version = "1.1", optional = true }
  httparse = { version = "1.9", optional = true }
 +shadowsocks-audit-protocol = { version = "1.24.0", path = "../shadowsocks-audit-protocol", optional = true }
 +crossbeam-queue = { version = "0.3.13", optional = true }
++hashbrown = { version = "0.16.1", optional = true, default-features = false }
  
  hickory-resolver = { version = "0.25", optional = true, features = ["serde"] }
  
@@ -13629,7 +14635,7 @@ index c8e1e4ac6be3892b26a4ec07ac34b6f76a7a3ca2..494bbbd6ae73e39d50ef0c9062b474f1
  
          trace!("REGEX-RULE {}", rule);
 diff --git a/crates/shadowsocks-service/src/config.rs b/crates/shadowsocks-service/src/config.rs
-index c281178a0d4b847dbde378884a3974830a92303d..3ba6c143aecacdb197c2b11cdbe872f3ab3fdd05 100644
+index c281178a0d4b847dbde378884a3974830a92303d..40bb405fce93170a1dedcdf1d59d6657074d7d05 100644
 --- a/crates/shadowsocks-service/src/config.rs
 +++ b/crates/shadowsocks-service/src/config.rs
 @@ -57,6 +57,9 @@ use std::{
@@ -13642,7 +14648,7 @@ index c281178a0d4b847dbde378884a3974830a92303d..3ba6c143aecacdb197c2b11cdbe872f3
  #[cfg(all(feature = "user-stats", unix))]
  use std::io;
  
-@@ -148,13 +151,44 @@ pub const USER_STATS_MAX_IN_FLIGHT_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+@@ -148,13 +151,49 @@ pub const USER_STATS_MAX_IN_FLIGHT_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
  /// Maximum external identifier length in UTF-8 bytes.
  pub const USER_STATS_MAX_IDENTIFIER_BYTES: usize = 128;
  
@@ -13653,6 +14659,11 @@ index c281178a0d4b847dbde378884a3974830a92303d..3ba6c143aecacdb197c2b11cdbe872f3
 +/// Default process-wide UDP target-window bound.
 +pub const USER_AUDIT_DEFAULT_MAX_UDP_TARGET_WINDOWS: usize = 65_536;
 +/// Fixed number of UDP audit-window shards.
++#[cfg(feature = "user-audit")]
++pub const USER_AUDIT_UDP_WINDOW_SHARDS: usize = shadowsocks_audit_protocol::UDP_AUDIT_SHARDS;
++/// Feature-off parsing retains the wire-defined value without linking the
++/// optional audit protocol crate into ordinary server builds.
++#[cfg(not(feature = "user-audit"))]
 +pub const USER_AUDIT_UDP_WINDOW_SHARDS: usize = 64;
 +/// Linux `sockaddr_un.sun_path` carries at most 107 pathname bytes plus its
 +/// terminating NUL.  Keep the producer-side check in sync with auditd.
@@ -13691,7 +14702,7 @@ index c281178a0d4b847dbde378884a3974830a92303d..3ba6c143aecacdb197c2b11cdbe872f3
      use std::{
          fs,
          os::unix::fs::{MetadataExt, PermissionsExt},
-@@ -168,7 +202,12 @@ pub(crate) fn canonical_user_stats_socket_path(
+@@ -168,7 +207,12 @@ pub(crate) fn canonical_user_stats_socket_path(
          ));
      }
  
@@ -13705,7 +14716,7 @@ index c281178a0d4b847dbde378884a3974830a92303d..3ba6c143aecacdb197c2b11cdbe872f3
      let mut current = PathBuf::from("/");
      // SAFETY: `geteuid` has no preconditions and does not mutate process state.
      let effective_uid = unsafe { libc::geteuid() };
-@@ -221,7 +260,173 @@ pub(crate) fn canonical_user_stats_socket_path(
+@@ -221,7 +265,173 @@ pub(crate) fn canonical_user_stats_socket_path(
          ));
      }
  
@@ -13880,7 +14891,7 @@ index c281178a0d4b847dbde378884a3974830a92303d..3ba6c143aecacdb197c2b11cdbe872f3
  }
  
  const fn default_user_stats_socket_mode() -> u32 {
-@@ -298,6 +503,19 @@ struct SSUserStatsConfig {
+@@ -298,6 +508,19 @@ struct SSUserStatsConfig {
      max_concurrent_clients: usize,
  }
  
@@ -13900,7 +14911,7 @@ index c281178a0d4b847dbde378884a3974830a92303d..3ba6c143aecacdb197c2b11cdbe872f3
  #[derive(Serialize, Deserialize, Debug, Default)]
  struct SSConfig {
      #[serde(skip_serializing_if = "Option::is_none")]
-@@ -329,6 +547,9 @@ struct SSConfig {
+@@ -329,6 +552,9 @@ struct SSConfig {
      #[serde(skip_serializing_if = "Option::is_none")]
      user_stats: Option<SSUserStatsConfig>,
  
@@ -13910,7 +14921,7 @@ index c281178a0d4b847dbde378884a3974830a92303d..3ba6c143aecacdb197c2b11cdbe872f3
      #[serde(skip_serializing_if = "Option::is_none")]
      password: Option<String>,
      #[serde(skip_serializing_if = "Option::is_none")]
-@@ -1441,6 +1662,38 @@ pub struct UserStatsConfig {
+@@ -1441,6 +1667,38 @@ pub struct UserStatsConfig {
      pub max_concurrent_clients: usize,
  }
  
@@ -13949,7 +14960,7 @@ index c281178a0d4b847dbde378884a3974830a92303d..3ba6c143aecacdb197c2b11cdbe872f3
  impl UserStatsConfig {
      /// Create a configuration with safe defaults.
      pub fn new<N, P>(node_id: N, socket_path: P) -> Self
-@@ -1610,6 +1863,9 @@ pub struct Config {
+@@ -1610,6 +1868,9 @@ pub struct Config {
      /// EIH per-user traffic statistics exporter configuration.
      pub user_stats: Option<UserStatsConfig>,
  
@@ -13959,7 +14970,7 @@ index c281178a0d4b847dbde378884a3974830a92303d..3ba6c143aecacdb197c2b11cdbe872f3
      /// Config is for Client or Server
      pub config_type: ConfigType,
  
-@@ -1752,6 +2008,8 @@ impl Config {
+@@ -1752,6 +2013,8 @@ impl Config {
  
              user_stats: None,
  
@@ -13968,7 +14979,7 @@ index c281178a0d4b847dbde378884a3974830a92303d..3ba6c143aecacdb197c2b11cdbe872f3
              config_type,
  
              udp_timeout: None,
-@@ -1775,6 +2033,15 @@ impl Config {
+@@ -1775,6 +2038,15 @@ impl Config {
      }
  
      fn load_from_ssconfig(config: SSConfig, config_type: ConfigType) -> Result<Self, Error> {
@@ -13984,7 +14995,7 @@ index c281178a0d4b847dbde378884a3974830a92303d..3ba6c143aecacdb197c2b11cdbe872f3
          let mut nconfig = Self::new(config_type);
  
          nconfig.user_stats = config.user_stats.as_ref().map(|stats| UserStatsConfig {
-@@ -1788,6 +2055,13 @@ impl Config {
+@@ -1788,6 +2060,13 @@ impl Config {
              max_identities: stats.max_identities,
              max_concurrent_clients: stats.max_concurrent_clients,
          });
@@ -13998,7 +15009,7 @@ index c281178a0d4b847dbde378884a3974830a92303d..3ba6c143aecacdb197c2b11cdbe872f3
  
          // Client
          //
-@@ -2661,15 +2935,16 @@ impl Config {
+@@ -2661,15 +2940,16 @@ impl Config {
          // Security
          if let Some(sec) = config.security
              && let Some(replay_attack) = sec.replay_attack
@@ -14023,7 +15034,7 @@ index c281178a0d4b847dbde378884a3974830a92303d..3ba6c143aecacdb197c2b11cdbe872f3
  
          if let Some(balancer) = config.balancer {
              nconfig.balancer = BalancerConfig {
-@@ -2874,8 +3149,8 @@ impl Config {
+@@ -2874,8 +3154,8 @@ impl Config {
  
      #[cfg(all(feature = "user-stats", unix))]
      pub(crate) fn check_user_stats_integrity(&self, stats: &UserStatsConfig) -> Result<(), Error> {
@@ -14033,7 +15044,7 @@ index c281178a0d4b847dbde378884a3974830a92303d..3ba6c143aecacdb197c2b11cdbe872f3
  
          fn invalid(desc: &'static str, detail: Option<String>) -> Error {
              Error::new(ErrorKind::Invalid, desc, detail)
-@@ -3029,10 +3304,7 @@ impl Config {
+@@ -3029,10 +3309,7 @@ impl Config {
              for user in users.users_iter() {
                  check_identifier(user.name(), "servers[].users[].name")?;
                  if !user_names.insert(user.name()) {
@@ -14045,7 +15056,7 @@ index c281178a0d4b847dbde378884a3974830a92303d..3ba6c143aecacdb197c2b11cdbe872f3
                  }
              }
          }
-@@ -3040,8 +3312,123 @@ impl Config {
+@@ -3040,8 +3317,123 @@ impl Config {
          Ok(())
      }
  
@@ -14169,7 +15180,7 @@ index c281178a0d4b847dbde378884a3974830a92303d..3ba6c143aecacdb197c2b11cdbe872f3
          if self.user_stats.is_some() && !self.config_type.is_server() {
              return Err(Error::new(
                  ErrorKind::Invalid,
-@@ -3073,6 +3460,11 @@ impl Config {
+@@ -3073,6 +3465,11 @@ impl Config {
              self.check_user_stats_integrity(stats)?;
          }
  
@@ -14181,7 +15192,7 @@ index c281178a0d4b847dbde378884a3974830a92303d..3ba6c143aecacdb197c2b11cdbe872f3
          if self.config_type.is_local() {
              if self.local.is_empty() {
                  let err = Error::new(
-@@ -3089,16 +3481,18 @@ impl Config {
+@@ -3089,16 +3486,18 @@ impl Config {
  
              // Balancer related checks
              if let Some(rtt) = self.balancer.max_server_rtt
@@ -14208,7 +15219,7 @@ index c281178a0d4b847dbde378884a3974830a92303d..3ba6c143aecacdb197c2b11cdbe872f3
          }
  
          if self.config_type.is_server() && self.server.is_empty() {
-@@ -3134,10 +3528,11 @@ impl Config {
+@@ -3134,10 +3533,11 @@ impl Config {
  
              // Plugin shouldn't be an empty string
              if let Some(plugin) = server.plugin()
@@ -14224,7 +15235,7 @@ index c281178a0d4b847dbde378884a3974830a92303d..3ba6c143aecacdb197c2b11cdbe872f3
  
              // Server's domain name shouldn't be an empty string
              match server.addr() {
-@@ -3235,6 +3630,13 @@ impl fmt::Display for Config {
+@@ -3235,6 +3635,13 @@ impl fmt::Display for Config {
                  max_identities: stats.max_identities,
                  max_concurrent_clients: stats.max_concurrent_clients,
              }),
@@ -14238,7 +15249,7 @@ index c281178a0d4b847dbde378884a3974830a92303d..3ba6c143aecacdb197c2b11cdbe872f3
              ..SSConfig::default()
          };
  
-@@ -3551,20 +3953,22 @@ impl fmt::Display for Config {
+@@ -3551,20 +3958,22 @@ impl fmt::Display for Config {
              }
  
              if jconf.method.is_none()
@@ -14272,7 +15283,7 @@ index c281178a0d4b847dbde378884a3974830a92303d..3ba6c143aecacdb197c2b11cdbe872f3
          }
  
          if self.no_delay {
-@@ -3671,17 +4075,18 @@ impl fmt::Display for Config {
+@@ -3671,17 +4080,18 @@ impl fmt::Display for Config {
  /// It will return the original value if fails to read `${VAR_NAME}`.
  pub fn read_variable_field_value(value: &str) -> Cow<'_, str> {
      if let Some(left_over) = value.strip_prefix("${")
@@ -14300,7 +15311,7 @@ index c281178a0d4b847dbde378884a3974830a92303d..3ba6c143aecacdb197c2b11cdbe872f3
  
      value.into()
  }
-@@ -3755,10 +4160,7 @@ mod user_stats_tests {
+@@ -3755,10 +4165,7 @@ mod user_stats_tests {
          assert_eq!(stats.max_request_bytes, USER_STATS_DEFAULT_MAX_REQUEST_BYTES);
          assert_eq!(stats.max_response_bytes, USER_STATS_DEFAULT_MAX_RESPONSE_BYTES);
          assert_eq!(stats.max_identities, USER_STATS_DEFAULT_MAX_IDENTITIES);
@@ -14312,7 +15323,7 @@ index c281178a0d4b847dbde378884a3974830a92303d..3ba6c143aecacdb197c2b11cdbe872f3
  
          let serialized = config.to_string();
          let serialized_value: serde_json::Value = json5::from_str(&serialized).unwrap();
-@@ -3801,6 +4203,37 @@ mod user_stats_tests {
+@@ -3801,6 +4208,37 @@ mod user_stats_tests {
          );
      }
  
@@ -14350,7 +15361,7 @@ index c281178a0d4b847dbde378884a3974830a92303d..3ba6c143aecacdb197c2b11cdbe872f3
      #[cfg(all(feature = "user-stats", unix))]
      #[test]
      fn valid_user_stats_configuration_passes_integrity_checks() {
-@@ -3810,19 +4243,121 @@ mod user_stats_tests {
+@@ -3810,19 +4248,121 @@ mod user_stats_tests {
          config.check_integrity().unwrap();
      }
  
@@ -14474,7 +15485,7 @@ index c281178a0d4b847dbde378884a3974830a92303d..3ba6c143aecacdb197c2b11cdbe872f3
      }
  
      #[cfg(all(feature = "user-stats", unix))]
-@@ -3835,11 +4370,7 @@ mod user_stats_tests {
+@@ -3835,11 +4375,7 @@ mod user_stats_tests {
          duplicate_servers["servers"]
              .as_array_mut()
              .unwrap()
@@ -14487,7 +15498,7 @@ index c281178a0d4b847dbde378884a3974830a92303d..3ba6c143aecacdb197c2b11cdbe872f3
          let config = Config::load_from_json_str(&duplicate_servers.to_string(), ConfigType::Server).unwrap();
          assert_eq!(config.check_integrity().unwrap_err().desc, "duplicate server `id`");
  
-@@ -3858,10 +4389,7 @@ mod user_stats_tests {
+@@ -3858,10 +4394,7 @@ mod user_stats_tests {
              )],
          });
          let error = Config::load_from_json_str(&duplicate_users.to_string(), ConfigType::Server).unwrap_err();
@@ -14499,7 +15510,7 @@ index c281178a0d4b847dbde378884a3974830a92303d..3ba6c143aecacdb197c2b11cdbe872f3
          assert!(error.detail.is_none());
  
          let duplicate_password = random_psk();
-@@ -3882,8 +4410,7 @@ mod user_stats_tests {
+@@ -3882,8 +4415,7 @@ mod user_stats_tests {
          let error = Config::load_from_json_str(&duplicate_passwords.to_string(), ConfigType::Server).unwrap_err();
          assert_eq!(error.desc, "duplicate user password in one server");
  
@@ -14509,7 +15520,7 @@ index c281178a0d4b847dbde378884a3974830a92303d..3ba6c143aecacdb197c2b11cdbe872f3
          let duplicate_password = random_psk();
          let mut manager = ServerUserManager::new();
          manager.add_user(ServerUser::with_encoded_key("user-a", &duplicate_password).unwrap());
-@@ -3951,8 +4478,7 @@ mod user_stats_tests {
+@@ -3951,8 +4483,7 @@ mod user_stats_tests {
              "用户",
          ] {
              let mut wire = wire_config(&directory.path().join("user-stats.sock"));
@@ -14519,7 +15530,7 @@ index c281178a0d4b847dbde378884a3974830a92303d..3ba6c143aecacdb197c2b11cdbe872f3
              let config = Config::load_from_json_str(&wire.to_string(), ConfigType::Server).unwrap();
              assert_eq!(
                  config.check_integrity().unwrap_err().desc,
-@@ -3961,8 +4487,7 @@ mod user_stats_tests {
+@@ -3961,8 +4492,7 @@ mod user_stats_tests {
          }
  
          let mut wire = wire_config(&directory.path().join("user-stats.sock"));
@@ -14529,7 +15540,7 @@ index c281178a0d4b847dbde378884a3974830a92303d..3ba6c143aecacdb197c2b11cdbe872f3
          let config = Config::load_from_json_str(&wire.to_string(), ConfigType::Server).unwrap();
          assert_eq!(
              config.check_integrity().unwrap_err().desc,
-@@ -3970,14 +4495,12 @@ mod user_stats_tests {
+@@ -3970,14 +4500,12 @@ mod user_stats_tests {
          );
  
          let mut wire = wire_config(&directory.path().join("user-stats.sock"));
@@ -14546,7 +15557,7 @@ index c281178a0d4b847dbde378884a3974830a92303d..3ba6c143aecacdb197c2b11cdbe872f3
          let config = Config::load_from_json_str(&wire.to_string(), ConfigType::Server).unwrap();
          assert_eq!(
              config.check_integrity().unwrap_err().desc,
-@@ -3985,8 +4508,7 @@ mod user_stats_tests {
+@@ -3985,8 +4513,7 @@ mod user_stats_tests {
          );
  
          let mut wire = wire_config(&directory.path().join("user-stats.sock"));
@@ -14929,7 +15940,7 @@ index 549174e1c368c361827bd2745bd612b171e6292a..0eecb47f3a3df6d9be15bbfc99baddd4
      }
  }
 diff --git a/crates/shadowsocks-service/src/server/context.rs b/crates/shadowsocks-service/src/server/context.rs
-index e00e53ada441f5f3356b3b8c554c238909de817d..52beb3db37879d5343d401e323e561c59d332b35 100644
+index e00e53ada441f5f3356b3b8c554c238909de817d..f38312a278848b7ad191cf22c2c275b84848f577 100644
 --- a/crates/shadowsocks-service/src/server/context.rs
 +++ b/crates/shadowsocks-service/src/server/context.rs
 @@ -1,6 +1,14 @@
@@ -14948,7 +15959,7 @@ index e00e53ada441f5f3356b3b8c554c238909de817d..52beb3db37879d5343d401e323e561c5
  
  use shadowsocks::{
      config::ServerType,
-@@ -9,11 +17,194 @@ use shadowsocks::{
+@@ -9,11 +17,201 @@ use shadowsocks::{
      net::ConnectOpts,
      relay::Address,
  };
@@ -15033,7 +16044,7 @@ index e00e53ada441f5f3356b3b8c554c238909de817d..52beb3db37879d5343d401e323e561c5
 +    }
 +
 +    pub(crate) async fn wait_until_stopped(&self) {
-+        let mut receiver = self.shutdown_receiver();
++        let mut receiver = self.inner.accept_shutdown.subscribe();
 +        if !self.is_accepting() || *receiver.borrow() {
 +            return;
 +        }
@@ -15044,8 +16055,15 @@ index e00e53ada441f5f3356b3b8c554c238909de817d..52beb3db37879d5343d401e323e561c5
 +        }
 +    }
 +
-+    pub(crate) fn shutdown_receiver(&self) -> watch::Receiver<bool> {
-+        self.inner.accept_shutdown.subscribe()
++    /// Create one cancellation future for a long-lived listener loop.
++    ///
++    /// Callers must construct and pin this future once, outside their accept or
++    /// receive loop. Recreating `watch::Receiver::changed` after every ready I/O
++    /// operation registers and cancels a Tokio waiter on the data-plane hot
++    /// path.
++    pub(crate) fn shutdown_waiter(&self) -> impl Future<Output = ()> + Send + 'static {
++        let shutdown = self.clone();
++        async move { shutdown.wait_until_stopped().await }
 +    }
 +
 +    /// Spawn a relay and retain an abort handle for coordinated shutdown.
@@ -15143,7 +16161,7 @@ index e00e53ada441f5f3356b3b8c554c238909de817d..52beb3db37879d5343d401e323e561c5
  /// Server Service Context
  #[derive(Clone)]
  pub struct ServiceContext {
-@@ -26,8 +217,12 @@ pub struct ServiceContext {
+@@ -26,8 +224,12 @@ pub struct ServiceContext {
      // Flow statistic report
      flow_stat: Arc<FlowStat>,
  
@@ -15156,7 +16174,7 @@ index e00e53ada441f5f3356b3b8c554c238909de817d..52beb3db37879d5343d401e323e561c5
  }
  
  impl Default for ServiceContext {
-@@ -37,8 +232,11 @@ impl Default for ServiceContext {
+@@ -37,8 +239,11 @@ impl Default for ServiceContext {
              connect_opts: ConnectOpts::default(),
              acl: None,
              flow_stat: Arc::new(FlowStat::new()),
@@ -15168,7 +16186,7 @@ index e00e53ada441f5f3356b3b8c554c238909de817d..52beb3db37879d5343d401e323e561c5
          }
      }
  }
-@@ -89,6 +287,25 @@ impl ServiceContext {
+@@ -89,6 +294,25 @@ impl ServiceContext {
          self.flow_stat.as_ref()
      }
  
@@ -15180,8 +16198,8 @@ index e00e53ada441f5f3356b3b8c554c238909de817d..52beb3db37879d5343d401e323e561c5
 +        self.data_shutdown.is_accepting()
 +    }
 +
-+    pub(crate) fn data_shutdown_receiver(&self) -> watch::Receiver<bool> {
-+        self.data_shutdown.shutdown_receiver()
++    pub(crate) fn data_shutdown_waiter(&self) -> impl Future<Output = ()> + Send + 'static {
++        self.data_shutdown.shutdown_waiter()
 +    }
 +
 +    pub(crate) fn spawn_relay<F>(&self, future: F) -> JoinHandle<()>
@@ -15194,7 +16212,7 @@ index e00e53ada441f5f3356b3b8c554c238909de817d..52beb3db37879d5343d401e323e561c5
      #[cfg(feature = "user-stats")]
      pub(crate) fn set_user_stats(&mut self, user_stats: Arc<ServerStatsHandle>) {
          self.user_stats = Some(user_stats);
-@@ -108,6 +325,26 @@ impl ServiceContext {
+@@ -108,6 +332,26 @@ impl ServiceContext {
          self.user_stats.is_some()
      }
  
@@ -15221,7 +16239,7 @@ index e00e53ada441f5f3356b3b8c554c238909de817d..52beb3db37879d5343d401e323e561c5
      /// Set customized DNS resolver
      pub fn set_dns_resolver(&mut self, resolver: Arc<DnsResolver>) {
          let context = Arc::get_mut(&mut self.context).expect("cannot set DNS resolver on a shared context");
-@@ -147,3 +384,66 @@ impl ServiceContext {
+@@ -147,3 +391,151 @@ impl ServiceContext {
          context.set_replay_attack_policy(security.replay_attack.policy);
      }
  }
@@ -15277,7 +16295,7 @@ index e00e53ada441f5f3356b3b8c554c238909de817d..52beb3db37879d5343d401e323e561c5
 +    #[tokio::test]
 +    async fn relay_completion_does_not_broadcast_accept_shutdown() {
 +        let shutdown = DataShutdownHandle::default();
-+        let mut accept_shutdown = shutdown.shutdown_receiver();
++        let mut accept_shutdown = shutdown.inner.accept_shutdown.subscribe();
 +        shutdown.spawn_relay(async {}).await.expect("relay task");
 +        assert!(
 +            tokio::time::timeout(std::time::Duration::from_millis(20), accept_shutdown.changed())
@@ -15286,6 +16304,91 @@ index e00e53ada441f5f3356b3b8c554c238909de817d..52beb3db37879d5343d401e323e561c5
 +            "relay completion woke the listener shutdown channel"
 +        );
 +        shutdown.stop_accepting();
++    }
++
++    #[tokio::test]
++    async fn listener_shutdown_waiter_is_single_subscription_and_wakes() {
++        let shutdown = DataShutdownHandle::default();
++        let waiter = shutdown.shutdown_waiter();
++        tokio::pin!(waiter);
++
++        for _ in 0..256 {
++            tokio::select! {
++                biased;
++                _ = &mut waiter => panic!("shutdown fired before stop_accepting"),
++                _ = tokio::task::yield_now() => {}
++            }
++            assert_eq!(
++                shutdown.inner.accept_shutdown.receiver_count(),
++                1,
++                "ready I/O iterations must reuse one shutdown subscription"
++            );
++        }
++
++        shutdown.stop_accepting();
++        tokio::time::timeout(std::time::Duration::from_secs(1), &mut waiter)
++            .await
++            .expect("persistent listener waiter must wake promptly");
++    }
++
++    #[test]
++    fn relay_hot_loops_keep_one_shutdown_waiter_outside_each_loop() {
++        fn scope<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
++            let start = source.find(start).expect("scope start marker");
++            let end = source[start..].find(end).expect("scope end marker") + start;
++            &source[start..end]
++        }
++
++        fn assert_waiter_before_loop(source: &str, label: &str) {
++            assert_eq!(
++                source.matches("data_shutdown_waiter()").count(),
++                1,
++                "{label} must construct exactly one shutdown waiter"
++            );
++            let waiter = source.find("data_shutdown_waiter()").expect("shutdown waiter call");
++            let pinned = source
++                .find("tokio::pin!(shutdown_waiter);")
++                .expect("shutdown waiter pin");
++            let loop_start = source.find("loop {").expect("long-lived relay loop");
++            assert!(
++                waiter < pinned && pinned < loop_start,
++                "{label} must construct and pin its shutdown waiter before the long-lived loop"
++            );
++        }
++
++        let tcp = include_str!("tcprelay.rs");
++        assert!(!tcp.contains("shutdown_rx.changed()"));
++        assert!(!tcp.contains("data_shutdown_receiver()"));
++        assert_eq!(tcp.matches("data_shutdown_waiter()").count(), 1);
++        assert_waiter_before_loop(
++            scope(
++                tcp,
++                "pub async fn run(self) -> io::Result<()> {",
++                "\n#[inline]\nasync fn timeout_fut",
++            ),
++            "TCP accept loop",
++        );
++
++        let udp = include_str!("udprelay.rs");
++        assert!(!udp.contains("shutdown_rx.changed()"));
++        assert!(!udp.contains("data_shutdown_receiver()"));
++        assert_eq!(udp.matches("data_shutdown_waiter()").count(), 2);
++        assert_waiter_before_loop(
++            scope(
++                udp,
++                "other_receivers.push(context.spawn_relay(async move {",
++                "\n                }));",
++            ),
++            "UDP receive worker loop",
++        );
++        assert_waiter_before_loop(
++            scope(
++                udp,
++                "// Make a clone to self.listener to avoid borrowing self",
++                "\n    fn log_packet_relay_error",
++            ),
++            "UDP main receive loop",
++        );
 +    }
 +}
 diff --git a/crates/shadowsocks-service/src/server/mod.rs b/crates/shadowsocks-service/src/server/mod.rs
@@ -16115,7 +17218,7 @@ index 5da6bfb244dafca6619ebf43daf40590cf1d682f..6e236a1912c12fd8d8cc51e8493fd822
      }
  }
 diff --git a/crates/shadowsocks-service/src/server/tcprelay.rs b/crates/shadowsocks-service/src/server/tcprelay.rs
-index 94e2768a80505279b6e5df01333569c9df9faf75..5eac6344beb498167fad2a9aa50308d786002f21 100644
+index 94e2768a80505279b6e5df01333569c9df9faf75..3b517f0234d60a69be4634d65d36652d33f12a1e 100644
 --- a/crates/shadowsocks-service/src/server/tcprelay.rs
 +++ b/crates/shadowsocks-service/src/server/tcprelay.rs
 @@ -35,6 +35,8 @@ use tokio::io::ReadBuf;
@@ -16127,7 +17230,7 @@ index 94e2768a80505279b6e5df01333569c9df9faf75..5eac6344beb498167fad2a9aa50308d7
  #[cfg(feature = "user-stats")]
  use super::user_stats::UserTrafficCounters;
  
-@@ -73,20 +75,33 @@ impl TcpServer {
+@@ -73,28 +75,52 @@ impl TcpServer {
  
      /// Start server's accept loop
      pub async fn run(self) -> io::Result<()> {
@@ -16149,7 +17252,11 @@ index 94e2768a80505279b6e5df01333569c9df9faf75..5eac6344beb498167fad2a9aa50308d7
 +            ),
 +        }
  
-+        let mut shutdown_rx = self.context.data_shutdown_receiver();
++        // Keep one cancellation future alive for the full accept loop. If it
++        // were recreated inside `select!`, every accepted connection would
++        // register and cancel another watch waiter on the hot path.
++        let shutdown_waiter = self.context.data_shutdown_waiter();
++        tokio::pin!(shutdown_waiter);
          loop {
 +            if !self.context.data_accepting() {
 +                return Ok(());
@@ -16164,14 +17271,30 @@ index 94e2768a80505279b6e5df01333569c9df9faf75..5eac6344beb498167fad2a9aa50308d7
 +            let accept_fut = self.listener.accept_map(|s| MonProxyStream::from_stream(s, flow_stat));
 +            tokio::pin!(accept_fut);
 +            let accepted = tokio::select! {
-+                _ = shutdown_rx.changed() => return Ok(()),
++                _ = &mut shutdown_waiter => return Ok(()),
 +                result = &mut accept_fut => result,
 +            };
 +            let (local_stream, peer_addr) = match accepted {
                  Ok(s) => s,
                  Err(err) => {
                      error!("tcp server accept failed with error: {}", err);
-@@ -108,7 +123,7 @@ impl TcpServer {
+-                    time::sleep(Duration::from_secs(1)).await;
++                    tokio::select! {
++                        _ = &mut shutdown_waiter => return Ok(()),
++                        _ = time::sleep(Duration::from_secs(1)) => {}
++                    }
+                     continue;
+                 }
+             };
+ 
++            if !self.context.data_accepting() {
++                return Ok(());
++            }
++
+             if self.context.check_client_blocked(&peer_addr) {
+                 warn!("access denied from {} by ACL rules", peer_addr);
+                 continue;
+@@ -108,7 +134,7 @@ impl TcpServer {
                  timeout: self.svr_cfg.timeout(),
              };
  
@@ -16180,7 +17303,7 @@ index 94e2768a80505279b6e5df01333569c9df9faf75..5eac6344beb498167fad2a9aa50308d7
                  if let Err(err) = client.serve().await {
                      debug!("tcp server stream aborted with error: {}", err);
                  }
-@@ -147,15 +162,40 @@ struct TcpTrafficStream<S> {
+@@ -147,15 +173,40 @@ struct TcpTrafficStream<S> {
      inner: S,
      counters: Arc<UserTrafficCounters>,
      direction: TcpTrafficDirection,
@@ -16221,7 +17344,7 @@ index 94e2768a80505279b6e5df01333569c9df9faf75..5eac6344beb498167fad2a9aa50308d7
          }
      }
  
-@@ -165,6 +205,17 @@ impl<S> TcpTrafficStream<S> {
+@@ -165,6 +216,17 @@ impl<S> TcpTrafficStream<S> {
              TcpTrafficDirection::Downlink => self.counters.add_tcp_downlink(amount),
          }
      }
@@ -16239,7 +17362,7 @@ index 94e2768a80505279b6e5df01333569c9df9faf75..5eac6344beb498167fad2a9aa50308d7
  }
  
  #[cfg(feature = "user-stats")]
-@@ -186,6 +237,8 @@ where
+@@ -186,6 +248,8 @@ where
          match Pin::new(&mut self.inner).poll_write(cx, buf) {
              Poll::Ready(Ok(amount)) => {
                  self.record_write(amount);
@@ -16248,7 +17371,7 @@ index 94e2768a80505279b6e5df01333569c9df9faf75..5eac6344beb498167fad2a9aa50308d7
                  Poll::Ready(Ok(amount))
              }
              result => result,
-@@ -212,6 +265,8 @@ where
+@@ -212,6 +276,8 @@ where
          match Pin::new(&mut self.inner).poll_write_vectored(cx, bufs) {
              Poll::Ready(Ok(amount)) => {
                  self.record_write(amount);
@@ -16257,7 +17380,7 @@ index 94e2768a80505279b6e5df01333569c9df9faf75..5eac6344beb498167fad2a9aa50308d7
                  Poll::Ready(Ok(amount))
              }
              result => result,
-@@ -396,10 +451,45 @@ impl TcpServerClient {
+@@ -396,10 +462,45 @@ impl TcpServerClient {
              }
          };
  
@@ -16303,7 +17426,7 @@ index 94e2768a80505279b6e5df01333569c9df9faf75..5eac6344beb498167fad2a9aa50308d7
              let mut remote_stream = TcpTrafficStream::new(&mut remote_stream, counters, TcpTrafficDirection::Uplink);
              return relay_connected_streams(
                  self.method,
-@@ -496,4 +586,88 @@ mod tests {
+@@ -496,4 +597,88 @@ mod tests {
          assert_eq!(user.tcp_uplink_bytes, 6);
          assert_eq!(user.tcp_downlink_bytes, u64::try_from(vectored_written).unwrap());
      }
@@ -16393,7 +17516,7 @@ index 94e2768a80505279b6e5df01333569c9df9faf75..5eac6344beb498167fad2a9aa50308d7
 +    }
  }
 diff --git a/crates/shadowsocks-service/src/server/udprelay.rs b/crates/shadowsocks-service/src/server/udprelay.rs
-index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..b93b012685dd6612b8d78887119f576c56aa67af 100644
+index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..5b0ebb7924e76785c6e14e5826db6b885ceb78ed 100644
 --- a/crates/shadowsocks-service/src/server/udprelay.rs
 +++ b/crates/shadowsocks-service/src/server/udprelay.rs
 @@ -33,6 +33,9 @@ use crate::net::{
@@ -16401,7 +17524,7 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..b93b012685dd6612b8d78887119f576c
  use super::context::ServiceContext;
  
 +#[cfg(feature = "user-audit")]
-+use super::user_audit::{AuditIdentityHandle, AuditTargetDraft};
++use super::user_audit::{AuditIdentityHandle, AuditTargetDraft, UdpAuditHost};
 +
  #[cfg(feature = "user-stats")]
  use crate::server::user_stats::UserTrafficCounters;
@@ -16443,7 +17566,7 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..b93b012685dd6612b8d78887119f576c
  
          let mut cleanup_timer = time::interval(self.time_to_live);
  
-@@ -280,16 +293,23 @@ impl UdpServer {
+@@ -280,16 +293,24 @@ impl UdpServer {
                  let otx = otx.clone();
                  let listener = self.listener.clone();
                  let context = self.context.clone();
@@ -16452,7 +17575,8 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..b93b012685dd6612b8d78887119f576c
 -                other_receivers.push(tokio::spawn(async move {
 +                other_receivers.push(context.spawn_relay(async move {
                      let mut buffer = [0u8; MAXIMUM_UDP_PAYLOAD_SIZE];
-+                    let mut shutdown_rx = task_context.data_shutdown_receiver();
++                    let shutdown_waiter = task_context.data_shutdown_waiter();
++                    tokio::pin!(shutdown_waiter);
  
                      loop {
 -                        let (n, peer_addr, target_addr, control) =
@@ -16461,19 +17585,19 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..b93b012685dd6612b8d78887119f576c
 -                                None => continue,
 -                            };
 +                        let received = tokio::select! {
-+                            _ = shutdown_rx.changed() => break,
++                            _ = &mut shutdown_waiter => break,
 +                            packet = Self::recv_one_packet(&task_context, &listener, &mut buffer) => packet,
 +                        };
++                        if !task_context.data_accepting() {
++                            break;
++                        }
 +                        let Some((n, peer_addr, target_addr, control)) = received else {
-+                            if !task_context.data_accepting() {
-+                                break;
-+                            }
 +                            continue;
 +                        };
  
                          if (otx
                              .send((peer_addr, target_addr, control, Bytes::copy_from_slice(&buffer[..n])))
-@@ -323,32 +343,38 @@ impl UdpServer {
+@@ -323,32 +344,39 @@ impl UdpServer {
          type QueuedDataType = (SocketAddr, Address, Option<UdpSocketControlData>, Bytes);
  
          #[inline]
@@ -16492,10 +17616,11 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..b93b012685dd6612b8d78887119f576c
          let mut buffer = [0u8; MAXIMUM_UDP_PAYLOAD_SIZE];
          // Make a clone to self.listener to avoid borrowing self
          let listener = self.listener.clone();
-+        let mut shutdown_rx = self.context.data_shutdown_receiver();
++        let shutdown_waiter = self.context.data_shutdown_waiter();
++        tokio::pin!(shutdown_waiter);
          loop {
              tokio::select! {
-+                _ = shutdown_rx.changed() => {
++                _ = &mut shutdown_waiter => {
 +                    break Ok(());
 +                }
                  _ = cleanup_timer.tick() => {
@@ -16518,7 +17643,7 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..b93b012685dd6612b8d78887119f576c
                      let (n, peer_addr, target_addr, control) = match recv_result {
                          Some(s) => s,
                          None => continue,
-@@ -361,7 +387,13 @@ impl UdpServer {
+@@ -361,7 +389,13 @@ impl UdpServer {
                  }
  
                  recv_result = multicore_recv(&mut orx_opt), if orx_opt.is_some() => {
@@ -16533,7 +17658,7 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..b93b012685dd6612b8d78887119f576c
                      let data_len = data.len();
                      if let Err(err) = self.send_packet(&listener, peer_addr, target_addr, control, data).await {
                          self.log_packet_relay_error(peer_addr, data_len, &err);
-@@ -394,7 +426,7 @@ impl UdpServer {
+@@ -394,7 +428,7 @@ impl UdpServer {
          l: &MonProxySocket<InboundUdpSocket>,
          buffer: &mut [u8],
      ) -> Option<(usize, SocketAddr, Address, Option<UdpSocketControlData>)> {
@@ -16542,7 +17667,7 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..b93b012685dd6612b8d78887119f576c
              Ok(s) => s,
              Err(err) => {
                  error!("udp server recv packet failed. {}", err);
-@@ -402,14 +434,11 @@ impl UdpServer {
+@@ -402,14 +436,11 @@ impl UdpServer {
              }
          };
  
@@ -16562,7 +17687,7 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..b93b012685dd6612b8d78887119f576c
              return None;
          }
  
-@@ -570,6 +599,8 @@ struct ClientSessionContext {
+@@ -570,6 +601,8 @@ struct ClientSessionContext {
      client_session_id: u64,
      packet_window_filter: PacketWindowFilter,
      client_user: Option<Arc<ServerUser>>,
@@ -16571,7 +17696,7 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..b93b012685dd6612b8d78887119f576c
      #[cfg(feature = "user-stats")]
      session_key: SessionKey,
      #[cfg(feature = "user-stats")]
-@@ -598,6 +629,16 @@ impl ClientSessionContext {
+@@ -598,6 +631,16 @@ impl ClientSessionContext {
              None
          };
  
@@ -16588,7 +17713,7 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..b93b012685dd6612b8d78887119f576c
          Ok(Self {
              client_session_id: control.client_session_id,
              packet_window_filter: PacketWindowFilter::new(),
-@@ -605,6 +646,8 @@ impl ClientSessionContext {
+@@ -605,6 +648,8 @@ impl ClientSessionContext {
              client_user: None,
              #[cfg(feature = "user-stats")]
              client_user: if user_stats_enabled { control.user.clone() } else { None },
@@ -16597,7 +17722,7 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..b93b012685dd6612b8d78887119f576c
              #[cfg(feature = "user-stats")]
              session_key: SessionKey::from_control(control, user_stats_enabled)?,
              #[cfg(feature = "user-stats")]
-@@ -642,6 +685,8 @@ struct UdpAssociationContext {
+@@ -642,6 +687,8 @@ struct UdpAssociationContext {
      inbound: Arc<MonProxySocket<InboundUdpSocket>>,
      // AEAD 2022
      client_session: Option<ClientSessionContext>,
@@ -16606,7 +17731,7 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..b93b012685dd6612b8d78887119f576c
      server_session_id: u64,
      server_packet_id: u64,
      #[cfg(feature = "user-stats")]
-@@ -668,6 +713,15 @@ fn generate_server_session_id() -> u64 {
+@@ -668,6 +715,15 @@ fn generate_server_session_id() -> u64 {
      }
  }
  
@@ -16622,7 +17747,7 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..b93b012685dd6612b8d78887119f576c
  impl UdpAssociationContext {
      fn create(
          context: Arc<ServiceContext>,
-@@ -682,6 +736,7 @@ impl UdpAssociationContext {
+@@ -682,6 +738,7 @@ impl UdpAssociationContext {
          // being OOM.
          let (sender, receiver) = mpsc::channel(UDP_ASSOCIATION_SEND_CHANNEL_SIZE);
  
@@ -16630,7 +17755,7 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..b93b012685dd6612b8d78887119f576c
          let mut assoc = Self {
              context,
              peer_addr,
-@@ -691,13 +746,15 @@ impl UdpAssociationContext {
+@@ -691,13 +748,15 @@ impl UdpAssociationContext {
              keepalive_flag: false,
              inbound,
              client_session,
@@ -16647,7 +17772,7 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..b93b012685dd6612b8d78887119f576c
  
          (handle, sender)
      }
-@@ -760,7 +817,11 @@ impl UdpAssociationContext {
+@@ -760,7 +819,11 @@ impl UdpAssociationContext {
                              #[cfg(all(feature = "aead-cipher-2022", feature = "user-stats"))]
                              Some(ref s) => NatKey::Session(s.session_key.clone()),
                              #[cfg(not(feature = "aead-cipher-2022"))]
@@ -16660,17 +17785,7 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..b93b012685dd6612b8d78887119f576c
                          };
  
                          if self.keepalive_tx.try_send(nat_key.clone()).is_err() {
-@@ -797,6 +858,9 @@ impl UdpAssociationContext {
-         data: &[u8],
-         control: &Option<UdpSocketControlData>,
-     ) {
-+        #[cfg(feature = "user-audit")]
-+        let audit_target = target_addr.clone();
-+
-         #[cfg(not(feature = "user-stats"))]
-         if let Some(ref mut session) = self.client_session
-             && peer_addr != self.peer_addr
-@@ -873,7 +937,10 @@ impl UdpAssociationContext {
+@@ -873,7 +936,10 @@ impl UdpAssociationContext {
                      }
                  }
              }
@@ -16682,7 +17797,7 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..b93b012685dd6612b8d78887119f576c
  
              #[cfg(feature = "user-stats")]
              if session_context.user_stats_enabled && !session_context.matches_user(control.user.as_ref()) {
-@@ -912,41 +979,85 @@ impl UdpAssociationContext {
+@@ -912,41 +978,89 @@ impl UdpAssociationContext {
              }
          }
  
@@ -16714,18 +17829,22 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..b93b012685dd6612b8d78887119f576c
 +                        // spelling first.  The complete target (including
 +                        // Unicode normalization) is built only on a miss or
 +                        // an expired window, keeping repeated UDP hits cheap.
-+                        let (kind, raw_host) = match &audit_target {
-+                            Address::SocketAddress(sa) => ("ip", sa.ip().to_string()),
-+                            Address::DomainNameAddress(host, _) => ("domain", host.clone()),
++                        let raw_host = match target_addr {
++                            Address::SocketAddress(sa) => UdpAuditHost::Ip(sa.ip()),
++                            Address::DomainNameAddress(host, _) => UdpAuditHost::Domain(host),
 +                        };
 +                        let port = actual_addr.port();
 +                        let remote_ip = actual_addr.ip();
-+                        emitter.try_emit_udp_lazy(&identity, self.association_id, kind, &raw_host, port, || {
-+                            match &audit_target {
++                        emitter.try_emit_udp_lazy(
++                            &identity,
++                            self.association_id,
++                            raw_host,
++                            port,
++                            || match target_addr {
 +                                Address::SocketAddress(sa) => AuditTargetDraft::ip_with_port(sa.ip(), port, remote_ip),
 +                                Address::DomainNameAddress(host, _) => AuditTargetDraft::domain(host, port, remote_ip),
-+                            }
-+                        });
++                            },
++                        );
 +                    }
                  }
 -                return;
@@ -16787,7 +17906,7 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..b93b012685dd6612b8d78887119f576c
          #[cfg(feature = "user-stats")]
          let user_stats = match self.client_session.as_ref() {
              Some(session) => session.user_stats_counter()?,
-@@ -1012,7 +1123,10 @@ impl UdpAssociationContext {
+@@ -1012,7 +1126,10 @@ impl UdpAssociationContext {
                          data.len()
                      );
  
@@ -16799,7 +17918,7 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..b93b012685dd6612b8d78887119f576c
                      if user_stats.is_some() {
                          return Err(io::Error::from(io::ErrorKind::WriteZero));
                      }
-@@ -1023,7 +1137,7 @@ impl UdpAssociationContext {
+@@ -1023,7 +1140,7 @@ impl UdpAssociationContext {
                      counter.add_udp_uplink(n);
                  }
  
@@ -16808,7 +17927,7 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..b93b012685dd6612b8d78887119f576c
              }
              Err(err) => Err(err),
          }
-@@ -1041,9 +1155,10 @@ impl UdpAssociationContext {
+@@ -1041,9 +1158,10 @@ impl UdpAssociationContext {
          // But for some implementations, they may expect the target address to be IPv4, because
          // the peer address is IPv4 when calling `sendto`.
          if let Address::SocketAddress(SocketAddr::V6(ref v6)) = addr
@@ -16822,7 +17941,7 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..b93b012685dd6612b8d78887119f576c
  
          match self.client_session {
              None => {
-@@ -1340,4 +1455,83 @@ mod tests {
+@@ -1340,4 +1458,83 @@ mod tests {
              );
          }
      }
@@ -16908,10 +18027,10 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..b93b012685dd6612b8d78887119f576c
  }
 diff --git a/crates/shadowsocks-service/src/server/user_audit.rs b/crates/shadowsocks-service/src/server/user_audit.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..5afb31f3266af28d1c9c2c6bd9753e384b9ac827
+index 0000000000000000000000000000000000000000..179b5485c0418aebe694678080542ed42083e757
 --- /dev/null
 +++ b/crates/shadowsocks-service/src/server/user_audit.rs
-@@ -0,0 +1,3792 @@
+@@ -0,0 +1,4052 @@
 +//! Non-blocking successful-target access auditing for the server data path.
 +//!
 +//! The relay only constructs a small draft and performs bounded atomic/cache
@@ -16920,8 +18039,10 @@ index 0000000000000000000000000000000000000000..5afb31f3266af28d1c9c2c6bd9753e38
 +
 +use std::{
 +    borrow::Cow,
-+    collections::{HashMap, VecDeque},
-+    fmt, io,
++    collections::{HashMap, VecDeque, hash_map::RandomState},
++    fmt,
++    hash::{Hash, Hasher},
++    io,
 +    net::IpAddr,
 +    path::PathBuf,
 +    sync::{
@@ -16930,9 +18051,6 @@ index 0000000000000000000000000000000000000000..5afb31f3266af28d1c9c2c6bd9753e38
 +    },
 +    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 +};
-+
-+#[cfg(test)]
-+use std::sync::OnceLock;
 +
 +#[cfg(target_os = "linux")]
 +use std::{
@@ -16945,12 +18063,16 @@ index 0000000000000000000000000000000000000000..5afb31f3266af28d1c9c2c6bd9753e38
 +};
 +
 +use crossbeam_queue::ArrayQueue;
++use hashbrown::{Equivalent, HashMap as BorrowingHashMap};
 +use tokio::{
 +    io::{AsyncReadExt, AsyncWriteExt},
 +    net::{UnixStream, unix::OwnedReadHalf, unix::OwnedWriteHalf},
 +    sync::Notify,
 +    time,
 +};
++
++#[cfg(test)]
++use tokio::sync::oneshot;
 +
 +use shadowsocks_audit_protocol::{
 +    ACK_TIMEOUT_SECONDS, AccessEvent, AuditRecord, DecimalU64, EventNackCode, Hello, MAX_AUDIT_PAYLOAD_BYTES,
@@ -16971,18 +18093,10 @@ index 0000000000000000000000000000000000000000..5afb31f3266af28d1c9c2c6bd9753e38
 +const MAX_RECONNECT_BACKOFF: Duration = Duration::from_secs(5);
 +const MAX_RECONNECT_JITTER_PERCENT: u32 = 20;
 +
-+// Test-only rendezvous for the lost-wakeup regression. It is intentionally
-+// outside the production state machine: the hook lets the test pause exactly
-+// after the idle waiter is registered, then enqueue an event without sending a
-+// notify permit.
 +#[cfg(test)]
-+static IDLE_SESSION_WAIT_HOOK: OnceLock<Notify> = OnceLock::new();
-+
-+#[cfg(test)]
-+fn notify_idle_session_wait_hook() {
-+    if let Some(notify) = IDLE_SESSION_WAIT_HOOK.get() {
-+        notify.notify_one();
-+    }
++struct IdleSessionWaitHook {
++    entered: oneshot::Sender<()>,
++    resume: oneshot::Receiver<()>,
 +}
 +
 +/// Marker carried by the `io::Error` returned for a non-retryable hello NACK.
@@ -17115,6 +18229,16 @@ index 0000000000000000000000000000000000000000..5afb31f3266af28d1c9c2c6bd9753e38
 +    #[cfg(test)]
 +    fn key_host(&self) -> &str {
 +        self.normalized_host.as_deref().unwrap_or(&self.host)
++    }
++
++    #[cfg(test)]
++    fn audit_host(&self, canonical: bool) -> UdpAuditHost<'_> {
++        if self.kind == "ip" {
++            if let Ok(address) = self.host.parse() {
++                return UdpAuditHost::Ip(address);
++            }
++        }
++        UdpAuditHost::Domain(if canonical { self.key_host() } else { &self.host })
 +    }
 +
 +    fn to_wire_target(&self) -> Result<Target, shadowsocks_audit_protocol::ProtocolError> {
@@ -17715,48 +18839,113 @@ index 0000000000000000000000000000000000000000..5afb31f3266af28d1c9c2c6bd9753e38
 +    }
 +}
 +
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub(crate) enum UdpAuditHost<'a> {
++    Ip(IpAddr),
++    Domain(&'a str),
++}
++
++impl Hash for UdpAuditHost<'_> {
++    fn hash<H: Hasher>(&self, state: &mut H) {
++        match self {
++            Self::Ip(address) => {
++                0u8.hash(state);
++                address.hash(state);
++            }
++            Self::Domain(host) => {
++                1u8.hash(state);
++                host.hash(state);
++            }
++        }
++    }
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++enum UdpWindowHost {
++    Ip(IpAddr),
++    Domain(Arc<str>),
++}
++
++impl UdpWindowHost {
++    fn borrowed(&self) -> UdpAuditHost<'_> {
++        match self {
++            Self::Ip(address) => UdpAuditHost::Ip(*address),
++            Self::Domain(host) => UdpAuditHost::Domain(host),
++        }
++    }
++
++    fn from_borrowed(host: UdpAuditHost<'_>) -> Self {
++        match host {
++            UdpAuditHost::Ip(address) => Self::Ip(address),
++            UdpAuditHost::Domain(host) => Self::Domain(Arc::from(host)),
++        }
++    }
++}
++
++impl Hash for UdpWindowHost {
++    fn hash<H: Hasher>(&self, state: &mut H) {
++        self.borrowed().hash(state);
++    }
++}
++
 +#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 +struct UdpWindowKey {
 +    server_id: Arc<str>,
 +    association_id: [u8; 16],
-+    host: Arc<str>,
-+    kind: Cow<'static, str>,
++    host: UdpWindowHost,
 +    port: u16,
 +}
 +
 +impl UdpWindowKey {
-+    fn from_parts(server_id: &Arc<str>, association_id: [u8; 16], kind: &str, host: &str, port: u16) -> Self {
++    fn from_parts(server_id: &Arc<str>, association_id: [u8; 16], host: UdpAuditHost<'_>, port: u16) -> Self {
 +        Self {
 +            server_id: server_id.clone(),
 +            association_id,
-+            host: Arc::from(host),
-+            kind: match kind {
-+                "ip" => Cow::Borrowed("ip"),
-+                "domain" => Cow::Borrowed("domain"),
-+                other => Cow::Owned(other.to_owned()),
-+            },
++            host: UdpWindowHost::from_borrowed(host),
 +            port,
-+        }
-+    }
-+
-+    fn with_host(&self, host: Arc<str>) -> Self {
-+        Self {
-+            server_id: self.server_id.clone(),
-+            association_id: self.association_id,
-+            host,
-+            kind: self.kind.clone(),
-+            port: self.port,
 +        }
 +    }
 +
 +    #[cfg(test)]
 +    fn new(server_id: &Arc<str>, association_id: [u8; 16], target: &AuditTargetDraft) -> Self {
-+        Self::from_parts(server_id, association_id, &target.kind, target.key_host(), target.port)
++        Self::from_parts(server_id, association_id, target.audit_host(true), target.port)
 +    }
++}
 +
-+    #[cfg(test)]
-+    fn raw(server_id: &Arc<str>, association_id: [u8; 16], target: &AuditTargetDraft) -> Self {
-+        Self::from_parts(server_id, association_id, &target.kind, &target.host, target.port)
++#[derive(Clone, Copy)]
++struct UdpWindowLookup<'a> {
++    server_id: &'a Arc<str>,
++    association_id: [u8; 16],
++    host: UdpAuditHost<'a>,
++    port: u16,
++}
++
++impl<'a> UdpWindowLookup<'a> {
++    fn new(server_id: &'a Arc<str>, association_id: [u8; 16], host: UdpAuditHost<'a>, port: u16) -> Self {
++        Self {
++            server_id,
++            association_id,
++            host,
++            port,
++        }
++    }
++}
++
++impl Hash for UdpWindowLookup<'_> {
++    fn hash<H: Hasher>(&self, state: &mut H) {
++        self.server_id.hash(state);
++        self.association_id.hash(state);
++        self.host.hash(state);
++        self.port.hash(state);
++    }
++}
++
++impl Equivalent<UdpWindowKey> for UdpWindowLookup<'_> {
++    fn equivalent(&self, key: &UdpWindowKey) -> bool {
++        self.server_id.as_ref() == key.server_id.as_ref()
++            && self.association_id == key.association_id
++            && self.host == key.host.borrowed()
++            && self.port == key.port
 +    }
 +}
 +
@@ -17768,11 +18957,10 @@ index 0000000000000000000000000000000000000000..5afb31f3266af28d1c9c2c6bd9753e38
 +
 +struct UdpWindowEntry {
 +    key: UdpWindowKey,
-+    /// The spelling supplied by the relay for the most recent lookup.  The
-+    /// canonical key above is used for correctness, while this bounded alias
-+    /// lets repeated raw UDP targets hit the cache without rebuilding and
-+    /// normalizing a full `AuditTargetDraft` first.
-+    raw_key: UdpWindowKey,
++    /// The primary relay spelling and one replaceable alternate share the
++    /// canonical entry. Hits for those two cached spellings construct no owned
++    /// key, while further equivalent spellings replace only the alternate.
++    raw_keys: [Option<UdpWindowKey>; 2],
 +    last_attempt: Instant,
 +    previous: Option<usize>,
 +    next: Option<usize>,
@@ -17784,8 +18972,8 @@ index 0000000000000000000000000000000000000000..5afb31f3266af28d1c9c2c6bd9753e38
 +    // the shard or allocates an unbounded history of queue nodes.
 +    entries: Vec<Option<UdpWindowEntry>>,
 +    free_slots: Vec<usize>,
-+    by_key: HashMap<UdpWindowKey, usize>,
-+    by_raw_key: HashMap<UdpWindowKey, usize>,
++    by_key: BorrowingHashMap<UdpWindowKey, usize, RandomState>,
++    by_raw_key: BorrowingHashMap<UdpWindowKey, usize, RandomState>,
 +    lru_head: Option<usize>,
 +    lru_tail: Option<usize>,
 +    association_counts: HashMap<UdpAssociationKey, usize>,
@@ -17796,8 +18984,8 @@ index 0000000000000000000000000000000000000000..5afb31f3266af28d1c9c2c6bd9753e38
 +        Self {
 +            entries: Vec::new(),
 +            free_slots: Vec::new(),
-+            by_key: HashMap::new(),
-+            by_raw_key: HashMap::new(),
++            by_key: BorrowingHashMap::with_hasher(RandomState::new()),
++            by_raw_key: BorrowingHashMap::with_hasher(RandomState::new()),
 +            lru_head: None,
 +            lru_tail: None,
 +            association_counts: HashMap::new(),
@@ -17896,11 +19084,13 @@ index 0000000000000000000000000000000000000000..5afb31f3266af28d1c9c2c6bd9753e38
 +    fn remove_slot(&mut self, slot: usize) -> Option<UdpWindowEntry> {
 +        let entry = self.entries.get(slot).and_then(Option::as_ref)?;
 +        let key = entry.key.clone();
-+        let raw_key = entry.raw_key.clone();
++        let raw_keys = entry.raw_keys.clone();
 +        self.detach(slot);
 +        self.by_key.remove(&key);
-+        if self.by_raw_key.get(&raw_key) == Some(&slot) {
-+            self.by_raw_key.remove(&raw_key);
++        for raw_key in raw_keys.iter().flatten() {
++            if self.by_raw_key.get(raw_key) == Some(&slot) {
++                self.by_raw_key.remove(raw_key);
++            }
 +        }
 +        let removed = self.entries.get_mut(slot).and_then(Option::take);
 +        if removed.is_some() {
@@ -17908,6 +19098,24 @@ index 0000000000000000000000000000000000000000..5afb31f3266af28d1c9c2c6bd9753e38
 +            self.decrement_association(&key);
 +        }
 +        removed
++    }
++
++    fn add_raw_alias(&mut self, slot: usize, raw_key: UdpWindowKey) -> Result<(), ()> {
++        let replaced = {
++            let entry = self.entries.get_mut(slot).and_then(Option::as_mut).ok_or(())?;
++            if entry.raw_keys.iter().flatten().any(|existing| existing == &raw_key) {
++                return Ok(());
++            }
++            let index = entry.raw_keys.iter().position(Option::is_none).unwrap_or(1);
++            entry.raw_keys[index].replace(raw_key.clone())
++        };
++        if let Some(replaced) = replaced
++            && self.by_raw_key.get(&replaced) == Some(&slot)
++        {
++            self.by_raw_key.remove(&replaced);
++        }
++        self.by_raw_key.insert(raw_key, slot);
++        Ok(())
 +    }
 +
 +    fn oldest_for_association(&self, association: &UdpAssociationKey) -> Option<usize> {
@@ -17929,6 +19137,10 @@ index 0000000000000000000000000000000000000000..5afb31f3266af28d1c9c2c6bd9753e38
 +    per_association: usize,
 +    per_shard: usize,
 +    poison_resets: AtomicU64,
++    #[cfg(test)]
++    lock_attempts: AtomicU64,
++    #[cfg(test)]
++    owned_key_constructions: AtomicU64,
 +}
 +
 +impl UdpAuditWindowCache {
@@ -17942,6 +19154,10 @@ index 0000000000000000000000000000000000000000..5afb31f3266af28d1c9c2c6bd9753e38
 +            per_association,
 +            per_shard,
 +            poison_resets: AtomicU64::new(0),
++            #[cfg(test)]
++            lock_attempts: AtomicU64::new(0),
++            #[cfg(test)]
++            owned_key_constructions: AtomicU64::new(0),
 +        })
 +    }
 +
@@ -17960,6 +19176,8 @@ index 0000000000000000000000000000000000000000..5afb31f3266af28d1c9c2c6bd9753e38
 +    }
 +
 +    fn lock_shard(&self, association_id: &[u8; 16]) -> Result<std::sync::MutexGuard<'_, AuditWindowShard>, ()> {
++        #[cfg(test)]
++        self.lock_attempts.fetch_add(1, Ordering::Relaxed);
 +        let index = Self::shard_index(association_id);
 +        let lock = self.shards.get(index).ok_or(())?;
 +        match lock.try_lock() {
@@ -17977,6 +19195,12 @@ index 0000000000000000000000000000000000000000..5afb31f3266af28d1c9c2c6bd9753e38
 +                Ok(guard)
 +            }
 +        }
++    }
++
++    fn owned_key(&self, lookup: UdpWindowLookup<'_>) -> UdpWindowKey {
++        #[cfg(test)]
++        self.owned_key_constructions.fetch_add(1, Ordering::Relaxed);
++        UdpWindowKey::from_parts(lookup.server_id, lookup.association_id, lookup.host, lookup.port)
 +    }
 +
 +    fn refresh_existing(shard: &mut AuditWindowShard, slot: usize, now: Instant) -> Result<Option<bool>, ()> {
@@ -18023,7 +19247,7 @@ index 0000000000000000000000000000000000000000..5afb31f3266af28d1c9c2c6bd9753e38
 +        let slot = shard.allocate_slot();
 +        let entry = UdpWindowEntry {
 +            key: key.clone(),
-+            raw_key: raw_key.clone(),
++            raw_keys: [Some(raw_key.clone()), None],
 +            last_attempt: now,
 +            previous: None,
 +            next: None,
@@ -18054,16 +19278,19 @@ index 0000000000000000000000000000000000000000..5afb31f3266af28d1c9c2c6bd9753e38
 +            return Err(());
 +        }
 +
-+        // Build both key spellings before entering the shard critical section.
-+        // Arc-backed fields make the entry and its two indexes share the same
-+        // bounded allocations instead of retaining four full String copies.
-+        let raw_key = UdpWindowKey::raw(server_id, association_id, target);
-+        let canonical_host = if target.key_host() == target.host {
-+            raw_key.host.clone()
++        let raw_host = target.audit_host(false);
++        let canonical_host = target.audit_host(true);
++        let raw_key = self.owned_key(UdpWindowLookup::new(server_id, association_id, raw_host, target.port));
++        let key = if raw_host == canonical_host {
++            raw_key.clone()
 +        } else {
-+            Arc::from(target.key_host())
++            self.owned_key(UdpWindowLookup::new(
++                server_id,
++                association_id,
++                canonical_host,
++                target.port,
++            ))
 +        };
-+        let key = raw_key.with_host(canonical_host);
 +        let mut shard = self.lock_shard(&association_id)?;
 +        if let Some(&slot) = shard.by_key.get(&key) {
 +            if let Some(eligible) = Self::refresh_existing(&mut shard, slot, now)? {
@@ -18083,12 +19310,11 @@ index 0000000000000000000000000000000000000000..5afb31f3266af28d1c9c2c6bd9753e38
 +        Ok(true)
 +    }
 +
-+    /// Fast-path UDP cooldown check used by the relay.  Domain normalization is
-+    /// completed before entering the shard critical section, and this function
-+    /// performs exactly one non-blocking lock attempt per successful send. The
-+    /// raw spelling is still checked first, so a normal cooldown hit does not
-+    /// construct an `AuditTargetDraft`; the canonical lookup prevents
-+    /// case/Unicode-equivalent spellings from bypassing the window.
++    /// Fast-path UDP cooldown check used by the relay. This function performs
++    /// exactly one non-blocking lock attempt per successful send. A borrowed
++    /// raw-key lookup happens first, so normal IP/domain cooldown hits neither
++    /// allocate nor normalize. The bounded canonical/alias path runs only for
++    /// a new spelling and still prevents case/Unicode-equivalent bypasses.
 +    /// `Some(target)` means the send is eligible and returns the target built
 +    /// for the event; `None` means the cooldown suppressed it. The closure is
 +    /// evaluated at most once and only after the cache decision.
@@ -18096,8 +19322,7 @@ index 0000000000000000000000000000000000000000..5afb31f3266af28d1c9c2c6bd9753e38
 +        &self,
 +        server_id: &Arc<str>,
 +        association_id: [u8; 16],
-+        kind: &str,
-+        host: &str,
++        host: UdpAuditHost<'_>,
 +        port: u16,
 +        now: Instant,
 +        build_target: F,
@@ -18108,24 +19333,9 @@ index 0000000000000000000000000000000000000000..5afb31f3266af28d1c9c2c6bd9753e38
 +        if self.per_shard == 0 || self.per_association == 0 {
 +            return Err(());
 +        }
-+        // Build both lookup spellings before the one lock attempt.  A failed
-+        // normalization deliberately falls back to the raw spelling: the
-+        // event builder retains the original host and the window still
-+        // suppresses exact repeats.
-+        let raw_key = UdpWindowKey::from_parts(server_id, association_id, kind, host, port);
-+        let canonical_host = if kind == "domain" {
-+            normalize_domain(host).unwrap_or_else(|_| host.to_owned())
-+        } else {
-+            host.to_owned()
-+        };
-+        let canonical_host = if canonical_host == host {
-+            raw_key.host.clone()
-+        } else {
-+            Arc::from(canonical_host)
-+        };
-+        let canonical_key = raw_key.with_host(canonical_host);
++        let raw_lookup = UdpWindowLookup::new(server_id, association_id, host, port);
 +        let mut shard = self.lock_shard(&association_id)?;
-+        if let Some(&slot) = shard.by_raw_key.get(&raw_key) {
++        if let Some(&slot) = shard.by_raw_key.get(&raw_lookup) {
 +            if let Some(eligible) = Self::refresh_existing(&mut shard, slot, now)? {
 +                if !eligible {
 +                    return Ok(None);
@@ -18134,8 +19344,28 @@ index 0000000000000000000000000000000000000000..5afb31f3266af28d1c9c2c6bd9753e38
 +                return Ok(Some(build_target()));
 +            }
 +        }
-+        if let Some(&slot) = shard.by_key.get(&canonical_key) {
++
++        // IDNA normalization allocates only after a borrowed raw miss. A
++        // failed normalization deliberately falls back to the raw spelling.
++        let canonical_domain = match host {
++            UdpAuditHost::Ip(_) => None,
++            UdpAuditHost::Domain(raw) => Some(match normalize_domain(raw) {
++                Ok(normalized) => Cow::Owned(normalized),
++                Err(_) => Cow::Borrowed(raw),
++            }),
++        };
++        let canonical_host = match (host, canonical_domain.as_ref()) {
++            (UdpAuditHost::Domain(_), Some(canonical)) => UdpAuditHost::Domain(canonical.as_ref()),
++            (other, _) => other,
++        };
++        let canonical_lookup = UdpWindowLookup::new(server_id, association_id, canonical_host, port);
++        if let Some(&slot) = shard.by_key.get(&canonical_lookup) {
 +            if let Some(eligible) = Self::refresh_existing(&mut shard, slot, now)? {
++                // Cache one alternate spelling beside the primary. Hits for
++                // those two spellings construct no owned key; a later spelling
++                // replaces only the alternate so alias memory remains bounded.
++                let raw_key = self.owned_key(raw_lookup);
++                shard.add_raw_alias(slot, raw_key)?;
 +                if !eligible {
 +                    return Ok(None);
 +                }
@@ -18143,6 +19373,12 @@ index 0000000000000000000000000000000000000000..5afb31f3266af28d1c9c2c6bd9753e38
 +                return Ok(Some(build_target()));
 +            }
 +        }
++        let raw_key = self.owned_key(raw_lookup);
++        let canonical_key = if canonical_host == host {
++            raw_key.clone()
++        } else {
++            self.owned_key(canonical_lookup)
++        };
 +        self.insert_entry(&mut shard, canonical_key, raw_key, association_id, server_id, now)?;
 +        drop(shard);
 +        Ok(Some(build_target()))
@@ -18157,6 +19393,16 @@ index 0000000000000000000000000000000000000000..5afb31f3266af28d1c9c2c6bd9753e38
 +                associations + guard.association_counts.len(),
 +            )
 +        })
++    }
++
++    #[cfg(test)]
++    fn lock_attempt_count(&self) -> u64 {
++        self.lock_attempts.load(Ordering::Relaxed)
++    }
++
++    #[cfg(test)]
++    fn owned_key_construction_count(&self) -> u64 {
++        self.owned_key_constructions.load(Ordering::Relaxed)
 +    }
 +
 +    /// Number of poisoned-shard recoveries.  This is a saturating health
@@ -18441,6 +19687,8 @@ index 0000000000000000000000000000000000000000..5afb31f3266af28d1c9c2c6bd9753e38
 +    /// second two-second drain and exceed the process shutdown budget.
 +    drain_started: AtomicBool,
 +    drain_completed: AtomicBool,
++    #[cfg(test)]
++    idle_session_wait_hook: Mutex<Option<IdleSessionWaitHook>>,
 +}
 +
 +impl AuditEmitter {
@@ -18483,7 +19731,37 @@ index 0000000000000000000000000000000000000000..5afb31f3266af28d1c9c2c6bd9753e38
 +            sequence_exhausted_events: AtomicU64::new(0),
 +            drain_started: AtomicBool::new(false),
 +            drain_completed: AtomicBool::new(false),
++            #[cfg(test)]
++            idle_session_wait_hook: Mutex::new(None),
 +        })
++    }
++
++    #[cfg(test)]
++    fn install_idle_session_wait_hook(&self) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
++        let (entered_tx, entered_rx) = oneshot::channel();
++        let (resume_tx, resume_rx) = oneshot::channel();
++        let mut hook = self
++            .idle_session_wait_hook
++            .lock()
++            .unwrap_or_else(|poisoned| poisoned.into_inner());
++        *hook = Some(IdleSessionWaitHook {
++            entered: entered_tx,
++            resume: resume_rx,
++        });
++        (entered_rx, resume_tx)
++    }
++
++    #[cfg(test)]
++    async fn synchronize_idle_session_wait_hook(&self) {
++        let hook = self
++            .idle_session_wait_hook
++            .lock()
++            .unwrap_or_else(|poisoned| poisoned.into_inner())
++            .take();
++        if let Some(hook) = hook {
++            let _ = hook.entered.send(());
++            let _ = hook.resume.await;
++        }
 +    }
 +
 +    pub(crate) fn begin_observation(self: &Arc<Self>) -> Option<ObservationGuard> {
@@ -18788,8 +20066,7 @@ index 0000000000000000000000000000000000000000..5afb31f3266af28d1c9c2c6bd9753e38
 +        self: &Arc<Self>,
 +        identity: &Arc<AuditIdentityHandle>,
 +        association_id: [u8; 16],
-+        kind: &str,
-+        host: &str,
++        host: UdpAuditHost<'_>,
 +        port: u16,
 +        build_target: F,
 +    ) where
@@ -18800,7 +20077,6 @@ index 0000000000000000000000000000000000000000..5afb31f3266af28d1c9c2c6bd9753e38
 +        let target = match self.udp_windows.eligible_lazy(
 +            &identity.server.server_id,
 +            association_id,
-+            kind,
 +            host,
 +            port,
 +            now,
@@ -19613,7 +20889,7 @@ index 0000000000000000000000000000000000000000..5afb31f3266af28d1c9c2c6bd9753e38
 +        // an older Notify permit while a frame is in progress.
 +        let notified = emitter.notify.notified();
 +        #[cfg(test)]
-+        notify_idle_session_wait_hook();
++        emitter.synchronize_idle_session_wait_hook().await;
 +        if !emitter.queue.is_empty() || emitter.diagnostic_shutdown_requested.load(Ordering::Acquire) {
 +            continue;
 +        }
@@ -19859,13 +21135,14 @@ index 0000000000000000000000000000000000000000..5afb31f3266af28d1c9c2c6bd9753e38
 +        let target = cache_target("Example.com", 443);
 +        assert!(cache.eligible(&server_id, association, &target, start).unwrap());
 +
++        let lock_attempts = cache.lock_attempt_count();
++        let owned_keys = cache.owned_key_construction_count();
 +        let builds = AtomicUsize::new(0);
 +        let decision = cache
 +            .eligible_lazy(
 +                &server_id,
 +                association,
-+                "domain",
-+                "Example.com",
++                UdpAuditHost::Domain("Example.com"),
 +                443,
 +                start + Duration::from_secs(1),
 +                || {
@@ -19876,6 +21153,46 @@ index 0000000000000000000000000000000000000000..5afb31f3266af28d1c9c2c6bd9753e38
 +            .unwrap();
 +        assert!(decision.is_none());
 +        assert_eq!(builds.load(Ordering::Relaxed), 0);
++        assert_eq!(cache.lock_attempt_count(), lock_attempts + 1);
++        assert_eq!(cache.owned_key_construction_count(), owned_keys);
++    }
++
++    #[test]
++    fn udp_cache_ip_hit_uses_one_lock_and_no_owned_key() {
++        let cache = UdpAuditWindowCache::new(4, USER_AUDIT_UDP_WINDOW_SHARDS * 4);
++        let server_id: Arc<str> = Arc::from("server");
++        let association = [0u8; 16];
++        let address: IpAddr = "192.0.2.53".parse().unwrap();
++        let start = Instant::now();
++
++        let lock_attempts = cache.lock_attempt_count();
++        assert!(
++            cache
++                .eligible_lazy(&server_id, association, UdpAuditHost::Ip(address), 53, start, || {
++                    AuditTargetDraft::ip_with_port(address, 53, address)
++                },)
++                .unwrap()
++                .is_some()
++        );
++        assert_eq!(cache.lock_attempt_count(), lock_attempts + 1);
++
++        let lock_attempts = cache.lock_attempt_count();
++        let owned_keys = cache.owned_key_construction_count();
++        assert!(
++            cache
++                .eligible_lazy(
++                    &server_id,
++                    association,
++                    UdpAuditHost::Ip(address),
++                    53,
++                    start + Duration::from_secs(1),
++                    || panic!("IP cooldown hit should not rebuild target"),
++                )
++                .unwrap()
++                .is_none()
++        );
++        assert_eq!(cache.lock_attempt_count(), lock_attempts + 1);
++        assert_eq!(cache.owned_key_construction_count(), owned_keys);
 +    }
 +
 +    #[test]
@@ -19890,13 +21207,13 @@ index 0000000000000000000000000000000000000000..5afb31f3266af28d1c9c2c6bd9753e38
 +        // This spelling misses the raw alias, but lightweight canonical
 +        // normalization must find the existing entry and suppress the event
 +        // without constructing the full target.
++        let lock_attempts = cache.lock_attempt_count();
 +        let builds = AtomicUsize::new(0);
 +        let decision = cache
 +            .eligible_lazy(
 +                &server_id,
 +                association,
-+                "domain",
-+                "EXAMPLE.COM",
++                UdpAuditHost::Domain("EXAMPLE.COM"),
 +                443,
 +                start + Duration::from_secs(1),
 +                || {
@@ -19907,23 +21224,77 @@ index 0000000000000000000000000000000000000000..5afb31f3266af28d1c9c2c6bd9753e38
 +            .unwrap();
 +        assert!(decision.is_none());
 +        assert_eq!(builds.load(Ordering::Relaxed), 0);
++        assert_eq!(cache.lock_attempt_count(), lock_attempts + 1);
 +
-+        // A canonical variant is intentionally not rebound as the raw alias:
-+        // alternating spellings must not rewrite two hash maps while the shard
-+        // lock is held. It still reaches the canonical lookup without building
-+        // a complete target during cooldown.
-+        let decision = cache
-+            .eligible_lazy(
-+                &server_id,
-+                association,
-+                "domain",
-+                "EXAMPLE.COM",
-+                443,
-+                start + Duration::from_secs(2),
-+                || panic!("cooldown alias should not rebuild target"),
-+            )
++        // The cached primary and alternate spelling must each use one try_lock
++        // and zero owned-key constructions per cooldown hit.
++        let lock_attempts = cache.lock_attempt_count();
++        let owned_keys = cache.owned_key_construction_count();
++        for index in 0..128 {
++            let spelling = if index % 2 == 0 { "Example.com" } else { "EXAMPLE.COM" };
++            let decision = cache
++                .eligible_lazy(
++                    &server_id,
++                    association,
++                    UdpAuditHost::Domain(spelling),
++                    443,
++                    start + Duration::from_secs(2),
++                    || panic!("cooldown alias should not rebuild target"),
++                )
++                .unwrap();
++            assert!(decision.is_none());
++        }
++        assert_eq!(cache.lock_attempt_count(), lock_attempts + 128);
++        assert_eq!(cache.owned_key_construction_count(), owned_keys);
++
++        // A third equivalent spelling replaces only the alternate alias. The
++        // canonical entry, association count, and two-slot raw index stay
++        // bounded instead of growing with attacker-controlled spellings.
++        let lengths = cache.lengths();
++        let lock_attempts = cache.lock_attempt_count();
++        let owned_keys = cache.owned_key_construction_count();
++        assert!(
++            cache
++                .eligible_lazy(
++                    &server_id,
++                    association,
++                    UdpAuditHost::Domain("eXample.COM"),
++                    443,
++                    start + Duration::from_secs(3),
++                    || panic!("third cooldown alias should not rebuild target"),
++                )
++                .unwrap()
++                .is_none()
++        );
++        assert_eq!(cache.lock_attempt_count(), lock_attempts + 1);
++        assert_eq!(cache.owned_key_construction_count(), owned_keys + 1);
++        assert_eq!(cache.lengths(), lengths);
++
++        let shard = cache.shards[UdpAuditWindowCache::shard_index(&association)]
++            .lock()
 +            .unwrap();
-+        assert!(decision.is_none());
++        assert_eq!(shard.by_key.len(), 1);
++        assert_eq!(shard.by_raw_key.len(), 2);
++        let entry = shard.entries.iter().flatten().next().expect("window entry");
++        assert_eq!(entry.raw_keys.iter().flatten().count(), 2);
++        assert!(shard.by_raw_key.contains_key(&UdpWindowLookup::new(
++            &server_id,
++            association,
++            UdpAuditHost::Domain("Example.com"),
++            443,
++        )));
++        assert!(!shard.by_raw_key.contains_key(&UdpWindowLookup::new(
++            &server_id,
++            association,
++            UdpAuditHost::Domain("EXAMPLE.COM"),
++            443,
++        )));
++        assert!(shard.by_raw_key.contains_key(&UdpWindowLookup::new(
++            &server_id,
++            association,
++            UdpAuditHost::Domain("eXample.COM"),
++            443,
++        )));
 +    }
 +
 +    #[test]
@@ -19944,12 +21315,19 @@ index 0000000000000000000000000000000000000000..5afb31f3266af28d1c9c2c6bd9753e38
 +        let entry = shard.entries.iter().flatten().next().expect("window entry");
 +        let canonical = shard.by_key.keys().next().expect("canonical index key");
 +        let raw = shard.by_raw_key.keys().next().expect("raw index key");
-+        assert!(Arc::ptr_eq(&entry.key.host, &canonical.host));
-+        assert!(Arc::ptr_eq(&entry.raw_key.host, &raw.host));
-+        assert_eq!(entry.key.kind, canonical.kind);
-+        assert_eq!(entry.raw_key.kind, raw.kind);
-+        assert!(matches!(entry.key.kind, Cow::Borrowed("domain")));
-+        assert!(matches!(entry.raw_key.kind, Cow::Borrowed("domain")));
++        let entry_raw = entry.raw_keys[0].as_ref().expect("primary raw key");
++        match (&entry.key.host, &canonical.host) {
++            (UdpWindowHost::Domain(entry), UdpWindowHost::Domain(index)) => {
++                assert!(Arc::ptr_eq(entry, index));
++            }
++            _ => panic!("expected canonical domain keys"),
++        }
++        match (&entry_raw.host, &raw.host) {
++            (UdpWindowHost::Domain(entry), UdpWindowHost::Domain(index)) => {
++                assert!(Arc::ptr_eq(entry, index));
++            }
++            _ => panic!("expected raw domain keys"),
++        }
 +    }
 +
 +    #[test]
@@ -20533,9 +21911,9 @@ index 0000000000000000000000000000000000000000..5afb31f3266af28d1c9c2c6bd9753e38
 +        let directory = tempdir().expect("temporary directory");
 +        let socket_path = directory.path().join("ingest.sock");
 +        let listener = UnixListener::bind(&socket_path).expect("listener");
-+        let idle_wait_hook = IDLE_SESSION_WAIT_HOOK.get_or_init(Notify::new);
 +        let config = UserAuditConfig::new(&socket_path, test_auditd_user());
 +        let emitter = AuditEmitter::new(runtime(), &config);
++        let (idle_wait_entered, idle_wait_resume) = emitter.install_idle_session_wait_hook();
 +        let first = emitter.encode_pending(tcp_draft(&emitter, 31)).expect("first event");
 +        emitter.increment_pending();
 +        let mut state = SupervisorState::new();
@@ -20564,8 +21942,9 @@ index 0000000000000000000000000000000000000000..5afb31f3266af28d1c9c2c6bd9753e38
 +                // insert without a notification to model the exact state after
 +                // drain has consumed the sole permit left by a relay push. The
 +                // explicit queue recheck must still send this event promptly.
-+                idle_wait_hook.notified().await;
++                idle_wait_entered.await.expect("producer entered idle wait boundary");
 +                emitter.queue.push(tcp_draft(&emitter, 32)).expect("queue has capacity");
++                idle_wait_resume.send(()).expect("resume producer queue recheck");
 +                let second = tokio::time::timeout(Duration::from_secs(1), read_frame(&mut reader))
 +                    .await
 +                    .expect("idle session slept despite a queued event")

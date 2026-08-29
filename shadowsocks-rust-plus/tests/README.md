@@ -64,8 +64,12 @@ python3 tests/test_mock_collector.py
 都是 16 字节标准 Base64、用户名和 uPSK 唯一、输出精确 `0600`、禁止覆盖、拒绝仓库内未 ignore 目标，并覆盖规范排序、五配置完全
 一致、顺序漂移与 ID 冲突。随机凭据只存在于权限受限的临时目录，测试输出和失败消息不得包含
 它们。发布测试使用无密钥的最小 ELF x86_64 fixture 两次打包并比较全部字节，校验双二进制
-manifest、两个二进制及 checksum 防篡改；本机有 OpenSSL 时还会临时生成测试专用密钥，覆盖 detached 签名成功、拒绝覆盖和
-篡改验签失败。临时密钥与产物不会写入仓库。
+manifest、两个二进制及 checksum 防篡改；package 写入测试覆盖额外成员插入、输出目录替换、原目录
+清理和 stat/open 身份竞态。本机有 OpenSSL 时还会临时生成测试专用密钥，覆盖 detached 签名成功、
+拒绝覆盖、manifest/signature/artifact A/B 路径替换、额外目录成员、仓库末检漂移、签名清理和篡改
+验签失败。构建 fixture 还会检查 source-root cwd、独立空 `CARGO_HOME`、Cargo config 搜索路径拒绝、
+Cargo/Rust 环境污染隔离，以及 Python 元数据必须绑定实际运行的解释器而非 `PATH` 中同名程序。
+临时密钥与产物不会写入仓库。
 
 ## 覆盖范围
 
@@ -188,8 +192,8 @@ HTTP/1.1-over-UDS 往返延迟分布、进程 RSS 和工具链信息；任一采
 [`benchmark_data_path.py`](benchmark_data_path.py) 在同一回环 echo 工作负载下比较：
 
 1. 精确锁定 commit 的原始上游 release；
-2. 编译 `user-stats` feature、但运行时没有 `user_stats` 配置的 plus release；
-3. 同一 plus 二进制、运行时启用统计。
+2. 编译 `user-audit` feature、但运行时没有 `user_stats`/`user_audit` 配置的 plus release；
+3. 同一 plus 二进制、运行时同时启用统计与审计。
 
 准备一个 HEAD 为锁定 commit 且工作树完全干净的原始上游 Git checkout，以及一个从该 commit
 按 `patches/series` 顺序逐个执行 `git am`、工作树同样干净的 plus Git checkout：
@@ -219,17 +223,36 @@ while IFS= read -r patch_name; do
 done < "$project_root/patches/series"
 ```
 
-上述 `benchmark_root` 必须事先不存在；命令不会覆盖已有目录。随后运行：
+上述 `benchmark_root` 必须事先不存在；命令不会覆盖已有目录。该 benchmark 只接受 Linux，且要求
+目标 auditd 已经运行。取得 systemd 主进程 PID 后运行：
 
 ```bash
-./tests/benchmark_data_path.py \
+auditd_pid="$(systemctl show \
+  --property MainPID --value shadowsocks-auditd.service)"
+test "$auditd_pid" -gt 0
+
+sudo ./tests/benchmark_data_path.py \
   --upstream-source /tmp/shadowsocks-rust-plus-benchmark/upstream \
   --plus-source /tmp/shadowsocks-rust-plus-benchmark/plus \
+  --audit-ingest-socket /run/shadowsocks-audit/ingest/ingest.sock \
+  --auditd-user shadowsocks-audit \
+  --producer-user shadowsocks-benchmark \
+  --audit-export-socket /run/shadowsocks-audit/export/export.sock \
+  --audit-export-user shadowsocks-audit-export \
+  --audit-hmac-key-file /etc/shadowsocks-audit/export-hmac \
+  --audit-node-id node-example-01 \
+  --auditd-pid "$auditd_pid" \
   --output /tmp/shadowsocks-rust-plus-data-path.json
 ```
 
-默认运行 5 个测量样本和 1 个 warm-up，使用 4 个 TCP 与 4 个 UDP worker，记录吞吐、CPU、RSS、
-环境、工作负载参数和二进制哈希。短冒烟参数可通过 `--help` 查看；依赖已经缓存时可加
+脚本必须以 root 运行，且 `shadowsocks-audit`、`shadowsocks-benchmark`、
+`shadowsocks-audit-export` 必须是三个不同 UID；producer 必须获准连接 ingest socket，export peer 必须
+获准连接 export socket。HMAC key 文件须由 auditd UID 持有且 mode 为 `0600`，内容不会写入报告。
+脚本会在运行前后验证 PID、有效 UID、可执行文件 inode/SHA-256、ingest/export socket 身份，并通过
+签名 health 的前后 `stored_records` 增量绑定 producer runtime；启用审计的测量样本会直接采集 auditd
+RSS。默认运行 5 个测量样本和 1 个 warm-up，使用 4 个 TCP 与 4 个
+UDP worker，独立累加 worker attempt/success/error，同时记录吞吐、`ssserver`/`sslocal`/auditd 的
+CPU/RSS、环境、工作负载参数和二进制哈希。短冒烟参数可通过 `--help` 查看；依赖已经缓存时可加
 `--offline-build`。`--plus-source` 不能使用 `prepare-source.sh` 生成的无 `.git` 导出树；脚本
 必须验证锁定提交确实是 plus HEAD 的祖先，避免把不同上游误作对照。脚本不硬编码“吞吐下降/
 CPU 增幅”的通过阈值，生产候选报告必须在目标
@@ -251,24 +274,35 @@ python3 tests/benchmark_audit.py \
   --output /tmp/shadowsocks-rust-plus-audit-preflight.json
 ```
 
-在 Linux 目标机上，先完成 upstream、feature-off plus 和 feature-on plus 三组回环测量，并让报告同时
-提供 `auditd` 的峰值 RSS 与健康场景代理成功/错误计数，再执行真实门禁：
+在 Linux 目标机上完成 upstream、runtime-off plus 和 user-audit runtime-on plus 三组回环测量后，
+同一份报告会用共同 `run_id` 绑定 auditd 进程 RSS 与真实 worker outcome；再执行真实门禁：
 
 ```bash
-python3 tests/benchmark_data_path.py \
+sudo python3 tests/benchmark_data_path.py \
   --upstream-source /tmp/shadowsocks-rust-plus-benchmark/upstream \
   --plus-source /tmp/shadowsocks-rust-plus-benchmark/plus \
+  --audit-ingest-socket /run/shadowsocks-audit/ingest/ingest.sock \
+  --auditd-user shadowsocks-audit \
+  --producer-user shadowsocks-benchmark \
+  --audit-export-socket /run/shadowsocks-audit/export/export.sock \
+  --audit-export-user shadowsocks-audit-export \
+  --audit-hmac-key-file /etc/shadowsocks-audit/export-hmac \
+  --audit-node-id node-example-01 \
+  --auditd-pid "$auditd_pid" \
   --output /tmp/shadowsocks-rust-plus-data-path.json
 python3 tests/benchmark_audit.py \
   --data-path-report /tmp/shadowsocks-rust-plus-data-path.json \
-  --auditd-report /tmp/shadowsocks-rust-plus-auditd.json \
   --require-linux --enforce \
   --output /tmp/shadowsocks-rust-plus-audit-gate.json
 ```
 
-`auditd` 报告至少包含 `peak_rss_kib` 和 `proxy` 对象（其中有 `attempts`、`successes`、`errors`，
-且三者由独立采集器记录）；它也可以直接嵌入 data-path JSON 的 `auditd` 字段。`--enforce` 会在缺少真实 data-path、auditd RSS、代理计数或任一阈值失败时退出非零；目标机实跑、
-Linux auditd runtime、sanitizer fuzz 和生产并发压测的证据需单独归档，不能用合成预检替代。
+门禁只接受 `evidence_kind=native_user_audit_data_path` 的自包含报告：必须是 Linux、plus 构建包含
+`user-audit`、三种 case 的 runtime 状态完整、三个服务 UID 各自独立、两个 socket 的 device/inode
+已绑定、auditd RSS 与 enabled case 采样一致、签名 health 证明 durable ingest 增量，且代理计数明确
+来自 `worker_outcomes`。性能阈值以锁定 upstream 为主基线，CPU/RSS 只比较 `ssserver`；分离的
+auditd JSON 不能证明属于同一次运行，因而不被接受。`--enforce` 会在缺少任一证据或阈值失败时
+退出非零；目标机实跑、Linux auditd runtime、sanitizer fuzz 和生产并发压测的证据需单独归档，
+不能用合成预检替代。
 
 ## 已知上游基线问题
 

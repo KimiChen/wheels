@@ -325,8 +325,8 @@ exporter 是统计启用时的必要服务，而不是可选旁路：
 - [`tests/benchmark_snapshot.py`](tests/benchmark_snapshot.py)：100/500/1000 身份的快照延迟、
   响应大小和 RSS，1000 身份单次响应设置 `< 1s` 自动门槛。
 - [`tests/benchmark_data_path.py`](tests/benchmark_data_path.py)：同一回环工作负载比较精确锁定的
-  原始上游、已编译 feature 但运行时关闭统计、运行时启用统计三种 release 配置，记录吞吐、
-  CPU、RSS 和构建产物哈希。
+  原始上游、已编译 `user-audit` 但运行时关闭统计/审计、运行时同时启用统计与审计三种 release
+  配置，记录吞吐、CPU、RSS、真实 worker outcome、durable ingest 证据和构建产物哈希。
 
 参考测量摘要、完整工作负载和结果解释见 [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md)；原始
 临时报告不提交，以免把单一环境的机器信息误当成发布基线。

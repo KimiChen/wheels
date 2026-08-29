@@ -10,6 +10,18 @@ usage() {
     "$(basename "$0")" >&2
 }
 
+directory_identity() {
+  local path="$1"
+  stat -Lc '%d:%i' -- "$path" 2>/dev/null || stat -f '%d:%i' -- "$path"
+}
+
+require_empty_release_directory() {
+  local path="$1"
+  local entries
+  entries="$(find "$path" -mindepth 1 -maxdepth 1 -print -quit)"
+  [[ -z "$entries" ]] || die "发布输出目录必须为空，拒绝覆盖或保留未绑定文件：$path"
+}
+
 repository_override=""
 output_dir="$SHADOWSOCKS_RUST_PLUS_ROOT/dist"
 while [[ $# -gt 0 ]]; do
@@ -31,12 +43,18 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Refuse a destination that already contains release metadata before spending
-# time on the four reproducibility builds.  A signed directory is immutable;
-# publishing a new candidate must use a fresh directory.
+# Refuse a destination that overlaps the development output tree or already
+# contains release payloads before spending time on reproducibility builds.
+# A signed directory is immutable; publishing a new candidate must use a fresh
+# directory.
 if [[ "$output_dir" != /* ]]; then
   output_dir="$PWD/$output_dir"
 fi
+case "$output_dir" in
+  "$SHADOWSOCKS_RUST_PLUS_ROOT/.cache/dev-dist"|"$SHADOWSOCKS_RUST_PLUS_ROOT/.cache/dev-dist"/*)
+    die "发布构建不得写入开发产物目录：$output_dir"
+    ;;
+esac
 [[ ! -L "$output_dir" ]] || die "发布输出目录不能是符号链接：$output_dir"
 if [[ -e "$output_dir" ]]; then
   output_dir="$(cd "$output_dir" && pwd -P)" || die "无法解析发布产物目录：$output_dir"
@@ -44,11 +62,28 @@ else
   mkdir -p "$(dirname "$output_dir")"
   output_parent="$(cd "$(dirname "$output_dir")" && pwd -P)" || die "无法解析发布产物父目录：$output_dir"
   output_dir="$output_parent/$(basename "$output_dir")"
+  mkdir "$output_dir" || die "无法创建发布产物目录：$output_dir"
 fi
-for release_marker in release-manifest.json release-manifest.sig; do
-  [[ ! -e "$output_dir/$release_marker" && ! -L "$output_dir/$release_marker" ]] || \
-    die "发布目录已包含 ${release_marker}，拒绝覆盖：${output_dir}"
-done
+case "$output_dir" in
+  "$SHADOWSOCKS_RUST_PLUS_ROOT/.cache/dev-dist"|"$SHADOWSOCKS_RUST_PLUS_ROOT/.cache/dev-dist"/*)
+    die "发布构建不得写入开发产物目录：$output_dir"
+    ;;
+esac
+require_empty_release_directory "$output_dir"
+output_identity="$(directory_identity "$output_dir")" || die "无法取得发布输出目录身份：$output_dir"
+output_device="${output_identity%%:*}"
+output_inode="${output_identity#*:}"
+[[ "$output_device" =~ ^[0-9]+$ && "$output_inode" =~ ^[0-9]+$ ]] || \
+  die "发布输出目录身份格式错误：$output_dir"
+
+validate_release_output_directory() {
+  [[ -d "$output_dir" && ! -L "$output_dir" ]] || die "发布输出目录已在构建期间被替换"
+  [[ "$(cd "$output_dir" && pwd -P)" == "$output_dir" ]] || \
+    die "发布输出目录解析结果已在构建期间变化"
+  [[ "$(directory_identity "$output_dir")" == "$output_identity" ]] || \
+    die "发布输出目录 inode 已在构建期间变化"
+  require_empty_release_directory "$output_dir"
+}
 
 require_command cargo
 require_command cargo-zigbuild
@@ -87,15 +122,13 @@ actual_python_version="$(python3 -c 'import platform; print(platform.python_vers
 [[ "$actual_python_version" == "$RELEASE_PYTHON_VERSION" ]] || \
   die "Python 版本不匹配：期望 $RELEASE_PYTHON_VERSION，实际 $actual_python_version"
 
-release_user_home="${HOME:?HOME 未设置}"
-release_cargo_home="${CARGO_HOME:-$release_user_home/.cargo}"
-[[ -d "$release_cargo_home" ]] || die "Cargo home 不存在：$release_cargo_home"
-release_cargo_home="$(cd "$release_cargo_home" && pwd -P)"
-
 # Do not let ambient compiler/linker/profile overrides become an unrecorded build input.
-unset AR CC CFLAGS CPPFLAGS CXX CXXFLAGS LDFLAGS RUSTC RUSTC_WRAPPER
+unset AR ARFLAGS CC CFLAGS CPPFLAGS CXX CXXFLAGS LDFLAGS RANLIB RANLIBFLAGS
+unset RUSTC RUSTC_WRAPPER
 unset RUSTC_WORKSPACE_WRAPPER RUSTFLAGS RUSTDOCFLAGS CARGO_BUILD_RUSTC
-unset CARGO_BUILD_RUSTC_WRAPPER CARGO_BUILD_RUSTFLAGS CARGO_ENCODED_RUSTFLAGS
+unset CARGO_BUILD_RUSTC_WRAPPER CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER
+unset CARGO_BUILD_RUSTFLAGS CARGO_ENCODED_RUSTFLAGS
+unset CARGO_ALIAS_ZIGBUILD
 unset CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER
 unset CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS
 unset CARGO_PROFILE_RELEASE_CODEGEN_UNITS CARGO_PROFILE_RELEASE_DEBUG
@@ -103,9 +136,37 @@ unset CARGO_PROFILE_RELEASE_LTO CARGO_PROFILE_RELEASE_OPT_LEVEL
 unset CARGO_PROFILE_RELEASE_PANIC CARGO_PROFILE_RELEASE_RPATH CARGO_PROFILE_RELEASE_STRIP
 unset CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS
 unset RUSTC_BOOTSTRAP
-unset CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_CC
-unset CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_CFLAGS
-unset CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_AR
+
+normalized_release_target="${RELEASE_TARGET//-/_}"
+uppercase_release_target="$(printf '%s' "$normalized_release_target" | tr '[:lower:]' '[:upper:]')"
+clean_release_environment_args=()
+for cc_variable in AR ARFLAGS CC CFLAGS CXX CXXFLAGS RANLIB RANLIBFLAGS; do
+  clean_release_environment_args+=(
+    -u "$cc_variable"
+    -u "${cc_variable}_${RELEASE_TARGET}"
+    -u "${cc_variable}_${normalized_release_target}"
+    -u "${cc_variable}_${uppercase_release_target}"
+    -u "${RELEASE_TARGET}_${cc_variable}"
+    -u "${normalized_release_target}_${cc_variable}"
+    -u "${uppercase_release_target}_${cc_variable}"
+    -u "TARGET_${cc_variable}"
+    -u "HOST_${cc_variable}"
+  )
+done
+clean_release_environment_args+=(
+  -u CARGO_ALIAS_ZIGBUILD
+  -u CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER
+  -u CROSS_COMPILE
+  -u CRATE_CC_NO_DEFAULTS
+  -u CC_SHELL_ESCAPED_FLAGS
+  -u CC_KNOWN_WRAPPER_CUSTOM
+  -u "CARGO_TARGET_${uppercase_release_target}_LINKER"
+  -u "CARGO_TARGET_${uppercase_release_target}_RUSTFLAGS"
+  -u "CARGO_TARGET_${uppercase_release_target}_RUNNER"
+)
+run_with_clean_release_environment() {
+  env "${clean_release_environment_args[@]}" "$@"
+}
 
 temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/shadowsocks-rust-plus.XXXXXX")"
 trap 'safe_remove_temp_dir "$temp_dir"' EXIT
@@ -113,6 +174,9 @@ source_a="$temp_dir/source-a"
 source_b="$temp_dir/source-b"
 target_a="$temp_dir/target-a"
 target_b="$temp_dir/target-b"
+cargo_home_a="$temp_dir/cargo-home-a"
+cargo_home_b="$temp_dir/cargo-home-b"
+mkdir -m 0700 "$cargo_home_a" "$cargo_home_b"
 
 prepare_args=("$source_a")
 if [[ -n "$repository_override" ]]; then
@@ -124,85 +188,40 @@ cp -R "$source_a/." "$source_b/"
 
 source_date_epoch="$(git -C "$SHADOWSOCKS_RUST_PLUS_ROOT" show -s --format=%ct "$actual_head")"
 [[ "$source_date_epoch" =~ ^[1-9][0-9]*$ ]] || die "overlay commit 时间戳无效"
-stable_build_time_utc="$(python3 - "$source_date_epoch" <<'PY'
-from datetime import datetime, timezone
-import sys
-
-print(datetime.fromtimestamp(int(sys.argv[1]), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
-PY
-)"
-[[ "$stable_build_time_utc" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] \
-  || die "无法生成稳定 UTC build time"
-
-build_once() {
-  local prepared_source="$1"
-  local target_dir="$2"
-  local encoded_flags
-
-  encoded_flags="--remap-path-prefix=${prepared_source}=/usr/src/shadowsocks-rust"
-  encoded_flags+=$'\x1f'
-  encoded_flags+="--remap-path-prefix=${target_dir}=/usr/src/target"
-  encoded_flags+=$'\x1f'
-  encoded_flags+="--remap-path-prefix=${release_cargo_home}=/usr/local/cargo"
-  encoded_flags+=$'\x1f-C\x1flink-arg=-Wl,--build-id=none\x1f-C\x1fstrip=symbols'
-
-  CARGO_ENCODED_RUSTFLAGS="$encoded_flags" \
-    CARGO_INCREMENTAL=0 \
-    CARGO_PROFILE_RELEASE_INCREMENTAL=false \
-    CARGO_TARGET_DIR="$target_dir" \
-    LANG=C \
-    LC_ALL=C \
-    SOURCE_DATE_EPOCH="$source_date_epoch" \
-    SHADOWSOCKS_BUILD_TIME_UTC="$stable_build_time_utc" \
-    TZ=UTC \
-    ZERO_AR_DATE=1 \
-    cargo zigbuild \
-      --manifest-path "$prepared_source/Cargo.toml" \
-      --locked \
-      --release \
-      --target "$RELEASE_TARGET" \
-      --features user-audit \
-      --bin ssserver
-}
-
-build_auditd_once() {
-  local prepared_source="$1"
-  local target_dir="$2"
-  local encoded_flags
-
-  encoded_flags="--remap-path-prefix=${prepared_source}=/usr/src/shadowsocks-rust"
-  encoded_flags+=$'\x1f'
-  encoded_flags+="--remap-path-prefix=${target_dir}=/usr/src/target"
-  encoded_flags+=$'\x1f'
-  encoded_flags+="--remap-path-prefix=${release_cargo_home}=/usr/local/cargo"
-  encoded_flags+=$'\x1f-C\x1flink-arg=-Wl,--build-id=none\x1f-C\x1fstrip=symbols'
-
-  CARGO_ENCODED_RUSTFLAGS="$encoded_flags" \
-    CARGO_INCREMENTAL=0 \
-    CARGO_PROFILE_RELEASE_INCREMENTAL=false \
-    CARGO_TARGET_DIR="$target_dir" \
-    LANG=C \
-    LC_ALL=C \
-    SOURCE_DATE_EPOCH="$source_date_epoch" \
-    SHADOWSOCKS_BUILD_TIME_UTC="$stable_build_time_utc" \
-    TZ=UTC \
-    ZERO_AR_DATE=1 \
-    cargo zigbuild \
-      --manifest-path "$prepared_source/Cargo.toml" \
-      --locked \
-      --release \
-      --target "$RELEASE_TARGET" \
-      --features user-audit \
-      --bin shadowsocks-auditd
-}
+expected_prepared_tree_sha256="$(lock_value prepared_tree_sha256)"
+[[ "$expected_prepared_tree_sha256" =~ ^[0-9a-f]{64}$ ]] || \
+  die "upstream.lock prepared_tree_sha256 格式错误"
 
 [[ -f "$source_a/crates/shadowsocks-auditd/Cargo.toml" ]] || \
   die "user-audit 已启用但准备源码缺少 shadowsocks-auditd crate"
 
-build_once "$source_a" "$target_a"
-build_auditd_once "$source_a" "$target_a"
-build_once "$source_b" "$target_b"
-build_auditd_once "$source_b" "$target_b"
+receipt_common_args=(
+  --version "$(lock_value tag)"
+  --upstream-commit "$(lock_value commit)"
+  --overlay-commit "$actual_head"
+  --source-date-epoch "$source_date_epoch"
+  --expected-prepared-tree-sha256 "$expected_prepared_tree_sha256"
+  --rustc-version "$actual_rustc_version"
+  --rustc-commit "$actual_rustc_commit"
+  --cargo-version "$actual_cargo_version"
+  --cargo-zigbuild-version "$actual_cargo_zigbuild_version"
+  --zig-version "$actual_zig_version"
+  --python-version "$actual_python_version"
+)
+run_with_clean_release_environment \
+  "$SHADOWSOCKS_RUST_PLUS_ROOT/scripts/release-artifact.py" build-and-receipt \
+  --build-id build-a \
+  --source-root "$source_a" \
+  --target-root "$target_a" \
+  --cargo-home "$cargo_home_a" \
+  "${receipt_common_args[@]}"
+run_with_clean_release_environment \
+  "$SHADOWSOCKS_RUST_PLUS_ROOT/scripts/release-artifact.py" build-and-receipt \
+  --build-id build-b \
+  --source-root "$source_b" \
+  --target-root "$target_b" \
+  --cargo-home "$cargo_home_b" \
+  "${receipt_common_args[@]}"
 
 binary_a="$target_a/$RELEASE_TARGET/release/ssserver"
 binary_b="$target_b/$RELEASE_TARGET/release/ssserver"
@@ -234,18 +253,29 @@ binary_sha256="$(shasum -a 256 "$binary_a" | awk '{ print $1 }')"
 auditd_binary_sha256="$(shasum -a 256 "$auditd_binary_a" | awk '{ print $1 }')"
 [[ "$auditd_binary_sha256" =~ ^[0-9a-f]{64}$ ]] || die "无法计算 shadowsocks-auditd SHA-256"
 
-mkdir -p "$output_dir"
-output_dir="$(cd "$output_dir" && pwd -P)"
+receipt_a="$target_a/build-receipt.json"
+receipt_b="$target_b/build-receipt.json"
+
+validate_release_output_directory
 "$SHADOWSOCKS_RUST_PLUS_ROOT/scripts/release-artifact.py" package-multi \
   --binary "$binary_a" \
   --auditd-binary "$auditd_binary_a" \
   --second-binary "$binary_b" \
   --second-auditd-binary "$auditd_binary_b" \
+  --first-build-receipt "$receipt_a" \
+  --second-build-receipt "$receipt_b" \
+  --first-source-root "$source_a" \
+  --second-source-root "$source_b" \
+  --first-target-root "$target_a" \
+  --second-target-root "$target_b" \
   --output-dir "$output_dir" \
+  --expected-output-device "$output_device" \
+  --expected-output-inode "$output_inode" \
   --version "$(lock_value tag)" \
   --upstream-commit "$(lock_value commit)" \
   --overlay-commit "$actual_head" \
   --source-date-epoch "$source_date_epoch" \
+  --expected-prepared-tree-sha256 "$expected_prepared_tree_sha256" \
   --rustc-version "$actual_rustc_version" \
   --rustc-commit "$actual_rustc_commit" \
   --cargo-version "$actual_cargo_version" \

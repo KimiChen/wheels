@@ -11,6 +11,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent.parent
+PATCH_DELETION_CHECKER = ROOT / "scripts" / "check-patch-deletions.py"
 
 
 class AuditPackagingTest(unittest.TestCase):
@@ -122,6 +123,42 @@ class AuditPackagingTest(unittest.TestCase):
                 "nullable_spool_gap",
             },
         )
+
+        records = {
+            name: json.loads(vector["canonical"])
+            for name, vector in vectors["records"].items()
+        }
+        self.assertIsNone(records["tcp_access_null_normalized"]["target"]["normalized_host"])
+
+        producer_gaps = {
+            record["reason"]: record
+            for record in records.values()
+            if record["event_type"] == "producer_gap"
+        }
+        self.assertEqual(set(producer_gaps), {"queue_overflow", "encode_error", "permanent_nack"})
+        self.assertIsNone(producer_gaps["queue_overflow"]["permanent_nack_code"])
+        self.assertIsNone(producer_gaps["encode_error"]["permanent_nack_code"])
+        self.assertEqual(producer_gaps["permanent_nack"]["permanent_nack_code"], "invalid_schema")
+        self.assertIsNotNone(producer_gaps["queue_overflow"]["first_dropped_sequence"])
+        self.assertIsNone(producer_gaps["encode_error"]["first_dropped_sequence"])
+
+        spool_gaps = {
+            record["reason"]: record
+            for record in records.values()
+            if record["event_type"] == "spool_gap"
+        }
+        self.assertEqual(
+            set(spool_gaps),
+            {
+                "capacity_eviction",
+                "min_free_eviction",
+                "quarantine_eviction",
+                "tail_truncation",
+                "segment_corruption",
+                "state_reset",
+            },
+        )
+        self.assertIsNone(spool_gaps["state_reset"]["lost_spool_epoch"])
         self.assertEqual(vectors["request"]["mac"], "c03af3fa5fab585d4f7edd738a4fba9755551d01502402486f0bafc3816659ab")
         self.assertEqual(vectors["response"]["mac"], "55ed61a4ecd614cc1d8a77ada41edb2393cf15f886453eecab888f868fd4b954")
 
@@ -163,37 +200,65 @@ class AuditPackagingTest(unittest.TestCase):
             self.assertIn("SHADOWSOCKS_REQUIRE_AUDIT_TARGET=1", text)
             self.assertIn("未验证", text)
 
-    def test_prepare_source_extracts_real_deleted_path_from_git_diff_header(self) -> None:
-        script = (ROOT / "scripts/prepare-source.sh").read_text(encoding="utf-8")
-        match = re.search(
-            r"done < <\(\n(?P<program>\s+awk '\n.*?\n\s+' \"\$patch_path\")\n\s+\)",
-            script,
-            re.DOTALL,
-        )
-        self.assertIsNotNone(match, "prepare-source deletion stanza parser not found")
-        assert match is not None
-        program = match.group("program").strip().removesuffix(' "$patch_path"')
+    def test_patch_deletion_guard_is_shared_by_both_replay_paths(self) -> None:
+        for script_name in ("prepare-source.sh", "verify.sh"):
+            script = (ROOT / "scripts" / script_name).read_text(encoding="utf-8")
+            self.assertIn("scripts/check-patch-deletions.py", script)
+
+    def test_patch_deletion_guard_rejects_empty_stanza_even_when_target_exists(self) -> None:
         fixture = """\
-diff --git a/kept.txt b/kept.txt
-index 1111111..2222222 100644
---- a/kept.txt
-+++ b/kept.txt
 diff --git a/removed.txt b/removed.txt
 deleted file mode 100644
-index 3333333..0000000
+index e69de29..0000000
 --- a/removed.txt
 +++ /dev/null
 """
-        with tempfile.TemporaryDirectory(prefix="ssrp-delete-parser-") as directory:
-            patch = Path(directory) / "fixture.patch"
+        with tempfile.TemporaryDirectory(prefix="ssrp-delete-empty-") as directory:
+            root = Path(directory)
+            (root / "removed.txt").write_text("", encoding="utf-8")
+            patch = root / "fixture.patch"
             patch.write_text(fixture, encoding="utf-8")
             result = subprocess.run(
-                ["bash", "-c", f"{program} \"$1\"", "bash", str(patch)],
+                [str(PATCH_DELETION_CHECKER), str(patch), "--source-root", str(root)],
                 text=True,
                 capture_output=True,
-                check=True,
+                check=False,
             )
-        self.assertEqual(result.stdout.splitlines(), ["removed.txt"])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("no hunk or binary payload", result.stderr)
+
+    def test_patch_deletion_guard_accepts_real_delete_and_rejects_missing_target(self) -> None:
+        fixture = """\
+diff --git a/removed.txt b/removed.txt
+deleted file mode 100644
+index 257cc56..0000000
+--- a/removed.txt
++++ /dev/null
+@@ -1 +0,0 @@
+-payload
+"""
+        with tempfile.TemporaryDirectory(prefix="ssrp-delete-real-") as directory:
+            root = Path(directory)
+            target = root / "removed.txt"
+            target.write_text("payload\n", encoding="utf-8")
+            patch = root / "fixture.patch"
+            patch.write_text(fixture, encoding="utf-8")
+            accepted = subprocess.run(
+                [str(PATCH_DELETION_CHECKER), str(patch), "--source-root", str(root)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            target.unlink()
+            missing = subprocess.run(
+                [str(PATCH_DELETION_CHECKER), str(patch), "--source-root", str(root)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        self.assertEqual(accepted.returncode, 0, accepted.stderr)
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn("does not exist", missing.stderr)
 
 
 if __name__ == "__main__":

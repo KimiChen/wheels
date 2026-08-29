@@ -24,6 +24,14 @@ class FuzzTargetTest(unittest.TestCase):
         self.assertTrue(target_path.is_file(), target_path)
         manifest = manifest_path.read_text(encoding="utf-8")
         target = target_path.read_text(encoding="utf-8")
+        embedded_vectors = SOURCE / "crates" / "shadowsocks-audit-protocol" / "src" / "golden_vectors.json"
+        outer_vectors = ROOT / "tests" / "golden_vectors.json"
+        self.assertTrue(embedded_vectors.is_file(), embedded_vectors)
+        self.assertEqual(
+            embedded_vectors.read_bytes(),
+            outer_vectors.read_bytes(),
+            "prepared protocol golden vectors drifted from the outer collector contract",
+        )
         self.assertIn('cargo-fuzz = true', manifest)
         self.assertIn('name = "audit_protocol"', manifest)
         for parser in (
@@ -50,7 +58,11 @@ class FuzzTargetTest(unittest.TestCase):
             "parse_error_response",
             "parse_health_response",
         ):
-            self.assertRegex(target, rf"\b{re.escape(parser)}\b", parser)
+            self.assertRegex(
+                target,
+                rf"\bwire::{re.escape(parser)}(?:\s*::<[^>]+>)?\s*\(",
+                f"{parser} must be invoked by the fuzz target",
+            )
         self.assertNotIn("panic!", target)
 
     def test_fuzz_runner_requires_explicit_tool_when_requested(self) -> None:

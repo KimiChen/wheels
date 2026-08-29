@@ -12,6 +12,8 @@ from mock_collector import (
     CollectorError,
     MockCollector,
     ResponseMetadata,
+    U64_MAX,
+    _strict_decimal,
     canonical_json,
     canonical_request,
     canonical_response,
@@ -242,9 +244,25 @@ class MockCollectorProtocolTest(unittest.TestCase):
             1,
         )
 
-        overflowing = wrapper_bytes(event_bytes, 1, received_at=2**64)
+        maximum_timestamp = wrapper_bytes(event_bytes, 1, received_at=U64_MAX)
+        self.assertEqual(
+            len(parse_lease(maximum_timestamp, lease_metadata(maximum_timestamp, "f" * 32, 1, 1, 1))),
+            1,
+        )
+
+        overflowing = wrapper_bytes(event_bytes, 1, received_at=U64_MAX + 1)
         with self.assertRaisesRegex(CollectorError, "u64 range"):
             parse_lease(overflowing, lease_metadata(overflowing, "1" * 32, 1, 1, 1))
+
+        self.assertEqual(_strict_decimal("0"), "0")
+        self.assertEqual(_strict_decimal(str(U64_MAX)), str(U64_MAX))
+        self.assertEqual(_strict_decimal(str(U64_MAX), positive=True), str(U64_MAX))
+        for invalid in (str(U64_MAX + 1), "-1", "+1", "01", "1.0", " 1", 1, True, None):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(CollectorError):
+                    _strict_decimal(invalid)
+        with self.assertRaises(CollectorError):
+            _strict_decimal("0", positive=True)
 
     def test_lease_parser_rejects_noncanonical_wrapper_and_event_escaping(self) -> None:
         event = b'{"event_id":"' + (b"0" * 32) + b':1","label":"a"}'

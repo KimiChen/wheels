@@ -11,6 +11,7 @@ usage() {
 
 require_command git
 require_command patch
+require_command python3
 require_command tar
 
 output_dir="$(absolute_path "$1")"
@@ -50,24 +51,13 @@ while IFS= read -r patch_name; do
     target_path="${target_path#b/}"
     mkdir -p "$output_dir/$(dirname "$target_path")"
   done < <(sed -n 's#^+++ b/##p' "$patch_path")
-  # A deletion must name an object that exists in the tree at this point. This
-  # catches an empty/ghost deletion stanza before `git apply` consumers see a
-  # misleadingly replayable patch; deletions of files introduced by an earlier
-  # patch in the series remain valid because the check uses the live tree.
-  while IFS= read -r deleted_path; do
-    [[ -n "$deleted_path" ]] || continue
-    if [[ ! -e "$output_dir/$deleted_path" && ! -L "$output_dir/$deleted_path" ]]; then
-      die "补丁删除了当前源码树中不存在的文件：$patch_name:$deleted_path"
-    fi
-  done < <(
-    awk '
-      /^diff --git a\/[^ ]+ b\/[^ ]+$/ {
-        path = $3
-        sub(/^a\//, "", path)
-      }
-      /^deleted file mode / && path != "" { print path }
-    ' "$patch_path"
-  )
+  # Validate both properties that patch(1) itself does not enforce: a deletion
+  # must carry an actual hunk/binary payload, and its source must exist after
+  # all earlier patches in the series have been applied.
+  if ! python3 "$SHADOWSOCKS_RUST_PLUS_ROOT/scripts/check-patch-deletions.py" \
+    "$patch_path" --source-root "$output_dir"; then
+    die "补丁包含空删除或删除了当前源码树中不存在的文件：$patch_name"
+  fi
   (
     cd "$output_dir"
     patch --batch --forward --fuzz=0 -E -p1 < "$patch_path"

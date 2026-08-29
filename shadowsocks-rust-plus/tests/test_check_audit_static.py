@@ -175,6 +175,38 @@ fn production() {
             findings = CHECKER.check(root, require_complete=False)
             self.assertTrue(any(":4: forbidden panic path in user-audit wiring" in item for item in findings))
 
+    def test_scans_complete_multiline_audit_block_inside_relay_function(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            service = root / "crates/shadowsocks-service/src"
+            service.mkdir(parents=True)
+            (service / "lib.rs").write_text(
+                '#[cfg(all(feature = "user-audit", not(target_os = "linux")))]\n'
+                'compile_error!("feature `user-audit` is supported on Linux only");\n',
+                encoding="utf-8",
+            )
+            relay = service / "server/udprelay.rs"
+            relay.parent.mkdir(parents=True)
+            relay.write_text(
+                'fn dispatch() {\n'
+                '    #[cfg(feature = "user-audit")]\n'
+                '    if let (Some(audit_emitter), Some(identity)) = (\n'
+                '        emitter(),\n'
+                '        identity(),\n'
+                '    ) {\n'
+                '        let padding = 0;\n'
+                '        let value: Option<u8> = None;\n'
+                '        value.unwrap();\n'
+                '        let bytes: &[u8] = &[];\n'
+                '        let _ = bytes[padding];\n'
+                '    }\n'
+                '}\n',
+                encoding="utf-8",
+            )
+            findings = CHECKER.check(root, require_complete=False)
+            self.assertTrue(any(":9: forbidden panic path in user-audit wiring" in item for item in findings))
+            self.assertTrue(any(":11: direct index in user-audit wiring" in item for item in findings))
+
 
 if __name__ == "__main__":
     unittest.main()

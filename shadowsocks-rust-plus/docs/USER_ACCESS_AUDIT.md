@@ -3395,7 +3395,7 @@ crash/capacity runtime 测试；Linux 上完整 `cargo test --workspace --featur
 | --- | --- |
 | C-6、M-41、M-42 | supervisor 与 spool 的启动时间计算改为不下溢的 checked 算术；启动时先建立 durable gap 索引再 flush reset；segment 边界测试改为分别验证协议记录上限和 16 KiB 运行下限。 |
 | M-43、M-44、M-45 | sealed/open 元数据与 body 使用同一 min/max 语义；cleanup 以真实释放字节和有界迭代判据停止，不把 quarantine 搬移当作净释放，也不让自产 gap 触发清理自激。 |
-| M-46、M-47 | write-barrier 冻结路径在重新确认 open inode、容量和 state durability 后可恢复；空 open 与路径失配会隔离孤儿文件、写入 `segment_corruption` gap 并重建可写 open 段。 |
+| M-46、M-47 | 无法确认 durability 的 write barrier 进入 sticky fatal 状态，拒绝所有公开操作并通知 daemon 退出，由 systemd 重启恢复；空 open 与路径失配会先持久化来源绑定 marker，再隔离孤儿文件、写入 `segment_corruption` gap 并重建可写 open 段。 |
 | M-48、M-49 | shutdown 等待者改为 `watch` 接收器，移出 TCP accept/UDP 收包热路径；producer 与 auditd 对绝对 socket 路径都做词法 dot-segment 校验。 |
 | M-50、M-51 | 重新生成的 patch 不含幽灵删除 stanza；`verify.sh` 与 `prepare-source.sh` 拒绝无实际内容的删除项；idle-session 回归通过 test-only rendezvous 确实覆盖 queue 复检。 |
 
@@ -3443,3 +3443,69 @@ crash/capacity 恢复或真实 producer runtime。`cargo-fuzz` sanitizer 实跑�
 `scripts/prepare-source.sh .cache/audit-work-source`。本轮 patch 已用
 `git apply --check --binary --whitespace=error-all` 和 `patch --dry-run --fuzz=0 -p1` 在包含
 `0001`/`0002` 的干净基线验证，并与准备源码树逐文件核对。
+
+## 26. 第六轮整改补充验收（2026-08-29）
+
+本节补充 §25 在崩溃一致性、热路径和发布证据上的最终复核结果。它更正 §25.1 中 M-46 曾描述为
+“进程内恢复”的表述；当 state durability 已无法判定时，继续服务会有复用 spool cursor 的风险，
+因此正确行为是 fail closed 并让服务管理器重启进程。
+
+### 26.1 Spool 崩溃一致性与恢复
+
+- M-46 的 fatal 状态是 sticky 的；append、lease、oversized quarantine 与 ACK 的每次拒绝都增加
+  `storage_rejected_attempts`，watch 通知使 daemon 终止，空闲 ingest/export 连接会被 abort，不会
+  阻止 systemd 的 `Restart=on-failure`。
+- `state.json` 原子写区分 rename 前失败和 rename 后不确定。rename 前失败可以回滚 open record；
+  rename 已完成但父目录同步或路径计量失败时，不再截断已经写入的 record，也不回退内存 cursor，
+  而是立即进入 fatal 状态。重启回归证明同一 `(spool_epoch, spool_sequence)` 不会复用。§8.3 仍允许
+  producer 在 auditd 重启后重放同一 `event_id`，两者不是同一个唯一性合同。
+- M-47 的 orphan-open 处理在 rename 前先写 schema 2 recovery marker，marker 携带私有
+  `source_fingerprint`；同一来源在同进程重试和重启后复用同一 gap identity，无关损坏对象不会误用
+  该 marker。append、lease、ACK 与 marker unlink 失败后的路径都会重新实测 spool bytes，避免容量
+  索引长期高估或漏计。
+
+### 26.2 Producer 热路径
+
+- M-48 的 TCP accept、UDP 主收包与 UDP worker 三个长循环各自在进入循环前只构造并 pin 一次
+  shutdown future；静态回归同时约束构造位置与调用次数，把 waiter 移回循环的变异会失败。
+- 每个成功 UDP send 最多执行一次 `try_lock()`。cooldown 查询用 `hashbrown::Equivalent` 借用 IP 或
+  domain 原始拼写；已缓存命中不创建 owned key。domain alias 明确限制为一个 canonical primary 加
+  一个可替换 alternate，第三种拼写会替换 alternate，因此内存有界但不会保留任意数量的拼写。
+- idle emitter 测试使用 emitter-local 双向 oneshot rendezvous，确定 session 已进入 queue 复检窗口；
+  删除复检的变异会失败，不再依赖调度巧合。
+
+### 26.3 Benchmark 与发布证据
+
+- 原生 data-path 报告绑定三种 case 的二进制哈希与 runtime 状态、ingest/export socket 的
+  device/inode、三个互不相同的服务 UID、启用态 runtime ID、前后两份签名 health、
+  `stored_records` 增量及 `last_ingest_at` 前移；auditd RSS 和 worker success/error 来自同一 run ID。
+- `build-and-receipt` 实际执行两次独立的 `cargo-zigbuild zigbuild`，直接调用经版本与 inode 校验的
+  `cargo-zigbuild` 绝对路径；构建 cwd 固定为 source root，使用独立空 `CARGO_HOME`，拒绝 source root
+  到文件系统根的 `.cargo/config{,.toml}`，且只向子进程传递显式 allowlist 环境。helper 同时实际核验
+  Cargo、rustc commit、Zig 与工具 inode；Python 版本、路径和 inode 绑定实际运行
+  `release-artifact.py` 的解释器，不信任 `PATH` 中另一份 `python3`。receipt 绑定 live source/target 与
+  两项 ELF64 artifact；entry point 必须位于 file-backed executable `PT_LOAD`。
+- `upstream.lock` 固定完整 prepared source tree 的 SHA-256。build、package、sign 与 verify 均要求
+  两份 receipt、live tree、manifest 和该 trust anchor 一致。package 持有已验证 device/inode 的发布
+  目录 FD，以 exclusive create 写入，并在返回前复核原目录路径身份、精确 unsigned 成员集合及每个成员
+  的 inode、mode 和 bytes；失败时只清理本次创建且 inode 仍匹配的文件。
+- sign/verify 将整个发布目录一次安全读取为内存 snapshot，绑定目录 device/inode、精确
+  unsigned/signed 成员集合及每个成员的 inode、mode 和 bytes；结构校验与 OpenSSL 签名/验签只消费
+  snapshot bytes，签名、公钥和私钥通过已经打开的普通文件 FD 传递。manifest、签名、artifact、额外
+  成员或目录路径在操作期间替换都会失败；shell 包装器在结束前再次检查 overlay HEAD 与干净工作树，
+  签名期间仓库漂移会删除本次新建且 inode 仍匹配的签名。
+  receipt 仍不提供恶意构建主机/构建者抗性，也不是密码学的 command-execution attestation；它不
+  证明工具二进制或 builder 身份可信，不穷举/证明完整宿主环境或 Cargo config，也不把提交时间戳
+  变成可信时间证明。两个 build 进程或主机是否真正相互独立仍属于发布方组织控制，而不是 receipt
+  可证明的事实。
+
+### 26.4 验收边界
+
+macOS 本机已执行 protocol、feature-off/service、静态、packaging、release、benchmark、collector、
+补丁重放与格式检查；state commit uncertainty 的定向用例另在 Debian x86_64 原生执行通过。
+最终 `./scripts/verify.sh` 完整通过，其中 workspace service 308 项、protocol 23 项、release 21 项、
+benchmark gate 10 项、packaging 11 项、static 13 项、mock collector 17 项与数据面集成均通过；另行
+执行的 feature-off service lib 14 项也通过。
+macOS 上的 Linux target `cargo check --all-targets` 不能替代 Linux runtime。完整
+`SO_PEERCRED`/UDS/signal/crash-capacity 集成、sanitizer fuzz、§14.5 目标机长压，以及固定工具链的两次
+musl release 构建和最终签名验签仍是发布前置，不得由合成 benchmark 或交叉编译结果替代。

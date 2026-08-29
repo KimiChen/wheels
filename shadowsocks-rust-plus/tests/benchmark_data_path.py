@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """Reproducible loopback data-path benchmark for shadowsocks-rust-plus.
 
-The benchmark builds and compares three release configurations:
+On Linux, the benchmark builds and compares three release configurations:
 
-* the exact locked upstream revision without the ``user-stats`` feature;
-* plus compiled with ``user-stats`` but without runtime statistics configuration;
-* the same plus binaries with runtime statistics enabled.
+* the exact locked upstream revision without the ``user-audit`` feature;
+* plus compiled with ``user-audit`` but without runtime audit configuration;
+* the same plus binaries with user statistics and user audit enabled.
+
+The enabled case requires an already running auditd. Its PID, executable and
+ingest socket identity are verified before and after the workload, and auditd
+RSS is sampled in the same run as the proxy worker outcomes.
 
 No public network endpoint is used by the benchmark workload. All credentials are
 created in memory for one invocation, written only to mode-0600 files below a
@@ -24,20 +28,31 @@ import json
 import math
 import os
 import platform
+import pwd
+import re
 import secrets
 import socket
 import socketserver
 import stat
 import statistics
 import subprocess
+import sys
 import tempfile
 import threading
 import time
-from dataclasses import dataclass
+import uuid
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import BinaryIO
 
 from http_unix import json_body, request as http_request, validate_snapshot
+from mock_collector import (
+    MockCollector,
+    canonical_json,
+    strict_json,
+    unix_http_request,
+    verify_response,
+)
 
 LOCKED_UPSTREAM_COMMIT = "7ee1aa9223ed8f4d34734aac919036c8ad4502c2"
 METHOD = "2022-blake3-aes-128-gcm"
@@ -173,13 +188,25 @@ class EchoServices:
 
 
 class ChildProcess:
-    def __init__(self, command: list[str], log_path: Path) -> None:
+    def __init__(
+        self,
+        command: list[str],
+        log_path: Path,
+        identity: pwd.struct_passwd | None = None,
+    ) -> None:
         self.log = secure_open_log(log_path)
         environment = os.environ.copy()
         # Upstream traces full configuration objects. Do not inherit a caller's
         # RUST_LOG=trace into a benchmark that uses ephemeral credentials.
         environment["RUST_LOG"] = "off"
         environment["RUST_BACKTRACE"] = "0"
+        identity_options: dict[str, object] = {}
+        if identity is not None:
+            identity_options = {
+                "user": identity.pw_uid,
+                "group": identity.pw_gid,
+                "extra_groups": os.getgrouplist(identity.pw_name, identity.pw_gid),
+            }
         try:
             self.process = subprocess.Popen(
                 command,
@@ -187,6 +214,7 @@ class ChildProcess:
                 stdout=self.log,
                 stderr=subprocess.STDOUT,
                 env=environment,
+                **identity_options,
             )
         except BaseException:
             self.log.close()
@@ -390,7 +418,8 @@ def build_binaries(
     target: Path,
     feature: str | None,
     offline: bool,
-) -> tuple[Path, Path]:
+    include_auditd: bool = False,
+) -> tuple[Path, Path, Path | None]:
     environment = os.environ.copy()
     environment["CARGO_TARGET_DIR"] = str(target)
     command = [
@@ -405,6 +434,8 @@ def build_binaries(
         "--bin",
         "sslocal",
     ]
+    if include_auditd:
+        command.extend(["--bin", "shadowsocks-auditd"])
     if feature is not None:
         command.extend(["--features", feature])
     if offline:
@@ -412,9 +443,10 @@ def build_binaries(
     subprocess.run(command, check=True, env=environment)
     server = target / "release" / "ssserver"
     local = target / "release" / "sslocal"
-    if not server.is_file() or not local.is_file():
-        raise RuntimeError("release build completed without ssserver/sslocal")
-    return server, local
+    auditd = target / "release" / "shadowsocks-auditd" if include_auditd else None
+    if not server.is_file() or not local.is_file() or (auditd is not None and not auditd.is_file()):
+        raise RuntimeError("release build completed without required benchmark binaries")
+    return server, local, auditd
 
 
 def file_sha256(path: Path) -> str:
@@ -425,10 +457,370 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def build_artifact_report(binaries: tuple[Path, Path]) -> dict[str, object]:
+def process_start_time_ticks(pid: int) -> int:
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+        fields = raw.rsplit(")", 1)[1].split()
+        # Field 22 is process start time; fields begins at procfs field 3.
+        value = int(fields[19])
+    except (FileNotFoundError, OSError, ValueError, IndexError) as error:
+        raise RuntimeError(f"cannot read auditd process identity for PID {pid}") from error
+    if value < 1:
+        raise RuntimeError("auditd process start time is invalid")
+    return value
+
+
+def process_effective_uid(pid: int) -> int:
+    try:
+        for line in Path(f"/proc/{pid}/status").read_text(encoding="ascii").splitlines():
+            if line.startswith("Uid:"):
+                values = line.split()[1:]
+                return int(values[1])
+    except (FileNotFoundError, OSError, ValueError, IndexError) as error:
+        raise RuntimeError(f"cannot read auditd credentials for PID {pid}") from error
+    raise RuntimeError(f"cannot find auditd credentials for PID {pid}")
+
+
+@dataclass(frozen=True)
+class AuditdProcessEvidence:
+    pid: int
+    user: str
+    uid: int
+    ingest_socket: Path
+    ingest_socket_device: int
+    ingest_socket_inode: int
+    executable_path: Path
+    executable_sha256: str
+    executable_device: int
+    executable_inode: int
+    process_start_time_ticks: int
+
+    def report(self, run_id: str, peak_rss_kib: int, rss_sample_count: int) -> dict[str, object]:
+        return {
+            "run_id": run_id,
+            "measurement_source": "resource_monitor_pid",
+            "pid": self.pid,
+            "process_start_time_ticks": self.process_start_time_ticks,
+            "user": self.user,
+            "uid": self.uid,
+            "ingest_socket_path": str(self.ingest_socket),
+            "ingest_socket_device": self.ingest_socket_device,
+            "ingest_socket_inode": self.ingest_socket_inode,
+            "executable_path": str(self.executable_path),
+            "executable_sha256": self.executable_sha256,
+            "peak_rss_kib": peak_rss_kib,
+            "rss_sample_count": rss_sample_count,
+        }
+
+
+def capture_auditd_process(
+    pid: int,
+    user: str,
+    ingest_socket: Path,
+) -> AuditdProcessEvidence:
+    if platform.system() != "Linux":
+        raise RuntimeError("native user-audit benchmark requires Linux")
+    if pid < 1:
+        raise RuntimeError("--auditd-pid must be positive")
+    if not ingest_socket.is_absolute() or os.path.normpath(str(ingest_socket)) != str(ingest_socket):
+        raise RuntimeError("--audit-ingest-socket must be a canonical absolute path")
+    try:
+        account = pwd.getpwnam(user)
+    except KeyError as error:
+        raise RuntimeError(f"--auditd-user does not exist: {user}") from error
+    try:
+        socket_metadata = ingest_socket.lstat()
+        if ingest_socket.resolve(strict=True) != ingest_socket:
+            raise RuntimeError("auditd ingest socket path contains a symbolic link")
+    except OSError as error:
+        raise RuntimeError(f"cannot inspect auditd ingest socket: {error}") from error
+    if not stat.S_ISSOCK(socket_metadata.st_mode):
+        raise RuntimeError("--audit-ingest-socket is not a Unix socket")
+    if socket_metadata.st_uid != account.pw_uid:
+        raise RuntimeError("auditd user does not own the ingest socket")
+    if process_effective_uid(pid) != account.pw_uid:
+        raise RuntimeError("auditd process effective UID does not match --auditd-user")
+
+    proc_executable = Path(f"/proc/{pid}/exe")
+    try:
+        linked_path = os.readlink(proc_executable)
+        if linked_path.endswith(" (deleted)"):
+            raise RuntimeError("auditd executable was deleted after process startup")
+        executable_path = Path(linked_path).resolve(strict=True)
+        before = proc_executable.stat()
+        executable_sha256 = file_sha256(proc_executable)
+        after = proc_executable.stat()
+    except OSError as error:
+        raise RuntimeError(f"cannot inspect auditd executable for PID {pid}: {error}") from error
+    if not stat.S_ISREG(after.st_mode) or before.st_dev != after.st_dev or before.st_ino != after.st_ino:
+        raise RuntimeError("auditd executable identity changed while it was hashed")
+    return AuditdProcessEvidence(
+        pid=pid,
+        user=user,
+        uid=account.pw_uid,
+        ingest_socket=ingest_socket,
+        ingest_socket_device=socket_metadata.st_dev,
+        ingest_socket_inode=socket_metadata.st_ino,
+        executable_path=executable_path,
+        executable_sha256=executable_sha256,
+        executable_device=after.st_dev,
+        executable_inode=after.st_ino,
+        process_start_time_ticks=process_start_time_ticks(pid),
+    )
+
+
+def assert_same_auditd_process(expected: AuditdProcessEvidence) -> None:
+    current = capture_auditd_process(expected.pid, expected.user, expected.ingest_socket)
+    if current != expected:
+        raise RuntimeError("auditd process, executable or ingest socket changed during benchmark")
+
+
+AUDIT_HEALTH_FIELDS = {
+    "schema_version",
+    "node_id",
+    "status",
+    "producer_connected",
+    "producer_runtime_id",
+    "last_ingest_at_unix_ms",
+    "spool_epoch",
+    "spool_bytes",
+    "max_spool_bytes",
+    "sealed_batches",
+    "oldest_unacked_at_unix_ms",
+    "stored_records",
+    "storage_rejected_attempts",
+    "evicted_unacked_records",
+}
+
+
+def _audit_decimal(value: object, field_name: str, *, positive: bool = False) -> int:
+    pattern = r"[1-9][0-9]*" if positive else r"0|[1-9][0-9]*"
+    if not isinstance(value, str) or re.fullmatch(pattern, value) is None:
+        raise RuntimeError(f"auditd health {field_name} is not canonical decimal")
+    number = int(value)
+    if number > U64_MAX:
+        raise RuntimeError(f"auditd health {field_name} exceeds u64")
+    return number
+
+
+def _validate_audit_health(
+    status: int,
+    body: bytes,
+    node_id: str,
+) -> dict[str, object]:
+    value = strict_json(body)
+    if not isinstance(value, dict) or set(value) != AUDIT_HEALTH_FIELDS:
+        raise RuntimeError("auditd health response has unexpected fields")
+    expected_status = "ok" if status == 200 else "degraded" if status == 503 else None
+    if (
+        expected_status is None
+        or value.get("schema_version") != 1
+        or value.get("node_id") != node_id
+        or value.get("status") != expected_status
+    ):
+        raise RuntimeError("auditd health status, schema or node is invalid")
+    if canonical_json(value) != body:
+        raise RuntimeError("auditd health response is not canonical JSON")
+    producer_connected = value.get("producer_connected")
+    if type(producer_connected) is not bool:
+        raise RuntimeError("auditd health producer_connected is not boolean")
+    runtime_id = value.get("producer_runtime_id")
+    if runtime_id is not None and (
+        not isinstance(runtime_id, str) or re.fullmatch(r"[0-9a-f]{32}", runtime_id) is None
+    ):
+        raise RuntimeError("auditd health producer_runtime_id is invalid")
+    last_ingest_raw = value.get("last_ingest_at_unix_ms")
+    last_ingest = (
+        None
+        if last_ingest_raw is None
+        else _audit_decimal(last_ingest_raw, "last_ingest_at_unix_ms", positive=True)
+    )
+    if not producer_connected and (runtime_id is not None or last_ingest is not None):
+        raise RuntimeError("disconnected auditd health retained producer state")
+    spool_epoch = value.get("spool_epoch")
+    if not isinstance(spool_epoch, str) or re.fullmatch(r"[0-9a-f]{32}", spool_epoch) is None:
+        raise RuntimeError("auditd health spool_epoch is invalid")
+    oldest_raw = value.get("oldest_unacked_at_unix_ms")
+    oldest = (
+        None
+        if oldest_raw is None
+        else _audit_decimal(oldest_raw, "oldest_unacked_at_unix_ms", positive=True)
+    )
+    normalized: dict[str, object] = {
+        "http_status": status,
+        "status": expected_status,
+        "node_id": node_id,
+        "producer_connected": producer_connected,
+        "producer_runtime_id": runtime_id,
+        "last_ingest_at_unix_ms": last_ingest,
+        "spool_epoch": spool_epoch,
+        "oldest_unacked_at_unix_ms": oldest,
+    }
+    for field_name in (
+        "spool_bytes",
+        "max_spool_bytes",
+        "sealed_batches",
+        "stored_records",
+        "storage_rejected_attempts",
+        "evicted_unacked_records",
+    ):
+        normalized[field_name] = _audit_decimal(value[field_name], field_name)
+    return normalized
+
+
+def _query_audit_health(socket_path: Path, node_id: str, key: bytes) -> dict[str, object]:
+    collector = MockCollector(node_id, key)
+    nonce = secrets.token_hex(16)
+    request = collector.build_request("GET", "/v1/audit/healthz", nonce=nonce)
+    status, headers, body = unix_http_request(socket_path, request)
+    verify_response(
+        key,
+        status=status,
+        headers=headers,
+        body=body,
+        request_nonce=nonce,
+        expected_node=node_id,
+    )
+    return _validate_audit_health(status, body, node_id)
+
+
+def _read_audit_hmac_key(path: Path, expected_uid: int) -> bytes:
+    if not path.is_absolute() or os.path.normpath(str(path)) != str(path):
+        raise RuntimeError("--audit-hmac-key-file must be a canonical absolute path")
+    if path.resolve(strict=True) != path:
+        raise RuntimeError("audit HMAC key path contains a symbolic link")
+    flags = os.O_RDONLY | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags)
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise RuntimeError("audit HMAC key is not a regular file")
+        if metadata.st_uid != expected_uid or stat.S_IMODE(metadata.st_mode) != 0o600:
+            raise RuntimeError("audit HMAC key owner or mode does not match auditd")
+        if metadata.st_size not in (64, 65):
+            raise RuntimeError("audit HMAC key file must contain exactly 64 hex bytes and optional LF")
+        payload = os.read(descriptor, 66)
+    finally:
+        os.close(descriptor)
+    raw = payload[:-1] if payload.endswith(b"\n") else payload
+    if len(raw) != 64 or re.fullmatch(rb"[0-9a-f]{64}", raw) is None:
+        raise RuntimeError("audit HMAC key must be 64 lowercase hexadecimal bytes")
+    return bytes.fromhex(raw.decode("ascii"))
+
+
+@dataclass(frozen=True)
+class AuditHealthClient:
+    socket_path: Path
+    socket_device: int
+    socket_inode: int
+    socket_owner_uid: int
+    user: str
+    uid: int
+    gid: int
+    supplementary_groups: tuple[int, ...]
+    node_id: str
+    key: bytes = field(repr=False)
+
+    def assert_socket_identity(self) -> None:
+        metadata = self.socket_path.lstat()
+        if (
+            not stat.S_ISSOCK(metadata.st_mode)
+            or metadata.st_dev != self.socket_device
+            or metadata.st_ino != self.socket_inode
+            or metadata.st_uid != self.socket_owner_uid
+        ):
+            raise RuntimeError("auditd export socket identity changed during benchmark")
+
+    def query(self) -> dict[str, object]:
+        self.assert_socket_identity()
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(Path(__file__).resolve()),
+                "--audit-health-helper",
+                "--socket",
+                str(self.socket_path),
+                "--node-id",
+                self.node_id,
+            ],
+            input=self.key.hex(),
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+            user=self.uid,
+            group=self.gid,
+            extra_groups=list(self.supplementary_groups),
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(
+                "signed auditd health query failed as export peer: "
+                + completed.stderr.strip()[:500]
+            )
+        try:
+            value = json.loads(completed.stdout)
+        except json.JSONDecodeError as error:
+            raise RuntimeError("auditd health helper returned invalid JSON") from error
+        if not isinstance(value, dict) or value.get("node_id") != self.node_id:
+            raise RuntimeError("auditd health helper returned invalid evidence")
+        self.assert_socket_identity()
+        return value
+
+
+def capture_audit_health_client(
+    socket_path: Path,
+    user: str,
+    node_id: str,
+    key_path: Path,
+    auditd_uid: int,
+) -> AuditHealthClient:
+    if not socket_path.is_absolute() or os.path.normpath(str(socket_path)) != str(socket_path):
+        raise RuntimeError("--audit-export-socket must be a canonical absolute path")
+    metadata = socket_path.lstat()
+    if socket_path.resolve(strict=True) != socket_path or not stat.S_ISSOCK(metadata.st_mode):
+        raise RuntimeError("--audit-export-socket is not a canonical Unix socket")
+    if metadata.st_uid != auditd_uid:
+        raise RuntimeError("auditd user does not own the export socket")
+    try:
+        account = pwd.getpwnam(user)
+    except KeyError as error:
+        raise RuntimeError(f"--audit-export-user does not exist: {user}") from error
+    if not node_id or len(node_id) > 128 or not node_id.isascii() or not node_id.isprintable():
+        raise RuntimeError("--audit-node-id is invalid")
+    return AuditHealthClient(
+        socket_path=socket_path,
+        socket_device=metadata.st_dev,
+        socket_inode=metadata.st_ino,
+        socket_owner_uid=metadata.st_uid,
+        user=user,
+        uid=account.pw_uid,
+        gid=account.pw_gid,
+        supplementary_groups=tuple(os.getgrouplist(account.pw_name, account.pw_gid)),
+        node_id=node_id,
+        key=_read_audit_hmac_key(key_path, auditd_uid),
+    )
+
+
+def _audit_health_helper_main(arguments: list[str]) -> int:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--socket", required=True, type=Path)
+    parser.add_argument("--node-id", required=True)
+    args = parser.parse_args(arguments)
+    key_hex = sys.stdin.read(65)
+    if re.fullmatch(r"[0-9a-f]{64}", key_hex) is None:
+        raise RuntimeError("health helper received invalid key material")
+    health = _query_audit_health(args.socket, args.node_id, bytes.fromhex(key_hex))
+    print(json.dumps(health, sort_keys=True, separators=(",", ":")))
+    return 0
+
+
+def build_artifact_report(binaries: tuple[Path, Path, Path | None]) -> dict[str, object]:
     return {
         path.name: {"sha256": file_sha256(path), "bytes": path.stat().st_size}
         for path in binaries
+        if path is not None
     }
 
 
@@ -511,6 +903,7 @@ class ResourceMonitor:
         self.interval = interval
         self.stop_event = threading.Event()
         self.peak_rss: dict[str, int | None] = {name: None for name in processes}
+        self.sample_count: dict[str, int] = {name: 0 for name in processes}
         self.peak_total_rss: int | None = None
         self.thread = threading.Thread(target=self._run, daemon=True)
 
@@ -518,6 +911,7 @@ class ResourceMonitor:
         values = {name: process_rss_kib(pid) for name, pid in self.processes.items()}
         for name, value in values.items():
             if value is not None:
+                self.sample_count[name] += 1
                 prior = self.peak_rss[name]
                 self.peak_rss[name] = value if prior is None else max(prior, value)
         present = [value for value in values.values() if value is not None]
@@ -541,6 +935,7 @@ class ResourceMonitor:
         self._sample()
         return {
             "peak_kib": self.peak_rss,
+            "sample_count": self.sample_count,
             "peak_combined_kib": self.peak_total_rss,
         }
 
@@ -719,12 +1114,15 @@ def run_sample(
     workload: Workload,
     processes: dict[str, ChildProcess],
     monitor_interval: float,
+    extra_processes: dict[str, int] | None = None,
 ) -> dict[str, object]:
     gate = StartGate(workload.concurrency)
-    monitor = ResourceMonitor(
-        {name: child.pid for name, child in processes.items()},
-        monitor_interval,
-    )
+    process_pids = {name: child.pid for name, child in processes.items()}
+    for name, pid in (extra_processes or {}).items():
+        if name in process_pids:
+            raise RuntimeError(f"duplicate monitored process name: {name}")
+        process_pids[name] = pid
+    monitor = ResourceMonitor(process_pids, monitor_interval)
     monitor_started = False
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=workload.concurrency) as pool:
@@ -756,29 +1154,46 @@ def run_sample(
                 monitor.start()
                 monitor_started = True
                 cpu_before = {
-                    name: process_cpu_seconds(child.pid)
-                    for name, child in processes.items()
+                    name: process_cpu_seconds(pid)
+                    for name, pid in process_pids.items()
                 }
                 started = time.perf_counter_ns()
                 gate.release()
-                results = [future.result(timeout=300) for future in futures]
+                results: list[dict[str, object]] = []
+                proxy_attempts = 0
+                proxy_successes = 0
+                proxy_errors = 0
+                worker_errors: list[BaseException] = []
+                for future in futures:
+                    proxy_attempts += 1
+                    try:
+                        results.append(future.result(timeout=300))
+                    except BaseException as error:
+                        proxy_errors += 1
+                        worker_errors.append(error)
+                    else:
+                        proxy_successes += 1
                 ended = time.perf_counter_ns()
                 cpu_after = {
-                    name: process_cpu_seconds(child.pid)
-                    for name, child in processes.items()
+                    name: process_cpu_seconds(pid)
+                    for name, pid in process_pids.items()
                 }
                 wall_seconds = (ended - started) / 1_000_000_000
+                if worker_errors:
+                    raise RuntimeError(
+                        f"{proxy_errors} of {proxy_attempts} proxy workers failed"
+                    ) from worker_errors[0]
             finally:
                 gate.release()
     finally:
         resources = (
             monitor.stop()
             if monitor_started
-            else {"peak_kib": {}, "peak_combined_kib": None}
+            else {"peak_kib": {}, "sample_count": {}, "peak_combined_kib": None}
         )
 
     cpu_delta: dict[str, float | None] = {}
-    for name in processes:
+    for name in process_pids:
         before, after = cpu_before[name], cpu_after[name]
         cpu_delta[name] = (
             round(max(0.0, after - before), 6)
@@ -821,6 +1236,12 @@ def run_sample(
             ),
         },
         "process_rss": resources,
+        "proxy": {
+            "source": "worker_outcomes",
+            "attempts": proxy_attempts,
+            "successes": proxy_successes,
+            "errors": proxy_errors,
+        },
     }
 
 
@@ -868,15 +1289,23 @@ def aggregate_samples(samples: list[dict[str, object]]) -> dict[str, object]:
         is not None
     }
     cpu_medians: dict[str, float | None] = {}
-    for process in ("ssserver", "sslocal", "combined"):
+    for process in ("ssserver", "sslocal", "auditd", "combined"):
         values = complete_metrics(samples, "process_cpu_seconds", process)
         cpu_medians[process] = round(statistics.median(values), 6) if values else None
     rss_maxima: dict[str, int | None] = {}
-    for process in ("ssserver", "sslocal"):
+    rss_sample_count_min: dict[str, int | None] = {}
+    for process in ("ssserver", "sslocal", "auditd"):
         values = complete_metrics(samples, "process_rss", "peak_kib", process)
         rss_maxima[process] = int(max(values)) if values else None
+        sample_counts = complete_metrics(samples, "process_rss", "sample_count", process)
+        rss_sample_count_min[process] = int(min(sample_counts)) if sample_counts else None
     combined_rss = complete_metrics(samples, "process_rss", "peak_combined_kib")
     rss_maxima["combined"] = int(max(combined_rss)) if combined_rss else None
+    proxy_attempts = complete_metrics(samples, "proxy", "attempts")
+    proxy_successes = complete_metrics(samples, "proxy", "successes")
+    proxy_errors = complete_metrics(samples, "proxy", "errors")
+    if proxy_attempts is None or proxy_successes is None or proxy_errors is None:
+        raise RuntimeError("proxy worker outcomes were not recorded for every sample")
     return {
         "samples": len(samples),
         "wall_seconds": distribution(walls, 6),
@@ -884,6 +1313,13 @@ def aggregate_samples(samples: list[dict[str, object]]) -> dict[str, object]:
         "protocol_bidirectional_mib_per_second": protocol_throughput,
         "process_cpu_seconds_median": cpu_medians,
         "process_peak_rss_kib_max": rss_maxima,
+        "process_rss_sample_count_min": rss_sample_count_min,
+        "proxy": {
+            "source": "worker_outcomes",
+            "attempts": int(sum(proxy_attempts)),
+            "successes": int(sum(proxy_successes)),
+            "errors": int(sum(proxy_errors)),
+        },
     }
 
 
@@ -891,7 +1327,10 @@ def server_config(
     server_port: int,
     identity_key: str,
     user_key: str,
+    node_id: str,
     statistics_socket: Path | None,
+    audit_ingest_socket: Path | None,
+    auditd_user: str | None,
 ) -> dict[str, object]:
     server: dict[str, object] = {
         "server": "127.0.0.1",
@@ -905,7 +1344,7 @@ def server_config(
     if statistics_socket is not None:
         server["id"] = "benchmark-entry"
         config["user_stats"] = {
-            "node_id": "benchmark-node",
+            "node_id": node_id,
             "socket_path": str(statistics_socket),
             "socket_mode": "0600",
             "read_timeout_ms": 1000,
@@ -914,6 +1353,15 @@ def server_config(
             "max_response_bytes": 1_048_576,
             "max_identities": 1,
             "max_concurrent_clients": 1,
+        }
+    if (audit_ingest_socket is None) != (auditd_user is None):
+        raise RuntimeError("audit ingest socket and auditd user must be supplied together")
+    if audit_ingest_socket is not None and auditd_user is not None:
+        if statistics_socket is None:
+            raise RuntimeError("user audit requires user statistics identity metadata")
+        config["user_audit"] = {
+            "ingest_socket_path": str(audit_ingest_socket),
+            "auditd_user": auditd_user,
         }
     return config
 
@@ -943,13 +1391,75 @@ def local_config(
     }
 
 
+def _audit_ingest_evidence(
+    before: dict[str, object],
+    after: dict[str, object],
+    runtime_id: str,
+) -> dict[str, object] | None:
+    before_stored = before.get("stored_records")
+    after_stored = after.get("stored_records")
+    before_ingest = before.get("last_ingest_at_unix_ms")
+    after_ingest = after.get("last_ingest_at_unix_ms")
+    if (
+        before.get("producer_connected") is not False
+        or after.get("http_status") != 200
+        or after.get("status") != "ok"
+        or after.get("producer_connected") is not True
+        or after.get("producer_runtime_id") != runtime_id
+        or before.get("spool_epoch") != after.get("spool_epoch")
+        or type(before_stored) is not int
+        or type(after_stored) is not int
+        or after_stored <= before_stored
+        or type(after_ingest) is not int
+        or (type(before_ingest) is int and after_ingest <= before_ingest)
+        or after.get("storage_rejected_attempts") != before.get("storage_rejected_attempts")
+        or after.get("evicted_unacked_records") != before.get("evicted_unacked_records")
+    ):
+        return None
+    return {
+        "source": "signed_health_stored_records_delta",
+        "producer_runtime_id": runtime_id,
+        "before": before,
+        "after": after,
+        "stored_records_delta": after_stored - before_stored,
+        "last_ingest_advanced": True,
+    }
+
+
+def wait_for_audit_ingest(
+    client: AuditHealthClient,
+    before: dict[str, object],
+    runtime_id: str,
+    server: ChildProcess,
+    timeout: float = 10.0,
+) -> dict[str, object]:
+    deadline = time.monotonic() + timeout
+    last_health: dict[str, object] | None = None
+    while time.monotonic() < deadline:
+        server.assert_running("ssserver")
+        last_health = client.query()
+        evidence = _audit_ingest_evidence(before, last_health, runtime_id)
+        if evidence is not None:
+            return evidence
+        time.sleep(0.2)
+    raise RuntimeError(
+        "auditd did not prove a signed durable record increment for the benchmark runtime; "
+        f"last health={last_health!r}"
+    )
+
+
 def run_case(
     case_name: str,
-    binaries: tuple[Path, Path],
+    binaries: tuple[Path, Path, Path | None],
     echo_port: int,
     identity_key: str,
     user_key: str,
     runtime_statistics: bool,
+    runtime_user_audit: bool,
+    auditd: AuditdProcessEvidence | None,
+    audit_health_client: AuditHealthClient | None,
+    producer_identity: pwd.struct_passwd,
+    node_id: str,
     workload: Workload,
     warmups: int,
     sample_count: int,
@@ -960,15 +1470,30 @@ def run_case(
     with tempfile.TemporaryDirectory(prefix="sdp-") as temp_name:
         temp = Path(temp_name).resolve()
         temp.chmod(0o700)
+        os.chown(temp, producer_identity.pw_uid, producer_identity.pw_gid)
         server_port = reserve_port()
         local_port = reserve_port()
         statistics_socket = temp / "user-stats.sock" if runtime_statistics else None
+        if runtime_user_audit != (auditd is not None and audit_health_client is not None):
+            raise RuntimeError("enabled user-audit case requires process and signed health evidence")
+        audit_health_before = audit_health_client.query() if audit_health_client is not None else None
+        if audit_health_before is not None and audit_health_before.get("producer_connected") is not False:
+            raise RuntimeError("benchmark requires a dedicated auditd with no producer connected")
         server_path = temp / "server.json"
         local_path = temp / "local.json"
         secure_write_json(
             server_path,
-            server_config(server_port, identity_key, user_key, statistics_socket),
+            server_config(
+                server_port,
+                identity_key,
+                user_key,
+                node_id,
+                statistics_socket,
+                auditd.ingest_socket if auditd is not None else None,
+                auditd.user if auditd is not None else None,
+            ),
         )
+        os.chown(server_path, producer_identity.pw_uid, producer_identity.pw_gid)
         secure_write_json(
             local_path,
             local_config(
@@ -978,7 +1503,11 @@ def run_case(
                 f"{identity_key}:{user_key}",
             ),
         )
-        server = ChildProcess([str(binaries[0]), "-c", str(server_path)], temp / "server.log")
+        server = ChildProcess(
+            [str(binaries[0]), "-c", str(server_path)],
+            temp / "server.log",
+            producer_identity,
+        )
         local: ChildProcess | None = None
         try:
             if statistics_socket is not None:
@@ -989,21 +1518,42 @@ def run_case(
             wait_for_tcp(local_port, list(processes.items()))
             time.sleep(0.1)
 
+            statistics_before = (
+                query_statistics(statistics_socket) if statistics_socket is not None else None
+            )
             counters_before = (
-                snapshot_user_counters(query_statistics(statistics_socket))
-                if statistics_socket is not None
+                snapshot_user_counters(statistics_before)
+                if statistics_before is not None
                 else None
             )
 
+            extra_processes = {"auditd": auditd.pid} if auditd is not None else None
             for _ in range(warmups):
-                run_sample(local_port, workload, processes, monitor_interval)
+                run_sample(
+                    local_port,
+                    workload,
+                    processes,
+                    monitor_interval,
+                    extra_processes,
+                )
             samples = [
-                run_sample(local_port, workload, processes, monitor_interval)
+                run_sample(
+                    local_port,
+                    workload,
+                    processes,
+                    monitor_interval,
+                    extra_processes,
+                )
                 for _ in range(sample_count)
             ]
             statistics_validation: dict[str, object] | None = None
+            runtime_id: str | None = None
             if statistics_socket is not None and counters_before is not None:
-                counters_after = snapshot_user_counters(query_statistics(statistics_socket))
+                statistics_after = query_statistics(statistics_socket)
+                counters_after = snapshot_user_counters(statistics_after)
+                runtime_id = str(statistics_after["runtime_id"])
+                if statistics_before is None or statistics_before.get("runtime_id") != runtime_id:
+                    raise RuntimeError("user-statistics runtime identity changed during benchmark")
                 observed_delta = {
                     field: counters_after[field] - counters_before[field]
                     for field in COUNTER_FIELDS
@@ -1023,11 +1573,29 @@ def run_case(
                     "expected_delta": expected_delta,
                     "observed_delta": observed_delta,
                 }
+            audit_ingest: dict[str, object] | None = None
+            if auditd is not None:
+                if audit_health_client is None or audit_health_before is None or runtime_id is None:
+                    raise RuntimeError("enabled audit case lacks health or runtime identity evidence")
+                audit_ingest = wait_for_audit_ingest(
+                    audit_health_client,
+                    audit_health_before,
+                    runtime_id,
+                    server,
+                )
             for label, process in processes.items():
                 process.assert_running(label)
+            if auditd is not None:
+                assert_same_auditd_process(auditd)
             return {
                 "name": case_name,
                 "runtime_user_stats": runtime_statistics,
+                "runtime_user_audit": runtime_user_audit,
+                "native_process_measurement": True,
+                "producer_user": producer_identity.pw_name,
+                "producer_uid": producer_identity.pw_uid,
+                "runtime_id": runtime_id,
+                "audit_ingest": audit_ingest,
                 "runtime_user_stats_validation": statistics_validation,
                 "aggregate": aggregate_samples(samples),
                 "measurements": samples,
@@ -1066,6 +1634,50 @@ def main() -> None:
     )
     parser.add_argument("--target-root", type=Path)
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--audit-ingest-socket",
+        required=True,
+        type=Path,
+        help="canonical Unix socket of the auditd instance sampled by this run",
+    )
+    parser.add_argument(
+        "--auditd-user",
+        required=True,
+        help="dedicated account owning the auditd process and ingest socket",
+    )
+    parser.add_argument(
+        "--producer-user",
+        required=True,
+        help="account used to run benchmark ssserver and accepted by auditd",
+    )
+    parser.add_argument(
+        "--audit-export-socket",
+        required=True,
+        type=Path,
+        help="auditd export socket used for signed before/after health evidence",
+    )
+    parser.add_argument(
+        "--audit-export-user",
+        required=True,
+        help="account authorized by auditd to query the export socket",
+    )
+    parser.add_argument(
+        "--audit-hmac-key-file",
+        required=True,
+        type=Path,
+        help="auditd HMAC key file; key bytes are never written to the report",
+    )
+    parser.add_argument(
+        "--audit-node-id",
+        required=True,
+        help="node identifier configured in auditd and user_stats",
+    )
+    parser.add_argument(
+        "--auditd-pid",
+        required=True,
+        type=int,
+        help="PID of the live auditd process sampled by this run",
+    )
     parser.add_argument("--samples", type=int, default=5)
     parser.add_argument("--warmups", type=int, default=1)
     parser.add_argument("--tcp-workers", type=int, default=4)
@@ -1077,6 +1689,13 @@ def main() -> None:
     parser.add_argument("--monitor-interval", type=float, default=0.2)
     parser.add_argument("--offline-build", action="store_true")
     arguments = parser.parse_args()
+
+    if platform.system() != "Linux":
+        parser.error("native user-audit data-path evidence can only be collected on Linux")
+    if os.geteuid() != 0:
+        parser.error(
+            "native evidence requires root to run ssserver and health queries as distinct service users"
+        )
 
     for name in (
         "samples",
@@ -1103,6 +1722,27 @@ def main() -> None:
     locked_commit = project_locked_commit()
     assert_locked_upstream(upstream, locked_commit)
     plus_base_verification = assert_plus_base(plus, locked_commit)
+    audit_ingest_socket = arguments.audit_ingest_socket.absolute()
+    auditd = capture_auditd_process(
+        arguments.auditd_pid,
+        arguments.auditd_user,
+        audit_ingest_socket,
+    )
+    try:
+        producer_identity = pwd.getpwnam(arguments.producer_user)
+    except KeyError:
+        parser.error(f"--producer-user does not exist: {arguments.producer_user}")
+    audit_export_socket = arguments.audit_export_socket.absolute()
+    audit_health_client = capture_audit_health_client(
+        audit_export_socket,
+        arguments.audit_export_user,
+        arguments.audit_node_id,
+        arguments.audit_hmac_key_file.absolute(),
+        auditd.uid,
+    )
+    if len({auditd.uid, producer_identity.pw_uid, audit_health_client.uid}) != 3:
+        parser.error("auditd, producer and export peer must resolve to distinct UIDs")
+    run_id = uuid.uuid4().hex
 
     workload = Workload(
         tcp_workers=arguments.tcp_workers,
@@ -1135,12 +1775,18 @@ def main() -> None:
         )
         plus_binaries = build_binaries(
             plus,
-            target_root / "plus-user-stats",
-            feature="user-stats",
+            target_root / "plus-user-audit",
+            feature="user-audit",
             offline=arguments.offline_build,
+            include_auditd=True,
         )
         upstream_artifacts = build_artifact_report(upstream_binaries)
         plus_artifacts = build_artifact_report(plus_binaries)
+        built_auditd = plus_binaries[2]
+        if built_auditd is None or file_sha256(built_auditd) != auditd.executable_sha256:
+            raise RuntimeError(
+                "running auditd executable does not match the current plus user-audit build"
+            )
         identity_key = random_key()
         user_key = random_key()
         with EchoServices() as echo:
@@ -1152,6 +1798,11 @@ def main() -> None:
                     identity_key,
                     user_key,
                     False,
+                    False,
+                    None,
+                    None,
+                    producer_identity,
+                    audit_health_client.node_id,
                     workload,
                     arguments.warmups,
                     arguments.samples,
@@ -1164,6 +1815,11 @@ def main() -> None:
                     identity_key,
                     user_key,
                     False,
+                    False,
+                    None,
+                    None,
+                    producer_identity,
+                    audit_health_client.node_id,
                     workload,
                     arguments.warmups,
                     arguments.samples,
@@ -1176,20 +1832,53 @@ def main() -> None:
                     identity_key,
                     user_key,
                     True,
+                    True,
+                    auditd,
+                    audit_health_client,
+                    producer_identity,
+                    audit_health_client.node_id,
                     workload,
                     arguments.warmups,
                     arguments.samples,
                     arguments.monitor_interval,
                 ),
             ]
+        assert_same_auditd_process(auditd)
     finally:
         if temporary_target is not None:
             temporary_target.cleanup()
 
+    enabled_aggregate = cases[2]["aggregate"]
+    if not isinstance(enabled_aggregate, dict):
+        raise RuntimeError("enabled case did not produce aggregate measurements")
+    auditd_peak_rss = enabled_aggregate["process_peak_rss_kib_max"].get("auditd")
+    auditd_sample_count = enabled_aggregate["process_rss_sample_count_min"].get("auditd")
+    if not isinstance(auditd_peak_rss, int) or not isinstance(auditd_sample_count, int):
+        raise RuntimeError("enabled case did not collect complete auditd RSS measurements")
+    audit_ingest = cases[2].get("audit_ingest")
+    if not isinstance(audit_ingest, dict):
+        raise RuntimeError("enabled case did not produce signed auditd ingest evidence")
+    auditd_report = auditd.report(run_id, auditd_peak_rss, auditd_sample_count)
+    auditd_report.update(
+        {
+            "producer_user": producer_identity.pw_name,
+            "producer_uid": producer_identity.pw_uid,
+            "export_user": audit_health_client.user,
+            "export_uid": audit_health_client.uid,
+            "export_socket_path": str(audit_health_client.socket_path),
+            "export_socket_device": audit_health_client.socket_device,
+            "export_socket_inode": audit_health_client.socket_inode,
+            "node_id": audit_health_client.node_id,
+            "ingest": audit_ingest,
+        }
+    )
+
     report = {
         "schema_version": 1,
+        "run_id": run_id,
         "generated_at_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
         "benchmark": "shadowsocks-rust-plus-loopback-data-path",
+        "evidence_kind": "native_user_audit_data_path",
         "workload_network_scope": "IPv4 loopback only",
         "build": {
             "profile": "release",
@@ -1200,11 +1889,11 @@ def main() -> None:
             "plus_worktree_state": git_worktree_state(plus),
             "plus_base_verification": plus_base_verification,
             "upstream_extra_features": [],
-            "plus_extra_features": ["user-stats"],
+            "plus_extra_features": ["user-audit"],
             "child_rust_log": "off",
             "artifacts": {
                 "upstream": upstream_artifacts,
-                "plus_user_stats": plus_artifacts,
+                "plus_user_audit": plus_artifacts,
             },
         },
         "environment": {
@@ -1240,6 +1929,7 @@ def main() -> None:
             },
         },
         "cases": cases,
+        "auditd": auditd_report,
     }
     encoded = json.dumps(report, ensure_ascii=False, indent=2) + "\n"
     if arguments.output is None:
@@ -1249,4 +1939,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "--audit-health-helper":
+        raise SystemExit(_audit_health_helper_main(sys.argv[2:]))
     main()
