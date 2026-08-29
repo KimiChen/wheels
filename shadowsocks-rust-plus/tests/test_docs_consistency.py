@@ -61,5 +61,59 @@ class MockCollectorDocsTests(unittest.TestCase):
         )
 
 
+class TestScriptDocsTests(unittest.TestCase):
+    """tests/README.md 对 scripts/test.sh 的描述必须与脚本实际分支一致。"""
+
+    ALWAYS_HEADING = "`scripts/test.sh` 无条件执行（不受 `--no-integration` 影响）的检查是："
+    INTEGRATION_HEADING = "只有未给出 `--no-integration` 时才追加执行的检查是："
+    INTEGRATION_END = "`SHADOWSOCKS_RUN_FUZZ=1` 时还会追加调用"
+    INTEGRATION_MARKER = 'if [[ "$run_integration" -eq 1 ]]; then'
+    # 审计专用门禁：它们无条件运行，必须在测试文档里点名，否则等于没有交付说明。
+    REQUIRED_AUDIT_GATES = (
+        "check_audit_static.py",
+        "test_check_audit_static.py",
+        "test_fuzz_target.py",
+        "test_panic_abort.py",
+        "test_benchmark_audit.py",
+        "test_integration_audit.py",
+        "benchmark_audit.py",
+        "test_docs_consistency.py",
+    )
+
+    def setUp(self) -> None:
+        self.readme = read(TESTS / "README.md")
+        self.script = read(ROOT / "scripts" / "test.sh")
+        self.assertIn(self.INTEGRATION_MARKER, self.script)
+        self.unconditional, self.integration_only = self.script.split(self.INTEGRATION_MARKER, 1)
+
+    def documented(self, start: str, end: str) -> list[str]:
+        self.assertIn(start, self.readme)
+        head = self.readme.index(start)
+        self.assertIn(end, self.readme[head:])
+        tail = self.readme.index(end, head)
+        names = re.findall(r"\]\(([A-Za-z0-9_]+\.py)\)", self.readme[head:tail])
+        self.assertTrue(names, f"{start} 段落没有列出任何脚本")
+        return names
+
+    def test_documented_unconditional_checks_really_run_unconditionally(self) -> None:
+        for name in self.documented(self.ALWAYS_HEADING, self.INTEGRATION_HEADING):
+            self.assertIn(f"tests/{name}", self.unconditional, name)
+            self.assertNotIn(f"tests/{name}", self.integration_only, name)
+
+    def test_documented_integration_checks_are_really_integration_gated(self) -> None:
+        for name in self.documented(self.INTEGRATION_HEADING, self.INTEGRATION_END):
+            self.assertIn(f"tests/{name}", self.integration_only, name)
+            self.assertNotIn(f"tests/{name}", self.unconditional, name)
+
+    def test_audit_gate_scripts_are_named_in_the_test_docs(self) -> None:
+        documented = set(self.documented(self.ALWAYS_HEADING, self.INTEGRATION_HEADING))
+        for gate in self.REQUIRED_AUDIT_GATES:
+            self.assertIn(gate, documented)
+
+    def test_without_audit_switch_is_documented(self) -> None:
+        self.assertIn("--without-audit", self.script)
+        self.assertIn("--without-audit", self.readme)
+
+
 if __name__ == "__main__":
     unittest.main()

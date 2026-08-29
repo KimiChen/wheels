@@ -24,25 +24,53 @@
 ./scripts/test.sh --source /path/to/prepared-shadowsocks-rust
 ```
 
-只运行 Rust/编译测试而跳过 Python 结算和真实进程集成测试：
+跳过需要真实进程或外部依赖的集成检查（Rust 编译/单元测试与全部审计门禁脚本仍然执行）：
 
 ```bash
 ./scripts/test.sh --source /path/to/prepared-shadowsocks-rust --no-integration
 ```
 
-`scripts/test.sh` 的固定检查包括：
+跳过全部 user-audit 相关检查（协议/auditd 单元测试与非 Linux 上的交叉 target check）：
 
-1. Linux 上运行 workspace lib/bin 的 `user-audit` Rust 单元测试；非 Linux 上改跑 `user-stats`
+```bash
+./scripts/test.sh --source /path/to/prepared-shadowsocks-rust --without-audit
+```
+
+`scripts/test.sh` 无条件执行（不受 `--no-integration` 影响）的检查是：
+
+1. 仓库 `tests/golden_vectors.json` 与源码内 protocol golden vectors 逐字节一致；
+2. Linux 上运行 workspace lib/bin 的 `user-audit` Rust 单元测试；非 Linux 上改跑 `user-stats`
    feature-off 路径并排除 Linux-only auditd；
-2. core 的 AEAD-2022 TCP EIH 认证用户透传测试；
-3. service 只启用普通 `server`、不启用 `user-stats` 的独立编译，防止 Cargo workspace
+3. core 的 AEAD-2022 TCP EIH 认证用户透传测试；
+4. service 只启用普通 `server`、不启用 `user-stats` 的独立 `cargo check`，防止 Cargo workspace
    feature 合并掩盖 gating 错误；
-4. HTTP response framing 与 snapshot schema 的 Python 单元测试；
-5. 结算模型契约测试；
-6. 私有凭据源生成、规范化和五配置一致性工具测试；
-7. 确定性 Linux 双二进制发布目录、manifest、SHA-256 和 detached 签名验签测试；
-8. 真实 `ssserver`/`sslocal` TCP+UDP 集成测试；
-9. `shadowsocks-audit-protocol`/`shadowsocks-auditd` 单元测试与 mock collector 协议测试。
+5. `shadowsocks-audit-protocol` 单元测试，以及 `shadowsocks-auditd` 的 Linux 单元测试或非 Linux
+   上的交叉 target `cargo check --all-targets`（`--without-audit` 时整段跳过）；
+6. 审计 panic/索引静态护栏 [`check_audit_static.py`](check_audit_static.py) 及其自测
+   [`test_check_audit_static.py`](test_check_audit_static.py)；
+7. fuzz 入口清单 [`test_fuzz_target.py`](test_fuzz_target.py) 与 release `panic = "abort"` 门禁
+   [`test_panic_abort.py`](test_panic_abort.py)；
+8. 发布性能门禁自测 [`test_benchmark_audit.py`](test_benchmark_audit.py)、auditd 集成脚本自测
+   [`test_integration_audit.py`](test_integration_audit.py)，以及
+   [`benchmark_audit.py`](benchmark_audit.py) 的一次短参数合成预检冒烟；
+9. 文档与实现一致性检查 [`test_docs_consistency.py`](test_docs_consistency.py)。
+
+只有未给出 `--no-integration` 时才追加执行的检查是：
+
+10. 私有凭据源生成、规范化和五配置一致性工具测试
+    [`test_cluster_users.py`](test_cluster_users.py)；
+11. HTTP response framing 与 snapshot schema 的 Python 单元测试
+    [`test_http_unix.py`](test_http_unix.py)；
+12. 确定性 Linux 双二进制发布目录、manifest、SHA-256 和 detached 签名验签测试
+    [`test_release_artifact.py`](test_release_artifact.py)；
+13. 结算模型契约测试 [`test_settlement.py`](test_settlement.py)；
+14. mock collector 协议测试 [`test_mock_collector.py`](test_mock_collector.py)；
+15. auditd 打包模板与账号/权限测试 [`test_audit_packaging.py`](test_audit_packaging.py)；
+16. 真实 `ssserver`/`sslocal` TCP+UDP 集成测试
+    [`integration_user_stats.py`](integration_user_stats.py)；
+17. 仅 Linux：auditd 真实进程集成测试 [`integration_audit.py`](integration_audit.py)。
+
+`SHADOWSOCKS_RUN_FUZZ=1` 时还会追加调用 `scripts/test-fuzz.sh`；默认不运行 fuzz。
 
 `shadowsocks-auditd` 是 Linux-only。在 macOS 等非 Linux 主机上，脚本会从宿主 workspace 测试中排除
 auditd，并把 workspace feature 降为 `user-stats`；producer 的 `user-audit` 单元测试不会在宿主
