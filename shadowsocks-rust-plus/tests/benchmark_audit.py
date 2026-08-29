@@ -32,6 +32,10 @@ AUDITD_RSS_LIMIT_KIB = 128 * 1024
 SCENARIOS = ("healthy", "offline", "slow_ack", "queue_full", "spool_full")
 DATA_PATH_BENCHMARK = "shadowsocks-rust-plus-loopback-data-path"
 DATA_PATH_EVIDENCE_KIND = "native_user_audit_data_path"
+# A workload that only ever addresses one UDP destination keeps a single audit
+# window entry alive per association, so the ssserver RSS budget of this file
+# cannot observe the window cache at all. Refuse such evidence.
+DATA_PATH_MIN_UDP_TARGETS = 8
 DATA_PATH_CASES = (
     "locked_upstream",
     "plus_compiled_runtime_disabled",
@@ -267,6 +271,9 @@ def _evaluate_data_path(
     run_id = report.get("run_id")
     if not isinstance(run_id, str) or not re.fullmatch(r"[0-9a-f]{32}", run_id):
         issues.append("invalid benchmark run_id")
+    udp_targets = _integer(_nested_value(report, "workload", "udp", "distinct_targets"))
+    if udp_targets is None or udp_targets < DATA_PATH_MIN_UDP_TARGETS:
+        issues.append("workload did not exercise enough distinct UDP targets")
 
     build = _mapping(report.get("build"))
     plus_features = build.get("plus_extra_features") if build is not None else None

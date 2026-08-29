@@ -95,6 +95,9 @@ class AuditBenchmarkTest(unittest.TestCase):
             "benchmark": MODULE.DATA_PATH_BENCHMARK,
             "evidence_kind": MODULE.DATA_PATH_EVIDENCE_KIND,
             "environment": {"system": "Linux"},
+            "workload": {
+                "udp": {"distinct_targets": MODULE.DATA_PATH_MIN_UDP_TARGETS},
+            },
             "build": {
                 "locked": True,
                 "plus_extra_features": (
@@ -302,6 +305,18 @@ class AuditBenchmarkTest(unittest.TestCase):
         self.assertIsNone(report["data_path"]["native_evidence_gate"])
         self.assertTrue(
             any("socket inode" in issue for issue in report["data_path"]["evidence_issues"])
+        )
+
+    def test_single_udp_target_workload_cannot_be_release_evidence(self) -> None:
+        evidence = self._native_report()
+        workload = evidence["workload"]
+        assert isinstance(workload, dict) and isinstance(workload["udp"], dict)
+        workload["udp"]["distinct_targets"] = 1
+        report = self._run_with_data_path(evidence)
+        self.assertIsNone(report["data_path"]["native_evidence_gate"])
+        self.assertIn(
+            "workload did not exercise enough distinct UDP targets",
+            report["data_path"]["evidence_issues"],
         )
 
     def test_missing_measurements_cannot_pass_enforcement_gate(self) -> None:

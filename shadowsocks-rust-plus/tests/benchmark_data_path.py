@@ -41,6 +41,7 @@ import tempfile
 import threading
 import time
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import BinaryIO
@@ -55,6 +56,10 @@ from mock_collector import (
 )
 
 LOCKED_UPSTREAM_COMMIT = "7ee1aa9223ed8f4d34734aac919036c8ad4502c2"
+# Number of distinct UDP tunnel targets driven by the default workload. The
+# benchmark gate refuses data-path evidence below its own minimum, so this
+# default must stay at or above ``benchmark_audit.DATA_PATH_MIN_UDP_TARGETS``.
+DEFAULT_UDP_TARGETS = 16
 METHOD = "2022-blake3-aes-128-gcm"
 MIB = 1024 * 1024
 U64_MAX = (1 << 64) - 1
@@ -139,9 +144,17 @@ class ThreadedTcpServer(socketserver.ThreadingTCPServer):
 
 
 class EchoServices:
-    """TCP and UDP echo services sharing one loopback port."""
+    """TCP and UDP echo services: one shared port plus extra UDP targets.
 
-    def __init__(self) -> None:
+    A workload with a single UDP destination only ever populates one audit
+    window entry per association, so the ssserver RSS gate cannot observe the
+    window cache at all. The extra UDP-only echo ports give the workload
+    distinct ``host:port`` targets behind their own tunnel locals.
+    """
+
+    def __init__(self, udp_targets: int = 1) -> None:
+        if udp_targets < 1:
+            raise ValueError("udp_targets must be positive")
         for _ in range(32):
             tcp = ThreadedTcpServer(("127.0.0.1", 0), EchoHandler)
             port = int(tcp.server_address[1])
@@ -159,32 +172,57 @@ class EchoServices:
         else:
             raise RuntimeError("could not bind TCP and UDP echo services to one port")
         self.udp.settimeout(0.2)
+        self.udp_sockets: list[socket.socket] = [self.udp]
+        try:
+            while len(self.udp_sockets) < udp_targets:
+                extra = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                try:
+                    extra.bind(("127.0.0.1", 0))
+                except OSError:
+                    extra.close()
+                    raise
+                extra.settimeout(0.2)
+                self.udp_sockets.append(extra)
+        except OSError:
+            for endpoint in self.udp_sockets:
+                endpoint.close()
+            self.tcp.server_close()
+            raise
+        self.udp_ports: tuple[int, ...] = tuple(
+            int(endpoint.getsockname()[1]) for endpoint in self.udp_sockets
+        )
         self.stop_event = threading.Event()
         self.tcp_thread = threading.Thread(target=self.tcp.serve_forever, daemon=True)
-        self.udp_thread = threading.Thread(target=self._serve_udp, daemon=True)
+        self.udp_threads = [
+            threading.Thread(target=self._serve_udp, args=(endpoint,), daemon=True)
+            for endpoint in self.udp_sockets
+        ]
 
-    def _serve_udp(self) -> None:
+    def _serve_udp(self, endpoint: socket.socket) -> None:
         while not self.stop_event.is_set():
             try:
-                data, peer = self.udp.recvfrom(65_535)
+                data, peer = endpoint.recvfrom(65_535)
             except socket.timeout:
                 continue
             except OSError:
                 return
-            self.udp.sendto(data, peer)
+            endpoint.sendto(data, peer)
 
     def __enter__(self) -> EchoServices:
         self.tcp_thread.start()
-        self.udp_thread.start()
+        for thread in self.udp_threads:
+            thread.start()
         return self
 
     def __exit__(self, *_: object) -> None:
         self.stop_event.set()
         self.tcp.shutdown()
         self.tcp.server_close()
-        self.udp.close()
+        for endpoint in self.udp_sockets:
+            endpoint.close()
         self.tcp_thread.join(timeout=2)
-        self.udp_thread.join(timeout=2)
+        for thread in self.udp_threads:
+            thread.join(timeout=2)
 
 
 class ChildProcess:
@@ -1028,21 +1066,31 @@ def tcp_worker(
 
 def udp_worker(
     worker_id: int,
-    port: int,
+    ports: Sequence[int],
     datagrams: int,
     payload_size: int,
     gate: StartGate,
 ) -> dict[str, object]:
+    if not ports:
+        raise RuntimeError("UDP worker requires at least one tunnel port")
     prefix = hashlib.sha256(f"ssrp-udp-{worker_id}".encode("ascii")).digest()
     filler_length = payload_size - 8
     filler = (prefix * math.ceil(filler_length / len(prefix)))[:filler_length]
     transferred = 0
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:
-        client.settimeout(10)
-        client.connect(("127.0.0.1", port))
+    clients: list[socket.socket] = []
+    try:
+        for port in ports:
+            client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            clients.append(client)
+            client.settimeout(10)
+            client.connect(("127.0.0.1", port))
         gate.worker_ready()
         started = time.perf_counter_ns()
         for sequence in range(datagrams):
+            # Rotate over every tunnel so one worker keeps an audit window
+            # entry alive per (association, target) pair. A single target is
+            # structurally unable to exercise the window cache.
+            client = clients[sequence % len(clients)]
             payload = sequence.to_bytes(8, "big") + filler
             if client.send(payload) != len(payload):
                 raise RuntimeError("UDP datagram was only partially sent")
@@ -1051,6 +1099,9 @@ def udp_worker(
                 raise RuntimeError("UDP echo integrity check failed")
             transferred += len(payload)
         elapsed = (time.perf_counter_ns() - started) / 1_000_000_000
+    finally:
+        for client in clients:
+            client.close()
     return {"protocol": "udp", "bytes_each_direction": transferred, "seconds": elapsed}
 
 
@@ -1062,6 +1113,7 @@ class Workload:
     tcp_chunk_bytes: int
     udp_datagrams_per_worker: int
     udp_payload_bytes: int
+    udp_targets: int = 1
 
     @property
     def concurrency(self) -> int:
@@ -1086,6 +1138,9 @@ class Workload:
                 "datagram_payload_bytes": self.udp_payload_bytes,
                 "datagrams_per_worker": self.udp_datagrams_per_worker,
                 "bytes_per_sample_per_direction": udp_bytes,
+                # The release gate rejects evidence collected against a single
+                # UDP destination, which cannot observe the audit window cache.
+                "distinct_targets": self.udp_targets,
             },
             "offered_payload_ratio": {
                 "tcp": round(tcp_bytes / total, 6),
@@ -1110,12 +1165,14 @@ class Workload:
 
 
 def run_sample(
-    local_port: int,
+    local_ports: Sequence[int],
     workload: Workload,
     processes: dict[str, ChildProcess],
     monitor_interval: float,
     extra_processes: dict[str, int] | None = None,
 ) -> dict[str, object]:
+    if len(local_ports) != workload.udp_targets:
+        raise RuntimeError("one tunnel local port is required per UDP target")
     gate = StartGate(workload.concurrency)
     process_pids = {name: child.pid for name, child in processes.items()}
     for name, pid in (extra_processes or {}).items():
@@ -1132,7 +1189,7 @@ def run_sample(
                     pool.submit(
                         tcp_worker,
                         worker_id,
-                        local_port,
+                        local_ports[0],
                         workload.tcp_bytes_per_worker,
                         workload.tcp_chunk_bytes,
                         gate,
@@ -1143,7 +1200,7 @@ def run_sample(
                     pool.submit(
                         udp_worker,
                         worker_id,
-                        local_port,
+                        local_ports,
                         workload.udp_datagrams_per_worker,
                         workload.udp_payload_bytes,
                         gate,
@@ -1367,11 +1424,15 @@ def server_config(
 
 
 def local_config(
-    local_port: int,
+    local_ports: Sequence[int],
     server_port: int,
-    echo_port: int,
+    echo_ports: Sequence[int],
     password: str,
 ) -> dict[str, object]:
+    if not local_ports or len(local_ports) != len(echo_ports):
+        raise RuntimeError("each forward target needs exactly one tunnel local port")
+    if len(set(local_ports)) != len(local_ports) or len(set(echo_ports)) != len(echo_ports):
+        raise RuntimeError("tunnel local and forward ports must be distinct")
     return {
         "locals": [
             {
@@ -1382,6 +1443,7 @@ def local_config(
                 "forward_port": echo_port,
                 "mode": "tcp_and_udp",
             }
+            for local_port, echo_port in zip(local_ports, echo_ports)
         ],
         "server": "127.0.0.1",
         "server_port": server_port,
@@ -1451,7 +1513,7 @@ def wait_for_audit_ingest(
 def run_case(
     case_name: str,
     binaries: tuple[Path, Path, Path | None],
-    echo_port: int,
+    echo_ports: Sequence[int],
     identity_key: str,
     user_key: str,
     runtime_statistics: bool,
@@ -1471,8 +1533,14 @@ def run_case(
         temp = Path(temp_name).resolve()
         temp.chmod(0o700)
         os.chown(temp, producer_identity.pw_uid, producer_identity.pw_gid)
+        if len(echo_ports) != workload.udp_targets:
+            raise RuntimeError("echo target count does not match the workload UDP targets")
         server_port = reserve_port()
-        local_port = reserve_port()
+        local_ports: list[int] = []
+        while len(local_ports) < len(echo_ports):
+            candidate = reserve_port()
+            if candidate != server_port and candidate not in local_ports:
+                local_ports.append(candidate)
         statistics_socket = temp / "user-stats.sock" if runtime_statistics else None
         if runtime_user_audit != (auditd is not None and audit_health_client is not None):
             raise RuntimeError("enabled user-audit case requires process and signed health evidence")
@@ -1497,9 +1565,9 @@ def run_case(
         secure_write_json(
             local_path,
             local_config(
-                local_port,
+                local_ports,
                 server_port,
-                echo_port,
+                echo_ports,
                 f"{identity_key}:{user_key}",
             ),
         )
@@ -1515,7 +1583,8 @@ def run_case(
             wait_for_tcp(server_port, [("ssserver", server)])
             local = ChildProcess([str(binaries[1]), "-c", str(local_path)], temp / "local.log")
             processes = {"ssserver": server, "sslocal": local}
-            wait_for_tcp(local_port, list(processes.items()))
+            for port in local_ports:
+                wait_for_tcp(port, list(processes.items()))
             time.sleep(0.1)
 
             statistics_before = (
@@ -1530,7 +1599,7 @@ def run_case(
             extra_processes = {"auditd": auditd.pid} if auditd is not None else None
             for _ in range(warmups):
                 run_sample(
-                    local_port,
+                    local_ports,
                     workload,
                     processes,
                     monitor_interval,
@@ -1538,7 +1607,7 @@ def run_case(
                 )
             samples = [
                 run_sample(
-                    local_port,
+                    local_ports,
                     workload,
                     processes,
                     monitor_interval,
@@ -1617,7 +1686,8 @@ def main() -> None:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         epilog=(
             "Short smoke workload: --samples 1 --warmups 0 --tcp-workers 1 "
-            "--udp-workers 1 --tcp-mib-per-worker 1 --udp-datagrams-per-worker 20"
+            "--udp-workers 1 --tcp-mib-per-worker 1 --udp-datagrams-per-worker 20 "
+            "--udp-targets 16"
         ),
     )
     parser.add_argument(
@@ -1686,6 +1756,12 @@ def main() -> None:
     parser.add_argument("--tcp-chunk-bytes", type=int, default=65_536)
     parser.add_argument("--udp-datagrams-per-worker", type=int, default=2_000)
     parser.add_argument("--udp-payload-bytes", type=int, default=1_200)
+    parser.add_argument(
+        "--udp-targets",
+        type=int,
+        default=DEFAULT_UDP_TARGETS,
+        help="distinct UDP tunnel destinations exercised by every UDP worker",
+    )
     parser.add_argument("--monitor-interval", type=float, default=0.2)
     parser.add_argument("--offline-build", action="store_true")
     arguments = parser.parse_args()
@@ -1705,6 +1781,7 @@ def main() -> None:
         "tcp_chunk_bytes",
         "udp_datagrams_per_worker",
         "udp_payload_bytes",
+        "udp_targets",
     ):
         validate_positive(parser, name, int(getattr(arguments, name)))
     if arguments.warmups < 0:
@@ -1751,6 +1828,7 @@ def main() -> None:
         tcp_chunk_bytes=arguments.tcp_chunk_bytes,
         udp_datagrams_per_worker=arguments.udp_datagrams_per_worker,
         udp_payload_bytes=arguments.udp_payload_bytes,
+        udp_targets=arguments.udp_targets,
     )
     if any(
         value > U64_MAX
@@ -1789,12 +1867,12 @@ def main() -> None:
             )
         identity_key = random_key()
         user_key = random_key()
-        with EchoServices() as echo:
+        with EchoServices(workload.udp_targets) as echo:
             cases = [
                 run_case(
                     "locked_upstream",
                     upstream_binaries,
-                    echo.port,
+                    echo.udp_ports,
                     identity_key,
                     user_key,
                     False,
@@ -1811,7 +1889,7 @@ def main() -> None:
                 run_case(
                     "plus_compiled_runtime_disabled",
                     plus_binaries,
-                    echo.port,
+                    echo.udp_ports,
                     identity_key,
                     user_key,
                     False,
@@ -1828,7 +1906,7 @@ def main() -> None:
                 run_case(
                     "plus_runtime_enabled",
                     plus_binaries,
-                    echo.port,
+                    echo.udp_ports,
                     identity_key,
                     user_key,
                     True,
@@ -1923,8 +2001,9 @@ def main() -> None:
                     "while remote proxy setup may overlap the measured transfer"
                 ),
                 "udp": (
-                    "new connected local UDP socket per worker/sample; first-packet association "
-                    "setup is inside the timer"
+                    "one connected local UDP socket per worker/sample and tunnel target; "
+                    "datagrams rotate over every target so the audit window cache is "
+                    "populated; first-packet association setup is inside the timer"
                 ),
             },
         },

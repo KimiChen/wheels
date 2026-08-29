@@ -251,7 +251,9 @@ sudo ./tests/benchmark_data_path.py \
 脚本会在运行前后验证 PID、有效 UID、可执行文件 inode/SHA-256、ingest/export socket 身份，并通过
 签名 health 的前后 `stored_records` 增量绑定 producer runtime；启用审计的测量样本会直接采集 auditd
 RSS。默认运行 5 个测量样本和 1 个 warm-up，使用 4 个 TCP 与 4 个
-UDP worker，独立累加 worker attempt/success/error，同时记录吞吐、`ssserver`/`sslocal`/auditd 的
+UDP worker；每个 UDP worker 轮流打 `--udp-targets`（默认 16）个互不相同的 tunnel 目标，
+否则单一目标只会占用一条审计窗口缓存条目，RSS 门禁结构上观察不到该缓存。
+独立累加 worker attempt/success/error，同时记录吞吐、`ssserver`/`sslocal`/auditd 的
 CPU/RSS、环境、工作负载参数和二进制哈希。短冒烟参数可通过 `--help` 查看；依赖已经缓存时可加
 `--offline-build`。`--plus-source` 不能使用 `prepare-source.sh` 生成的无 `.git` 导出树；脚本
 必须验证锁定提交确实是 plus HEAD 的祖先，避免把不同上游误作对照。脚本不硬编码“吞吐下降/
