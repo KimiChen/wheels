@@ -19238,10 +19238,10 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..5b0ebb7924e76785c6e14e5826db6b88
  }
 diff --git a/crates/shadowsocks-service/src/server/user_audit.rs b/crates/shadowsocks-service/src/server/user_audit.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..1dbfe85859cf66317fb69d24b37e9e1e4abb14bf
+index 0000000000000000000000000000000000000000..302fb149750cd3df3b3740981f7d722e3fefe1f7
 --- /dev/null
 +++ b/crates/shadowsocks-service/src/server/user_audit.rs
-@@ -0,0 +1,4376 @@
+@@ -0,0 +1,4464 @@
 +//! Non-blocking successful-target access auditing for the server data path.
 +//!
 +//! The relay only constructs a small draft and performs bounded atomic/cache
@@ -20925,6 +20925,10 @@ index 0000000000000000000000000000000000000000..1dbfe85859cf66317fb69d24b37e9e1e
 +    /// when the bounded shutdown drain expires disappears from the final
 +    /// aggregate journald and under-reports the abandoned events.
 +    diagnostic_inflight_counts: [AtomicU64; DIAGNOSTIC_BUCKETS.len()],
++    /// Number of rate-limited runtime health lines written by the supervisor.
++    /// Only the wiring test reads it; production observability is journald.
++    #[cfg(test)]
++    health_logs: AtomicU64,
 +    #[cfg(test)]
 +    idle_session_wait_hook: Mutex<Option<IdleSessionWaitHook>>,
 +}
@@ -20970,6 +20974,8 @@ index 0000000000000000000000000000000000000000..1dbfe85859cf66317fb69d24b37e9e1e
 +            drain_started: AtomicBool::new(false),
 +            drain_completed: AtomicBool::new(false),
 +            diagnostic_inflight_counts: std::array::from_fn(|_| AtomicU64::new(0)),
++            #[cfg(test)]
++            health_logs: AtomicU64::new(0),
 +            #[cfg(test)]
 +            idle_session_wait_hook: Mutex::new(None),
 +        })
@@ -21925,6 +21931,43 @@ index 0000000000000000000000000000000000000000..1dbfe85859cf66317fb69d24b37e9e1e
 +    }
 +}
 +
++/// Expose the producer health counters at runtime.  Section 7.2 makes journald
++/// the local observability surface; sampling them only on the shutdown path
++/// leaves a degraded long-lived producer invisible for the whole process
++/// lifetime.  Counts only, at most one line per diagnostic interval.
++fn log_producer_health(emitter: &AuditEmitter, last_log: &mut Instant) {
++    if last_log.elapsed() < DIAGNOSTIC_INTERVAL {
++        return;
++    }
++    let health = emitter.health_snapshot();
++    if !health.has_issue() {
++        return;
++    }
++    *last_log = Instant::now();
++    #[cfg(test)]
++    emitter.health_logs.fetch_add(1, Ordering::Relaxed);
++    log::warn!(
++        "user audit producer health invalid_ack={} hello_nack_count={} hello_nack_degraded={} \
++         encode_error_time_unknown={} diagnostic_time_unknown={} udp_contention_time_unknown={} \
++         contention_saturated={} producer_gap_saturated={} udp_window_poison_resets={} \
++         diagnostic_encode_errors={} diagnostic_permanent_nacks={} sequence_exhausted_events={} \
++         sequence_exhausted={}",
++        health.invalid_ack,
++        health.hello_nack_count,
++        health.hello_nack_degraded,
++        health.encode_error_time_unknown,
++        health.diagnostic_time_unknown,
++        health.udp_contention_time_unknown,
++        health.contention_saturated,
++        health.producer_gap_saturated,
++        health.udp_window_poison_resets,
++        health.diagnostic_encode_errors,
++        health.diagnostic_permanent_nacks,
++        health.sequence_exhausted_events,
++        health.sequence_exhausted,
++    );
++}
++
 +fn supervisor_drained(emitter: &AuditEmitter, state: &SupervisorState) -> bool {
 +    let lifecycle = emitter.lifecycle_state.load(Ordering::Acquire);
 +    lifecycle & CLOSED_BIT != 0
@@ -21944,7 +21987,9 @@ index 0000000000000000000000000000000000000000..1dbfe85859cf66317fb69d24b37e9e1e
 +    let now = Instant::now();
 +    let mut last_error_log = rate_limit_stamp_before(now, DIAGNOSTIC_INTERVAL);
 +    let mut last_hello_nack_log = rate_limit_stamp_before(now, DIAGNOSTIC_INTERVAL);
++    let mut last_health_log = rate_limit_stamp_before(now, DIAGNOSTIC_INTERVAL);
 +    loop {
++        log_producer_health(&emitter, &mut last_health_log);
 +        fill_pending(&emitter, &mut state);
 +        if supervisor_drained(&emitter, &state) {
 +            break;
@@ -23253,6 +23298,49 @@ index 0000000000000000000000000000000000000000..1dbfe85859cf66317fb69d24b37e9e1e
 +        tokio::time::timeout(Duration::from_millis(100), emitter.shutdown_notify.notified())
 +            .await
 +            .expect("close signal must retain one supervisor permit");
++    }
++
++    #[test]
++    fn producer_health_report_is_rate_limited_and_only_when_degraded() {
++        let config = UserAuditConfig::new("/tmp/audit.sock", test_auditd_user());
++        let emitter = AuditEmitter::new(runtime(), &config);
++        let mut last_log = rate_limit_stamp_before(Instant::now(), DIAGNOSTIC_INTERVAL);
++
++        // A healthy producer stays silent and keeps its stamp available.
++        log_producer_health(&emitter, &mut last_log);
++        assert_eq!(emitter.health_logs.load(Ordering::Acquire), 0);
++
++        saturating_add_atomic(&emitter.invalid_ack, 1);
++        log_producer_health(&emitter, &mut last_log);
++        assert_eq!(emitter.health_logs.load(Ordering::Acquire), 1);
++        // A second call inside the same interval is suppressed.
++        log_producer_health(&emitter, &mut last_log);
++        assert_eq!(emitter.health_logs.load(Ordering::Acquire), 1);
++    }
++
++    #[cfg(unix)]
++    #[tokio::test]
++    async fn supervisor_reports_producer_health_while_running() {
++        let directory = tempdir().expect("temporary directory");
++        let socket_path = directory.path().join("missing-ingest.sock");
++        let config = UserAuditConfig::new(&socket_path, test_auditd_user());
++        let emitter = AuditEmitter::new(runtime(), &config);
++        // A counter that degrades long before shutdown must reach journald from
++        // the running supervisor, not only from the final shutdown report.
++        saturating_add_atomic(&emitter.invalid_ack, 1);
++        let supervisor = emitter.spawn_supervisor();
++        for _ in 0..200 {
++            if emitter.health_logs.load(Ordering::Acquire) != 0 {
++                break;
++            }
++            tokio::time::sleep(Duration::from_millis(10)).await;
++        }
++        assert_eq!(emitter.health_logs.load(Ordering::Acquire), 1);
++        emitter.close_emitter();
++        tokio::time::timeout(Duration::from_secs(10), supervisor)
++            .await
++            .expect("supervisor did not stop")
++            .expect("supervisor task failed");
 +    }
 +
 +    #[cfg(unix)]
