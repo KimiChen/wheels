@@ -19238,10 +19238,10 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..5b0ebb7924e76785c6e14e5826db6b88
  }
 diff --git a/crates/shadowsocks-service/src/server/user_audit.rs b/crates/shadowsocks-service/src/server/user_audit.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..3dfa4314e18b4c9c10a4a06c06d0bbb4e59f314a
+index 0000000000000000000000000000000000000000..60ae45752019d5e624193c93f94b9454b33c898e
 --- /dev/null
 +++ b/crates/shadowsocks-service/src/server/user_audit.rs
-@@ -0,0 +1,4180 @@
+@@ -0,0 +1,4227 @@
 +//! Non-blocking successful-target access auditing for the server data path.
 +//!
 +//! The relay only constructs a small draft and performs bounded atomic/cache
@@ -20905,6 +20905,12 @@ index 0000000000000000000000000000000000000000..3dfa4314e18b4c9c10a4a06c06d0bbb4
 +    /// second two-second drain and exceed the process shutdown budget.
 +    drain_started: AtomicBool,
 +    drain_completed: AtomicBool,
++    /// Original `count` of the diagnostic snapshot currently owned by the
++    /// supervisor, per bucket.  `take_diagnostic_round_robin` clears the
++    /// accumulator, so without this mirror a snapshot still held in-flight
++    /// when the bounded shutdown drain expires disappears from the final
++    /// aggregate journald and under-reports the abandoned events.
++    diagnostic_inflight_counts: [AtomicU64; DIAGNOSTIC_BUCKETS.len()],
 +    #[cfg(test)]
 +    idle_session_wait_hook: Mutex<Option<IdleSessionWaitHook>>,
 +}
@@ -20949,6 +20955,7 @@ index 0000000000000000000000000000000000000000..3dfa4314e18b4c9c10a4a06c06d0bbb4
 +            sequence_exhausted_events: AtomicU64::new(0),
 +            drain_started: AtomicBool::new(false),
 +            drain_completed: AtomicBool::new(false),
++            diagnostic_inflight_counts: std::array::from_fn(|_| AtomicU64::new(0)),
 +            #[cfg(test)]
 +            idle_session_wait_hook: Mutex::new(None),
 +        })
@@ -21147,14 +21154,22 @@ index 0000000000000000000000000000000000000000..3dfa4314e18b4c9c10a4a06c06d0bbb4
 +    /// This is intentionally non-destructive: a concurrent supervisor may still
 +    /// own an in-flight snapshot while the outer drain deadline expires.
 +    pub(crate) fn diagnostic_pending_counts(&self) -> [u64; 6] {
-+        [
++        let accumulated = [
 +            self.queue_overflow.approximate_count(),
 +            self.encode_error.approximate_count(),
 +            self.permanent_nack[0].approximate_count(),
 +            self.permanent_nack[1].approximate_count(),
 +            self.permanent_nack[2].approximate_count(),
 +            self.contention.approximate_count(),
-+        ]
++        ];
++        // A snapshot owned by the supervisor has already left its accumulator.
++        // Add the mirrored count so an aborted or budget-expired shutdown still
++        // reports the events it gave up on.
++        let mut counts = accumulated;
++        for (count, mirrored) in counts.iter_mut().zip(self.diagnostic_inflight_counts.iter()) {
++            *count = count.saturating_add(mirrored.load(Ordering::Acquire));
++        }
++        counts
 +    }
 +
 +    /// Capture queue, in-flight, and accumulator counts without taking
@@ -21563,6 +21578,10 @@ index 0000000000000000000000000000000000000000..3dfa4314e18b4c9c10a4a06c06d0bbb4
 +                    last_seen_unix_ms: last_seen,
 +                }
 +            };
++            // Publish the taken count before the candidate escapes: from here
++            // on the accumulator is empty, so only this mirror can account for
++            // the snapshot in a shutdown report.
++            self.diagnostic_inflight_counts[bucket.index()].store(snapshot.count, Ordering::Release);
 +            return Some(DiagnosticCandidate {
 +                draft,
 +                bucket,
@@ -21592,6 +21611,7 @@ index 0000000000000000000000000000000000000000..3dfa4314e18b4c9c10a4a06c06d0bbb4
 +        } else {
 +            self.accumulator(candidate.bucket).merge(candidate.snapshot);
 +        }
++        self.diagnostic_inflight_counts[candidate.bucket.index()].store(0, Ordering::Release);
 +        self.diagnostic_inflight
 +            .fetch_and(!candidate.bucket.bit(), Ordering::AcqRel);
 +        self.notify.notify_waiters();
@@ -21615,6 +21635,9 @@ index 0000000000000000000000000000000000000000..3dfa4314e18b4c9c10a4a06c06d0bbb4
 +                    self.request_diagnostic_retry(*bucket);
 +                }
 +            }
++            // Release the shutdown mirror only after the snapshot has been
++            // returned to its accumulator or booked as a shutdown drop.
++            self.diagnostic_inflight_counts[bucket.index()].store(0, Ordering::Release);
 +        } else if let Some(bucket) = permanent_nack.and_then(permanent_bucket) {
 +            if let PendingKind::Access { sequence } = event.kind {
 +                if self.diagnostics_frozen.load(Ordering::Acquire) {
@@ -22873,6 +22896,30 @@ index 0000000000000000000000000000000000000000..3dfa4314e18b4c9c10a4a06c06d0bbb4
 +            identity: id.identity.clone(),
 +            target: AuditTargetDraft::ip_with_port("127.0.0.1".parse().unwrap(), 80, "127.0.0.1".parse().unwrap()),
 +        }
++    }
++
++    #[test]
++    fn shutdown_report_keeps_the_in_flight_diagnostic_count() {
++        let config = UserAuditConfig::new("/tmp/audit.sock", test_auditd_user());
++        let emitter = AuditEmitter::new(runtime(), &config);
++        let index = DiagnosticBucket::QueueOverflow.index();
++        emitter.queue_overflow.add(7, Some(3), 1_787_587_200_000);
++
++        let now = Instant::now();
++        let candidate = emitter
++            .take_diagnostic_round_robin(0, 0, now, &[now; DIAGNOSTIC_BUCKETS.len()], true)
++            .expect("queue overflow snapshot");
++        assert_eq!(candidate.bucket, DiagnosticBucket::QueueOverflow);
++        // `take` emptied the accumulator, so only the shutdown mirror can still
++        // account for these seven abandoned events.
++        assert!(!emitter.queue_overflow.is_nonempty());
++        assert_eq!(emitter.shutdown_pending_snapshot().diagnostics[index], 7);
++
++        // Resolving the snapshot releases the mirror exactly once.
++        emitter.increment_pending();
++        let event = emitter.encode_candidate(candidate).expect("encoded diagnostic");
++        emitter.resolve_pending(&event, None);
++        assert_eq!(emitter.shutdown_pending_snapshot().diagnostics[index], 0);
 +    }
 +
 +    #[test]
