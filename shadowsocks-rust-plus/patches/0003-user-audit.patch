@@ -7813,10 +7813,10 @@ index 0000000000000000000000000000000000000000..6cf8d005dfef917c852be4f611d5b945
 +}
 diff --git a/crates/shadowsocks-auditd/src/spool.rs b/crates/shadowsocks-auditd/src/spool.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..6fe481d768d8b92436ece5b9e1c3d60ee9b084ee
+index 0000000000000000000000000000000000000000..842b3e37c8b926bcde77eabb3e14c5a92539f0cd
 --- /dev/null
 +++ b/crates/shadowsocks-auditd/src/spool.rs
-@@ -0,0 +1,7284 @@
+@@ -0,0 +1,7434 @@
 +//! Durable, node-local audit spool.
 +//!
 +//! The spool is deliberately synchronous.  Ingest and export perform their
@@ -15088,6 +15088,156 @@ index 0000000000000000000000000000000000000000..6fe481d768d8b92436ece5b9e1c3d60e
 +        assert!(degraded);
 +        assert!(rejected > 0);
 +        assert!(path.exists(), "malformed marker remains for operator recovery");
++    }
++
++    #[test]
++    fn open_segment_epoch_mismatch_isolates_the_open_bytes_and_starts_a_new_epoch() {
++        let dir = tempfile::tempdir().expect("tempdir");
++        let spool = Spool::open(config(dir.path())).expect("spool");
++        spool.append(&event(1), 1).expect("append");
++        let open_epoch = lock(&spool.inner).epoch.clone();
++        drop(spool);
++
++        // Only the cursor's epoch changes.  The scanned high-water mark stays
++        // below `next_spool_sequence`, so §9.4's open/state epoch mismatch is
++        // the single criterion that can force a reset here.
++        let cursor_epoch = "0123456789abcdef0123456789abcdef";
++        let state = String::from_utf8(fs::read(dir.path().join("state.json")).expect("state")).expect("utf8 state");
++        assert!(state.contains(&open_epoch));
++        fs::write(dir.path().join("state.json"), state.replace(&open_epoch, cursor_epoch)).expect("rewrite cursor");
++
++        let spool = Spool::open(config(dir.path())).expect("recover");
++        let recovered = lock(&spool.inner).epoch.clone();
++        assert_ne!(recovered, open_epoch, "an open segment from another epoch is untrusted");
++        assert_ne!(
++            recovered, cursor_epoch,
++            "the mismatching cursor epoch must not be continued"
++        );
++        assert!(
++            fs::read_dir(dir.path().join("quarantine"))
++                .expect("quarantine")
++                .filter_map(Result::ok)
++                .any(|entry| entry.file_name().to_string_lossy().starts_with("state-reset-")),
++            "the old open bytes must be isolated before the epoch changes"
++        );
++
++        let records = drain_records(&spool);
++        assert_eq!(records.len(), 1, "only the state-reset gap belongs to the new epoch");
++        let wire::AuditRecord::SpoolGap(gap) = &records[0] else {
++            panic!("expected a spool gap, got {:?}", records[0]);
++        };
++        assert_eq!(gap.reason, wire::SpoolGapReason::StateReset);
++        assert_eq!(gap.lost_spool_epoch.as_deref(), Some(open_epoch.as_str()));
++    }
++
++    #[test]
++    fn overlapping_sealed_sequence_ranges_abandon_the_epoch() {
++        let dir = tempfile::tempdir().expect("tempdir");
++        let spool = Spool::open(config(dir.path())).expect("spool");
++        spool.append(&event(1), 1).expect("append");
++        let sealed = spool.lease().expect("lease").expect("sealed batch").info.path.clone();
++        let epoch = lock(&spool.inner).epoch.clone();
++        drop(spool);
++
++        // A second surviving object claiming the same (epoch, sequence) range
++        // is evidence of a copy or rename: the epoch can no longer produce
++        // unambiguous export keys and must be abandoned.
++        let duplicate = dir
++            .path()
++            .join("sealed")
++            .join(format!("{epoch}-1-1-{}", "f".repeat(32)));
++        fs::create_dir(&duplicate).expect("duplicate batch dir");
++        fs::set_permissions(&duplicate, fs::Permissions::from_mode(0o700)).expect("dir mode");
++        for name in ["meta.json", "segment.ndjson"] {
++            fs::copy(sealed.join(name), duplicate.join(name)).expect("copy batch object");
++            fs::set_permissions(duplicate.join(name), fs::Permissions::from_mode(0o600)).expect("file mode");
++        }
++
++        let spool = Spool::open(config(dir.path())).expect("recover");
++        let inner = lock(&spool.inner);
++        assert_ne!(inner.epoch, epoch, "ambiguous sequence ranges must abandon the epoch");
++        assert!(
++            inner
++                .durable_gap_reasons
++                .values()
++                .any(|reason| *reason == wire::SpoolGapReason::StateReset),
++            "an abandoned epoch owes the collector a state_reset gap"
++        );
++    }
++
++    #[test]
++    fn pending_state_reset_repairs_the_cursor_without_a_second_epoch() {
++        let dir = tempfile::tempdir().expect("tempdir");
++        let spool = Spool::open(config(dir.path())).expect("spool");
++        let epoch = lock(&spool.inner).epoch.clone();
++        let gap_id = "spool:cccccccccccccccccccccccccccccccc";
++        {
++            // Reproduce the one crash window §9.4 allows to be repaired in
++            // place: the reset gap is already durable while state.json still
++            // carries the pending marker.
++            let mut inner = lock(&spool.inner);
++            inner.pending_state_reset = Some(wire::StateReset {
++                gap_event_id: gap_id.to_owned(),
++                occurred_at_unix_ms: 1_u64.into(),
++                lost_spool_epoch: None,
++                first_lost_spool_sequence: None,
++                last_lost_spool_sequence: None,
++            });
++            let spec = GapSpec {
++                event_id: gap_id.to_owned(),
++                occurred_at_unix_ms: 1,
++                lost_spool_epoch: None,
++                reason: wire::SpoolGapReason::StateReset,
++                first_lost_spool_sequence: None,
++                last_lost_spool_sequence: None,
++                lost_events: None,
++                lost_bytes: None,
++                lost_batch_id: None,
++                source_fingerprint: None,
++            };
++            spool.write_gap_locked(&mut inner, &spec).expect("durable reset gap");
++        }
++        drop(spool);
++
++        // Rewind the cursor behind the durable record so the ordinary
++        // `next <= max` rule would demand another epoch.
++        let state_path = dir.path().join("state.json");
++        let state = String::from_utf8(fs::read(&state_path).expect("state")).expect("utf8 state");
++        let rewound = state.replace("\"next_spool_sequence\":\"2\"", "\"next_spool_sequence\":\"1\"");
++        assert_ne!(rewound, state, "the test needs the cursor to be rewound");
++        fs::write(&state_path, &rewound).expect("rewind cursor");
++
++        let spool = Spool::open(config(dir.path())).expect("recover");
++        let inner = lock(&spool.inner);
++        assert_eq!(
++            inner.epoch, epoch,
++            "a repairable pending reset must not create a second epoch"
++        );
++        assert_eq!(inner.next_sequence, 2, "the cursor is repaired past the durable record");
++        assert!(inner.pending_state_reset.is_none(), "the pending marker is cleared");
++        drop(inner);
++        assert_eq!(
++            fs::read_dir(dir.path().join("quarantine"))
++                .expect("quarantine")
++                .filter_map(Result::ok)
++                .count(),
++            0,
++            "no epoch change means the open segment stays in place"
++        );
++        let state = wire::parse_spool_state(&fs::read(&state_path).expect("state")).expect("canonical state");
++        assert_eq!(state.spool_epoch, epoch);
++        assert!(state.pending_state_reset.is_none());
++        assert_eq!(
++            drain_records(&spool)
++                .iter()
++                .filter(|record| matches!(
++                    record,
++                    wire::AuditRecord::SpoolGap(gap) if gap.reason == wire::SpoolGapReason::StateReset
++                ))
++                .count(),
++            1,
++            "the repaired reset must not be reported twice"
++        );
 +    }
 +
 +    #[test]
