@@ -6593,14 +6593,14 @@ index 0000000000000000000000000000000000000000..a544cd37b7a0f2e1784bb2f69a118650
 +}
 diff --git a/crates/shadowsocks-auditd/src/ingest.rs b/crates/shadowsocks-auditd/src/ingest.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..dd3c8750da79fd88187b9448d01b89fceea18cd1
+index 0000000000000000000000000000000000000000..f26697471a044a5d1e14ebc2145b32c95699370f
 --- /dev/null
 +++ b/crates/shadowsocks-auditd/src/ingest.rs
-@@ -0,0 +1,752 @@
+@@ -0,0 +1,751 @@
 +//! Unix-stream ingest endpoint used by the ssserver producer.
 +
 +use std::{
-+    collections::{HashMap, VecDeque},
++    collections::{BTreeMap, HashMap},
 +    fs, io,
 +    os::fd::AsRawFd,
 +    os::unix::fs::{FileTypeExt, MetadataExt},
@@ -6696,7 +6696,11 @@ index 0000000000000000000000000000000000000000..dd3c8750da79fd88187b9448d01b89fc
 +
 +struct DedupCache {
 +    entries: HashMap<String, (String, EventAck, u64)>,
-+    order: VecDeque<(String, u64)>,
++    // Recency index: exactly one slot per live entry, keyed by the entry's
++    // current token.  Because a touch moves its slot instead of appending a
++    // new one, no stale history can accumulate and no compaction pass is
++    // ever needed.
++    order: BTreeMap<u64, String>,
 +    generation: u64,
 +    capacity: usize,
 +}
@@ -6715,7 +6719,7 @@ index 0000000000000000000000000000000000000000..dd3c8750da79fd88187b9448d01b89fc
 +    fn with_capacity(capacity: usize) -> Self {
 +        Self {
 +            entries: HashMap::new(),
-+            order: VecDeque::new(),
++            order: BTreeMap::new(),
 +            generation: 0,
 +            capacity,
 +        }
@@ -6731,11 +6735,16 @@ index 0000000000000000000000000000000000000000..dd3c8750da79fd88187b9448d01b89fc
 +        // lifetime of the daemon, while a quiet event eventually ages out.
 +        if !matches!(result, DedupLookup::Missing) {
 +            self.generation = self.generation.wrapping_add(1);
-+            if let Some((_, _, token)) = self.entries.get_mut(event_id) {
-+                *token = self.generation;
-+                self.order.push_back((event_id.to_owned(), *token));
++            let token = self.generation;
++            if let Some((_, _, current)) = self.entries.get_mut(event_id) {
++                let previous = std::mem::replace(current, token);
++                // Move the existing slot rather than appending a second one.
++                // The `unwrap_or_else` keeps the one-slot-per-entry invariant
++                // even if the index were ever out of step, so a touched entry
++                // can never become unevictable.
++                let name = self.order.remove(&previous).unwrap_or_else(|| event_id.to_owned());
++                self.order.insert(token, name);
 +            }
-+            self.trim_order();
 +        }
 +        result
 +    }
@@ -6743,34 +6752,24 @@ index 0000000000000000000000000000000000000000..dd3c8750da79fd88187b9448d01b89fc
 +    fn insert(&mut self, event_id: String, digest: String, ack: EventAck) {
 +        self.generation = self.generation.wrapping_add(1);
 +        let token = self.generation;
-+        self.order.push_back((event_id.clone(), token));
-+        self.entries.insert(event_id, (digest, ack, token));
++        if let Some((_, _, previous)) = self.entries.insert(event_id.clone(), (digest, ack, token)) {
++            // Re-inserting a live event ID replaces its recency slot; leaving
++            // the old token behind would break the one-slot-per-entry bound.
++            self.order.remove(&previous);
++        }
++        self.order.insert(token, event_id);
 +        self.trim_order();
 +    }
 +
 +    fn trim_order(&mut self) {
-+        // Stale generation tokens are only history; they must not consume
-+        // live-entry capacity. Evict until the number of current entries is
-+        // within the configured bound, skipping stale touches on the way.
++        // The index holds one slot per live entry, so its first key is always
++        // the least recently used current entry. Eviction is therefore
++        // O(log n) per insert with no history to compact.
 +        while self.entries.len() > self.capacity {
-+            let Some((old, token)) = self.order.pop_front() else {
++            let Some((_, old)) = self.order.pop_first() else {
 +                break;
 +            };
-+            if self.entries.get(&old).is_some_and(|(_, _, current)| *current == token) {
-+                self.entries.remove(&old);
-+            }
-+        }
-+
-+        // Repeated hits can otherwise grow the history forever. Compact it
-+        // periodically while retaining exactly the newest token for each live
-+        // entry. This does not change LRU ordering or evict a current entry.
-+        let compact_at = self.capacity.saturating_add(1);
-+        if self.order.len() > compact_at {
-+            self.order.retain(|(event_id, token)| {
-+                self.entries
-+                    .get(event_id)
-+                    .is_some_and(|(_, _, current)| current == token)
-+            });
++            self.entries.remove(&old);
 +        }
 +    }
 +}
