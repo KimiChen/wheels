@@ -7813,10 +7813,10 @@ index 0000000000000000000000000000000000000000..6cf8d005dfef917c852be4f611d5b945
 +}
 diff --git a/crates/shadowsocks-auditd/src/spool.rs b/crates/shadowsocks-auditd/src/spool.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..9858d0204321ea5f7c39f1357e0b9920d34ffbde
+index 0000000000000000000000000000000000000000..b5defd0a2f582397e6f58e25c350d7b20dd97ed9
 --- /dev/null
 +++ b/crates/shadowsocks-auditd/src/spool.rs
-@@ -0,0 +1,7591 @@
+@@ -0,0 +1,7630 @@
 +//! Durable, node-local audit spool.
 +//!
 +//! The spool is deliberately synchronous.  Ingest and export perform their
@@ -9663,6 +9663,9 @@ index 0000000000000000000000000000000000000000..9858d0204321ea5f7c39f1357e0b9920
 +            // Keep health degraded even if an older call site forgot to set
 +            // the sticky flag when it reached the saturation point.
 +            || inner.storage_rejected_attempts == u64::MAX
++            || inner.evicted_unacked_records == u64::MAX
++            || inner.stored_records == u64::MAX
++            || inner.sealed_batches == u64::MAX
 +            || spool_bytes >= self.config.max_spool_bytes
 +            || self.quarantine_outstanding()
 +            || !free_space_ok(&self.root, self.config.min_free_bytes)
@@ -14672,6 +14675,42 @@ index 0000000000000000000000000000000000000000..9858d0204321ea5f7c39f1357e0b9920
 +        let error = ensure_dir(&link.join("child"), 0o700).expect_err("symlink must be rejected");
 +        assert!(error.kind() == io::ErrorKind::PermissionDenied || error.raw_os_error() == Some(libc::ELOOP));
 +        assert!(!outside.path().join("child").exists());
++    }
++
++    /// m-206: §10.1 requires every saturated counter - not only
++    /// `storage_rejected_attempts` - to force a degraded status.
++    #[test]
++    fn saturated_loss_counters_report_degraded() {
++        let dir = tempfile::tempdir().expect("tempdir");
++        let spool = Spool::open(config(dir.path())).expect("spool");
++        spool.append(&event(1), 1).expect("append");
++        assert_eq!(spool.health().status, "ok");
++
++        lock(&spool.inner).evicted_unacked_records = u64::MAX;
++        assert_eq!(
++            spool.health().status,
++            "degraded",
++            "a saturated evicted_unacked_records must report degraded"
++        );
++        lock(&spool.inner).evicted_unacked_records = 0;
++        assert_eq!(spool.health().status, "ok");
++
++        let stored = lock(&spool.inner).stored_records;
++        lock(&spool.inner).stored_records = u64::MAX;
++        assert_eq!(
++            spool.health().status,
++            "degraded",
++            "a saturated stored_records must report degraded"
++        );
++        lock(&spool.inner).stored_records = stored;
++        assert_eq!(spool.health().status, "ok");
++
++        lock(&spool.inner).sealed_batches = u64::MAX;
++        assert_eq!(
++            spool.health().status,
++            "degraded",
++            "a saturated sealed_batches must report degraded"
++        );
 +    }
 +
 +    #[test]
