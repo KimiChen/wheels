@@ -4364,3 +4364,58 @@ gap（`m-43`/`m-111` 的修复成立）。
 `config/auditd.example.json` 模板都必须位于这些账号可读可执行的路径**。放在 `/root`
 （Debian 默认 `0550`）下会得到一串难以定位的 `PermissionError`——以 root 身份工作时这是很自然的
 放法。`tests/README.md` 与 `packaging/README.md` 均未说明这一点。
+
+### 30.7 README 第 1–2 步：发布构建与签名验签（已完成）
+
+重试后**全部通过**，用时约 40 分钟（`taskset -c 0,1 nice -n 10`，节点其余负载为零）。
+
+- **第 1 步：两次独立 musl 构建，产物字节一致。** `build-a` 与 `build-b` 在互不相同的 target
+  目录下构建，`ssserver` 与 `shadowsocks-auditd` 的 SHA-256 **完全相同**
+  （`0656e047…` / `8ba6dafd…`），两份 build receipt 分别记录各自的构建路径与同一摘要。
+  §15.1 的「两次独立可复现构建」**首次在真机得到证实**——此前七轮审计与 §26.3 的全部相关声明
+  都只有代码层面的依据。
+- **第 2 步：签名与独立验签通过。** `sign-release.sh` 以 `0600` 离线私钥（P-256）生成 detached
+  签名；`verify-release.sh` 用独立公钥验签，输出
+  「签名验证通过；双二进制发布产物、来源与 SHA-256 全部匹配。」
+- **发布目录恰为 §15.1/`m-213` 规定的 8 成员**：两个 ELF、两个 `.sha256`、
+  `release-manifest.json`、`release-manifest.sig`、两份 build receipt。
+- **已替换为发布链产物并复验。** `/usr/local/bin` 下的两个二进制换成发布目录中的 ELF，其
+  SHA-256 与已签名 manifest 记录逐字一致；两个服务重启后均 active，C-7 三项探测（producer
+  connect、export peer connect、`nobody` 被拒）在发布链二进制下**同样成立**。
+  因此 §30.5/§30.6 中「使用验证构建而非发布链产物」的限定**已解除**。
+
+**关于阶段 3b 首次失败的最终判断**：确系 crates.io 链路抖动，不是缺陷。但 §30.5 记录的三条
+交付约束依然成立且值得补文档——每次发布完整下载两遍依赖图、根 crate 未加
+`--no-default-features` 而拉入 `reqwest`/`web-sys`、净化环境不放行 `CARGO_HTTP_*` 使停滞阈值
+不可调。本次成功耗时 40 分钟，其中绝大部分是依赖下载。
+
+**新增文档待补项**：`_sign_snapshot` 使用 `openssl dgst -sha256 -sign`，该调用支持 RSA 与
+ECDSA，但**不支持 Ed25519**（Ed25519 需 `pkeyutl` 且不做预哈希）。§15.1 与
+`packaging/README.md` 均未声明可用的密钥类型，运维若选用 Ed25519 这一现代默认，只会得到
+`manifest 签名失败` 而无从定位。
+
+### 30.8 本次 Linux 实装的最终状态
+
+**已在真机证实**
+
+| 项目 | 结果 |
+| --- | --- |
+| README 第 1 步 两次独立 musl 构建 | 通过，两次产物字节一致 |
+| README 第 2 步 签名 + 独立验签 | 通过，发布目录 8 成员齐备 |
+| README 第 3 步 账号/组/目录/unit | 通过，§11 权限模型逐项一致 |
+| README 第 4 步 配置注入 | 通过，`verify-five` 200+4 账号验证通过 |
+| README 第 5 步 数据面启动 | 通过，ssserver TCP/UDP 监听，auditd 并存 |
+| `C-2` / `C-4` / `C-7` | **全部真机证实修复**（重启存活、socket 属组正确、两账号可达且 `nobody` 被拒） |
+| `cargo test -p shadowsocks-auditd` | 99 passed / 0 failed（root 与非 root 各一次） |
+| `tests/integration_audit.py` | 通过（`SO_PEERCRED`、hello/ACK、hello_nack、HMAC 签名 health 全链路） |
+| trust anchor 与补丁重放 | 均在真机生效（anchor 曾正确拦截一次陈旧摘要） |
+
+**仍未完成**
+
+- `M-66`：`user_stats` exporter 的 4 个用例在 Linux 上确定性失败，属 `0001` 范围，归属待定；
+  它使 `cargo test --workspace --features user-audit` 无法全绿。
+- `cargo-fuzz` sanitizer 实跑、§14.5 目标机吞吐/CPU/RSS 长压：均未执行。
+- 本次未做真实代理流量的端到端审计事件验证（`integration_audit.py` 覆盖的是 ingest/export
+  协议链路，不是经由 ssserver 转发真实流量后产生 access event）。
+
+因此本节证明了**发布链、打包权限模型与协议链路在真机成立**，但仍不等于 §16 的完整验收。
