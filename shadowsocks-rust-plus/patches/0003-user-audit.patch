@@ -8071,10 +8071,10 @@ index 0000000000000000000000000000000000000000..6cf8d005dfef917c852be4f611d5b945
 +}
 diff --git a/crates/shadowsocks-auditd/src/spool.rs b/crates/shadowsocks-auditd/src/spool.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..b89675c1b0f4cd69b007c94797f3921aefeb94ef
+index 0000000000000000000000000000000000000000..af9c3278f1308c97edee6eb7180c7eaeb0e70b3b
 --- /dev/null
 +++ b/crates/shadowsocks-auditd/src/spool.rs
-@@ -0,0 +1,8228 @@
+@@ -0,0 +1,8239 @@
 +//! Durable, node-local audit spool.
 +//!
 +//! The spool is deliberately synchronous.  Ingest and export perform their
@@ -14996,7 +14996,18 @@ index 0000000000000000000000000000000000000000..b89675c1b0f4cd69b007c94797f3921a
 +        std::os::unix::fs::symlink(outside.path(), &link).expect("symlink");
 +
 +        let error = ensure_dir(&link.join("child"), 0o700).expect_err("symlink must be rejected");
-+        assert!(error.kind() == io::ErrorKind::PermissionDenied || error.raw_os_error() == Some(libc::ELOOP));
++        // The refusal errno depends on the open flags, not on the guarantee:
++        // `O_NOFOLLOW` alone reports ELOOP, but combined with `O_DIRECTORY`
++        // Linux reports ENOTDIR for the same rejected symlink (macOS likewise).
++        // Accept either spelling; the security property is the assertion below.
++        assert!(
++            error.kind() == io::ErrorKind::PermissionDenied
++                || error.raw_os_error() == Some(libc::ELOOP)
++                || error.raw_os_error() == Some(libc::ENOTDIR),
++            "unexpected refusal: kind={:?} raw={:?}",
++            error.kind(),
++            error.raw_os_error()
++        );
 +        assert!(!outside.path().join("child").exists());
 +    }
 +
