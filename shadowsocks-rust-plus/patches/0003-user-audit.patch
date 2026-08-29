@@ -8071,10 +8071,10 @@ index 0000000000000000000000000000000000000000..6cf8d005dfef917c852be4f611d5b945
 +}
 diff --git a/crates/shadowsocks-auditd/src/spool.rs b/crates/shadowsocks-auditd/src/spool.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..f5f66f5d50d67b5c92cbf8111d31e8ed8ea8876d
+index 0000000000000000000000000000000000000000..262e7758b75cc2b60b0eed90f5ecb9ef2d16dd87
 --- /dev/null
 +++ b/crates/shadowsocks-auditd/src/spool.rs
-@@ -0,0 +1,7970 @@
+@@ -0,0 +1,8042 @@
 +//! Durable, node-local audit spool.
 +//!
 +//! The spool is deliberately synchronous.  Ingest and export perform their
@@ -11624,6 +11624,13 @@ index 0000000000000000000000000000000000000000..f5f66f5d50d67b5c92cbf8111d31e8ed
 +            }
 +        };
 +        let info = lease.info;
++        // A sealed batch evicted before delivery takes its durable `spool_gap`
++        // records with it, so those IDs must leave the durable index: §9.5
++        // allows the same gap ID to be written again while it is not durable.
++        // Entries for batches that were acked and later removed by retention
++        // are deliberately kept, because rewriting a delivered gap ID would
++        // duplicate it at the collector.
++        forget_durable_gap_reasons(&lease.body, &mut inner.durable_gap_reasons);
 +        let gap_event_id = format!("{}{}", GAP_ID_PREFIX, random_hex_id()?);
 +        let pending = wire::EvictionPending::new(
 +            info.batch_id.clone(),
@@ -12920,6 +12927,21 @@ index 0000000000000000000000000000000000000000..f5f66f5d50d67b5c92cbf8111d31e8ed
 +}
 +
 +fn collect_spool_gap_reasons(body: &[u8], gaps: &mut HashMap<String, wire::SpoolGapReason>) {
++    for_each_spool_gap(body, |gap| {
++        gaps.insert(gap.event_id, gap.reason);
++    });
++}
++
++/// Drop the gap IDs carried by a segment body from the durable index.  The
++/// index answers "is this gap already durable"; a segment that no longer
++/// exists cannot keep answering yes.
++fn forget_durable_gap_reasons(body: &[u8], gaps: &mut HashMap<String, wire::SpoolGapReason>) {
++    for_each_spool_gap(body, |gap| {
++        gaps.remove(&gap.event_id);
++    });
++}
++
++fn for_each_spool_gap(body: &[u8], mut visit: impl FnMut(wire::SpoolGap)) {
 +    for line in body.split_inclusive(|byte| *byte == b'\n') {
 +        let Some(wire::AuditRecord::SpoolGap(gap)) = wire::parse_spool_line(line)
 +            .ok()
@@ -12927,7 +12949,7 @@ index 0000000000000000000000000000000000000000..f5f66f5d50d67b5c92cbf8111d31e8ed
 +        else {
 +            continue;
 +        };
-+        gaps.insert(gap.event_id, gap.reason);
++        visit(gap);
 +    }
 +}
 +
@@ -15695,6 +15717,56 @@ index 0000000000000000000000000000000000000000..f5f66f5d50d67b5c92cbf8111d31e8ed
 +                .filter_map(Result::ok)
 +                .any(|entry| entry.path().is_dir()),
 +            "damaged bytes must remain isolated for operator recovery"
++        );
++    }
++
++    #[test]
++    fn evicting_a_sealed_batch_forgets_its_durable_gap_ids() {
++        let dir = tempfile::tempdir().expect("tempdir");
++        let spool = Spool::open(config(dir.path())).expect("spool");
++        let spec = GapSpec {
++            event_id: format!("{GAP_ID_PREFIX}{}", "ab".repeat(16)),
++            occurred_at_unix_ms: 1_787_587_200_000,
++            lost_spool_epoch: None,
++            reason: wire::SpoolGapReason::StateReset,
++            first_lost_spool_sequence: None,
++            last_lost_spool_sequence: None,
++            lost_events: None,
++            lost_bytes: None,
++            lost_batch_id: None,
++            source_fingerprint: None,
++        };
++        let path = {
++            let mut inner = lock(&spool.inner);
++            spool.write_gap_locked(&mut inner, &spec).expect("durable gap");
++            spool.seal_locked(&mut inner).expect("seal");
++            assert!(inner.durable_gap_reasons.contains_key(&spec.event_id));
++            inner.sealed_paths.values().next().cloned().expect("sealed batch")
++        };
++
++        {
++            let mut inner = lock(&spool.inner);
++            spool.evict_sealed_locked(&mut inner, &path).expect("evict");
++            assert!(
++                !inner.durable_gap_reasons.contains_key(&spec.event_id),
++                "an evicted segment must not keep claiming its gap ID is durable"
++            );
++        }
++
++        // The same gap ID is therefore writable again, as required for a gap
++        // that never reached the collector.
++        {
++            let mut inner = lock(&spool.inner);
++            spool.write_gap_locked(&mut inner, &spec).expect("rewrite gap");
++            assert!(inner.durable_gap_reasons.contains_key(&spec.event_id));
++        }
++        let body = read_regular_file(&dir.path().join("open/current.ndjson")).expect("open segment");
++        assert_eq!(
++            body.split_inclusive(|byte| *byte == b'\n')
++                .filter(|line| line_is_spool_gap(line))
++                .count(),
++            2,
++            "the eviction gap and the rewritten gap must both be present"
 +        );
 +    }
 +
