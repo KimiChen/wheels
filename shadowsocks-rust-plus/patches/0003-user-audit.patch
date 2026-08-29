@@ -7813,10 +7813,10 @@ index 0000000000000000000000000000000000000000..6cf8d005dfef917c852be4f611d5b945
 +}
 diff --git a/crates/shadowsocks-auditd/src/spool.rs b/crates/shadowsocks-auditd/src/spool.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..842b3e37c8b926bcde77eabb3e14c5a92539f0cd
+index 0000000000000000000000000000000000000000..b82ff42ef0a425a13f98f0e45c7053bb5c4e3413
 --- /dev/null
 +++ b/crates/shadowsocks-auditd/src/spool.rs
-@@ -0,0 +1,7434 @@
+@@ -0,0 +1,7484 @@
 +//! Durable, node-local audit spool.
 +//!
 +//! The spool is deliberately synchronous.  Ingest and export perform their
@@ -7852,7 +7852,6 @@ index 0000000000000000000000000000000000000000..842b3e37c8b926bcde77eabb3e14c5a9
 +};
 +
 +const STATE_SCHEMA_VERSION: u8 = 1;
-+const TOMBSTONE_RETENTION_SECONDS: u64 = 7 * 86_400;
 +const GAP_ID_PREFIX: &str = "spool:";
 +const PRODUCER_DISCONNECT_GRACE: Duration = Duration::from_secs(5);
 +const RETENTION_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
@@ -11015,8 +11014,11 @@ index 0000000000000000000000000000000000000000..842b3e37c8b926bcde77eabb3e14c5a9
 +    }
 +
 +    fn prune_receipts_locked(&self, inner: &mut SpoolInner) -> Result<(), SpoolError> {
++        // §5.4 defines a single receipt retention window.  Bind the ledger to
++        // the protocol crate's constant instead of keeping a second definition
++        // of the same contract value in this file.
 +        let cutoff = unix_seconds()?
-+            .saturating_sub(TOMBSTONE_RETENTION_SECONDS)
++            .saturating_sub(wire::RECEIPT_RETENTION_SECONDS)
 +            .saturating_mul(1_000);
 +        let old = inner.tombstones.clone();
 +        inner
@@ -15057,6 +15059,54 @@ index 0000000000000000000000000000000000000000..842b3e37c8b926bcde77eabb3e14c5a9
 +            "an unmeasurable marker must force a full re-measurement"
 +        );
 +        assert!(inner.storage_rejected_attempts > 0);
++    }
++
++    /// m-178: §5.4 defines one receipt retention window.  Bind the ledger's
++    /// pruning cutoff to the protocol constant so a second local definition
++    /// cannot drift away from the contract.
++    #[test]
++    fn receipt_retention_follows_the_protocol_constant() {
++        let dir = tempfile::tempdir().expect("tempdir");
++        let spool = Spool::open(config(dir.path())).expect("spool");
++        let now = unix_millis().expect("clock");
++        let window = wire::RECEIPT_RETENTION_SECONDS.saturating_mul(1_000);
++        let kept = "a".repeat(32);
++        let aged = "c".repeat(32);
++        let mut inner = lock(&spool.inner);
++        spool
++            .add_tombstone_locked(
++                &mut inner,
++                TombstoneEntry::AckedReceipt(wire::AckedReceipt::new(
++                    kept.clone(),
++                    "b".repeat(64),
++                    now - window + 3_600_000,
++                )),
++            )
++            .expect("receipt inside the window");
++        spool
++            .add_tombstone_locked(
++                &mut inner,
++                TombstoneEntry::AckedReceipt(wire::AckedReceipt::new(
++                    aged.clone(),
++                    "d".repeat(64),
++                    now - window - 3_600_000,
++                )),
++            )
++            .expect("receipt outside the window");
++        spool.prune_receipts_locked(&mut inner).expect("prune");
++        let retained: Vec<_> = inner
++            .tombstones
++            .iter()
++            .filter_map(|entry| entry.batch_id().map(str::to_owned))
++            .collect();
++        assert!(
++            retained.contains(&kept),
++            "a receipt one hour inside RECEIPT_RETENTION_SECONDS must be retained"
++        );
++        assert!(
++            !retained.contains(&aged),
++            "a receipt one hour past RECEIPT_RETENTION_SECONDS must be pruned"
++        );
 +    }
 +
 +    #[test]
