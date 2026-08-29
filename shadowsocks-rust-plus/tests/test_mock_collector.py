@@ -919,3 +919,7 @@ class WireResponseTest(unittest.TestCase):
             with self.subTest(body=body):
                 with self.assertRaisesRegex(CollectorError, "did not acknowledge"):
                     self.collect([lease, (200, {"Content-Type": "application/json"}, body)])
+
+
+if __name__ == "__main__":
+    unittest.main()
