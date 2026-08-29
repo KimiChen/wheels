@@ -19238,10 +19238,10 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..5b0ebb7924e76785c6e14e5826db6b88
  }
 diff --git a/crates/shadowsocks-service/src/server/user_audit.rs b/crates/shadowsocks-service/src/server/user_audit.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..df115466fe5cdf8ad0b088b1cf26edf6708dd3d5
+index 0000000000000000000000000000000000000000..3dfa4314e18b4c9c10a4a06c06d0bbb4e59f314a
 --- /dev/null
 +++ b/crates/shadowsocks-service/src/server/user_audit.rs
-@@ -0,0 +1,4098 @@
+@@ -0,0 +1,4180 @@
 +//! Non-blocking successful-target access auditing for the server data path.
 +//!
 +//! The relay only constructs a small draft and performs bounded atomic/cache
@@ -19301,6 +19301,13 @@ index 0000000000000000000000000000000000000000..df115466fe5cdf8ad0b088b1cf26edf6
 +const ACK_TIMEOUT: Duration = Duration::from_secs(ACK_TIMEOUT_SECONDS);
 +const DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(PRODUCER_DIAGNOSTIC_INTERVAL_SECONDS);
 +const INITIAL_RECONNECT_BACKOFF: Duration = Duration::from_millis(100);
++/// Bounded drain budget the supervisor keeps after the emitter is closed
++/// (section 7.3).  A shutdown failure is retried inside this window; only an
++/// exhausted budget drops the remaining queue and in-flight work.
++const SHUTDOWN_DRAIN_BUDGET: Duration = Duration::from_secs(2);
++/// Fixed retry spacing used while the shutdown budget is running.  Transport
++/// backoff would otherwise consume the whole budget after a single failure.
++const SHUTDOWN_RETRY_DELAY: Duration = Duration::from_millis(100);
 +const MAX_RECONNECT_BACKOFF: Duration = Duration::from_secs(5);
 +const MAX_RECONNECT_JITTER_PERCENT: u32 = 20;
 +
@@ -21866,6 +21873,9 @@ index 0000000000000000000000000000000000000000..df115466fe5cdf8ad0b088b1cf26edf6
 +
 +async fn run_supervisor(emitter: Arc<AuditEmitter>) {
 +    let mut state = SupervisorState::new();
++    // First instant at which this supervisor observed the closed lifecycle
++    // bit.  The bounded shutdown drain budget is measured from there.
++    let mut shutdown_started: Option<Instant> = None;
 +    let now = Instant::now();
 +    let mut last_error_log = rate_limit_stamp_before(now, DIAGNOSTIC_INTERVAL);
 +    let mut last_hello_nack_log = rate_limit_stamp_before(now, DIAGNOSTIC_INTERVAL);
@@ -21924,10 +21934,20 @@ index 0000000000000000000000000000000000000000..df115466fe5cdf8ad0b088b1cf26edf6
 +        }
 +
 +        if emitter.lifecycle_state.load(Ordering::Acquire) & CLOSED_BIT != 0 {
-+            // Shutdown has no retry budget. Any pending frame is retained in
-+            // the bounded pending snapshot for final journald reporting, and
-+            // the root launcher owns the remaining drain deadline.
-+            break;
++            // Section 7.3 grants a bounded two-second drain, not a single
++            // attempt: one retryable NACK during SIGTERM must not discard the
++            // queue together with the whole in-flight backlog.  Keep replaying
++            // the preserved bytes on a fixed short cadence until the budget is
++            // exhausted; only then drop what is left, which the final
++            // aggregate journald still accounts for.
++            let started = *shutdown_started.get_or_insert_with(Instant::now);
++            let remaining = SHUTDOWN_DRAIN_BUDGET.saturating_sub(started.elapsed());
++            if remaining.is_zero() {
++                break;
++            }
++            state.backoff = INITIAL_RECONNECT_BACKOFF;
++            time::sleep(SHUTDOWN_RETRY_DELAY.min(remaining)).await;
++            continue;
 +        }
 +
 +        let base = state.backoff;
@@ -23092,11 +23112,73 @@ index 0000000000000000000000000000000000000000..df115466fe5cdf8ad0b088b1cf26edf6
 +        let supervisor = emitter.spawn_supervisor();
 +        emitter.close_emitter();
 +
-+        tokio::time::timeout(Duration::from_secs(1), supervisor)
++        // The retry loop is bounded by the shutdown drain budget, never by a
++        // single failed attempt.
++        tokio::time::timeout(SHUTDOWN_DRAIN_BUDGET * 3, supervisor)
 +            .await
 +            .expect("closed supervisor kept retrying")
 +            .expect("supervisor task failed");
-+        assert_eq!(emitter.health_snapshot().hello_nack_count, 0);
++    }
++
++    #[cfg(unix)]
++    #[tokio::test]
++    async fn closed_supervisor_replays_a_retryable_nack_inside_the_drain_budget() {
++        let directory = tempdir().expect("temporary directory");
++        let socket_path = directory.path().join("ingest.sock");
++        let listener = UnixListener::bind(&socket_path).expect("listener");
++        let config = UserAuditConfig::new(&socket_path, test_auditd_user());
++        let emitter = AuditEmitter::new(runtime(), &config);
++        let draft = tcp_draft(&emitter, 57);
++        let expected_event_id = draft.event_id();
++        emitter.try_push(draft);
++
++        // The first session answers the access event with a retryable NACK
++        // (auditd rotating a segment while systemd stops both units) and then
++        // drops the connection.  The very same event must still be replayed.
++        let server = tokio::spawn(async move {
++            let (stream, _) = listener.accept().await.expect("first accept");
++            let (mut reader, mut writer) = stream.into_split();
++            let _hello = read_frame(&mut reader).await.expect("hello");
++            let hello_ack = serialize_canonical(&HelloAck::new()).expect("hello ack");
++            write_frame(&mut writer, &hello_ack).await.expect("write hello ack");
++            let event_bytes = read_frame(&mut reader).await.expect("event");
++            let record = parse_canonical_record(&event_bytes).expect("access event");
++            let nack = EventNack::new(record.event_id(), EventNackCode::StorageUnavailable);
++            let nack = serialize_canonical(&nack).expect("nack");
++            write_frame(&mut writer, &nack).await.expect("write nack");
++            drop(writer);
++            drop(reader);
++
++            let (stream, _) = listener.accept().await.expect("second accept");
++            let (mut reader, mut writer) = stream.into_split();
++            let _hello = read_frame(&mut reader).await.expect("replay hello");
++            let hello_ack = serialize_canonical(&HelloAck::new()).expect("hello ack");
++            write_frame(&mut writer, &hello_ack).await.expect("write hello ack");
++            let event_bytes = read_frame(&mut reader).await.expect("replayed event");
++            let record = parse_canonical_record(&event_bytes).expect("access event");
++            let ack = EventAck::new(record.event_id(), "0123456789abcdef0123456789abcdef", 1);
++            let ack = serialize_canonical(&ack).expect("event ack");
++            write_frame(&mut writer, &ack).await.expect("write event ack");
++            record.event_id().to_owned()
++        });
++
++        let supervisor = emitter.spawn_supervisor();
++        emitter.close_emitter();
++        tokio::time::timeout(SHUTDOWN_DRAIN_BUDGET * 3, emitter.drain())
++            .await
++            .expect("shutdown drain timed out");
++        assert!(emitter.drain_completed());
++        assert_eq!(emitter.pending_len(), 0);
++        assert!(emitter.queue.is_empty());
++        let replayed = tokio::time::timeout(SHUTDOWN_DRAIN_BUDGET * 3, server)
++            .await
++            .expect("mock ingest server did not stop")
++            .expect("mock ingest server failed");
++        assert_eq!(replayed, expected_event_id);
++        tokio::time::timeout(SHUTDOWN_DRAIN_BUDGET * 3, supervisor)
++            .await
++            .expect("supervisor did not stop")
++            .expect("supervisor task failed");
 +    }
 +
 +    #[cfg(unix)]
