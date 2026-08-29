@@ -633,6 +633,79 @@ with open(fixture_root / ("environment-" + source_root.name + ".json"), "w", enc
             result = self.package_multi(server, auditd, output, success=False)
             self.assertIn("源码树摘要", result.stderr)
 
+    def test_patch_deletion_checker_accepts_space_and_quoted_paths(self) -> None:
+        """删除校验不得把含空格或 git C-quote 的路径误判成畸形或不存在。"""
+        checker = PROJECT_ROOT / "scripts" / "check-patch-deletions.py"
+        with tempfile.TemporaryDirectory(prefix="ssrp-patch-deletions-") as temporary:
+            root = Path(temporary)
+            counter = 0
+
+            def check(
+                patch_text: str, present: list[str], *, success: bool
+            ) -> subprocess.CompletedProcess[str]:
+                nonlocal counter
+                counter += 1
+                source = root / f"case-{counter}"
+                source.mkdir()
+                for name in present:
+                    path = source / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text("x\n", encoding="utf-8")
+                patch = root / f"case-{counter}.patch"
+                patch.write_text(patch_text, encoding="utf-8")
+                return self.run_command(
+                    [
+                        sys.executable,
+                        str(checker),
+                        str(patch),
+                        "--source-root",
+                        str(source),
+                    ],
+                    success=success,
+                )
+
+            spaced = (
+                "diff --git a/docs/with space.md b/docs/with space.md\n"
+                "deleted file mode 100644\n"
+                "--- a/docs/with space.md\n"
+                "+++ /dev/null\n"
+                "@@ -1 +0,0 @@\n"
+                "-x\n"
+            )
+            check(spaced, ["docs/with space.md"], success=True)
+
+            quoted = (
+                'diff --git "a/docs/\\303\\251.md" "b/docs/\\303\\251.md"\n'
+                "deleted file mode 100644\n"
+                '--- "a/docs/\\303\\251.md"\n'
+                "+++ /dev/null\n"
+                "@@ -1 +0,0 @@\n"
+                "-x\n"
+            )
+            check(quoted, ["docs/é.md"], success=True)
+
+            # 真正的两类失败仍然必须被拒绝。
+            missing = check(
+                "diff --git a/docs/gone.md b/docs/gone.md\n"
+                "deleted file mode 100644\n"
+                "--- a/docs/gone.md\n"
+                "+++ /dev/null\n"
+                "@@ -1 +0,0 @@\n"
+                "-x\n",
+                [],
+                success=False,
+            )
+            self.assertIn("does not exist", missing.stderr)
+            empty = check(
+                "diff --git a/docs/present.md b/docs/present.md\n"
+                "deleted file mode 100644\n"
+                "--- a/docs/present.md\n"
+                "+++ /dev/null\n",
+                ["docs/present.md"],
+                success=False,
+            )
+            self.assertIn("no hunk or binary payload", empty.stderr)
+
     def test_verifier_rejects_self_consistent_but_unpinned_source_tree(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ssrp-release-source-anchor-") as temporary:
             root = Path(temporary)

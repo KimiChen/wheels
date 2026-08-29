@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import shlex
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -22,15 +21,96 @@ class Stanza:
     has_payload: bool = False
 
 
-def _diff_old_path(line: str, number: int) -> str:
+DIFF_HEADER_PREFIX = "diff --git "
+C_QUOTE_ESCAPES = {
+    "a": 0x07,
+    "b": 0x08,
+    "f": 0x0C,
+    "n": 0x0A,
+    "r": 0x0D,
+    "t": 0x09,
+    "v": 0x0B,
+    "\\": 0x5C,
+    '"': 0x22,
+}
+
+
+def _decode_c_quoted(token: str, number: int) -> str:
+    """Decode Git's C-style quoting (octal byte escapes) back into a path."""
+    raw = bytearray()
+    index = 0
+    while index < len(token):
+        char = token[index]
+        if char != "\\":
+            raw.extend(char.encode("utf-8"))
+            index += 1
+            continue
+        index += 1
+        if index >= len(token):
+            raise PatchDeletionError(f"line {number}: truncated escape in diff --git header")
+        char = token[index]
+        if char in C_QUOTE_ESCAPES:
+            raw.append(C_QUOTE_ESCAPES[char])
+            index += 1
+            continue
+        digits = token[index : index + 3]
+        if len(digits) != 3 or any(digit not in "01234567" for digit in digits):
+            raise PatchDeletionError(f"line {number}: bad escape in diff --git header")
+        raw.append(int(digits, 8))
+        index += 3
     try:
-        fields = shlex.split(line, posix=True)
-    except ValueError as error:
-        raise PatchDeletionError(f"line {number}: malformed diff header: {error}") from error
-    if len(fields) != 4 or fields[:2] != ["diff", "--git"]:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise PatchDeletionError(f"line {number}: diff --git path is not UTF-8") from error
+
+
+def _scan_quoted(text: str, number: int) -> tuple[str, str]:
+    """Split a leading C-quoted token from ``text`` and decode it."""
+    index = 1
+    while index < len(text):
+        char = text[index]
+        if char == "\\":
+            index += 2
+            continue
+        if char == '"':
+            return _decode_c_quoted(text[1:index], number), text[index + 1 :]
+        index += 1
+    raise PatchDeletionError(f"line {number}: unterminated quoted path in diff --git header")
+
+
+def _split_diff_header(rest: str, number: int) -> tuple[str, str]:
+    if rest.startswith('"'):
+        # Git quotes both names as a pair whenever either one needs quoting.
+        old_path, remainder = _scan_quoted(rest, number)
+        if not remainder.startswith(' "'):
+            raise PatchDeletionError(f"line {number}: malformed diff --git header")
+        new_path, trailing = _scan_quoted(remainder[1:], number)
+        if trailing:
+            raise PatchDeletionError(f"line {number}: malformed diff --git header")
+        return old_path, new_path
+    # An unquoted header is ambiguous when a path contains spaces; recover the
+    # split by requiring a single `a/... b/...` cut, preferring the equal-path
+    # one that every deletion stanza produces.
+    candidates = [
+        (rest[:index], rest[index + 1 :])
+        for index, char in enumerate(rest)
+        if char == " "
+        and rest[:index].startswith("a/")
+        and rest[index + 1 :].startswith("b/")
+    ]
+    equal = [pair for pair in candidates if pair[0][2:] == pair[1][2:]]
+    if len(equal) == 1:
+        return equal[0]
+    if len(candidates) == 1:
+        return candidates[0]
+    raise PatchDeletionError(f"line {number}: malformed diff --git header")
+
+
+def _diff_old_path(line: str, number: int) -> str:
+    if not line.startswith(DIFF_HEADER_PREFIX):
         raise PatchDeletionError(f"line {number}: malformed diff --git header")
-    old_path = fields[2]
-    if not old_path.startswith("a/"):
+    old_path, new_path = _split_diff_header(line[len(DIFF_HEADER_PREFIX) :], number)
+    if not old_path.startswith("a/") or not new_path.startswith("b/"):
         raise PatchDeletionError(f"line {number}: deletion source path must start with a/")
     relative = old_path[2:]
     pure = PurePosixPath(relative)
