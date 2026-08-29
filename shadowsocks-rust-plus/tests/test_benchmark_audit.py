@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import json
 import subprocess
 import sys
@@ -403,6 +404,266 @@ class AuditBenchmarkTest(unittest.TestCase):
         )
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("--data-path-report", completed.stderr)
+
+
+def _auditd(report: dict[str, object]) -> dict[str, object]:
+    value = report["auditd"]
+    assert isinstance(value, dict)
+    return value
+
+
+def _case_record(report: dict[str, object], index: int) -> dict[str, object]:
+    cases = report["cases"]
+    assert isinstance(cases, list)
+    value = cases[index]
+    assert isinstance(value, dict)
+    return value
+
+
+def _enabled_aggregate(report: dict[str, object]) -> dict[str, object]:
+    value = _case_record(report, 2)["aggregate"]
+    assert isinstance(value, dict)
+    return value
+
+
+def _enabled_proxy(report: dict[str, object]) -> dict[str, object]:
+    value = _enabled_aggregate(report)["proxy"]
+    assert isinstance(value, dict)
+    return value
+
+
+def _nested(report: dict[str, object], *keys: str) -> dict[str, object]:
+    value: object = report
+    for key in keys:
+        assert isinstance(value, dict)
+        value = value[key]
+    assert isinstance(value, dict)
+    return value
+
+
+def _drop_case(report: dict[str, object], name: str) -> None:
+    cases = report["cases"]
+    assert isinstance(cases, list)
+    report["cases"] = [
+        item for item in cases if not (isinstance(item, dict) and item.get("name") == name)
+    ]
+
+
+# One negative case per ``issues.append`` site in ``_evaluate_data_path``.
+# Deleting any single evidence check has to turn exactly one of these red;
+# without that the release gate cannot tell native Linux evidence from a
+# report that merely claims to be one.
+EVIDENCE_MUTATIONS: tuple[tuple[str, object, str], ...] = (
+    (
+        "benchmark_identity",
+        lambda report: report.__setitem__("benchmark", "some-other-benchmark"),
+        "unexpected benchmark identity",
+    ),
+    (
+        "evidence_kind",
+        lambda report: report.pop("evidence_kind"),
+        "missing native user-audit evidence kind",
+    ),
+    (
+        "environment_system",
+        lambda report: _nested(report, "environment").__setitem__("system", "Darwin"),
+        "data-path evidence was not collected on Linux",
+    ),
+    (
+        "run_id_shape",
+        lambda report: report.__setitem__("run_id", "not-a-run-id"),
+        "invalid benchmark run_id",
+    ),
+    (
+        "udp_target_count",
+        lambda report: _nested(report, "workload", "udp").__setitem__("distinct_targets", 1),
+        "workload did not exercise enough distinct UDP targets",
+    ),
+    (
+        "plus_feature_set",
+        lambda report: _nested(report, "build").__setitem__(
+            "plus_extra_features", ["user-stats"]
+        ),
+        "plus build does not prove the user-audit feature",
+    ),
+    (
+        "locked_build",
+        lambda report: _nested(report, "build").__setitem__("locked", False),
+        "build was not performed with the locked dependency graph",
+    ),
+    (
+        "missing_case",
+        lambda report: _drop_case(report, "plus_compiled_runtime_disabled"),
+        "missing unique case plus_compiled_runtime_disabled",
+    ),
+    (
+        "user_stats_runtime_state",
+        lambda report: _case_record(report, 0).__setitem__("runtime_user_stats", True),
+        "locked_upstream has unexpected user-stats runtime state",
+    ),
+    (
+        "user_audit_runtime_state",
+        lambda report: _case_record(report, 2).__setitem__("runtime_user_audit", False),
+        "plus_runtime_enabled has unexpected user-audit runtime state",
+    ),
+    (
+        "native_measurement_marker",
+        lambda report: _case_record(report, 1).__setitem__(
+            "native_process_measurement", False
+        ),
+        "plus_compiled_runtime_disabled lacks native process measurement marker",
+    ),
+    (
+        "detached_auditd_report",
+        None,
+        "detached auditd evidence is not accepted",
+    ),
+    (
+        "in_run_auditd_measurement",
+        lambda report: report.pop("auditd"),
+        "missing in-run auditd measurement",
+    ),
+    (
+        "auditd_run_id",
+        lambda report: _auditd(report).__setitem__("run_id", "9" * 32),
+        "auditd measurement run_id does not match benchmark",
+    ),
+    (
+        "auditd_measurement_source",
+        lambda report: _auditd(report).__setitem__("measurement_source", "self_reported"),
+        "auditd RSS is not identified as a live process sample",
+    ),
+    (
+        "auditd_rss_sample_count",
+        lambda report: _auditd(report).__setitem__("rss_sample_count", 0),
+        "auditd RSS has no successful process samples",
+    ),
+    (
+        "auditd_digest_shape",
+        lambda report: _auditd(report).__setitem__("executable_sha256", "not-a-digest"),
+        "auditd executable digest is missing or invalid",
+    ),
+    (
+        "auditd_digest_matches_build",
+        lambda report: _auditd(report).__setitem__("executable_sha256", "d" * 64),
+        "running auditd does not match the current plus build artifact",
+    ),
+    (
+        "auditd_pid",
+        lambda report: _auditd(report).__setitem__("pid", 0),
+        "auditd PID is missing or invalid",
+    ),
+    (
+        "auditd_start_time",
+        lambda report: _auditd(report).__setitem__("process_start_time_ticks", 0),
+        "auditd process start identity is missing or invalid",
+    ),
+    (
+        "auditd_executable_path",
+        lambda report: _auditd(report).__setitem__("executable_path", "shadowsocks-auditd"),
+        "auditd executable path is missing or not absolute",
+    ),
+    (
+        "ingest_socket_path",
+        lambda report: _auditd(report).__setitem__("ingest_socket_path", "ingest.sock"),
+        "auditd ingest socket path is missing or not absolute",
+    ),
+    (
+        "ingest_socket_inode",
+        lambda report: _auditd(report).pop("ingest_socket_inode"),
+        "auditd ingest socket inode is missing",
+    ),
+    (
+        "ingest_socket_device",
+        lambda report: _auditd(report).pop("ingest_socket_device"),
+        "auditd ingest socket device is missing",
+    ),
+    (
+        "export_socket_path",
+        lambda report: _auditd(report).__setitem__("export_socket_path", "export.sock"),
+        "auditd export socket path is missing or not absolute",
+    ),
+    (
+        "export_socket_inode",
+        lambda report: _auditd(report).pop("export_socket_inode"),
+        "auditd export socket inode is missing",
+    ),
+    (
+        "export_socket_device",
+        lambda report: _auditd(report).pop("export_socket_device"),
+        "auditd export socket device is missing",
+    ),
+    (
+        "auditd_peak_rss",
+        lambda report: _auditd(report).pop("peak_rss_kib"),
+        "auditd peak RSS is missing",
+    ),
+    (
+        "auditd_summary_matches_case",
+        lambda report: _auditd(report).__setitem__("peak_rss_kib", 19_000),
+        "auditd summary does not match the enabled case process samples",
+    ),
+    (
+        "independent_identities",
+        lambda report: _auditd(report).__setitem__("export_uid", 1001),
+        "auditd, producer and export identities are not independently bound",
+    ),
+    (
+        "durable_ingest_delta",
+        lambda report: _nested(report, "auditd", "ingest").__setitem__("source", "guessed"),
+        "signed auditd health does not prove a durable ingest delta",
+    ),
+    (
+        "proxy_counter_source",
+        lambda report: _enabled_proxy(report).__setitem__("source", "estimated"),
+        "enabled proxy counters are not worker outcomes",
+    ),
+    (
+        "proxy_counter_completeness",
+        lambda report: _enabled_proxy(report).pop("errors"),
+        "enabled proxy outcome counters are incomplete",
+    ),
+    (
+        "required_metric_presence",
+        lambda report: _enabled_aggregate(report).pop("bidirectional_mib_per_second"),
+        "one or more required native measurements are missing",
+    ),
+)
+
+
+class EvidenceCheckBindingTest(unittest.TestCase):
+    """Every ``_evaluate_data_path`` check needs a case that fails without it."""
+
+    def test_unmutated_native_evidence_raises_no_issue(self) -> None:
+        metrics = MODULE._evaluate_data_path(AuditBenchmarkTest._native_report())
+        self.assertEqual(metrics["evidence_issues"], [])
+        self.assertTrue(metrics["native_evidence_gate"])
+
+    def test_every_evidence_check_has_a_failing_case(self) -> None:
+        for name, mutate, expected in EVIDENCE_MUTATIONS:
+            with self.subTest(check=name):
+                evidence = AuditBenchmarkTest._native_report()
+                if mutate is None:
+                    # The detached-report rejection is the one check that is
+                    # driven by the second argument instead of the payload.
+                    metrics = MODULE._evaluate_data_path(evidence, {})
+                else:
+                    mutate(evidence)
+                    metrics = MODULE._evaluate_data_path(evidence)
+                self.assertIn(expected, metrics["evidence_issues"])
+                self.assertIsNone(metrics["native_evidence_gate"])
+
+    def test_mutation_table_covers_every_check_site(self) -> None:
+        source = inspect.getsource(MODULE._evaluate_data_path)
+        self.assertEqual(
+            source.count("issues.append("),
+            len(EVIDENCE_MUTATIONS),
+            "a new evidence check needs its own negative case in EVIDENCE_MUTATIONS",
+        )
+        self.assertEqual(
+            len({expected for _, _, expected in EVIDENCE_MUTATIONS}),
+            len(EVIDENCE_MUTATIONS),
+        )
 
 
 if __name__ == "__main__":
