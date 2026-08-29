@@ -306,5 +306,103 @@ fn production_unix() {
         self.assertEqual(sorted(int(item.rsplit(":", 2)[1]) for item in findings), [9, 14])
 
 
+    def test_bounds_proof_from_another_function_is_not_accepted(self) -> None:
+        # m-218：放行窗口曾是“前 256 行”，另一个函数里的 len() 也能洗白索引。
+        findings = self.check_source(
+            """
+fn earlier(input: &[u8]) -> usize {
+    input.len()
+}
+
+fn later(input: &[u8], index: usize) -> u8 {
+    input[index]
+}
+"""
+        )
+        self.assertEqual(len(findings), 1)
+        self.assertIn(":7: direct index is not statically bounded", findings[0])
+
+    def test_iteration_alone_is_not_a_bounds_proof(self) -> None:
+        # m-218：`.iter()`/`.find()` 本身不给出任何上界。
+        findings = self.check_source(
+            """
+fn scan(input: &[u8], index: usize) -> u8 {
+    for _ in input.iter() {}
+    input[index]
+}
+"""
+        )
+        self.assertEqual(len(findings), 1)
+        self.assertIn(":4: direct index is not statically bounded", findings[0])
+
+    def test_accepted_index_proofs(self) -> None:
+        # m-218：`_index_is_proven_safe` 的每条放行规则都必须有用例覆盖。
+        proofs = {
+            "length check in the same function": """
+fn read_at(input: &[u8], index: usize) -> u8 {
+    if index >= input.len() {
+        return 0;
+    }
+    input[index]
+}
+""",
+            "index bound by a search over the same slice": """
+fn trim(input: &[u8]) -> &[u8] {
+    let start = input.iter().position(|byte| *byte != b' ').unwrap_or(0);
+    &input[start..]
+}
+""",
+            "explicit validation call": """
+fn read_at(input: &[u8], index: usize) -> u8 {
+    validate_bounds(input, index);
+    input[index]
+}
+""",
+            "buffer filled by a read": """
+fn header(stream: &mut Stream) -> u8 {
+    let mut buffer = [0_u8; 4];
+    stream.read(&mut buffer)?;
+    buffer[3]
+}
+""",
+            "length used inside the index expression": """
+fn tail(input: &[u8]) -> &[u8] {
+    &input[input.len() - 1..]
+}
+""",
+            "window element": """
+fn pairs(input: &[u8]) -> bool {
+    input.windows(2).any(|pair| pair[1] == 0)
+}
+""",
+            "modulo of a fixed length": """
+const SLOTS: usize = 4;
+
+fn pick(cursor: usize) -> u8 {
+    let table: [u8; SLOTS] = [0; SLOTS];
+    let slot = cursor % SLOTS;
+    table[slot]
+}
+""",
+            "discriminant with a bounded index function": """
+impl Bucket {
+    fn index(&self) -> usize {
+        match self {
+            Bucket::First => 0,
+            Bucket::Second => 1,
+        }
+    }
+}
+
+fn due(next_due: &[u64; 4], bucket: Bucket) -> u64 {
+    next_due[bucket.index()]
+}
+""",
+        }
+        for name, source in proofs.items():
+            with self.subTest(name):
+                self.assertEqual(self.check_source(source), [])
+
+
 if __name__ == "__main__":
     unittest.main()

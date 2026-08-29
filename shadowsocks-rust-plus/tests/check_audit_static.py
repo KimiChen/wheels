@@ -55,6 +55,11 @@ REQUIRED_PRODUCTION_FILES = (
     "crates/shadowsocks-service/src/server/udprelay.rs",
     "crates/shadowsocks-service/src/server/context.rs",
 )
+# Bound the "proof window" for a direct index to the enclosing function.  A
+# `name.len()` several hundred lines earlier, in an unrelated item, is not proof
+# that this index is in range.
+FUNCTION_DECLARATION = re.compile(r"(?:^|\s)(?:pub\s+)?(?:async\s+)?(?:unsafe\s+)?(?:const\s+)?fn\s+[A-Za-z0-9_]+")
+
 AUDIT_MARKER = re.compile(
     r"\b(?:user_audit|audit_emitter|AuditEmitter|AuditTarget|AuditRecord|audit_event|user-audit)\b"
 )
@@ -252,6 +257,14 @@ def _structural_characters_for_item(
     return "".join(result), block_comment_depth, raw_hashes
 
 
+def _enclosing_function_start(lines: list[str], line_index: int) -> int:
+    """Return the line index of the nearest enclosing ``fn`` declaration."""
+    for cursor in range(line_index, -1, -1):
+        if FUNCTION_DECLARATION.search(lines[cursor]):
+            return cursor
+    return 0
+
+
 def _fixed_array_length(lines: list[str], line_index: int, name: str) -> int | None:
     # Rustfmt keeps parameters and local declarations close to their use. Restricting
     # the search avoids treating an identically named array in an earlier item as proof.
@@ -308,9 +321,11 @@ def _index_is_proven_safe(lines: list[str], line_index: int, match: re.Match[str
         return _fixed_array_index_is_safe(lines, line_index, match)
 
     name = re.escape(match.group("name"))
-    context = "\n".join(lines[max(0, line_index - 256):line_index + 1])
+    # A bound established in another function proves nothing here, so the guard
+    # window is the enclosing function instead of a fixed line count.
+    context = "\n".join(lines[_enclosing_function_start(lines, line_index):line_index + 1])
     if re.search(
-        rf"\b{name}\s*(?:\n\s*)?\.(?:len|starts_with|strip_prefix|find|windows|iter)\s*\(",
+        rf"\b{name}\s*(?:\n\s*)?\.(?:len|starts_with|strip_prefix|windows)\s*\(",
         context,
     ):
         return True
@@ -319,6 +334,23 @@ def _index_is_proven_safe(lines: list[str], line_index: int, match: re.Match[str
     if re.search(rf"\.read\s*\(\s*&mut\s+{name}\b", context):
         return True
     if re.search(rf"\b{name}\.len\(\)", expression):
+        return True
+    # A plain `.iter()`/`.find()` mention bounds nothing on its own. Only accept
+    # an index whose every component is bound by a search over this collection.
+    components = [part for part in re.split(r"\.\.=?|\+|-|\s+", expression) if part]
+    searched = rf"\blet\s+(?:mut\s+)?{{binding}}\s*=[^;]*\b{name}\b[^;]*\.(?:position|rposition|find)\s*\("
+    if any(
+        re.search(searched.format(binding=re.escape(part)), context) is not None
+        for part in components
+        if not part.isdecimal()
+    ) and all(
+        part.isdecimal()
+        or (
+            re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", part) is not None
+            and re.search(searched.format(binding=re.escape(part)), context) is not None
+        )
+        for part in components
+    ):
         return True
 
     # `slice.windows(N)` yields subslices of exactly N elements.
