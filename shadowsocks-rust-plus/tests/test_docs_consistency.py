@@ -200,5 +200,45 @@ class PerformanceDocsTests(unittest.TestCase):
         )
 
 
+class AuditIntermediaryDocsTests(unittest.TestCase):
+    """§10.3 的中介细则必须在 OPERATIONS.md 里有可执行的落地写法。"""
+
+    LOG_FORMAT = "log_format audit_export_min"
+    USER_STATS_LOCATION = "location ~ ^/(?:v1/snapshot|healthz)$ {"
+
+    def setUp(self) -> None:
+        self.operations = read(DOCS / "OPERATIONS.md")
+
+    def test_request_body_limit_matches_the_contract(self) -> None:
+        spec = read(DOCS / "USER_ACCESS_AUDIT.md")
+        limit = re.search(
+            r"在转发前拒绝 query、百分号编码路径变体、非预期 method 和超过 (\d+) bytes 的 request body",
+            spec,
+        )
+        self.assertIsNotNone(limit, "§10.3 的 body 上限条文已改写")
+        self.assertIn(f"client_max_body_size {limit.group(1)};", self.operations)
+
+    def test_endpoint_to_node_mapping_is_documented(self) -> None:
+        self.assertIn(
+            flat("每个对外 endpoint 只映射一个 `node_id`"),
+            flat(self.operations),
+        )
+
+    def test_access_log_format_drops_authorization_and_mac_headers(self) -> None:
+        self.assertIn(self.LOG_FORMAT, self.operations)
+        self.assertIn("access_log /var/log/nginx/shadowsocks-audit-export.log audit_export_min;",
+                      self.operations)
+        declaration = re.search(rf"{self.LOG_FORMAT}(.*?);", self.operations, re.S)
+        self.assertIsNotNone(declaration)
+        rendered = declaration.group(1).lower()
+        for forbidden in ("authorization", "x_shadowsocks_audit", "request_body", "resp_body"):
+            self.assertNotIn(forbidden, rendered)
+
+    def test_user_stats_nginx_block_is_marked_non_transferable(self) -> None:
+        location = self.operations.index(self.USER_STATS_LOCATION)
+        fence = self.operations.rindex("```nginx", 0, location)
+        self.assertIn("不可照抄", self.operations[fence:location])
+
+
 if __name__ == "__main__":
     unittest.main()

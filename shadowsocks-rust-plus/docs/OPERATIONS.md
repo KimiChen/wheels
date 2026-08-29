@@ -301,9 +301,12 @@ generation 仍是 v1 完整键的强制维度，不得因当前实现固定为 1
 下面是最小 Nginx upstream 片段；它只展示 exporter 相关指令，外层 `server` 仍必须配置 TLS、
 mTLS、采集网段 allowlist、速率限制和不记录响应 body 的审计。显式写 `proxy_http_version 1.1`
 是为了兼容 Nginx 1.29.7 之前默认使用 HTTP/1.0 的版本；Unix socket URL 与该版本差异见
-[Nginx proxy module](https://nginx.org/en/docs/http/ngx_http_proxy_module.html)。
+[Nginx proxy module](https://nginx.org/en/docs/http/ngx_http_proxy_module.html)。该片段只适用于
+user-stats exporter：审计 export 的 method/path、body 语义、必须逐字透传的 header 和 HMAC 要求都
+不同，专用片段见下文“审计 export 的 HTTP 中介”。
 
 ```nginx
+# 仅适用于 user-stats exporter；不可照抄到 /v1/audit/*，审计 export 见下文专用片段。
 location ~ ^/(?:v1/snapshot|healthz)$ {
     if ($http_content_length != "") { return 400; }
     if ($http_transfer_encoding != "") { return 400; }
@@ -398,10 +401,21 @@ worker，不是远端 collector；仅把某个账号加入 export 组而不匹�
 公网侧必须使用 HTTPS、mTLS、collector 来源 allowlist、限速和不记录请求/响应正文的审计日志。
 中介只能转发三个精确的 method/path 组合，不得重写 method/path、规范 JSON body、
 `Authorization` 或 `X-Shadowsocks-Audit-*` 请求头，不得解压/压缩正文、缓存响应、自动重试 upstream
-或把 204 改写为带 body 的响应。下面片段放在专用 Nginx `http`/`server` 上下文；TLS 和 allowlist
-仍需由部署系统补齐：
+或把 204 改写为带 body 的响应。
+
+[`USER_ACCESS_AUDIT.md`](USER_ACCESS_AUDIT.md) 第 10.3 节还要求每个对外 endpoint 只映射一个
+`node_id`：一份 server/location 配置只指向一个节点的 export socket，不同节点使用不同 endpoint、
+不同 HMAC key 和不同 upstream。不得用同一个 endpoint 依据请求头在多个节点之间路由，也不得让两个
+节点共用一份 key——否则节点隔离与第 10.2 节的 MAC 归属都不再成立。
+
+下面片段放在专用 Nginx `http`/`server` 上下文；TLS 和 allowlist 仍需由部署系统补齐：
 
 ```nginx
+# 仅适用于审计 export；一份配置只对应一个 node_id 与一个 export socket。
+# 第 10.3 节：access/error log 不得记录 Authorization、任何 X-Shadowsocks-Audit-* 头或请求/响应正文。
+log_format audit_export_min '$remote_addr $time_iso8601 '
+                            '"$request_method $uri" $status $body_bytes_sent $request_time';
+
 map "$request_method:$uri" $audit_route_allowed {
     default                         0;
     "GET:/v1/audit/healthz"        1;
@@ -414,6 +428,11 @@ location ~ ^/v1/audit/(?:healthz|lease|ack)$ {
     if ($is_args != "") { return 400; }
     if ($http_transfer_encoding != "") { return 400; }
     if ($http_content_encoding != "") { return 400; }
+
+    # 第 10.3 节：转发前就拒绝超过 4096 bytes 的 request body（与第 10.1 节的 POST body 上限一致）。
+    client_max_body_size 4096;
+    access_log /var/log/nginx/shadowsocks-audit-export.log audit_export_min;
+    error_log  /var/log/nginx/shadowsocks-audit-export.error.log warn;
 
     proxy_pass http://unix:/run/shadowsocks-audit/export/export.sock:;
     proxy_http_version 1.1;
