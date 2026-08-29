@@ -283,5 +283,28 @@ fn checks(value: Result<u8, u8>, slice: &[u8]) {
         )
 
 
+    def test_scans_production_code_guarded_by_cfg_not_test(self) -> None:
+        # m-217：#[cfg(not(test))] 守护的是生产代码，不得当成 cfg(test) 条目跳过。
+        findings = self.check_source(
+            """
+#[cfg(test)]
+fn fixture() {
+    panic!("test only");
+}
+
+#[cfg(not(test))]
+fn production() {
+    risky().expect("must be reported");
+}
+
+#[cfg(all(not(test), unix))]
+fn production_unix() {
+    risky().unwrap();
+}
+"""
+        )
+        self.assertEqual(sorted(int(item.rsplit(":", 2)[1]) for item in findings), [9, 14])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -110,13 +110,55 @@ def _structural_characters(line: str, block_comment_depth: int) -> tuple[str, in
     return "".join(result), block_comment_depth
 
 
+def _cfg_predicate_requires_test(predicate: str) -> bool:
+    """Return whether ``test`` appears in a non-negated position of a cfg predicate.
+
+    ``#[cfg(not(test))]`` guards *production* code, so a plain ``test`` substring
+    match would drop the guarded item out of the scan entirely.
+    """
+
+    position = 0
+
+    def parse(negated: bool) -> bool:
+        nonlocal position
+        found = False
+        token: list[str] = []
+
+        def flush() -> None:
+            nonlocal found
+            if not negated and "".join(token).strip() == "test":
+                found = True
+            token.clear()
+
+        while position < len(predicate):
+            character = predicate[position]
+            position += 1
+            if character == "(":
+                name = "".join(token).strip()
+                token.clear()
+                if parse(negated != (name == "not")):
+                    found = True
+                continue
+            if character == ")":
+                flush()
+                return found
+            if character == ",":
+                flush()
+                continue
+            token.append(character)
+        flush()
+        return found
+
+    return parse(False)
+
+
 def _test_only_lines(lines: list[str]) -> set[int]:
     """Find complete Rust items whose cfg predicate includes ``test``."""
     skipped: set[int] = set()
     cursor = 0
     while cursor < len(lines):
-        attribute = lines[cursor].strip()
-        if re.fullmatch(r"#\[cfg\([^\]]*\btest\b[^\]]*\)\]", attribute) is None:
+        attribute = re.fullmatch(r"#\[cfg\((?P<predicate>.*)\)\]", lines[cursor].strip())
+        if attribute is None or not _cfg_predicate_requires_test(attribute.group("predicate")):
             cursor += 1
             continue
         start = cursor
