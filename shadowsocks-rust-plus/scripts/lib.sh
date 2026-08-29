@@ -3,17 +3,45 @@ set -euo pipefail
 
 readonly SHADOWSOCKS_RUST_PLUS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 
-if [[ -f "$SHADOWSOCKS_RUST_PLUS_ROOT/.env" ]]; then
-  set -a
-  # shellcheck disable=SC1091
-  source "$SHADOWSOCKS_RUST_PLUS_ROOT/.env"
-  set +a
-fi
-
 die() {
   printf '错误：%s\n' "$*" >&2
   exit 1
 }
+
+# `.env` is an untracked developer convenience.  It must never be executed as
+# shell (arbitrary code) and must never be able to introduce build inputs that
+# the release receipt does not record.  Import a fixed key allowlist literally,
+# and let release scripts opt out entirely with
+# SHADOWSOCKS_RUST_PLUS_NO_DOTENV=1.
+readonly SHADOWSOCKS_RUST_PLUS_DOTENV_KEYS=("UPSTREAM_REPOSITORY" "CARGO_HOME")
+
+load_dotenv() {
+  local file="$SHADOWSOCKS_RUST_PLUS_ROOT/.env"
+  [[ -f "$file" ]] || return 0
+  if [[ "${SHADOWSOCKS_RUST_PLUS_NO_DOTENV:-0}" == 1 ]]; then
+    printf '忽略 .env：当前脚本要求可复现的环境输入。\n' >&2
+    return 0
+  fi
+  local line key value allowed
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ -z "${line//[[:space:]]/}" || "$line" == \#* ]] && continue
+    [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || \
+      die ".env 只接受 KEY=VALUE 行，不是 shell 脚本：$line"
+    key="${line%%=*}"
+    value="${line#*=}"
+    allowed=0
+    for candidate in "${SHADOWSOCKS_RUST_PLUS_DOTENV_KEYS[@]}"; do
+      [[ "$key" == "$candidate" ]] && allowed=1 && break
+    done
+    [[ "$allowed" == 1 ]] || die ".env 不允许的键：$key（允许：${SHADOWSOCKS_RUST_PLUS_DOTENV_KEYS[*]}）"
+    if [[ "$value" == \"*\" || "$value" == \'*\' ]]; then
+      value="${value:1:${#value}-2}"
+    fi
+    export "$key=$value"
+  done < "$file"
+}
+
+load_dotenv
 
 require_command() {
   command -v "$1" >/dev/null 2>&1 || die "缺少命令：$1"

@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# 发布链路的环境输入必须完全由脚本与 lock 文件决定，不接受未跟踪的 .env。
+SHADOWSOCKS_RUST_PLUS_NO_DOTENV=1
+export SHADOWSOCKS_RUST_PLUS_NO_DOTENV
 source "$(dirname "$0")/lib.sh"
 # shellcheck disable=SC1091
 source "$SHADOWSOCKS_RUST_PLUS_ROOT/packaging/release-toolchain.lock"
