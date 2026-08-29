@@ -7813,10 +7813,10 @@ index 0000000000000000000000000000000000000000..6cf8d005dfef917c852be4f611d5b945
 +}
 diff --git a/crates/shadowsocks-auditd/src/spool.rs b/crates/shadowsocks-auditd/src/spool.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..e484e4f2b012729d30acd2fe691ecbd33e669421
+index 0000000000000000000000000000000000000000..fc04cae46b3f20eb750d2560bec8ef1dd9043a97
 --- /dev/null
 +++ b/crates/shadowsocks-auditd/src/spool.rs
-@@ -0,0 +1,7828 @@
+@@ -0,0 +1,7925 @@
 +//! Durable, node-local audit spool.
 +//!
 +//! The spool is deliberately synchronous.  Ingest and export perform their
@@ -11062,6 +11062,34 @@ index 0000000000000000000000000000000000000000..e484e4f2b012729d30acd2fe691ecbd3
 +        }
 +    }
 +
++    /// `durable_gap_reasons` answers one question: has the fixed gap of an
++    /// outstanding transaction already reached durable storage?  Once no
++    /// pending tombstone, queued recovery gap or pending state reset refers to
++    /// an event ID, nothing can consult its entry again - freshly generated
++    /// gap IDs are random and never collide - so drop it instead of growing
++    /// the index for the whole process lifetime and relying on the next
++    /// startup rebuild to clear it.
++    fn prune_durable_gap_reasons_locked(inner: &mut SpoolInner) {
++        if inner.durable_gap_reasons.is_empty() {
++            return;
++        }
++        let mut referenced: HashSet<String> = HashSet::new();
++        for entry in &inner.tombstones {
++            if let Some(event_id) = entry.gap_event_id() {
++                referenced.insert(event_id.to_owned());
++            }
++        }
++        for spec in &inner.recovery_gaps {
++            referenced.insert(spec.event_id.clone());
++        }
++        if let Some(pending) = inner.pending_state_reset.as_ref() {
++            referenced.insert(pending.gap_event_id.clone());
++        }
++        inner
++            .durable_gap_reasons
++            .retain(|event_id, _| referenced.contains(event_id));
++    }
++
 +    fn prune_receipts_locked(&self, inner: &mut SpoolInner) -> Result<(), SpoolError> {
 +        // §5.4 defines a single receipt retention window.  Bind the ledger to
 +        // the protocol crate's constant instead of keeping a second definition
@@ -11091,6 +11119,7 @@ index 0000000000000000000000000000000000000000..e484e4f2b012729d30acd2fe691ecbd3
 +            inner.tombstones = old;
 +            return Err(error);
 +        }
++        Self::prune_durable_gap_reasons_locked(inner);
 +        Ok(())
 +    }
 +
@@ -15155,6 +15184,74 @@ index 0000000000000000000000000000000000000000..e484e4f2b012729d30acd2fe691ecbd3
 +        }
 +        assert!(spool.append(&event(1), 1).is_ok());
 +        assert_eq!(spool.health().status, "degraded");
++    }
++
++    /// m-176: `durable_gap_reasons` answers whether an outstanding transaction
++    /// has already written its fixed gap.  Entries of finished transactions can
++    /// never be consulted again and must not accumulate for the lifetime of the
++    /// process, while an outstanding transaction keeps its answer.
++    #[test]
++    fn the_durable_gap_index_drops_finished_transactions_only() {
++        let dir = tempfile::tempdir().expect("tempdir");
++        let spool = Spool::open(config(dir.path())).expect("spool");
++        spool.append(&event(1), 1).expect("append");
++        let mut inner = lock(&spool.inner);
++        for index in 0..8_u64 {
++            let spec = GapSpec {
++                event_id: format!("{GAP_ID_PREFIX}{}", random_hex_id().expect("gap id")),
++                occurred_at_unix_ms: 1_000 + index,
++                lost_spool_epoch: None,
++                reason: wire::SpoolGapReason::StateReset,
++                first_lost_spool_sequence: None,
++                last_lost_spool_sequence: None,
++                lost_events: None,
++                lost_bytes: None,
++                lost_batch_id: None,
++                source_fingerprint: None,
++            };
++            spool.write_gap_locked(&mut inner, &spec).expect("gap");
++        }
++        assert_eq!(inner.durable_gap_reasons.len(), 8);
++        spool.prune_receipts_locked(&mut inner).expect("prune");
++        assert!(
++            inner.durable_gap_reasons.is_empty(),
++            "finished gap transactions must not stay in the index until the next rebuild"
++        );
++
++        let gap_event_id = format!("{GAP_ID_PREFIX}{}", "d".repeat(32));
++        let pending = wire::EvictionPending::new(
++            "b".repeat(32),
++            "c".repeat(64),
++            unix_millis().expect("clock"),
++            gap_event_id.clone(),
++            "capacity_eviction",
++            "e".repeat(32),
++            4096,
++            4099,
++            4,
++            512,
++        );
++        spool
++            .add_tombstone_locked(&mut inner, TombstoneEntry::EvictionPending(pending))
++            .expect("pending eviction");
++        let spec = GapSpec {
++            event_id: gap_event_id.clone(),
++            occurred_at_unix_ms: 2_000,
++            lost_spool_epoch: Some("e".repeat(32)),
++            reason: wire::SpoolGapReason::CapacityEviction,
++            first_lost_spool_sequence: Some(4096),
++            last_lost_spool_sequence: Some(4099),
++            lost_events: Some(4),
++            lost_bytes: Some(512),
++            lost_batch_id: Some("b".repeat(32)),
++            source_fingerprint: None,
++        };
++        spool.write_gap_locked(&mut inner, &spec).expect("gap");
++        spool.prune_receipts_locked(&mut inner).expect("prune");
++        assert!(
++            inner.durable_gap_reasons.contains_key(&gap_event_id),
++            "an outstanding pending transaction must keep its durable-gap answer"
++        );
 +    }
 +
 +    #[test]
