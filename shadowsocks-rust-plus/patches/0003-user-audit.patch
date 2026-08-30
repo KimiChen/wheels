@@ -8089,10 +8089,10 @@ index 0000000000000000000000000000000000000000..6cf8d005dfef917c852be4f611d5b945
 +}
 diff --git a/crates/shadowsocks-auditd/src/spool.rs b/crates/shadowsocks-auditd/src/spool.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..629d0b47f869e9be917db47ed764d324bcb44311
+index 0000000000000000000000000000000000000000..38daaa1b2c98421327cf5cf3bfa7167006bc8200
 --- /dev/null
 +++ b/crates/shadowsocks-auditd/src/spool.rs
-@@ -0,0 +1,9283 @@
+@@ -0,0 +1,9348 @@
 +//! Durable, node-local audit spool.
 +//!
 +//! The spool is deliberately synchronous.  Ingest and export perform their
@@ -16096,6 +16096,71 @@ index 0000000000000000000000000000000000000000..629d0b47f869e9be917db47ed764d324
 +        spool.reconcile_tombstones_locked(&mut inner).expect("reconcile");
 +        assert!(!marker.exists(), "a resolved marker must not survive to the next startup");
 +        assert!(inner.pending_marker_cleanup.is_empty());
++    }
++
++    /// `m-231`：「先提交后记账」这条顺序在**每一个**提交点上都要有护栏。
++    ///
++    /// `989a0aa` 只绑住了 `evict_quarantine_locked`。把另外两个点的
++    /// `commit.finish()?` 挪到 `add_evicted_unacked_records` 之前——marker 清理
++    /// 失败时记账被 `?` 跳过，该批次的丢失量永久漏计——整套用例仍全绿。
++    /// 这两条把它们绑上：让 marker 清理失败，断言销毁的账仍然算过。
++    #[test]
++    fn sealed_eviction_counts_before_reporting_a_marker_cleanup_failure() {
++        let dir = tempfile::tempdir().expect("tempdir");
++        let spool = Spool::open(config(dir.path())).expect("spool");
++        spool.append(&event(1), 1).expect("append");
++        spool.append(&event(2), 2).expect("append");
++        {
++            let mut inner = lock(&spool.inner);
++            spool.seal_locked(&mut inner).expect("seal");
++        }
++        let sealed = list_batch_dirs(&dir.path().join("sealed")).expect("sealed");
++        assert_eq!(sealed.len(), 1);
++
++        let mut inner = lock(&spool.inner);
++        inner.faults.marker_cleanup = true;
++        let error = spool
++            .evict_sealed_locked(&mut inner, &sealed[0])
++            .expect_err("the marker cleanup failure must reach the caller");
++        assert!(
++            error.to_string().contains("injected marker cleanup failure"),
++            "unexpected error: {error}"
++        );
++        assert_eq!(
++            inner.evicted_unacked_records, 2,
++            "the batch is already destroyed and its gap durable, so the loss must be counted"
++        );
++    }
++
++    /// 见上一条：这是 reconcile 的 QuarantinePending 腿。
++    #[test]
++    fn recovered_quarantine_eviction_counts_before_reporting_a_marker_cleanup_failure() {
++        let dir = tempfile::tempdir().expect("tempdir");
++        let spool = Spool::open(config(dir.path())).expect("spool");
++        let mut inner = lock(&spool.inner);
++        let pending = wire::QuarantinePending::new(
++            format!("{GAP_ID_PREFIX}{}", "7".repeat(32)),
++            "batch-corrupt-9-zzzz".to_owned(),
++            unix_millis().expect("clock"),
++            Some("b".repeat(32)),
++            Some("c".repeat(64)),
++            Some("e".repeat(32)),
++            Some(4096),
++            Some(4098),
++            Some(3),
++            Some(512),
++        );
++        spool
++            .add_tombstone_locked(&mut inner, TombstoneEntry::QuarantinePending(pending))
++            .expect("quarantine_eviction pending");
++        inner.faults.marker_cleanup = true;
++        spool
++            .reconcile_tombstones_locked(&mut inner)
++            .expect("reconcile retains a failed candidate instead of propagating");
++        assert_eq!(
++            inner.evicted_unacked_records, 3,
++            "the resumed destruction must be counted even when marker cleanup fails"
++        );
 +    }
 +
 +    /// `m-222` 的另一半：aggregate ledger 提交之后，私有 marker 清理失败必须
