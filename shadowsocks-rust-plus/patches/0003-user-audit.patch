@@ -25785,7 +25785,7 @@ index 0000000000000000000000000000000000000000..d8a730d159d970a86a23d51d58193173
 +    }
 +}
 diff --git a/crates/shadowsocks-service/src/server/user_stats.rs b/crates/shadowsocks-service/src/server/user_stats.rs
-index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..74bd38dc121961484918848065a07547642b6b29 100644
+index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..984a9f2e828f27d1a585f443505061cf9f8bbcd4 100644
 --- a/crates/shadowsocks-service/src/server/user_stats.rs
 +++ b/crates/shadowsocks-service/src/server/user_stats.rs
 @@ -11,11 +11,16 @@ use std::{
@@ -26063,10 +26063,20 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..74bd38dc121961484918848065a07547
      }
  
      #[cfg(test)]
-@@ -992,6 +1115,22 @@ mod exporter {
+@@ -992,6 +1115,32 @@ mod exporter {
          release: Arc<Semaphore>,
      }
  
++    /// One connection handed back to the accept loop so its lingering close runs
++    /// as a task the loop owns.  `handle_client` cannot spawn it itself without
++    /// detaching from `run()`'s `JoinSet`, and a detached task outlives the
++    /// exporter it belongs to.
++    struct LingeringClose {
++        stream: UnixStream,
++        timeout: Duration,
++        hook: LingeringCloseHook,
++    }
++
 +    /// Test-only synchronization for proving that a lingering worker can be
 +    /// held open without consuming an ordinary client permit.  In production
 +    /// the wrapper is zero-sized and all hook code is compiled out.
@@ -26086,7 +26096,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..74bd38dc121961484918848065a07547
      impl UserStatsExporter {
          /// Safely bind the configured filesystem socket.
          pub fn bind(mut config: UserStatsConfig, registry: Arc<UserStatsRegistry>) -> io::Result<Self> {
-@@ -1025,6 +1164,7 @@ mod exporter {
+@@ -1025,6 +1174,7 @@ mod exporter {
                  inject_accept_failure: false,
                  #[cfg(test)]
                  busy_response_hook: None,
@@ -26094,7 +26104,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..74bd38dc121961484918848065a07547
              })
          }
  
-@@ -1044,6 +1184,19 @@ mod exporter {
+@@ -1044,6 +1194,19 @@ mod exporter {
              (entered_rx, release)
          }
  
@@ -26114,20 +26124,51 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..74bd38dc121961484918848065a07547
          /// Serve requests until the owning task is cancelled.
          pub async fn run(self) -> io::Result<()> {
              info!(
-@@ -1052,6 +1205,7 @@ mod exporter {
+@@ -1052,6 +1215,8 @@ mod exporter {
              );
              let semaphore = Arc::new(Semaphore::new(self.config.max_concurrent_clients));
              let busy_response_semaphore = Arc::new(Semaphore::new(MAX_BUSY_RESPONSE_WORKERS));
 +            let lingering_close_semaphore = Arc::new(Semaphore::new(MAX_LINGERING_CLOSE_WORKERS));
++            let (lingering_close_tx, mut lingering_close_rx) = tokio::sync::mpsc::unbounded_channel();
              let mut workers = JoinSet::new();
              let mut consecutive_accept_errors = 0usize;
  
-@@ -1132,7 +1286,19 @@ mod exporter {
+@@ -1064,14 +1229,22 @@ mod exporter {
+                     }
+                 }
+ 
+-                #[cfg(test)]
+-                let accept_result = if self.inject_accept_failure {
+-                    Err(io::Error::other("injected persistent accept failure"))
+-                } else {
+-                    self.listener.accept().await
++                // Service lingering-close hand-backs while waiting for the next
++                // connection, so a rejected client's drain starts immediately
++                // and still runs as a task this loop owns.
++                let accept_result = loop {
++                    #[cfg(test)]
++                    if self.inject_accept_failure {
++                        break Err(io::Error::other("injected persistent accept failure"));
++                    }
++                    tokio::select! {
++                        biased;
++                        Some(request) = lingering_close_rx.recv() => {
++                            spawn_bounded_lingering_close(&mut workers, &lingering_close_semaphore, request);
++                        }
++                        result = self.listener.accept() => break result,
++                    }
+                 };
+-                #[cfg(not(test))]
+-                let accept_result = self.listener.accept().await;
+ 
+                 let (stream, _) = match accept_result {
+                     Ok(connection) => {
+@@ -1132,7 +1305,19 @@ mod exporter {
                  };
                  let registry = self.registry.clone();
                  let config = self.config.clone();
 -                workers.spawn(async move { handle_client(stream, permit, registry, config).await });
-+                let lingering_close_semaphore = lingering_close_semaphore.clone();
++                let lingering_close_tx = lingering_close_tx.clone();
 +                let lingering_close_hook = self.lingering_close_hook.clone();
 +                workers.spawn(async move {
 +                    handle_client(
@@ -26135,7 +26176,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..74bd38dc121961484918848065a07547
 +                        permit,
 +                        registry,
 +                        config,
-+                        lingering_close_semaphore,
++                        lingering_close_tx,
 +                        lingering_close_hook,
 +                    )
 +                    .await
@@ -26143,7 +26184,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..74bd38dc121961484918848065a07547
              }
          }
      }
-@@ -1403,8 +1569,7 @@ mod exporter {
+@@ -1403,8 +1588,7 @@ mod exporter {
          }
  
          let suffix = &value[host.len()..];
@@ -26153,7 +26194,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..74bd38dc121961484918848065a07547
      }
  
      fn request_has_one_valid_host(request: &Request<Incoming>) -> bool {
-@@ -1489,11 +1654,14 @@ mod exporter {
+@@ -1489,11 +1673,14 @@ mod exporter {
      }
  
      async fn handle_client(
@@ -26162,14 +26203,14 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..74bd38dc121961484918848065a07547
          permit: OwnedSemaphorePermit,
          registry: Arc<UserStatsRegistry>,
          config: UserStatsConfig,
-+        lingering_close_semaphore: Arc<Semaphore>,
++        lingering_close_tx: tokio::sync::mpsc::UnboundedSender<LingeringClose>,
 +        lingering_close_hook: LingeringCloseHook,
      ) -> io::Result<()> {
 +        let mut stream = stream;
          let head = match time::timeout(
              config.read_timeout,
              read_request_head(&mut stream, config.max_request_bytes),
-@@ -1501,41 +1669,53 @@ mod exporter {
+@@ -1501,41 +1688,53 @@ mod exporter {
          .await
          {
              Err(..) => {
@@ -26181,7 +26222,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..74bd38dc121961484918848065a07547
                      config.write_timeout,
                      StatusCode::REQUEST_TIMEOUT,
                      ERROR_READ_TIMEOUT,
-+                    lingering_close_semaphore,
++                    lingering_close_tx,
 +                    lingering_close_hook,
                  )
                  .await;
@@ -26196,7 +26237,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..74bd38dc121961484918848065a07547
                      config.write_timeout,
                      StatusCode::PAYLOAD_TOO_LARGE,
                      ERROR_REQUEST_TOO_LARGE,
-+                    lingering_close_semaphore,
++                    lingering_close_tx,
 +                    lingering_close_hook,
                  )
                  .await;
@@ -26211,7 +26252,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..74bd38dc121961484918848065a07547
                      config.write_timeout,
                      StatusCode::BAD_REQUEST,
                      ERROR_INVALID_REQUEST,
-+                    lingering_close_semaphore,
++                    lingering_close_tx,
 +                    lingering_close_hook,
                  )
                  .await;
@@ -26226,12 +26267,12 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..74bd38dc121961484918848065a07547
                      config.write_timeout,
                      StatusCode::HTTP_VERSION_NOT_SUPPORTED,
                      ERROR_HTTP_VERSION_NOT_SUPPORTED,
-+                    lingering_close_semaphore,
++                    lingering_close_tx,
 +                    lingering_close_hook,
                  )
                  .await;
                  return Ok(());
-@@ -1547,12 +1727,20 @@ mod exporter {
+@@ -1547,12 +1746,20 @@ mod exporter {
              let (status, body) = match error {
                  ReadHeadError::Invalid => (StatusCode::BAD_REQUEST, ERROR_INVALID_REQUEST),
                  ReadHeadError::TooLarge => (StatusCode::PAYLOAD_TOO_LARGE, ERROR_REQUEST_TOO_LARGE),
@@ -26250,14 +26291,14 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..74bd38dc121961484918848065a07547
 +                config.write_timeout,
 +                status,
 +                body,
-+                lingering_close_semaphore,
++                lingering_close_tx,
 +                lingering_close_hook,
 +            )
 +            .await;
              return Ok(());
          }
  
-@@ -1588,17 +1776,124 @@ mod exporter {
+@@ -1588,17 +1795,136 @@ mod exporter {
          response
      }
  
@@ -26330,13 +26371,20 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..74bd38dc121961484918848065a07547
 +        timeout: Duration,
 +        status: StatusCode,
 +        body: &[u8],
-+        lingering_close_semaphore: Arc<Semaphore>,
++        lingering_close_tx: tokio::sync::mpsc::UnboundedSender<LingeringClose>,
 +        lingering_close_hook: LingeringCloseHook,
 +    ) {
 +        let response = direct_json_response(status, body);
 +        let _ = time::timeout(timeout, async { stream.write_all(&response).await }).await;
 +        drop(permit);
-+        spawn_bounded_lingering_close(stream, timeout, lingering_close_semaphore, lingering_close_hook);
++        // A closed receiver means the accept loop is gone; dropping the stream
++        // then is the only thing left to do, and shutdown does not need a
++        // graceful lingering close.
++        let _ = lingering_close_tx.send(LingeringClose {
++            stream,
++            timeout,
++            hook: lingering_close_hook,
++        });
 +    }
 +
 +    /// Start one bounded lingering-close worker, or drop the stream when all
@@ -26347,15 +26395,19 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..74bd38dc121961484918848065a07547
 +    /// the response bytes are already written and framed by `Content-Length`,
 +    /// but a read-to-EOF client observes an error instead of a clean end.
 +    fn spawn_bounded_lingering_close(
-+        stream: UnixStream,
-+        timeout: Duration,
-+        semaphore: Arc<Semaphore>,
-+        _hook: LingeringCloseHook,
++        workers: &mut JoinSet<io::Result<()>>,
++        semaphore: &Arc<Semaphore>,
++        request: LingeringClose,
 +    ) {
-+        let Ok(worker_permit) = semaphore.try_acquire_owned() else {
++        let LingeringClose {
++            stream,
++            timeout,
++            hook: _hook,
++        } = request;
++        let Ok(worker_permit) = semaphore.clone().try_acquire_owned() else {
 +            return;
 +        };
-+        tokio::spawn(async move {
++        workers.spawn(async move {
 +            let _worker_permit = worker_permit;
 +            #[cfg(test)]
 +            if let Some(hook) = _hook.inner {
@@ -26366,6 +26418,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..74bd38dc121961484918848065a07547
 +            }
 +            let mut stream = stream;
 +            lingering_close(&mut stream, timeout).await;
++            Ok(())
 +        });
      }
  
@@ -26377,17 +26430,36 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..74bd38dc121961484918848065a07547
 +        use tokio::io::{AsyncReadExt, AsyncWriteExt};
 +
 +        use super::{
-+            ERROR_REQUEST_TOO_LARGE, LINGERING_CLOSE_MAX_BYTES, LingeringCloseHook, LingeringCloseTestHook, StatusCode,
++            ERROR_REQUEST_TOO_LARGE, LINGERING_CLOSE_MAX_BYTES, LingeringClose, LingeringCloseHook, LingeringCloseTestHook, StatusCode,
 +            UnixStream, set_socket_permissions_nofollow, verify_open_file_path, write_direct_json,
 +            write_direct_json_and_detach,
 +        };
  
          pub(crate) const BUSY_RESPONSE_WORKERS: usize = super::MAX_BUSY_RESPONSE_WORKERS;
          pub(crate) const SNAPSHOT_REQUEST: &[u8] = b"GET /v1/snapshot HTTP/1.1\r\nHost: localhost\r\n\r\n";
-@@ -1638,6 +1933,321 @@ mod exporter {
+@@ -1638,6 +1964,354 @@ mod exporter {
              drop(socket);
          }
  
++        /// One hand-back serviced exactly the way `run()` services it: take the
++        /// request off the channel and spawn it into a `JoinSet` under the shared
++        /// bound.  Unit tests that drive `write_direct_json_and_detach` directly
++        /// have to stand in for the accept loop; using the same function keeps
++        /// them from drifting into testing a private copy.
++        fn service_lingering_close(
++            receiver: &mut tokio::sync::mpsc::UnboundedReceiver<LingeringClose>,
++            workers: &mut tokio::task::JoinSet<std::io::Result<()>>,
++            semaphore: &std::sync::Arc<tokio::sync::Semaphore>,
++        ) -> bool {
++            match receiver.try_recv() {
++                Ok(request) => {
++                    super::spawn_bounded_lingering_close(workers, semaphore, request);
++                    true
++                }
++                Err(..) => false,
++            }
++        }
++
 +        /// Pins both socket buffers to a known size.  Tests use it in both
 +        /// directions: widened so a whole backlog can be queued without the
 +        /// writer blocking, or narrowed so a writer provably blocks until the
@@ -26525,16 +26597,19 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..74bd38dc121961484918848065a07547
 +                }),
 +            };
 +            let first_permit = client_semaphore.clone().try_acquire_owned().unwrap();
++            let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
++            let mut workers = tokio::task::JoinSet::new();
 +            write_direct_json_and_detach(
 +                first_server,
 +                first_permit,
 +                std::time::Duration::from_secs(5),
 +                StatusCode::PAYLOAD_TOO_LARGE,
 +                ERROR_REQUEST_TOO_LARGE,
-+                lingering_semaphore.clone(),
++                sender.clone(),
 +                first_hook,
 +            )
 +            .await;
++            assert!(service_lingering_close(&mut receiver, &mut workers, &lingering_semaphore));
 +
 +            tokio::time::timeout(std::time::Duration::from_secs(1), entered_rx.recv())
 +                .await
@@ -26562,10 +26637,11 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..74bd38dc121961484918848065a07547
 +                std::time::Duration::from_secs(5),
 +                StatusCode::PAYLOAD_TOO_LARGE,
 +                ERROR_REQUEST_TOO_LARGE,
-+                lingering_semaphore.clone(),
++                sender,
 +                LingeringCloseHook::default(),
 +            )
 +            .await;
++            assert!(service_lingering_close(&mut receiver, &mut workers, &lingering_semaphore));
 +            assert_eq!(client_semaphore.available_permits(), 1);
 +
 +            let mut second_response = Vec::new();
@@ -26623,16 +26699,23 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..74bd38dc121961484918848065a07547
 +
 +            let client_semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
 +            let permit = client_semaphore.try_acquire_owned().unwrap();
++            let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
 +            write_direct_json_and_detach(
 +                server,
 +                permit,
 +                std::time::Duration::from_secs(5),
 +                StatusCode::PAYLOAD_TOO_LARGE,
 +                ERROR_REQUEST_TOO_LARGE,
-+                std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
++                sender,
 +                LingeringCloseHook::default(),
 +            )
 +            .await;
++            let lingering = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
++            let mut workers = tokio::task::JoinSet::new();
++            assert!(
++                service_lingering_close(&mut receiver, &mut workers, &lingering),
++                "the direct error must hand its stream back to the accept loop"
++            );
 +
 +            let response = tokio::time::timeout(std::time::Duration::from_secs(5), writer)
 +                .await
@@ -26671,16 +26754,19 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..74bd38dc121961484918848065a07547
 +
 +            let client_semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
 +            let permit = client_semaphore.clone().try_acquire_owned().unwrap();
++            let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
 +            write_direct_json_and_detach(
 +                server,
 +                permit,
 +                std::time::Duration::from_secs(5),
 +                StatusCode::PAYLOAD_TOO_LARGE,
 +                ERROR_REQUEST_TOO_LARGE,
-+                lingering.clone(),
++                sender,
 +                LingeringCloseHook::default(),
 +            )
 +            .await;
++            let mut workers = tokio::task::JoinSet::new();
++            assert!(service_lingering_close(&mut receiver, &mut workers, &lingering));
 +
 +            assert_eq!(
 +                client_semaphore.available_permits(),
@@ -26706,7 +26792,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..74bd38dc121961484918848065a07547
          #[test]
          fn lock_path_verification_rejects_an_inode_replacement() {
              let directory = tempfile::tempdir().unwrap();
-@@ -1669,10 +2279,7 @@ mod tests {
+@@ -1669,10 +2343,7 @@ mod tests {
          T: Send + 'static,
          F: FnOnce() -> T + Send + 'static,
      {
@@ -26718,7 +26804,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..74bd38dc121961484918848065a07547
          let (started_tx, started_rx) = std::sync::mpsc::channel();
          let (result_tx, result_rx) = std::sync::mpsc::channel();
          let worker = std::thread::spawn(move || {
-@@ -1791,7 +2398,10 @@ mod tests {
+@@ -1791,7 +2462,10 @@ mod tests {
              assert_eq!(prior.servers[0].server_id, snapshot.servers[0].server_id);
              assert_eq!(prior.servers[0].generation, snapshot.servers[0].generation);
              assert_eq!(prior.servers[0].users[0].name, snapshot.servers[0].users[0].name);
@@ -26730,7 +26816,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..74bd38dc121961484918848065a07547
          }
          assert!(active_snapshot.servers[0].active);
          assert_eq!(active_snapshot.servers[0].users[0].tcp_uplink_bytes, 7);
-@@ -2038,10 +2648,7 @@ mod tests {
+@@ -2038,10 +2712,7 @@ mod tests {
              response.headers.get("cache-control").map(String::as_str),
              Some("no-store")
          );
@@ -26742,7 +26828,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..74bd38dc121961484918848065a07547
          assert!(!response.headers.contains_key("transfer-encoding"));
          assert_eq!(
              response.headers["content-length"].parse::<usize>().unwrap(),
-@@ -2123,8 +2730,7 @@ mod tests {
+@@ -2123,8 +2794,7 @@ mod tests {
          assert_eq!(response.body, exporter::ERROR_INVALID_REQUEST);
  
          for declared_body in [
@@ -26752,7 +26838,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..74bd38dc121961484918848065a07547
              b"GET /v1/snapshot HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: gzip\r\n\r\n".as_slice(),
              b"GET /v1/snapshot HTTP/1.1\r\nHost: localhost\r\nContent-Length: nope\r\n\r\n".as_slice(),
              b"GET /v1/snapshot HTTP/1.1\r\nHost: localhost\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\n"
-@@ -2158,7 +2764,10 @@ mod tests {
+@@ -2158,7 +2828,10 @@ mod tests {
              .unwrap()
              .unwrap();
          assert_eq!(
@@ -26764,7 +26850,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..74bd38dc121961484918848065a07547
              1
          );
          let response = parse_response(bytes);
-@@ -2207,8 +2816,7 @@ mod tests {
+@@ -2207,8 +2880,7 @@ mod tests {
          }
  
          for unsupported_version in ["HTTP/1.0", "HTTP/1.2", "HTTP/2.0"] {
@@ -26774,7 +26860,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..74bd38dc121961484918848065a07547
              let response = request(&path, request_bytes.as_bytes()).await;
              assert_eq!(response.status, 505);
              assert_eq!(response.body, exporter::ERROR_HTTP_VERSION_NOT_SUPPORTED);
-@@ -2218,13 +2826,7 @@ mod tests {
+@@ -2218,13 +2890,7 @@ mod tests {
          assert_eq!(response.status, 400);
          assert_eq!(response.body, exporter::ERROR_INVALID_REQUEST);
  
@@ -26789,7 +26875,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..74bd38dc121961484918848065a07547
              let request_bytes = format!("GET /healthz HTTP/1.1\r\nHost: {valid_host}\r\n\r\n");
              let response = request(&path, request_bytes.as_bytes()).await;
              assert_eq!(response.status, 200);
-@@ -2258,11 +2860,7 @@ mod tests {
+@@ -2258,11 +2924,7 @@ mod tests {
          let exporter = UserStatsExporter::bind(exporter_config(&path), registry.clone()).unwrap();
          let task = tokio::spawn(exporter.run());
  
@@ -26802,7 +26888,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..74bd38dc121961484918848065a07547
          let response = split_response(bytes);
          assert_eq!(response.status, 405);
          assert_eq!(response.headers.get("allow").map(String::as_str), Some("GET"));
-@@ -2274,10 +2872,7 @@ mod tests {
+@@ -2274,10 +2936,7 @@ mod tests {
              response.headers.get("cache-control").map(String::as_str),
              Some("no-store")
          );
@@ -26814,11 +26900,50 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..74bd38dc121961484918848065a07547
          assert_eq!(
              response.headers["content-length"].parse::<usize>().unwrap(),
              exporter::ERROR_METHOD_NOT_ALLOWED.len()
-@@ -2393,6 +2988,49 @@ mod tests {
+@@ -2393,6 +3052,88 @@ mod tests {
          let _ = task.await;
      }
  
 +    #[cfg(unix)]
++    /// `m-232`：lingering worker 必须由 `run()` 拥有，随它一起终止。
++    ///
++    /// 改造前用的是 `tokio::spawn`，任务逃出 `run()` 的 `JoinSet`：`run()` 被
++    /// abort 后最多 32 个 worker 仍带着连接 fd 活到各自的 drain 预算用完，打破了
++    /// 「exporter 的所有 client I/O 任务由 run() 拥有」这条既有性质。
++    ///
++    /// 观察量：把 worker 停在 hook 上（永不释放），再 abort `run()`。属于 JoinSet
++    /// 时连接会被立即关闭；游离时 worker 会一直挂着，对端读不到任何结束。
++    #[tokio::test]
++    async fn aborting_the_exporter_terminates_its_lingering_workers() {
++        let directory = trusted_tempdir();
++        let path = directory.path().join("user-stats.sock");
++        let config = exporter_config(&path);
++        let (registry, _server) = exporter_registry();
++        let mut exporter = UserStatsExporter::bind(config, registry).unwrap();
++        let (mut entered, _release) = exporter.block_lingering_closes();
++        let task = tokio::spawn(exporter.run());
++
++        let mut rejected = UnixStream::connect(&path).await.unwrap();
++        rejected
++            .write_all(b"GET /v1/snapshot HTTP/1.0\r\nHost: localhost\r\n\r\n")
++            .await
++            .unwrap();
++        tokio::time::timeout(Duration::from_secs(1), entered.recv())
++            .await
++            .unwrap()
++            .expect("the direct error must reach the lingering worker");
++
++        task.abort();
++        let _ = task.await;
++
++        // The worker is still parked on the hook and never released.
++        let mut rest = Vec::new();
++        tokio::time::timeout(Duration::from_secs(2), rejected.read_to_end(&mut rest))
++            .await
++            .expect("a lingering worker owned by run() must be aborted with it")
++            .ok();
++    }
++
 +    #[tokio::test]
 +    async fn direct_error_lingering_does_not_hold_client_permit() {
 +        let directory = trusted_tempdir();
@@ -26864,7 +26989,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..74bd38dc121961484918848065a07547
      #[cfg(unix)]
      #[tokio::test]
      async fn exporter_rejects_clients_above_the_concurrency_limit() {
-@@ -2508,10 +3146,23 @@ mod tests {
+@@ -2508,10 +3249,23 @@ mod tests {
          let mut overflow = UnixStream::connect(&path).await.unwrap();
          overflow.write_all(exporter::tests::HEALTH_REQUEST).await.unwrap();
          let mut overflow_response = Vec::new();
