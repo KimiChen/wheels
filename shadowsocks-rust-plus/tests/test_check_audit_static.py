@@ -446,5 +446,32 @@ fn due(next_due: &[u64; 4], bucket: Bucket) -> u64 {
         self.assertTrue(any(":7: forbidden panic path in user-audit wiring" in item for item in findings))
 
 
+class InstantArithmeticRuleTests(unittest.TestCase):
+    """`m-142`：`Instant` 加减必须走 checked 助手，静态护栏要抓得住。"""
+
+    def test_the_rule_matches_bare_instant_arithmetic(self) -> None:
+        for line in (
+            "let deadline = time::Instant::now() + HTTP_DEADLINE;",
+            "let stamp = Instant::now() - RATE_LIMIT_INTERVAL;",
+            "state.diagnostic_next_due[index] = now + DIAGNOSTIC_INTERVAL;",
+            "let deadline = self.last_seen + Duration::from_secs(1);",
+            "let next = stamp + EXPORT_TIMEOUT;",
+        ):
+            with self.subTest(line=line):
+                self.assertTrue(CHECKER.INSTANT_ARITHMETIC.search(line), line)
+
+    def test_the_rule_leaves_checked_helpers_and_unrelated_arithmetic_alone(self) -> None:
+        for line in (
+            "let deadline = deadline_after(time::Instant::now(), HTTP_DEADLINE);",
+            "let stamp = rate_limit_stamp_before(now, DIAGNOSTIC_INTERVAL);",
+            "let next = now.checked_add(interval).unwrap_or(now);",
+            "let total = count + 1;",
+            "let bytes = raw_bytes + header_len;",
+            "let when = recorded_at_unix_ms + 1_000;",
+        ):
+            with self.subTest(line=line):
+                self.assertIsNone(CHECKER.INSTANT_ARITHMETIC.search(line), line)
+
+
 if __name__ == "__main__":
     unittest.main()

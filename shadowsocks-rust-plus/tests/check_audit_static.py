@@ -58,6 +58,19 @@ REQUIRED_PRODUCTION_FILES = (
 # Bound the "proof window" for a direct index to the enclosing function.  A
 # `name.len()` several hundred lines earlier, in an unrelated item, is not proof
 # that this index is in range.
+# `m-142`: `Instant + Duration` panics on overflow and `Instant - Duration` on
+# underflow (the latter within the first seconds of uptime).  Under
+# `panic = "abort"` either one takes the whole audit daemon down, and `C-6` was
+# exactly that.  The delivered fix is the `deadline_after` / `rate_limit_stamp_*`
+# family of checked helpers; this rule keeps a bare arithmetic operator from
+# creeping back in beside them.  Comments and `#[cfg(test)]` code are exempt --
+# structural stripping removes the former, `_test_only_lines` the latter.
+INSTANT_ARITHMETIC = re.compile(
+    r"\bInstant::now\s*\(\s*\)\s*[-+]"
+    r"|\b(?:now|[A-Za-z0-9_.]*(?:instant|deadline|stamp|next_due|last_[a-z_]*))\s*[-+]\s*"
+    r"(?:Duration::|[A-Z][A-Z0-9_]*(?:INTERVAL|TIMEOUT|DEADLINE|WINDOW|SECONDS|MILLIS))"
+)
+
 FUNCTION_DECLARATION = re.compile(r"(?:^|\s)(?:pub\s+)?(?:async\s+)?(?:unsafe\s+)?(?:const\s+)?fn\s+[A-Za-z0-9_]+")
 
 AUDIT_MARKER = re.compile(
@@ -405,6 +418,8 @@ def _check_file(path: Path) -> list[str]:
         structural = structural_lines[line_index]
         if FORBIDDEN.search(structural):
             findings.append(f"{path}:{number}: forbidden panic path")
+        if INSTANT_ARITHMETIC.search(structural):
+            findings.append(f"{path}:{number}: unchecked Instant arithmetic (use a checked helper)")
         for match in INDEX.finditer(structural):
             if not _index_is_proven_safe(structural_lines, line_index, match):
                 findings.append(f"{path}:{number}: direct index is not statically bounded")
