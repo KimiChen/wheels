@@ -25657,7 +25657,7 @@ index 0000000000000000000000000000000000000000..d8a730d159d970a86a23d51d58193173
 +    }
 +}
 diff --git a/crates/shadowsocks-service/src/server/user_stats.rs b/crates/shadowsocks-service/src/server/user_stats.rs
-index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..f47cd3bdc246e85bc4ac262a33f5acecc27b86e4 100644
+index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..c5a96e1d8655612742709ec71aede263c807fab0 100644
 --- a/crates/shadowsocks-service/src/server/user_stats.rs
 +++ b/crates/shadowsocks-service/src/server/user_stats.rs
 @@ -11,11 +11,16 @@ use std::{
@@ -26256,14 +26256,16 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..f47cd3bdc246e85bc4ac262a33f5acec
  
          pub(crate) const BUSY_RESPONSE_WORKERS: usize = super::MAX_BUSY_RESPONSE_WORKERS;
          pub(crate) const SNAPSHOT_REQUEST: &[u8] = b"GET /v1/snapshot HTTP/1.1\r\nHost: localhost\r\n\r\n";
-@@ -1638,6 +1933,210 @@ mod exporter {
+@@ -1638,6 +1933,261 @@ mod exporter {
              drop(socket);
          }
  
-+        /// Raises both socket buffers so a whole test backlog can be queued
-+        /// without the writer blocking; the default `AF_UNIX` buffer is far
-+        /// smaller than the drain budget on some platforms.
-+        fn widen_socket_buffers(fd: std::os::fd::RawFd, bytes: libc::c_int) {
++        /// Pins both socket buffers to a known size.  Tests use it in both
++        /// directions: widened so a whole backlog can be queued without the
++        /// writer blocking, or narrowed so a writer provably blocks until the
++        /// peer drains.  The default `AF_UNIX` buffer differs by an order of
++        /// magnitude between platforms, so neither can be assumed.
++        fn set_socket_buffers(fd: std::os::fd::RawFd, bytes: libc::c_int) {
 +            for option in [libc::SO_SNDBUF, libc::SO_RCVBUF] {
 +                // SAFETY: `fd` is an open socket owned by the caller and `bytes`
 +                // outlives the call.
@@ -26295,8 +26297,8 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..f47cd3bdc246e85bc4ac262a33f5acec
 +            let (mut client, mut server) = UnixStream::pair().unwrap();
 +            let server_fd = std::os::fd::AsRawFd::as_raw_fd(&server);
 +            let room = libc::c_int::try_from(queued * 2).expect("buffer size fits in c_int");
-+            widen_socket_buffers(std::os::fd::AsRawFd::as_raw_fd(&client), room);
-+            widen_socket_buffers(server_fd, room);
++            set_socket_buffers(std::os::fd::AsRawFd::as_raw_fd(&client), room);
++            set_socket_buffers(server_fd, room);
 +
 +            client.write_all(&vec![b'x'; queued]).await.unwrap();
 +            client.shutdown().await.unwrap();
@@ -26464,10 +26466,59 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..f47cd3bdc246e85bc4ac262a33f5acec
 +            .expect("lingering worker must release its permit after EOF");
 +        }
 +
++        /// `M-73` 的性质随 `m-220` 搬了家，绑定也必须跟着搬。
++        ///
++        /// 改造把五个直接错误出口从 `write_direct_json` 换成了
++        /// `write_direct_json_and_detach`，drain 现在发生在分离出去的 worker 里；
++        /// `write_direct_json` 在生产代码中只剩 429 busy 一个调用点。原先守着
++        /// `M-73` 的两条用例仍然直接调 `write_direct_json`，因此**不再覆盖 413
++        /// 路径**——把 worker 体内的 drain 换成 `shutdown` + `drop`（对 413 完整
++        /// 复原 `M-73` 缺陷），49 条用例照样全绿。这一条把它绑回来。
++        ///
++        /// 观察量选客户端能否写完：缓冲被钉到 4 KiB，32 KiB 的请求必然写不完；
++        /// 只有服务端真的排空接收队列，客户端的写才能推进到底。这比在服务端
++        /// 量 FIONREAD 可靠——那个 fd 已经被移进 worker，随时可能关闭。
++        #[tokio::test]
++        async fn a_detached_direct_error_drains_the_unread_request() {
++            const QUEUED: usize = 32 * 1_024;
++            let (client, server) = UnixStream::pair().unwrap();
++            set_socket_buffers(std::os::fd::AsRawFd::as_raw_fd(&client), 4_096);
++            set_socket_buffers(std::os::fd::AsRawFd::as_raw_fd(&server), 4_096);
++
++            let writer = tokio::spawn(async move {
++                let mut client = client;
++                client.write_all(&vec![b'x'; QUEUED]).await?;
++                let mut response = Vec::new();
++                client.read_to_end(&mut response).await?;
++                Ok::<_, std::io::Error>(response)
++            });
++
++            let client_semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
++            let permit = client_semaphore.try_acquire_owned().unwrap();
++            write_direct_json_and_detach(
++                server,
++                permit,
++                std::time::Duration::from_secs(5),
++                StatusCode::PAYLOAD_TOO_LARGE,
++                ERROR_REQUEST_TOO_LARGE,
++                std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
++                LingeringCloseHook::default(),
++            )
++            .await;
++
++            let response = tokio::time::timeout(std::time::Duration::from_secs(5), writer)
++                .await
++                .expect("the detached worker must drain the request instead of leaving the client blocked")
++                .unwrap()
++                .expect("the client must finish writing and read its response");
++            assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 413 "));
++            assert!(response.ends_with(ERROR_REQUEST_TOO_LARGE));
++        }
++
          #[test]
          fn lock_path_verification_rejects_an_inode_replacement() {
              let directory = tempfile::tempdir().unwrap();
-@@ -1669,10 +2168,7 @@ mod tests {
+@@ -1669,10 +2219,7 @@ mod tests {
          T: Send + 'static,
          F: FnOnce() -> T + Send + 'static,
      {
@@ -26479,7 +26530,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..f47cd3bdc246e85bc4ac262a33f5acec
          let (started_tx, started_rx) = std::sync::mpsc::channel();
          let (result_tx, result_rx) = std::sync::mpsc::channel();
          let worker = std::thread::spawn(move || {
-@@ -1791,7 +2287,10 @@ mod tests {
+@@ -1791,7 +2338,10 @@ mod tests {
              assert_eq!(prior.servers[0].server_id, snapshot.servers[0].server_id);
              assert_eq!(prior.servers[0].generation, snapshot.servers[0].generation);
              assert_eq!(prior.servers[0].users[0].name, snapshot.servers[0].users[0].name);
@@ -26491,7 +26542,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..f47cd3bdc246e85bc4ac262a33f5acec
          }
          assert!(active_snapshot.servers[0].active);
          assert_eq!(active_snapshot.servers[0].users[0].tcp_uplink_bytes, 7);
-@@ -2038,10 +2537,7 @@ mod tests {
+@@ -2038,10 +2588,7 @@ mod tests {
              response.headers.get("cache-control").map(String::as_str),
              Some("no-store")
          );
@@ -26503,7 +26554,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..f47cd3bdc246e85bc4ac262a33f5acec
          assert!(!response.headers.contains_key("transfer-encoding"));
          assert_eq!(
              response.headers["content-length"].parse::<usize>().unwrap(),
-@@ -2123,8 +2619,7 @@ mod tests {
+@@ -2123,8 +2670,7 @@ mod tests {
          assert_eq!(response.body, exporter::ERROR_INVALID_REQUEST);
  
          for declared_body in [
@@ -26513,7 +26564,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..f47cd3bdc246e85bc4ac262a33f5acec
              b"GET /v1/snapshot HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: gzip\r\n\r\n".as_slice(),
              b"GET /v1/snapshot HTTP/1.1\r\nHost: localhost\r\nContent-Length: nope\r\n\r\n".as_slice(),
              b"GET /v1/snapshot HTTP/1.1\r\nHost: localhost\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\n"
-@@ -2158,7 +2653,10 @@ mod tests {
+@@ -2158,7 +2704,10 @@ mod tests {
              .unwrap()
              .unwrap();
          assert_eq!(
@@ -26525,7 +26576,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..f47cd3bdc246e85bc4ac262a33f5acec
              1
          );
          let response = parse_response(bytes);
-@@ -2207,8 +2705,7 @@ mod tests {
+@@ -2207,8 +2756,7 @@ mod tests {
          }
  
          for unsupported_version in ["HTTP/1.0", "HTTP/1.2", "HTTP/2.0"] {
@@ -26535,7 +26586,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..f47cd3bdc246e85bc4ac262a33f5acec
              let response = request(&path, request_bytes.as_bytes()).await;
              assert_eq!(response.status, 505);
              assert_eq!(response.body, exporter::ERROR_HTTP_VERSION_NOT_SUPPORTED);
-@@ -2218,13 +2715,7 @@ mod tests {
+@@ -2218,13 +2766,7 @@ mod tests {
          assert_eq!(response.status, 400);
          assert_eq!(response.body, exporter::ERROR_INVALID_REQUEST);
  
@@ -26550,7 +26601,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..f47cd3bdc246e85bc4ac262a33f5acec
              let request_bytes = format!("GET /healthz HTTP/1.1\r\nHost: {valid_host}\r\n\r\n");
              let response = request(&path, request_bytes.as_bytes()).await;
              assert_eq!(response.status, 200);
-@@ -2258,11 +2749,7 @@ mod tests {
+@@ -2258,11 +2800,7 @@ mod tests {
          let exporter = UserStatsExporter::bind(exporter_config(&path), registry.clone()).unwrap();
          let task = tokio::spawn(exporter.run());
  
@@ -26563,7 +26614,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..f47cd3bdc246e85bc4ac262a33f5acec
          let response = split_response(bytes);
          assert_eq!(response.status, 405);
          assert_eq!(response.headers.get("allow").map(String::as_str), Some("GET"));
-@@ -2274,10 +2761,7 @@ mod tests {
+@@ -2274,10 +2812,7 @@ mod tests {
              response.headers.get("cache-control").map(String::as_str),
              Some("no-store")
          );
@@ -26575,7 +26626,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..f47cd3bdc246e85bc4ac262a33f5acec
          assert_eq!(
              response.headers["content-length"].parse::<usize>().unwrap(),
              exporter::ERROR_METHOD_NOT_ALLOWED.len()
-@@ -2393,6 +2877,49 @@ mod tests {
+@@ -2393,6 +2928,49 @@ mod tests {
          let _ = task.await;
      }
  
@@ -26625,7 +26676,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..f47cd3bdc246e85bc4ac262a33f5acec
      #[cfg(unix)]
      #[tokio::test]
      async fn exporter_rejects_clients_above_the_concurrency_limit() {
-@@ -2508,10 +3035,23 @@ mod tests {
+@@ -2508,10 +3086,23 @@ mod tests {
          let mut overflow = UnixStream::connect(&path).await.unwrap();
          overflow.write_all(exporter::tests::HEALTH_REQUEST).await.unwrap();
          let mut overflow_response = Vec::new();
