@@ -25657,7 +25657,7 @@ index 0000000000000000000000000000000000000000..d8a730d159d970a86a23d51d58193173
 +    }
 +}
 diff --git a/crates/shadowsocks-service/src/server/user_stats.rs b/crates/shadowsocks-service/src/server/user_stats.rs
-index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..46bc318d3b074f597dfcfa639054f630f059ce23 100644
+index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..f47cd3bdc246e85bc4ac262a33f5acecc27b86e4 100644
 --- a/crates/shadowsocks-service/src/server/user_stats.rs
 +++ b/crates/shadowsocks-service/src/server/user_stats.rs
 @@ -11,11 +11,16 @@ use std::{
@@ -26129,7 +26129,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..46bc318d3b074f597dfcfa639054f630
              return Ok(());
          }
  
-@@ -1588,17 +1776,110 @@ mod exporter {
+@@ -1588,17 +1776,124 @@ mod exporter {
          response
      }
  
@@ -26145,13 +26145,24 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..46bc318d3b074f597dfcfa639054f630
 +    ///
 +    /// What draining buys, precisely: a client that stops writing once it is
 +    /// rejected -- every well-behaved one -- has its queue emptied and observes
-+    /// the response followed by a clean end of stream. It is *not* an
-+    /// unconditional guarantee. The drain is bounded by `LINGERING_CLOSE_MAX_BYTES`
-+    /// and `LINGERING_CLOSE_TIMEOUT` because an unbounded one would let a client
-+    /// pin a lingering worker for as long as it keeps writing. A client that is
-+    /// still sending when the budget runs out is closed with a non-empty queue and
-+    /// does see the reset. That residual window cannot be closed while the drain
-+    /// stays bounded, and the bound is the point.
++    /// the response followed by a clean end of stream, *provided a drain runs at
++    /// all*. It is not an unconditional guarantee, and there are two distinct
++    /// ways to lose it.
++    ///
++    /// One: the drain is bounded by `LINGERING_CLOSE_MAX_BYTES` and
++    /// `LINGERING_CLOSE_TIMEOUT`, because an unbounded one would let a client pin
++    /// a lingering worker for as long as it keeps writing. A client still sending
++    /// when the budget runs out is closed with a non-empty queue and sees the
++    /// reset.
++    ///
++    /// Two: `spawn_bounded_lingering_close` runs at most
++    /// `MAX_LINGERING_CLOSE_WORKERS` drains at once and drops the stream outright
++    /// when they are all busy -- then *no* drain runs and even a client that
++    /// stopped writing sees the reset. This is the cheaper of the two thresholds
++    /// to reach: it needs concurrent rejections, not a large request.
++    ///
++    /// Both are deliberate. Neither residual window can be closed while the work
++    /// stays bounded, and bounding it is the point.
 +    ///
 +    /// The response itself is unaffected either way: `direct_json_response` always
 +    /// frames with `Content-Length` and `Connection: close`, so a client that
@@ -26203,7 +26214,10 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..46bc318d3b074f597dfcfa639054f630
 +    /// Start one bounded lingering-close worker, or drop the stream when all
 +    /// workers are occupied.  The latter is the same fail-fast behavior used
 +    /// for an overloaded 429 response and keeps rejected clients from creating
-+    /// an unbounded backlog of drain tasks.
++    /// an unbounded backlog of drain tasks.  Dropping here skips the drain
++    /// entirely, so the peer sees the reset described in `lingering_close` --
++    /// the response bytes are already written and framed by `Content-Length`,
++    /// but a read-to-EOF client observes an error instead of a clean end.
 +    fn spawn_bounded_lingering_close(
 +        stream: UnixStream,
 +        timeout: Duration,
@@ -26242,7 +26256,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..46bc318d3b074f597dfcfa639054f630
  
          pub(crate) const BUSY_RESPONSE_WORKERS: usize = super::MAX_BUSY_RESPONSE_WORKERS;
          pub(crate) const SNAPSHOT_REQUEST: &[u8] = b"GET /v1/snapshot HTTP/1.1\r\nHost: localhost\r\n\r\n";
-@@ -1638,6 +1919,210 @@ mod exporter {
+@@ -1638,6 +1933,210 @@ mod exporter {
              drop(socket);
          }
  
@@ -26453,7 +26467,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..46bc318d3b074f597dfcfa639054f630
          #[test]
          fn lock_path_verification_rejects_an_inode_replacement() {
              let directory = tempfile::tempdir().unwrap();
-@@ -1669,10 +2154,7 @@ mod tests {
+@@ -1669,10 +2168,7 @@ mod tests {
          T: Send + 'static,
          F: FnOnce() -> T + Send + 'static,
      {
@@ -26465,7 +26479,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..46bc318d3b074f597dfcfa639054f630
          let (started_tx, started_rx) = std::sync::mpsc::channel();
          let (result_tx, result_rx) = std::sync::mpsc::channel();
          let worker = std::thread::spawn(move || {
-@@ -1791,7 +2273,10 @@ mod tests {
+@@ -1791,7 +2287,10 @@ mod tests {
              assert_eq!(prior.servers[0].server_id, snapshot.servers[0].server_id);
              assert_eq!(prior.servers[0].generation, snapshot.servers[0].generation);
              assert_eq!(prior.servers[0].users[0].name, snapshot.servers[0].users[0].name);
@@ -26477,7 +26491,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..46bc318d3b074f597dfcfa639054f630
          }
          assert!(active_snapshot.servers[0].active);
          assert_eq!(active_snapshot.servers[0].users[0].tcp_uplink_bytes, 7);
-@@ -2038,10 +2523,7 @@ mod tests {
+@@ -2038,10 +2537,7 @@ mod tests {
              response.headers.get("cache-control").map(String::as_str),
              Some("no-store")
          );
@@ -26489,7 +26503,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..46bc318d3b074f597dfcfa639054f630
          assert!(!response.headers.contains_key("transfer-encoding"));
          assert_eq!(
              response.headers["content-length"].parse::<usize>().unwrap(),
-@@ -2123,8 +2605,7 @@ mod tests {
+@@ -2123,8 +2619,7 @@ mod tests {
          assert_eq!(response.body, exporter::ERROR_INVALID_REQUEST);
  
          for declared_body in [
@@ -26499,7 +26513,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..46bc318d3b074f597dfcfa639054f630
              b"GET /v1/snapshot HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: gzip\r\n\r\n".as_slice(),
              b"GET /v1/snapshot HTTP/1.1\r\nHost: localhost\r\nContent-Length: nope\r\n\r\n".as_slice(),
              b"GET /v1/snapshot HTTP/1.1\r\nHost: localhost\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\n"
-@@ -2158,7 +2639,10 @@ mod tests {
+@@ -2158,7 +2653,10 @@ mod tests {
              .unwrap()
              .unwrap();
          assert_eq!(
@@ -26511,7 +26525,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..46bc318d3b074f597dfcfa639054f630
              1
          );
          let response = parse_response(bytes);
-@@ -2207,8 +2691,7 @@ mod tests {
+@@ -2207,8 +2705,7 @@ mod tests {
          }
  
          for unsupported_version in ["HTTP/1.0", "HTTP/1.2", "HTTP/2.0"] {
@@ -26521,7 +26535,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..46bc318d3b074f597dfcfa639054f630
              let response = request(&path, request_bytes.as_bytes()).await;
              assert_eq!(response.status, 505);
              assert_eq!(response.body, exporter::ERROR_HTTP_VERSION_NOT_SUPPORTED);
-@@ -2218,13 +2701,7 @@ mod tests {
+@@ -2218,13 +2715,7 @@ mod tests {
          assert_eq!(response.status, 400);
          assert_eq!(response.body, exporter::ERROR_INVALID_REQUEST);
  
@@ -26536,7 +26550,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..46bc318d3b074f597dfcfa639054f630
              let request_bytes = format!("GET /healthz HTTP/1.1\r\nHost: {valid_host}\r\n\r\n");
              let response = request(&path, request_bytes.as_bytes()).await;
              assert_eq!(response.status, 200);
-@@ -2258,11 +2735,7 @@ mod tests {
+@@ -2258,11 +2749,7 @@ mod tests {
          let exporter = UserStatsExporter::bind(exporter_config(&path), registry.clone()).unwrap();
          let task = tokio::spawn(exporter.run());
  
@@ -26549,7 +26563,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..46bc318d3b074f597dfcfa639054f630
          let response = split_response(bytes);
          assert_eq!(response.status, 405);
          assert_eq!(response.headers.get("allow").map(String::as_str), Some("GET"));
-@@ -2274,10 +2747,7 @@ mod tests {
+@@ -2274,10 +2761,7 @@ mod tests {
              response.headers.get("cache-control").map(String::as_str),
              Some("no-store")
          );
@@ -26561,7 +26575,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..46bc318d3b074f597dfcfa639054f630
          assert_eq!(
              response.headers["content-length"].parse::<usize>().unwrap(),
              exporter::ERROR_METHOD_NOT_ALLOWED.len()
-@@ -2393,6 +2863,49 @@ mod tests {
+@@ -2393,6 +2877,49 @@ mod tests {
          let _ = task.await;
      }
  
@@ -26611,7 +26625,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..46bc318d3b074f597dfcfa639054f630
      #[cfg(unix)]
      #[tokio::test]
      async fn exporter_rejects_clients_above_the_concurrency_limit() {
-@@ -2508,10 +3021,23 @@ mod tests {
+@@ -2508,10 +3035,23 @@ mod tests {
          let mut overflow = UnixStream::connect(&path).await.unwrap();
          overflow.write_all(exporter::tests::HEALTH_REQUEST).await.unwrap();
          let mut overflow_response = Vec::new();
