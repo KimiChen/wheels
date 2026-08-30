@@ -8,6 +8,21 @@ die() {
   exit 1
 }
 
+# Switch environment variables are a three-state contract, not a truthiness
+# test.  `${VAR:-default} == 1` collapses every unrecognised value onto the
+# "off" branch, so a typo (`yes`, `true`, `2`) silently opts out of a gate the
+# operator meant to keep -- the wrong direction for a fail-closed switch.
+# Accept only `0` and `1`; reject anything else loudly.
+require_bool_env() {
+  local name="$1" default="$2" value
+  value="${!name-}"
+  [[ -n "$value" ]] || value="$default"
+  case "$value" in
+    0 | 1) printf '%s\n' "$value" ;;
+    *) die "$name 只接受 0 或 1，实际：$value" ;;
+  esac
+}
+
 # `.env` is an untracked developer convenience.  It must never be executed as
 # shell (arbitrary code) and must never be able to introduce build inputs that
 # the release receipt does not record.  Import a fixed key allowlist literally,
@@ -18,7 +33,7 @@ readonly SHADOWSOCKS_RUST_PLUS_DOTENV_KEYS=("UPSTREAM_REPOSITORY" "CARGO_HOME")
 load_dotenv() {
   local file="$SHADOWSOCKS_RUST_PLUS_ROOT/.env"
   [[ -f "$file" ]] || return 0
-  if [[ "${SHADOWSOCKS_RUST_PLUS_NO_DOTENV:-0}" == 1 ]]; then
+  if [[ "$(require_bool_env SHADOWSOCKS_RUST_PLUS_NO_DOTENV 0)" == 1 ]]; then
     printf '忽略 .env：当前脚本要求可复现的环境输入。\n' >&2
     return 0
   fi

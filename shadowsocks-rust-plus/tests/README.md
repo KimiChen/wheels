@@ -58,7 +58,10 @@ workspace 与静态、文档和 Python 工具门禁仍会执行）：
 8. 发布性能门禁自测 [`test_benchmark_audit.py`](test_benchmark_audit.py)、auditd 集成脚本自测
    [`test_integration_audit.py`](test_integration_audit.py)，以及
    [`benchmark_audit.py`](benchmark_audit.py) 的一次短参数合成预检冒烟；
-9. 文档与实现一致性检查 [`test_docs_consistency.py`](test_docs_consistency.py)。
+9. 文档与实现一致性检查 [`test_docs_consistency.py`](test_docs_consistency.py)；
+10. 开关变量三态解析门禁 [`test_script_switches.py`](test_script_switches.py)——`SHADOWSOCKS_REQUIRE_AUDIT_TARGET`、`SHADOWSOCKS_RUN_FUZZ`、
+    `SHADOWSOCKS_RUST_PLUS_STRICT_FMT`、`SHADOWSOCKS_RUST_PLUS_NO_DOTENV` 只接受 `0` 或 `1`，其它取值一律报错退出，
+    笔误不会被当成显式降级。
 
 只有未给出 `--no-integration` 时才追加执行的检查是：
 

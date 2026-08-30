@@ -11,6 +11,11 @@ require_command patch
 require_command python3
 require_command rg
 
+# Parse the switches up front so an invalid value fails before the long
+# prepare/build/test sequence rather than after it.
+require_audit_target="$(require_bool_env SHADOWSOCKS_REQUIRE_AUDIT_TARGET 1)"
+strict_fmt="$(require_bool_env SHADOWSOCKS_RUST_PLUS_STRICT_FMT 0)"
+
 [[ -f "$SHADOWSOCKS_RUST_PLUS_ROOT/config/auditd.example.json" ]] || \
   die "缺少 auditd 配置样例"
 [[ -f "$SHADOWSOCKS_RUST_PLUS_ROOT/packaging/shadowsocks-auditd.service" ]] || \
@@ -80,14 +85,14 @@ actual_prepared_tree_sha256="$(
 # untouched upstream tree changes unrelated let-chains and imports. Keep strict
 # formatting available for a pinned-compatible toolchain without making the normal
 # verifier fail on pristine upstream code.
-if [[ "${SHADOWSOCKS_RUST_PLUS_STRICT_FMT:-0}" == 1 ]]; then
+if [[ "$strict_fmt" == 1 ]]; then
   cargo fmt --manifest-path "$source_dir/Cargo.toml" --all -- --check
 fi
 "$SHADOWSOCKS_RUST_PLUS_ROOT/scripts/test.sh" --source "$source_dir"
 
 bash "$SHADOWSOCKS_RUST_PLUS_ROOT/scripts/check-sensitive.sh"
 
-if [[ "${SHADOWSOCKS_REQUIRE_AUDIT_TARGET:-1}" == 1 ]]; then
+if [[ "$require_audit_target" == 1 ]]; then
   printf '验证完成：锁定版本、零 fuzz 补丁重放、测试与敏感信息扫描均通过。\n'
 else
   printf '验证完成（覆盖面不完整）：锁定版本、零 fuzz 补丁重放与敏感信息扫描通过；auditd 交叉检查已被 SHADOWSOCKS_REQUIRE_AUDIT_TARGET=0 显式降级。\n'

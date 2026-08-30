@@ -34,6 +34,11 @@ done
 
 require_command cargo
 
+# Parse the switches up front: an invalid value must fail before the workspace
+# build, not after it.
+require_audit_target="$(require_bool_env SHADOWSOCKS_REQUIRE_AUDIT_TARGET 1)"
+run_fuzz="$(require_bool_env SHADOWSOCKS_RUN_FUZZ 0)"
+
 temp_dir=""
 if [[ -z "$source_dir" ]]; then
   temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/shadowsocks-rust-plus.XXXXXX")"
@@ -110,7 +115,7 @@ if [[ "$run_audit" -eq 1 ]]; then
       CARGO_TARGET_DIR="$target_dir" cargo check \
         --manifest-path "$source_dir/Cargo.toml" \
         --locked --target "$audit_target" -p shadowsocks-auditd --all-targets
-    elif [[ "${SHADOWSOCKS_REQUIRE_AUDIT_TARGET:-1}" == 1 ]]; then
+    elif [[ "$require_audit_target" == 1 ]]; then
       die "非 Linux 主机缺少 auditd 交叉检查 target：$audit_target（\`rustup target add $audit_target\` 安装；确知要放弃该覆盖面时用 SHADOWSOCKS_REQUIRE_AUDIT_TARGET=0 显式降级）"
     else
       auditd_crate_checked=0
@@ -128,10 +133,11 @@ python3 "$SHADOWSOCKS_RUST_PLUS_ROOT/tests/test_benchmark_audit.py"
 python3 "$SHADOWSOCKS_RUST_PLUS_ROOT/tests/test_benchmark_data_path.py"
 python3 "$SHADOWSOCKS_RUST_PLUS_ROOT/tests/test_integration_audit.py"
 python3 "$SHADOWSOCKS_RUST_PLUS_ROOT/tests/test_docs_consistency.py"
+python3 "$SHADOWSOCKS_RUST_PLUS_ROOT/tests/test_script_switches.py"
 python3 "$SHADOWSOCKS_RUST_PLUS_ROOT/tests/benchmark_audit.py" \
   --events 2000 --producers 4 --queue-capacity 128 --spool-capacity 256 >/dev/null
 
-if [[ "${SHADOWSOCKS_RUN_FUZZ:-0}" == 1 ]]; then
+if [[ "$run_fuzz" == 1 ]]; then
   "$SHADOWSOCKS_RUST_PLUS_ROOT/scripts/test-fuzz.sh" --source "$source_dir" \
     --seconds "${SHADOWSOCKS_FUZZ_SECONDS:-30}" --require
 fi
