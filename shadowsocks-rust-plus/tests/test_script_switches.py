@@ -296,5 +296,42 @@ class BooleanSwitchTests(unittest.TestCase):
         self.assertIn("未验证", result.stderr)
 
 
+class CoverageStatusWriterTests(unittest.TestCase):
+    """写入器自身的错误处理不能被 `mv` 的语义骗过去。"""
+
+    def write(self, path: Path, *values: str) -> subprocess.CompletedProcess[str]:
+        script = f'source "{LIB}"; write_test_coverage_status "{path}" ' + " ".join(values)
+        return subprocess.run(
+            ["bash", "-c", script],
+            capture_output=True,
+            text=True,
+            env={"PATH": "/usr/bin:/bin", "HOME": str(ROOT)},
+            cwd=ROOT,
+        )
+
+    def test_an_existing_directory_target_is_rejected_instead_of_silently_moved_into(self) -> None:
+        """`mv -f src dir` 把 src 移进 dir 而不失败。
+
+        没有这道检查时写入器会返回 0、宣告成功，而 `$path` 处根本没有文件——
+        对一个自称「发布结论依据」的写入器，这是最糟的失败方式。
+        """
+
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / "status"
+            target.mkdir()
+            result = self.write(target, "1", "1", "1", "1", "1")
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertIn("目录", result.stderr)
+            self.assertEqual(list(target.iterdir()), [], "不得在目标目录里留下临时文件")
+
+    def test_a_regular_file_target_is_overwritten(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / "status"
+            target.write_text("stale", encoding="utf-8")
+            result = self.write(target, "1", "1", "1", "1", "1")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(target.read_text(encoding="utf-8"))["coverage_complete"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

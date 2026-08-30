@@ -95,6 +95,11 @@ write_test_coverage_status() {
   directory="$(dirname -- "$path")"
   [[ -d "$directory" ]] || die "测试覆盖面状态的父目录不存在：$directory"
   [[ ! -L "$path" ]] || die "测试覆盖面状态不能写入符号链接：$path"
+  # `mv -f src dir` does not fail -- it moves `src` *into* `dir`.  Without this
+  # check the writer reports success while leaving no file at `$path` at all,
+  # and the caller (a release-facing conclusion) never learns.
+  [[ ! -d "$path" ]] || die "测试覆盖面状态不能写入已存在的目录：$path"
+  [[ ! -e "$path" || -f "$path" ]] || die "测试覆盖面状态必须是普通文件：$path"
 
   if [[ "$run_audit" == 1 && "$auditd_crate_checked" == 1 && \
         "$auditd_runtime_executed" == 1 ]]; then
