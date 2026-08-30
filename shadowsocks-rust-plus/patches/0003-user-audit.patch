@@ -8089,10 +8089,10 @@ index 0000000000000000000000000000000000000000..6cf8d005dfef917c852be4f611d5b945
 +}
 diff --git a/crates/shadowsocks-auditd/src/spool.rs b/crates/shadowsocks-auditd/src/spool.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..574e2dca5c486ae6a80da0795196a884026f4c13
+index 0000000000000000000000000000000000000000..cdc364601dde503eb02b444137f85a1779567f4b
 --- /dev/null
 +++ b/crates/shadowsocks-auditd/src/spool.rs
-@@ -0,0 +1,9057 @@
+@@ -0,0 +1,9193 @@
 +//! Durable, node-local audit spool.
 +//!
 +//! The spool is deliberately synchronous.  Ingest and export perform their
@@ -9061,6 +9061,16 @@ index 0000000000000000000000000000000000000000..574e2dca5c486ae6a80da0795196a884
 +const QUARANTINE_LABEL_ACKED: &str = "acked-corrupt";
 +
 +#[cfg(test)]
++thread_local! {
++    /// Startup-only fault: `Spool::open` has no `SpoolInner` yet, so the salvage
++    /// path cannot use the ordinary `TestFaults` switches.
++    static SALVAGE_PERSIST_AFTER_RENAME: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
++    /// Startup-only fault: make the stale-marker unlink fail so the branch that
++    /// must *not* replay the marker into the ledger is actually exercised.
++    static STARTUP_MARKER_UNLINK_FAILS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
++}
++
++#[cfg(test)]
 +#[derive(Debug, Default)]
 +struct TestFaults {
 +    partial_write: bool,
@@ -9207,7 +9217,17 @@ index 0000000000000000000000000000000000000000..574e2dca5c486ae6a80da0795196a884
 +                    // available for operator salvage.
 +                    storage_rejected_attempts = saturating_inc(storage_rejected_attempts);
 +                } else if !salvaged.is_empty() {
-+                    match persist_tombstones(&root, &salvaged) {
++                    #[cfg(test)]
++                    let salvage_result = if SALVAGE_PERSIST_AFTER_RENAME.with(std::cell::Cell::take) {
++                        Err(AtomicWriteError::AfterRename(
++                            io::Error::other("injected salvage failure after durable commit").into(),
++                        ))
++                    } else {
++                        persist_tombstones(&root, &salvaged)
++                    };
++                    #[cfg(not(test))]
++                    let salvage_result = persist_tombstones(&root, &salvaged);
++                    match salvage_result {
 +                        Ok(()) => {}
 +                        Err(AtomicWriteError::BeforeRename(_)) => {
 +                            storage_rejected_attempts = saturating_inc(storage_rejected_attempts);
@@ -9287,9 +9307,16 @@ index 0000000000000000000000000000000000000000..574e2dca5c486ae6a80da0795196a884
 +                            }
 +                        }
 +                    } else if gap_already_durable {
-+                        if let Some(event_id) = gap_id.as_deref()
-+                            && remove_tombstone_pending_marker(&root, event_id).is_err()
-+                        {
++                        #[cfg(test)]
++                        let unlink_failed = STARTUP_MARKER_UNLINK_FAILS.with(std::cell::Cell::get)
++                            || gap_id
++                                .as_deref()
++                                .is_some_and(|event_id| remove_tombstone_pending_marker(&root, event_id).is_err());
++                        #[cfg(not(test))]
++                        let unlink_failed = gap_id
++                            .as_deref()
++                            .is_some_and(|event_id| remove_tombstone_pending_marker(&root, event_id).is_err());
++                        if unlink_failed {
 +                            // The fixed gap proves that this transaction is
 +                            // already resolved. Keep only the private marker
 +                            // on disk for a later startup retry; re-inserting
@@ -15870,6 +15897,115 @@ index 0000000000000000000000000000000000000000..574e2dca5c486ae6a80da0795196a884
 +            inner.evicted_unacked_records, 0,
 +            "the durable ACK receipt must override the legacy ambiguous label"
 +        );
++    }
++
++    /// `m-230`（`m-222` 的启动期那一半之一）：固定 gap 已 durable 的 stale marker
++    /// **不得**被重新放回 aggregate ledger。
++    ///
++    /// 放回去等于把一次已经完成的破坏性事务再演一遍，并重复它的健康计账。把
++    /// 删掉的 `tombstones.push(marker)` 加回去，整套用例仍全绿——这条把它绑住。
++    #[test]
++    fn a_stale_marker_with_a_durable_gap_is_not_replayed_into_the_ledger() {
++        let dir = tempfile::tempdir().expect("tempdir");
++        let gap_id = format!("{GAP_ID_PREFIX}{}", "5".repeat(32));
++        {
++            let spool = Spool::open(config(dir.path())).expect("spool");
++            let mut inner = lock(&spool.inner);
++            // The marker and its fixed gap, exactly as a completed transaction
++            // whose marker unlink failed would leave them.
++            spool
++                .add_tombstone_locked(&mut inner, eviction_pending_for_test(&gap_id, &"a".repeat(32)))
++                .expect("pending eviction");
++            spool
++                .write_gap_locked(
++                    &mut inner,
++                    &GapSpec {
++                        event_id: gap_id.clone(),
++                        occurred_at_unix_ms: 1,
++                        lost_spool_epoch: None,
++                        reason: wire::SpoolGapReason::CapacityEviction,
++                        first_lost_spool_sequence: Some(1),
++                        last_lost_spool_sequence: Some(2),
++                        lost_events: Some(2),
++                        lost_bytes: Some(128),
++                        lost_batch_id: Some("a".repeat(32)),
++                        source_fingerprint: None,
++                    },
++                )
++                .expect("durable gap");
++        }
++        let marker = tombstone_pending_marker_path_for_id(dir.path(), &gap_id).expect("marker path");
++        assert!(marker.is_file(), "the private marker outlived its transaction");
++        // The ledger no longer knows about it -- only the durable gap does.
++        fs::write(
++            dir.path().join("tombstones.json"),
++            b"{\"tombstone_schema_version\":1,\"entries\":[]}\n",
++        )
++        .expect("empty ledger");
++
++        // Force the unlink to fail: that is the branch that must not replay the
++        // marker into the aggregate ledger.
++        STARTUP_MARKER_UNLINK_FAILS.with(|hook| hook.set(true));
++        let spool = Spool::open(config(dir.path())).expect("reopen with a stale marker");
++        STARTUP_MARKER_UNLINK_FAILS.with(|hook| hook.set(false));
++        let inner = lock(&spool.inner);
++        assert!(
++            !inner
++                .tombstones
++                .iter()
++                .any(|entry| matches!(entry, TombstoneEntry::EvictionPending(_))),
++            "a resolved marker must not be resurrected as a pending transaction"
++        );
++        // The ledger alone cannot tell: a resurrected pending is consumed by the
++        // reconcile pass that `Spool::open` runs, so it is gone either way.  What
++        // it leaves behind is the replay's accounting.
++        assert_eq!(
++            inner.evicted_unacked_records, 0,
++            "replaying a resolved marker would charge its loss a second time"
++        );
++    }
++
++    /// `m-230`（`m-222` 的启动期那一半之二）：salvage 写替换 ledger 时若 rename
++    /// 已生效而目录 fsync 未确认，启动必须拒绝继续服务。
++    ///
++    /// 把它换回旧的「计一次 storage rejection 然后照常启动」，整套用例仍全绿。
++    #[test]
++    fn salvage_after_rename_failure_refuses_to_start() {
++        let dir = tempfile::tempdir().expect("tempdir");
++        {
++            let spool = Spool::open(config(dir.path())).expect("spool");
++            let mut inner = lock(&spool.inner);
++            spool
++                .add_tombstone_locked(
++                    &mut inner,
++                    eviction_pending_for_test(&format!("{GAP_ID_PREFIX}{}", "6".repeat(32)), &"a".repeat(32)),
++                )
++                .expect("pending");
++        }
++        // Drive startup into the salvage path with something left to salvage.
++        // One unusable entry makes the strict loader reject the document, while
++        // `salvage_tombstones` skips that entry and still recovers the pending
++        // transaction -- so the replacement ledger really gets written and the
++        // injected post-rename failure has something to fire on.  Truncating the
++        // file instead would leave nothing to write back and skip the branch.
++        let ledger = dir.path().join("tombstones.json");
++        let mut value: serde_json::Value =
++            serde_json::from_slice(&fs::read(&ledger).expect("ledger")).expect("json");
++        value
++            .get_mut("entries")
++            .and_then(serde_json::Value::as_array_mut)
++            .expect("entries")
++            .push(serde_json::json!({ "entry_type": "not_a_real_variant" }));
++        fs::write(&ledger, serde_json::to_vec(&value).expect("json")).expect("corrupt the ledger");
++
++        SALVAGE_PERSIST_AFTER_RENAME.with(|hook| hook.set(true));
++        let outcome = Spool::open(config(dir.path()));
++        assert!(
++            matches!(outcome.as_ref().err(), Some(SpoolError::DurabilityUncertain)),
++            "startup must refuse to continue, got {:?}",
++            outcome.as_ref().err()
++        );
++        SALVAGE_PERSIST_AFTER_RENAME.with(|hook| hook.set(false));
 +    }
 +
 +    /// `m-222` 的另一半：aggregate ledger 提交之后，私有 marker 清理失败必须
