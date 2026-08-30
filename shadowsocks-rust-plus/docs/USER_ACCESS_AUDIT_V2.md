@@ -32,6 +32,101 @@
   规则**，因此同类回归仍无护栏。
 - 出处：历史文档 §23.6 `m-142`、§27.5 `m-170`、§27.4「遗留未修」。
 
+### 本轮审阅新增问题（P2，`20ac4784e4735ab115469c936082e04717218e02^..47a65a4e175879e0a758644f185f4d93ca6eac1d`）
+
+> 2026-08-30 对该范围共 89 个 commit（含起始 commit，截至当前 `HEAD`）进行复核。以下条目接续
+> 历史文档 §30 已记录的 `M-67`，编号为 `M-68`–`M-73`，当前均未修复；`P2` 表示应在发布前处理的代码/交付门禁
+> 缺陷。行号以当前工作树中的交付文件为准，补丁内的行号指 `patches/0003-user-audit.patch` 的
+> post-image 行。
+
+#### M-68（P2）ACKed 批次进入 `quarantine/` 后被计入未确认丢失
+
+- **位置**：`patches/0003-user-audit.patch:10348-10360,11745-11747,2195-2207`。
+- **现象/影响**：`quarantine_batch_locked` 将来源目录同时判定为 `sealed/` 或 `acked/`，并把
+  `QuarantinePending.event_count` 保存为该批次的总事件数。后续 `evict_quarantine_locked` 不区分
+  来源，始终以 `spec.lost_events` 调用 `add_evicted_unacked_records`。因此，一个已经收到 ACK、因
+  损坏从 `acked/` 移入 `quarantine/` 的批次在随后被清理时，会把已经交付的事件重复算成
+  `evicted_unacked_records`，健康状态和丢失告警均被高报。
+- **触发/复现**：构造一个 meta 可读但 body 损坏的 ACKed 批次，令完整性检查将其隔离，再触发
+  `quarantine` 驱逐；gap 的 `lost_events` 为该批次总数，而实际未 ACK 数应为 0。
+- **修复建议**：在 pending 记录中保留来源的 ACK 状态或直接保存未 ACK 计数，所有驱逐路径只按该
+  计数更新 health；补充 ACKed quarantine → eviction 的回归测试，并断言 gap 与 health 计数语义不混用。
+- **出处/引入**：`fc5bfb7b5ebfe0e18c97bfc4cb98d7f84a528c44`（修复 m-191）。
+
+#### M-69（P2）`QuarantinePending` 崩溃恢复完成删除和 gap 后漏计未确认丢失
+
+- **位置**：`patches/0003-user-audit.patch:11825-11938`。
+- **现象/影响**：重启恢复 `TombstoneEntry::QuarantinePending` 时，代码会重试 rename/删除、写入
+  固定 gap，并移除 pending marker/tombstone，但该分支没有调用 `add_evicted_unacked_records`。
+  对 `reason=quarantine_eviction` 且 `event_count=N` 的事务，崩溃前后实际丢失了 N 条未 ACK 事件，
+  但恢复后的 `evicted_unacked_records` 少 N，health 低报丢失量（而普通进程内路径
+  `evict_quarantine_locked` 会计数）。
+- **触发/复现**：在 quarantine eviction 的删除屏障之后、gap 持久化/事务收尾之前终止 auditd，
+  再启动触发 `reconcile_tombstones_locked`；检查 gap 的 `lost_events` 与 health counter 不一致。
+- **修复建议**：把“完成 quarantine eviction”设计成带 gap ID 的幂等会计事务，在成功完成 durable
+  状态转换时补记一次未 ACK 数；区分 `segment_corruption`（可能来自 ACKed 批次）与
+  `quarantine_eviction`，并增加崩溃恢复回归测试。
+- **出处/引入**：`fc5bfb7b5ebfe0e18c97bfc4cb98d7f84a528c44`（修复 m-191）。
+
+#### M-70（P2）`EvictionPending` 恢复计数在 tombstone 持久化失败后重复累加
+
+- **位置**：`patches/0003-user-audit.patch:11813-11822`，关联
+  `11435-11457` 的 `replace_tombstone_locked`。
+- **现象/影响**：`reconcile_tombstones_locked` 在把 `EvictionPending` 替换为
+  `EvictedReceipt` 之前就调用 `add_evicted_unacked_records`。若随后
+  `replace_tombstone_locked` 写 `tombstones.json` 失败，该函数会回滚内存 tombstone 并返回错误；
+  下次 reconcile 再走同一分支，又会先累加一次。单个被驱逐批次因此可在可恢复的存储故障期间按
+  重试次数放大 `evicted_unacked_records`，健康数据失真。
+- **触发/复现**：注入一次 `persist_tombstones_locked` 失败，使 pending entry 保留，然后恢复存储
+  并再次执行 reconcile；gap 只应存在一条，但 counter 增加两次。
+- **修复建议**：将计数更新放在成功的 durable tombstone 状态转换之后，或为每个 gap ID 持久化
+  “计数已应用”标记并以其做幂等保护；用失败后重试测试绑定该顺序。
+- **出处/引入**：`fc5bfb7b5ebfe0e18c97bfc4cb98d7f84a528c44`（修复 m-191）。
+
+#### M-71（P2）相对 `PATH` 仍会折叠 `rustup` 代理，发布构建失败
+
+- **位置**：`scripts/release-artifact.py:563-575,636-644`。
+- **现象/影响**：`d0c29ff` 新增 `_absolute_tool_path` 以保留 `cargo`/`rustc` 的 rustup 代理文件名，
+  但只处理绝对候选路径；当 `PATH` 含相对目录时，`shutil.which` 可返回相对的
+  `bin/cargo`，随后 `candidate.resolve(strict=True)` 又把符号链接折叠为 `rustup`。执行版本检查时
+  实际运行的是 `rustup -V` 而不是 `cargo -V`，合法的固定 rustup 工具链会被误判为版本不一致，
+  README 的发布构建步骤因此不可完成。
+- **触发/复现**：准备 `bin/cargo -> rustup` 的 rustup 风格目录，设置 `PATH=bin`（相对当前工作目录），
+  调用 `_resolve_build_tool("cargo", environment)`；返回路径的 basename 变为 `rustup`。
+- **修复建议**：无论候选路径是否绝对，都只解析其父目录并保留原 basename（同时保留现有
+  `stat`、普通文件、执行位和 inode 校验）；增加相对 `PATH` 的代理符号链接回归测试。
+- **出处/引入**：`d0c29ff49b4ff4a8303606fe3285c23b522cdf45`（修复 M-63 的不完整分支）。
+
+#### M-72（P2）`SHADOWSOCKS_REQUIRE_AUDIT_TARGET` 非法值绕过 fail-closed 门禁
+
+- **位置**：`scripts/test.sh:113-119`、`scripts/verify.sh:90-93`。
+- **现象/影响**：缺少 auditd 交叉检查 target 时，脚本只判断变量是否精确等于字符串 `1`；除合法
+  `0` 外的其它非空值（如 `yes`、`2`、`false`）都会进入降级分支，等同于用户明确设置 `=0`，并可能让
+  `verify.sh` 打印“验证完成（覆盖面不完整）”。这使拼写错误、CI 统一注入的布尔值或恶意环境值
+  将应失败的 auditd 编译覆盖面静默变成成功，违背 `b918b8f` 设定的 fail-closed 合同。
+- **触发/复现**：在未安装 `x86_64-unknown-linux-gnu` target 的非 Linux 主机执行
+  `SHADOWSOCKS_REQUIRE_AUDIT_TARGET=yes scripts/verify.sh`（同样适用于 `2`/`false`）；返回码可为
+  0，且 auditd crate 实际未被编译。
+- **修复建议**：集中解析为三态：仅 `0` 允许显式降级、仅 `1`要求失败闭合、其它值立即报错；
+  `test.sh` 与 `verify.sh` 共用规范化结果，并为 `0/1/非法值` 分别补 shell 回归测试。
+- **出处/引入**：`b918b8f34dd50351e6e1310b2698380de908327c`（修复 M-62 的门禁解析）。
+
+#### M-73（P2）AF_UNIX lingering close 的有界 drain 仍可能在错误响应后复位连接
+
+- **位置**：`patches/0003-user-audit.patch:24933-24937,24980-25003`，对应原始 exporter
+  `patches/0001-eih-user-stats-http-unix-exporter.patch:4623-4627` 的错误响应路径。
+- **现象/影响**：Linux 在关闭接收队列非空的 AF_UNIX stream 时可能向对端报告 `ECONNRESET`。
+  `69069b3` 将直接错误响应改为 lingering close，但 drain 上限仍只有 65,536 字节或 100 ms。
+  `PAYLOAD_TOO_LARGE` 可能在更大的请求尚未读完时返回，`TOO_MANY_REQUESTS` 更可能完全未读入站
+  数据；对超大、持续发送或慢速客户端，预算耗尽时队列仍非空，客户端会在已收到完整 413/429 后
+  读到 `ECONNRESET`。这使错误响应的 HTTP 语义在 Linux 上仍不稳定。
+- **触发/复现**：向 busy/超限路径持续发送超过 65,536 字节的请求，或以低于 drain 预算的速率发送，
+  读取完整响应后继续读 socket；可观察响应已写出但读取以 `ECONNRESET` 结束。
+- **修复建议**：定义可证明的 graceful-close 策略（例如在拒绝前消耗完整请求、把排空与 permit
+  生命周期解耦并设置明确的连接级上限），而不是仅提高常量；Linux 上补充超大和慢速发送者的
+  回归/压力测试，确保客户端能稳定看到响应后的 EOF 或合同规定的错误。
+- **出处/引入**：`69069b3f57846aab6027d570454166f8eb39a1c4`（修复 M-66 的不完整 lingering close）。
+
 ## 3. 待执行的验证
 
 以下为发布前置。第一项已经按第 5 节决策收窄，原始宽命令的失败记录见表下；其余三项**从未在任何机器上执行过**：
@@ -106,7 +201,8 @@
   `direct_error_response_drains_unread_request_input` 以 `UnixStream::pair()` + FIONREAD
   直接断言队列被读空，不依赖平台 close 语义。Linux（Debian 13 / rustc 1.97.0）变异检验：
   修复在位 5/5 通过，去掉 drain 后 4 项转红。修复解除阻塞后随即在同一节点首次跑完
-  `cargo test --workspace --features user-audit --no-fail-fast`，结果见 §3.1。
+  `cargo test --workspace --features user-audit --no-fail-fast`，结果见 §3.1。该结论只覆盖
+  65,536 字节/100 毫秒有界 drain 场景；超大或慢速请求仍可能在错误响应后触发 RST，见本节 `M-73`。
 - 2026-08-30：**`D-5` 已实施**（overlay `8711cbd`，规范升版 v5 → v6）。发布构建改为
   `--no-default-features` 加显式 feature 集，§15.1 增列该集合。x86_64-unknown-linux-musl
   下少编译 29 个 crate（brotli/zstd/flate2、tun/smoltcp/etherparse、nix、qrcode、
@@ -118,3 +214,5 @@
   Linux 再运行 feature-on `user-audit` 回归，并显式运行 `tcp_eih_user`；其余 workspace
   integration targets 不再进入这两个 workspace 命令，锁定上游的公网 HTTP/1.0 targets
   不再阻塞本项目 §16 全绿判据。
+- 2026-08-30：完成对 `20ac4784e4735ab115469c936082e04717218e02^..47a65a4e175879e0a758644f185f4d93ca6eac1d`
+  的 89 个 commit（含起始 commit）审阅，新增并记录 `M-68`–`M-73` 六条 P2；均待修复，未改变规范合同或源码。
