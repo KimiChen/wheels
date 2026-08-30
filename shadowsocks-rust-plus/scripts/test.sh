@@ -59,6 +59,15 @@ fi
 # executed gate cannot drift apart -- and a test can bind the gate without
 # re-implementing this script's control flow.
 #
+# `--exclude shadowsocks-auditd` on the feature-off command keeps that command
+# byte-identical on every host.  Note what it does *not* do: `--exclude` only
+# drops a member from the set of packages to test, not from the build graph, so
+# it would not save a non-Linux host from that crate's `compile_error!`.  What
+# does is the root manifest -- `user-stats` does not pull `dep:shadowsocks-auditd`,
+# only `user-audit` does.  Moving that dependency into `user-stats` would make
+# this command fail on macOS with a Linux-only compile error despite the
+# `--exclude`; re-check here if the root feature graph ever changes.
+#
 # `--lib --bins` on the workspace commands selects no integration target at all,
 # so every target that still belongs in the gate is named below.  §16 sorts them
 # into overlay-owned, pure-loopback and public-network; the first two run here,
