@@ -92,9 +92,9 @@ Linux 主机直接运行完整开发路径：
 ```
 
 macOS 等非 Linux 主机的 auditd 静态交叉检查使用默认 `x86_64-unknown-linux-gnu` target，也可通过
-`SHADOWSOCKS_AUDIT_CHECK_TARGET` 选择另一个 target。推荐先安装该 target；未安装时
-`verify.sh`/`test.sh` 会继续执行其余检查并明确打印“未验证”，设置
-缺失 target 默认即为失败（fail-closed）；确知要放弃该覆盖面时用 `SHADOWSOCKS_REQUIRE_AUDIT_TARGET=0` 显式降级。非 Linux 开发构建仍必须显式
+`SHADOWSOCKS_AUDIT_CHECK_TARGET` 选择另一个 target。推荐先安装该 target。target 未安装时，门禁
+默认即为失败（fail-closed）；只有显式设置 `SHADOWSOCKS_REQUIRE_AUDIT_TARGET=0` 才会继续其余
+检查并明确打印“未验证”。非 Linux 开发构建仍必须显式
 关闭 auditd：
 
 ```bash
@@ -115,8 +115,8 @@ feature 的开发用 `ssserver` 与 `shadowsocks-auditd`；该 feature 在非 Li
 
 由于 `shadowsocks-auditd` 明确是 Linux-only，非 Linux 主机上的 `verify.sh` 会运行 feature-off
 workspace、service/协议测试，并在 target 已安装时对上述 Linux target 执行 auditd
-`cargo check --all-targets`；target 缺失时只报告未验证，使用
-该门禁默认 fail-closed，`SHADOWSOCKS_REQUIRE_AUDIT_TARGET=0` 才显式降级为“未验证”。feature-off 的收窄
+`cargo check --all-targets`；target 缺失时默认 fail-closed，只有设置
+`SHADOWSOCKS_REQUIRE_AUDIT_TARGET=0` 才显式降级为“未验证”并继续其余检查。feature-off 的收窄
 workspace 回归，以及 §16 ①②两类集成目标（overlay 自有的 `tcp_eih_user` 与三个纯 loopback 的 UDP
 目标），在任何主机上都会运行；`user-audit` feature-on 收窄 workspace 回归、auditd 原生单元测试与
 auditd 集成测试只能在 Linux 主机执行，且是发布前置硬条件。workspace 门禁使用 `--lib --bins`，因而不

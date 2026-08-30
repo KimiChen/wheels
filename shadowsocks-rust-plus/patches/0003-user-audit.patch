@@ -8073,10 +8073,10 @@ index 0000000000000000000000000000000000000000..6cf8d005dfef917c852be4f611d5b945
 +}
 diff --git a/crates/shadowsocks-auditd/src/spool.rs b/crates/shadowsocks-auditd/src/spool.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..83d635d84c23d2aa28bb0e6d30906a66c5483f17
+index 0000000000000000000000000000000000000000..3869ab55937e87d6f14e85733ff1fd1da8d31a72
 --- /dev/null
 +++ b/crates/shadowsocks-auditd/src/spool.rs
-@@ -0,0 +1,8472 @@
+@@ -0,0 +1,8775 @@
 +//! Durable, node-local audit spool.
 +//!
 +//! The spool is deliberately synchronous.  Ingest and export perform their
@@ -8800,6 +8800,26 @@ index 0000000000000000000000000000000000000000..83d635d84c23d2aa28bb0e6d30906a66
 +    basename.starts_with(&format!("{QUARANTINE_LABEL_ACKED}-"))
 +}
 +
++/// Resolve ACK provenance for a pending quarantine transaction.  Newer
++/// quarantine names carry the source label, while older names used
++/// `batch-corrupt` for both `sealed/` and `acked/`.  A matching durable ACK
++/// receipt is a conservative compatibility signal for those legacy names.
++fn quarantine_pending_source_is_acked(inner: &SpoolInner, pending: &wire::QuarantinePending) -> bool {
++    if quarantine_source_is_acked(&pending.quarantine_basename) {
++        return true;
++    }
++    let (Some(batch_id), Some(body_sha256)) = (pending.batch_id.as_deref(), pending.body_sha256.as_deref()) else {
++        return false;
++    };
++    inner.tombstones.iter().any(|entry| {
++        matches!(
++            entry,
++            TombstoneEntry::AckedReceipt(receipt)
++                if receipt.batch_id.as_str() == batch_id && receipt.body_sha256.as_str() == body_sha256
++        )
++    })
++}
++
 +fn quarantine_recovery_path(
 +    root: &Path,
 +    path: &Path,
@@ -9042,6 +9062,27 @@ index 0000000000000000000000000000000000000000..83d635d84c23d2aa28bb0e6d30906a66
 +    seal_after_open_rename: bool,
 +    seal_rollback: bool,
 +    persist_tombstones: bool,
++    // Skip one aggregate-ledger write, then fail the next one.  This models
++    // the pending-marker write succeeding while the later ledger removal
++    // fails, which is the retry window for quarantine eviction accounting.
++    persist_tombstones_skip: bool,
++}
++
++/// The aggregate tombstone ledger is the commit point for a pending
++/// destructive transaction. Marker cleanup is a second, best-effort barrier:
++/// it must still be reported to the caller, but an error there must not make
++/// callers forget accounting for a ledger transition that is already durable.
++struct TombstoneCommit {
++    marker_cleanup_error: Option<SpoolError>,
++}
++
++impl TombstoneCommit {
++    fn finish(self) -> Result<(), SpoolError> {
++        match self.marker_cleanup_error {
++            Some(error) => Err(error),
++            None => Ok(()),
++        }
++    }
 +}
 +
 +pub struct Spool {
@@ -9209,9 +9250,11 @@ index 0000000000000000000000000000000000000000..83d635d84c23d2aa28bb0e6d30906a66
 +                        if let Some(event_id) = gap_id.as_deref()
 +                            && remove_tombstone_pending_marker(&root, event_id).is_err()
 +                        {
-+                            // Keep the marker in memory if unlink failed so
-+                            // the normal reconcile path can retry it.
-+                            tombstones.push(marker);
++                            // The fixed gap proves that this transaction is
++                            // already resolved. Keep only the private marker
++                            // on disk for a later startup retry; re-inserting
++                            // it into the aggregate ledger would replay the
++                            // destructive operation and its health accounting.
 +                            degraded = true;
 +                            non_gap_degraded = true;
 +                            storage_rejected_attempts = saturating_inc(storage_rejected_attempts);
@@ -10402,7 +10445,7 @@ index 0000000000000000000000000000000000000000..83d635d84c23d2aa28bb0e6d30906a66
 +        if let Some(index) = inner.tombstones.iter().position(|entry| {
 +            matches!(entry, TombstoneEntry::QuarantinePending(value) if value.gap_event_id == pending.gap_event_id)
 +        }) {
-+            self.remove_tombstone_locked(inner, index)?;
++            self.remove_tombstone_locked(inner, index)?.finish()?;
 +        }
 +        // A rename does not change total bytes, but it does change the
 +        // trusted record indexes when the source was a sealed batch.
@@ -11427,7 +11470,7 @@ index 0000000000000000000000000000000000000000..83d635d84c23d2aa28bb0e6d30906a66
 +        Ok(())
 +    }
 +
-+    fn remove_tombstone_locked(&self, inner: &mut SpoolInner, index: usize) -> Result<(), SpoolError> {
++    fn remove_tombstone_locked(&self, inner: &mut SpoolInner, index: usize) -> Result<TombstoneCommit, SpoolError> {
 +        if index >= inner.tombstones.len() {
 +            return Err(SpoolError::InvalidState("tombstone index is out of bounds".to_owned()));
 +        }
@@ -11438,14 +11481,10 @@ index 0000000000000000000000000000000000000000..83d635d84c23d2aa28bb0e6d30906a66
 +            inner.tombstones = old;
 +            return Err(error);
 +        }
-+        if let Some(gap_id) = removed.gap_event_id() {
-+            // Keep the operation conservative if unlinking the private marker
-+            // fails.  The durable ledger transition is already complete; a
-+            // later startup/reconcile pass can remove the stale marker after
-+            // observing the fixed gap ID.
-+            self.remove_tombstone_pending_marker_locked(inner, gap_id)?;
-+        }
-+        Ok(())
++        let marker_cleanup_error = removed
++            .gap_event_id()
++            .and_then(|gap_id| self.remove_tombstone_pending_marker_locked(inner, gap_id).err());
++        Ok(TombstoneCommit { marker_cleanup_error })
 +    }
 +
 +    fn replace_tombstone_locked(
@@ -11453,7 +11492,7 @@ index 0000000000000000000000000000000000000000..83d635d84c23d2aa28bb0e6d30906a66
 +        inner: &mut SpoolInner,
 +        index: usize,
 +        replacement: Option<TombstoneEntry>,
-+    ) -> Result<(), SpoolError> {
++    ) -> Result<TombstoneCommit, SpoolError> {
 +        if index >= inner.tombstones.len() {
 +            return Err(SpoolError::InvalidState("tombstone index is out of bounds".to_owned()));
 +        }
@@ -11468,10 +11507,10 @@ index 0000000000000000000000000000000000000000..83d635d84c23d2aa28bb0e6d30906a66
 +            inner.tombstones = old;
 +            return Err(error);
 +        }
-+        if let Some(gap_id) = replaced.gap_event_id() {
-+            self.remove_tombstone_pending_marker_locked(inner, gap_id)?;
-+        }
-+        Ok(())
++        let marker_cleanup_error = replaced
++            .gap_event_id()
++            .and_then(|gap_id| self.remove_tombstone_pending_marker_locked(inner, gap_id).err());
++        Ok(TombstoneCommit { marker_cleanup_error })
 +    }
 +
 +    fn add_receipt_locked(&self, inner: &mut SpoolInner, entry: TombstoneEntry) -> Result<(), SpoolError> {
@@ -11480,7 +11519,9 @@ index 0000000000000000000000000000000000000000..83d635d84c23d2aa28bb0e6d30906a66
 +
 +    fn persist_tombstones_locked(&self, inner: &mut SpoolInner) -> Result<(), SpoolError> {
 +        #[cfg(test)]
-+        if std::mem::take(&mut inner.faults.persist_tombstones) {
++        if !std::mem::take(&mut inner.faults.persist_tombstones_skip)
++            && std::mem::take(&mut inner.faults.persist_tombstones)
++        {
 +            return Err(io::Error::other("injected tombstone persistence failure").into());
 +        }
 +        let path = self.root.join("tombstones.json");
@@ -11535,10 +11576,36 @@ index 0000000000000000000000000000000000000000..83d635d84c23d2aa28bb0e6d30906a66
 +    }
 +
 +    fn remove_tombstone_pending_marker_locked(&self, inner: &mut SpoolInner, event_id: &str) -> Result<(), SpoolError> {
-+        let path = tombstone_pending_marker_path_for_id(&self.root, event_id)?;
-+        let before = file_len(&path)?;
-+        if remove_tombstone_pending_marker(&self.root, event_id)? {
-+            Self::adjust_spool_bytes(inner, -i128::from(before));
++        let path = match tombstone_pending_marker_path_for_id(&self.root, event_id) {
++            Ok(path) => path,
++            Err(error) => {
++                inner.spool_bytes_known = false;
++                mark_storage_rejection(inner, true);
++                return Err(error);
++            }
++        };
++        let before = match file_len(&path) {
++            Ok(value) => value,
++            Err(error) => {
++                // The ledger transition may already be durable, but the
++                // marker's size is no longer trustworthy.  Force a full
++                // measurement before allowing another capacity decision.
++                inner.spool_bytes_known = false;
++                mark_storage_rejection(inner, true);
++                return Err(error.into());
++            }
++        };
++        match remove_tombstone_pending_marker(&self.root, event_id) {
++            Ok(true) => Self::adjust_spool_bytes(inner, -i128::from(before)),
++            Ok(false) => {}
++            Err(error) => {
++                // `remove_file` can succeed before the parent directory fsync
++                // fails.  In either case the incremental byte index cannot be
++                // trusted until the next full scan.
++                inner.spool_bytes_known = false;
++                mark_storage_rejection(inner, true);
++                return Err(error);
++            }
 +        }
 +        Ok(())
 +    }
@@ -11706,7 +11773,12 @@ index 0000000000000000000000000000000000000000..83d635d84c23d2aa28bb0e6d30906a66
 +        if let Some(index) = inner.tombstones.iter().position(|entry| {
 +            matches!(entry, TombstoneEntry::EvictionPending(value) if value.gap_event_id == pending.gap_event_id)
 +        }) {
-+            self.replace_tombstone_locked(inner, index, Some(replacement))?;
++            let commit = self.replace_tombstone_locked(inner, index, Some(replacement))?;
++            // Count only after the pending -> receipt ledger transition has
++            // committed, but before reporting a marker cleanup error.
++            Self::add_evicted_unacked_records(inner, info.event_count);
++            commit.finish()?;
++            return Ok(());
 +        }
 +        Self::add_evicted_unacked_records(inner, info.event_count);
 +        Ok(())
@@ -11770,13 +11842,24 @@ index 0000000000000000000000000000000000000000..83d635d84c23d2aa28bb0e6d30906a66
 +        // destroyed range -- §9.5 defines `lost_events` as what the corrupt
 +        // object's metadata says it held -- but `evicted_unacked_records` is
 +        // named for undelivered records and drives loss alerting.
-+        if !quarantine_source_is_acked(&pending.quarantine_basename) {
-+            Self::add_evicted_unacked_records(inner, spec.lost_events.unwrap_or(0));
-+        }
 +        if let Some(index) = inner.tombstones.iter().position(|entry| {
 +            matches!(entry, TombstoneEntry::QuarantinePending(value) if value.gap_event_id == pending.gap_event_id)
 +        }) {
-+            self.remove_tombstone_locked(inner, index)?;
++            let commit = self.remove_tombstone_locked(inner, index)?;
++            // The object and its gap are already durable.  Count only after
++            // the pending ledger entry is durably removed, so a retry after a
++            // pre-commit ledger failure cannot charge the same loss twice.
++            if !quarantine_pending_source_is_acked(inner, &pending) {
++                Self::add_evicted_unacked_records(inner, spec.lost_events.unwrap_or(0));
++            }
++            commit.finish()?;
++            return Ok(());
++        }
++        // This should be unreachable because the pending entry is created
++        // above, but preserve the historical accounting fallback if a caller
++        // supplies an already-compacted ledger.
++        if !quarantine_pending_source_is_acked(inner, &pending) {
++            Self::add_evicted_unacked_records(inner, spec.lost_events.unwrap_or(0));
 +        }
 +        Ok(())
 +    }
@@ -11802,7 +11885,7 @@ index 0000000000000000000000000000000000000000..83d635d84c23d2aa28bb0e6d30906a66
 +                                    // barrier; retaining the complete batch is
 +                                    // safer than claiming it was evicted.  Drop
 +                                    // only the pending transaction marker.
-+                                    self.remove_tombstone_locked(inner, index)?;
++                                    self.remove_tombstone_locked(inner, index)?.finish()?;
 +                                    return Ok(false);
 +                                }
 +                                Ok(None) | Err(_) => {
@@ -11838,7 +11921,7 @@ index 0000000000000000000000000000000000000000..83d635d84c23d2aa28bb0e6d30906a66
 +                        if !inner.durable_gap_reasons.contains_key(&pending.gap_event_id) {
 +                            self.write_gap_locked(inner, &spec)?;
 +                        }
-+                        self.replace_tombstone_locked(
++                        let commit = self.replace_tombstone_locked(
 +                            inner,
 +                            index,
 +                            Some(TombstoneEntry::EvictedReceipt(wire::EvictedReceipt::from_pending(
@@ -11855,6 +11938,7 @@ index 0000000000000000000000000000000000000000..83d635d84c23d2aa28bb0e6d30906a66
 +                        // batch again.  `evict_sealed_locked` already orders it
 +                        // this way.
 +                        Self::add_evicted_unacked_records(inner, pending.event_count.0);
++                        commit.finish()?;
 +                        Ok(true)
 +                    }
 +                    TombstoneEntry::QuarantinePending(pending) => {
@@ -11905,7 +11989,17 @@ index 0000000000000000000000000000000000000000..83d635d84c23d2aa28bb0e6d30906a66
 +                        if let Some(path) = source_path {
 +                            let source_parent = path.parent().map(Path::to_path_buf);
 +                            let source_hint = read_meta_hint(&path, &self.config.node_id);
-+                            let result = quarantine_path(&self.root, &path, QUARANTINE_LABEL_UNACKED);
++                            // A crash can leave the source in its trusted
++                            // directory after the pending marker/ledger have
++                            // been persisted. Preserve that provenance in the
++                            // quarantine basename; otherwise an ACKed batch is
++                            // later charged as undelivered loss.
++                            let label = if source_parent.as_deref().is_some_and(|parent| parent.ends_with("acked")) {
++                                QUARANTINE_LABEL_ACKED
++                            } else {
++                                QUARANTINE_LABEL_UNACKED
++                            };
++                            let result = quarantine_path(&self.root, &path, label);
 +                            if result.is_err() && !path.exists() {
 +                                self.rebuild_runtime_indexes_locked(inner);
 +                            }
@@ -11969,7 +12063,7 @@ index 0000000000000000000000000000000000000000..83d635d84c23d2aa28bb0e6d30906a66
 +                            self.write_gap_locked(inner, &spec)?;
 +                        }
 +                        self.discard_recovery_gap_locked(inner, &pending.gap_event_id)?;
-+                        self.remove_tombstone_locked(inner, index)?;
++                        let commit = self.remove_tombstone_locked(inner, index)?;
 +                        // Finishing a crashed quarantine eviction destroys the same
 +                        // records `evict_quarantine_locked` would have accounted for,
 +                        // so this leg must count them too -- it is the same durable
@@ -11979,9 +12073,10 @@ index 0000000000000000000000000000000000000000..83d635d84c23d2aa28bb0e6d30906a66
 +                        // in-process path does not count that either.  The
 +                        // already-acknowledged source rule from
 +                        // `evict_quarantine_locked` applies here unchanged.
-+                        if !is_corruption_quarantine && !quarantine_source_is_acked(&pending.quarantine_basename) {
++                        if !is_corruption_quarantine && !quarantine_pending_source_is_acked(inner, &pending) {
 +                            Self::add_evicted_unacked_records(inner, spec.lost_events.unwrap_or(0));
 +                        }
++                        commit.finish()?;
 +                        Ok(false)
 +                    }
 +                    TombstoneEntry::AckedReceipt(_) | TombstoneEntry::EvictedReceipt(_) => Ok(true),
@@ -15483,6 +15578,214 @@ index 0000000000000000000000000000000000000000..83d635d84c23d2aa28bb0e6d30906a66
 +            inner.evicted_unacked_records, 3,
 +            "already-acknowledged events must not be counted on the recovery leg either"
 +        );
++    }
++
++    /// A crash after the pending quarantine transaction is persisted but
++    /// before its source rename must retain the source directory's provenance.
++    /// In particular, an ACKed source must not be relabelled as unacknowledged
++    /// when recovery retries the rename.
++    #[test]
++    fn pending_quarantine_recovery_preserves_acked_source_label() {
++        let dir = tempfile::tempdir().expect("tempdir");
++        let spool = Spool::open(config(dir.path())).expect("spool");
++        spool.append(&event(1), 1).expect("append");
++        let lease = spool.lease().expect("lease").expect("batch");
++        let batch_id = lease.info.batch_id.clone();
++        let body_sha256 = lease.info.body_sha256.clone();
++        let spool_epoch = lease.info.spool_epoch.clone();
++        let first_sequence = lease.info.first_spool_sequence;
++        let last_sequence = lease.info.last_spool_sequence;
++        let event_count = lease.info.event_count;
++        let raw_bytes = lease.info.raw_bytes;
++        assert_eq!(spool.ack(&batch_id, &body_sha256).expect("ack"), AckOutcome::Acked);
++        drop(lease);
++
++        let acked = list_batch_dirs(&dir.path().join("acked")).expect("acked");
++        assert_eq!(acked.len(), 1);
++        let source_basename = acked[0]
++            .file_name()
++            .and_then(|value| value.to_str())
++            .expect("source basename")
++            .to_owned();
++        let gap_id = format!("{GAP_ID_PREFIX}{}", "a".repeat(32));
++        let mut pending = wire::QuarantinePending::new(
++            gap_id,
++            source_basename,
++            unix_millis().expect("clock"),
++            Some(batch_id),
++            Some(body_sha256),
++            Some(spool_epoch),
++            Some(first_sequence),
++            Some(last_sequence),
++            Some(event_count),
++            Some(raw_bytes),
++        );
++        pending.reason = "segment_corruption".to_owned();
++        {
++            let mut inner = lock(&spool.inner);
++            spool
++                .add_tombstone_locked(&mut inner, TombstoneEntry::QuarantinePending(pending))
++                .expect("pending quarantine");
++            spool
++                .reconcile_tombstones_locked(&mut inner)
++                .expect("reconcile pending source");
++            assert_eq!(inner.evicted_unacked_records, 0);
++        }
++
++        let isolated = list_entries(&dir.path().join("quarantine")).expect("quarantine");
++        assert_eq!(isolated.len(), 1);
++        let isolated_basename = isolated[0]
++            .file_name()
++            .and_then(|value| value.to_str())
++            .expect("quarantine basename")
++            .to_owned();
++        assert!(
++            quarantine_source_is_acked(&isolated_basename),
++            "a pending ACKed source must retain its label: {isolated_basename}"
++        );
++
++        // The label is consumed after a later quarantine eviction.  This
++        // proves the provenance survives the recovery retry all the way to the
++        // health counter, rather than only changing the displayed basename.
++        {
++            let mut inner = lock(&spool.inner);
++            spool
++                .evict_quarantine_locked(&mut inner, &isolated[0])
++                .expect("evict quarantined copy");
++            assert_eq!(inner.evicted_unacked_records, 0);
++        }
++    }
++
++    /// Quarantine directories written by versions before the source label was
++    /// introduced are still safe to evict when their durable ACK receipt is
++    /// available.
++    #[test]
++    fn legacy_acked_quarantine_uses_the_durable_ack_receipt() {
++        let dir = tempfile::tempdir().expect("tempdir");
++        let spool = Spool::open(config(dir.path())).expect("spool");
++        spool.append(&event(1), 1).expect("append");
++        let lease = spool.lease().expect("lease").expect("batch");
++        let batch_id = lease.info.batch_id.clone();
++        let body_sha256 = lease.info.body_sha256.clone();
++        assert_eq!(spool.ack(&batch_id, &body_sha256).expect("ack"), AckOutcome::Acked);
++        drop(lease);
++
++        let acked = list_batch_dirs(&dir.path().join("acked")).expect("acked");
++        assert_eq!(acked.len(), 1);
++        let legacy_name = format!(
++            "batch-corrupt-legacy-{}",
++            acked[0].file_name().and_then(|value| value.to_str()).expect("basename")
++        );
++        let legacy_path = dir.path().join("quarantine").join(&legacy_name);
++        fs::rename(&acked[0], &legacy_path).expect("move legacy quarantine object");
++        assert!(!quarantine_source_is_acked(&legacy_name));
++
++        let mut inner = lock(&spool.inner);
++        spool
++            .evict_quarantine_locked(&mut inner, &legacy_path)
++            .expect("evict legacy quarantine object");
++        assert_eq!(
++            inner.evicted_unacked_records, 0,
++            "the durable ACK receipt must override the legacy ambiguous label"
++        );
++    }
++
++    /// Once the aggregate ledger has committed, a failure removing its private
++    /// marker must not lose the corresponding health accounting or make a later
++    /// retry charge the same transaction again.
++    #[test]
++    fn committed_quarantine_eviction_counts_once_when_marker_cleanup_fails() {
++        let dir = tempfile::tempdir().expect("tempdir");
++        let spool = Spool::open(config(dir.path())).expect("spool");
++        let gap_id = format!("{GAP_ID_PREFIX}{}", "e".repeat(32));
++        let pending = eviction_pending_for_test(&gap_id, &"f".repeat(32));
++        {
++            let mut inner = lock(&spool.inner);
++            spool
++                .add_tombstone_locked(&mut inner, pending)
++                .expect("pending eviction");
++        }
++        let marker = dir.path().join(format!(
++            "{TOMBSTONE_PENDING_MARKER_PREFIX}{}.json",
++            &gap_id[GAP_ID_PREFIX.len()..]
++        ));
++        assert!(marker.is_file());
++        // Make marker cleanup fail after the ledger replacement while leaving
++        // the path present.  A directory is rejected by `file_len` before any
++        // destructive unlink, which is deterministic on every Unix target.
++        fs::remove_file(&marker).expect("remove marker file");
++        fs::create_dir(&marker).expect("replace marker with directory");
++
++        {
++            let mut inner = lock(&spool.inner);
++            spool
++                .reconcile_tombstones_locked(&mut inner)
++                .expect("nonfatal marker cleanup failure");
++            assert!(
++                inner
++                    .tombstones
++                    .iter()
++                    .any(|entry| matches!(entry, TombstoneEntry::EvictedReceipt(_))),
++                "the durable ledger transition must remain committed"
++            );
++            assert_eq!(inner.evicted_unacked_records, 2);
++            assert!(!inner.spool_bytes_known);
++        }
++
++        // Once the marker is repaired, another reconciliation pass sees only
++        // the receipt and must not account for the same loss a second time.
++        fs::remove_dir(&marker).expect("remove broken marker directory");
++        {
++            let mut inner = lock(&spool.inner);
++            spool
++                .reconcile_tombstones_locked(&mut inner)
++                .expect("reconcile after marker repair");
++            assert_eq!(inner.evicted_unacked_records, 2);
++        }
++    }
++
++    /// A ledger failure before the pending -> removed transition must leave
++    /// the counter untouched; recovery of the retained pending entry then
++    /// accounts for the destruction exactly once.
++    #[test]
++    fn quarantine_eviction_ledger_retry_does_not_double_count() {
++        let dir = tempfile::tempdir().expect("tempdir");
++        let spool = Spool::open(config(dir.path())).expect("spool");
++        spool.append(&event(1), 1).expect("append");
++        {
++            let mut inner = lock(&spool.inner);
++            spool.seal_locked(&mut inner).expect("seal");
++        }
++        let sealed = list_batch_dirs(&dir.path().join("sealed")).expect("sealed");
++        fs::write(sealed[0].join("segment.ndjson"), b"corrupt\n").expect("corrupt body");
++        assert!(spool.lease().expect("integrity check").is_none());
++        let isolated = list_entries(&dir.path().join("quarantine")).expect("quarantine");
++        assert_eq!(isolated.len(), 1);
++
++        {
++            let mut inner = lock(&spool.inner);
++            // The first tombstone write belongs to adding the pending entry;
++            // fail the following write that removes it after the object/gap
++            // have already been committed.
++            inner.faults.persist_tombstones_skip = true;
++            inner.faults.persist_tombstones = true;
++            assert!(spool.evict_quarantine_locked(&mut inner, &isolated[0]).is_err());
++            assert_eq!(inner.evicted_unacked_records, 0);
++            assert!(inner.tombstones.iter().any(|entry| {
++                matches!(entry, TombstoneEntry::QuarantinePending(_))
++            }));
++        }
++
++        {
++            let mut inner = lock(&spool.inner);
++            spool
++                .reconcile_tombstones_locked(&mut inner)
++                .expect("recover retained pending transaction");
++            assert_eq!(inner.evicted_unacked_records, 1);
++            assert!(!inner.tombstones.iter().any(|entry| {
++                matches!(entry, TombstoneEntry::QuarantinePending(_))
++            }));
++        }
 +    }
 +
 +    /// `M-68`: startup recovery isolates an `acked/` batch whose body rotted but
@@ -24905,7 +25208,7 @@ index 0000000000000000000000000000000000000000..4a5d39945fa2689df5f3cd97703cfbf4
 +    }
 +}
 diff --git a/crates/shadowsocks-service/src/server/user_stats.rs b/crates/shadowsocks-service/src/server/user_stats.rs
-index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..59f52fded53a5755da9d51c516a3c5fa365b1b39 100644
+index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..46bc318d3b074f597dfcfa639054f630f059ce23 100644
 --- a/crates/shadowsocks-service/src/server/user_stats.rs
 +++ b/crates/shadowsocks-service/src/server/user_stats.rs
 @@ -11,11 +11,16 @@ use std::{
@@ -25159,10 +25462,14 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..59f52fded53a5755da9d51c516a3c5fa
          if !self.record.active.load(Ordering::Relaxed)
              || self.record.current_lifecycle.load(Ordering::Acquire) != self.lifecycle
              || !state
-@@ -749,6 +862,11 @@ mod exporter {
+@@ -749,6 +862,15 @@ mod exporter {
      const ACCEPT_ERROR_RETRY_DELAY: Duration = Duration::from_secs(1);
      const BUSY_RESPONSE_WRITE_TIMEOUT: Duration = Duration::from_millis(100);
      const MAX_BUSY_RESPONSE_WORKERS: usize = 32;
++    /// Upper bound on direct-error connections that may linger while their
++    /// unread request bytes are drained.  These workers do not hold a client
++    /// concurrency permit, so they need an independent bound of their own.
++    const MAX_LINGERING_CLOSE_WORKERS: usize = 32;
 +    /// Upper bound on the input drained during a lingering close: one further
 +    /// maximum-sized request beyond whatever the response path already read.
 +    const LINGERING_CLOSE_MAX_BYTES: usize = USER_STATS_MAX_REQUEST_BYTES;
@@ -25171,7 +25478,95 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..59f52fded53a5755da9d51c516a3c5fa
  
      pub(super) const HEALTH_OK: &[u8] = b"{\"schema_version\":1,\"status\":\"ok\"}\n";
      pub(super) const HEALTH_UNHEALTHY: &[u8] = b"{\"schema_version\":1,\"status\":\"unhealthy\"}\n";
-@@ -1403,8 +1521,7 @@ mod exporter {
+@@ -983,6 +1105,7 @@ mod exporter {
+         inject_accept_failure: bool,
+         #[cfg(test)]
+         busy_response_hook: Option<BusyResponseTestHook>,
++        lingering_close_hook: LingeringCloseHook,
+     }
+ 
+     #[cfg(test)]
+@@ -992,6 +1115,22 @@ mod exporter {
+         release: Arc<Semaphore>,
+     }
+ 
++    /// Test-only synchronization for proving that a lingering worker can be
++    /// held open without consuming an ordinary client permit.  In production
++    /// the wrapper is zero-sized and all hook code is compiled out.
++    #[derive(Clone, Default)]
++    struct LingeringCloseHook {
++        #[cfg(test)]
++        inner: Option<LingeringCloseTestHook>,
++    }
++
++    #[cfg(test)]
++    #[derive(Clone)]
++    struct LingeringCloseTestHook {
++        entered: tokio::sync::mpsc::UnboundedSender<()>,
++        release: Arc<Semaphore>,
++    }
++
+     impl UserStatsExporter {
+         /// Safely bind the configured filesystem socket.
+         pub fn bind(mut config: UserStatsConfig, registry: Arc<UserStatsRegistry>) -> io::Result<Self> {
+@@ -1025,6 +1164,7 @@ mod exporter {
+                 inject_accept_failure: false,
+                 #[cfg(test)]
+                 busy_response_hook: None,
++                lingering_close_hook: LingeringCloseHook::default(),
+             })
+         }
+ 
+@@ -1044,6 +1184,19 @@ mod exporter {
+             (entered_rx, release)
+         }
+ 
++        #[cfg(test)]
++        pub(super) fn block_lingering_closes(&mut self) -> (tokio::sync::mpsc::UnboundedReceiver<()>, Arc<Semaphore>) {
++            let (entered, entered_rx) = tokio::sync::mpsc::unbounded_channel();
++            let release = Arc::new(Semaphore::new(0));
++            self.lingering_close_hook = LingeringCloseHook {
++                inner: Some(LingeringCloseTestHook {
++                    entered,
++                    release: release.clone(),
++                }),
++            };
++            (entered_rx, release)
++        }
++
+         /// Serve requests until the owning task is cancelled.
+         pub async fn run(self) -> io::Result<()> {
+             info!(
+@@ -1052,6 +1205,7 @@ mod exporter {
+             );
+             let semaphore = Arc::new(Semaphore::new(self.config.max_concurrent_clients));
+             let busy_response_semaphore = Arc::new(Semaphore::new(MAX_BUSY_RESPONSE_WORKERS));
++            let lingering_close_semaphore = Arc::new(Semaphore::new(MAX_LINGERING_CLOSE_WORKERS));
+             let mut workers = JoinSet::new();
+             let mut consecutive_accept_errors = 0usize;
+ 
+@@ -1132,7 +1286,19 @@ mod exporter {
+                 };
+                 let registry = self.registry.clone();
+                 let config = self.config.clone();
+-                workers.spawn(async move { handle_client(stream, permit, registry, config).await });
++                let lingering_close_semaphore = lingering_close_semaphore.clone();
++                let lingering_close_hook = self.lingering_close_hook.clone();
++                workers.spawn(async move {
++                    handle_client(
++                        stream,
++                        permit,
++                        registry,
++                        config,
++                        lingering_close_semaphore,
++                        lingering_close_hook,
++                    )
++                    .await
++                });
+             }
+         }
+     }
+@@ -1403,8 +1569,7 @@ mod exporter {
          }
  
          let suffix = &value[host.len()..];
@@ -25181,7 +25576,85 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..59f52fded53a5755da9d51c516a3c5fa
      }
  
      fn request_has_one_valid_host(request: &Request<Incoming>) -> bool {
-@@ -1547,10 +1664,9 @@ mod exporter {
+@@ -1489,11 +1654,14 @@ mod exporter {
+     }
+ 
+     async fn handle_client(
+-        mut stream: UnixStream,
++        stream: UnixStream,
+         permit: OwnedSemaphorePermit,
+         registry: Arc<UserStatsRegistry>,
+         config: UserStatsConfig,
++        lingering_close_semaphore: Arc<Semaphore>,
++        lingering_close_hook: LingeringCloseHook,
+     ) -> io::Result<()> {
++        let mut stream = stream;
+         let head = match time::timeout(
+             config.read_timeout,
+             read_request_head(&mut stream, config.max_request_bytes),
+@@ -1501,41 +1669,53 @@ mod exporter {
+         .await
+         {
+             Err(..) => {
+-                write_direct_json(
+-                    &mut stream,
++                write_direct_json_and_detach(
++                    stream,
++                    permit,
+                     config.write_timeout,
+                     StatusCode::REQUEST_TIMEOUT,
+                     ERROR_READ_TIMEOUT,
++                    lingering_close_semaphore,
++                    lingering_close_hook,
+                 )
+                 .await;
+                 return Ok(());
+             }
+             Ok(Err(ReadHeadError::TooLarge)) => {
+-                write_direct_json(
+-                    &mut stream,
++                write_direct_json_and_detach(
++                    stream,
++                    permit,
+                     config.write_timeout,
+                     StatusCode::PAYLOAD_TOO_LARGE,
+                     ERROR_REQUEST_TOO_LARGE,
++                    lingering_close_semaphore,
++                    lingering_close_hook,
+                 )
+                 .await;
+                 return Ok(());
+             }
+             Ok(Err(ReadHeadError::Invalid)) => {
+-                write_direct_json(
+-                    &mut stream,
++                write_direct_json_and_detach(
++                    stream,
++                    permit,
+                     config.write_timeout,
+                     StatusCode::BAD_REQUEST,
+                     ERROR_INVALID_REQUEST,
++                    lingering_close_semaphore,
++                    lingering_close_hook,
+                 )
+                 .await;
+                 return Ok(());
+             }
+             Ok(Err(ReadHeadError::UnsupportedVersion)) => {
+-                write_direct_json(
+-                    &mut stream,
++                write_direct_json_and_detach(
++                    stream,
++                    permit,
+                     config.write_timeout,
+                     StatusCode::HTTP_VERSION_NOT_SUPPORTED,
+                     ERROR_HTTP_VERSION_NOT_SUPPORTED,
++                    lingering_close_semaphore,
++                    lingering_close_hook,
+                 )
+                 .await;
+                 return Ok(());
+@@ -1547,12 +1727,20 @@ mod exporter {
              let (status, body) = match error {
                  ReadHeadError::Invalid => (StatusCode::BAD_REQUEST, ERROR_INVALID_REQUEST),
                  ReadHeadError::TooLarge => (StatusCode::PAYLOAD_TOO_LARGE, ERROR_REQUEST_TOO_LARGE),
@@ -25193,9 +25666,21 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..59f52fded53a5755da9d51c516a3c5fa
 +                    (StatusCode::HTTP_VERSION_NOT_SUPPORTED, ERROR_HTTP_VERSION_NOT_SUPPORTED)
 +                }
              };
-             write_direct_json(&mut stream, config.write_timeout, status, body).await;
+-            write_direct_json(&mut stream, config.write_timeout, status, body).await;
++            write_direct_json_and_detach(
++                stream,
++                permit,
++                config.write_timeout,
++                status,
++                body,
++                lingering_close_semaphore,
++                lingering_close_hook,
++            )
++            .await;
              return Ok(());
-@@ -1588,17 +1704,65 @@ mod exporter {
+         }
+ 
+@@ -1588,17 +1776,110 @@ mod exporter {
          response
      }
  
@@ -25214,10 +25699,10 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..59f52fded53a5755da9d51c516a3c5fa
 +    /// the response followed by a clean end of stream. It is *not* an
 +    /// unconditional guarantee. The drain is bounded by `LINGERING_CLOSE_MAX_BYTES`
 +    /// and `LINGERING_CLOSE_TIMEOUT` because an unbounded one would let a client
-+    /// pin a permit for as long as it keeps writing, so a client that is still
-+    /// sending when the budget runs out is closed with a non-empty queue and does
-+    /// see the reset. That residual window cannot be closed while the drain stays
-+    /// bounded, and the bound is the point.
++    /// pin a lingering worker for as long as it keeps writing. A client that is
++    /// still sending when the budget runs out is closed with a non-empty queue and
++    /// does see the reset. That residual window cannot be closed while the drain
++    /// stays bounded, and the bound is the point.
 +    ///
 +    /// The response itself is unaffected either way: `direct_json_response` always
 +    /// frames with `Content-Length` and `Connection: close`, so a client that
@@ -25230,9 +25715,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..59f52fded53a5755da9d51c516a3c5fa
 +            let mut scratch = [0u8; 1_024];
 +            let mut drained = 0usize;
 +            while drained < LINGERING_CLOSE_MAX_BYTES {
-+                let read_len = LINGERING_CLOSE_MAX_BYTES
-+                    .saturating_sub(drained)
-+                    .min(scratch.len());
++                let read_len = LINGERING_CLOSE_MAX_BYTES.saturating_sub(drained).min(scratch.len());
 +                match stream.read(&mut scratch[..read_len]).await {
 +                    Ok(0) | Err(..) => break,
 +                    Ok(count) => drained = drained.saturating_add(count),
@@ -25247,6 +25730,52 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..59f52fded53a5755da9d51c516a3c5fa
          let _ = time::timeout(timeout, async { stream.write_all(&response).await }).await;
 -        let _ = stream.shutdown().await;
 +        lingering_close(stream, timeout).await;
++    }
++
++    /// Write a direct error while the client permit is still owned, then hand
++    /// the stream to a separately bounded lingering-close worker.  The worker
++    /// semaphore is deliberately acquired after the client permit is dropped:
++    /// a slow peer must not make ordinary clients wait for the drain budget.
++    async fn write_direct_json_and_detach(
++        mut stream: UnixStream,
++        permit: OwnedSemaphorePermit,
++        timeout: Duration,
++        status: StatusCode,
++        body: &[u8],
++        lingering_close_semaphore: Arc<Semaphore>,
++        lingering_close_hook: LingeringCloseHook,
++    ) {
++        let response = direct_json_response(status, body);
++        let _ = time::timeout(timeout, async { stream.write_all(&response).await }).await;
++        drop(permit);
++        spawn_bounded_lingering_close(stream, timeout, lingering_close_semaphore, lingering_close_hook);
++    }
++
++    /// Start one bounded lingering-close worker, or drop the stream when all
++    /// workers are occupied.  The latter is the same fail-fast behavior used
++    /// for an overloaded 429 response and keeps rejected clients from creating
++    /// an unbounded backlog of drain tasks.
++    fn spawn_bounded_lingering_close(
++        stream: UnixStream,
++        timeout: Duration,
++        semaphore: Arc<Semaphore>,
++        _hook: LingeringCloseHook,
++    ) {
++        let Ok(worker_permit) = semaphore.try_acquire_owned() else {
++            return;
++        };
++        tokio::spawn(async move {
++            let _worker_permit = worker_permit;
++            #[cfg(test)]
++            if let Some(hook) = _hook.inner {
++                let _ = hook.entered.send(());
++                if let Ok(permit) = hook.release.acquire_owned().await {
++                    permit.forget();
++                }
++            }
++            let mut stream = stream;
++            lingering_close(&mut stream, timeout).await;
++        });
      }
  
      #[cfg(test)]
@@ -25257,13 +25786,14 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..59f52fded53a5755da9d51c516a3c5fa
 +        use tokio::io::{AsyncReadExt, AsyncWriteExt};
 +
 +        use super::{
-+            ERROR_REQUEST_TOO_LARGE, LINGERING_CLOSE_MAX_BYTES, StatusCode, UnixStream,
-+            set_socket_permissions_nofollow, verify_open_file_path, write_direct_json,
++            ERROR_REQUEST_TOO_LARGE, LINGERING_CLOSE_MAX_BYTES, LingeringCloseHook, LingeringCloseTestHook, StatusCode,
++            UnixStream, set_socket_permissions_nofollow, verify_open_file_path, write_direct_json,
++            write_direct_json_and_detach,
 +        };
  
          pub(crate) const BUSY_RESPONSE_WORKERS: usize = super::MAX_BUSY_RESPONSE_WORKERS;
          pub(crate) const SNAPSHOT_REQUEST: &[u8] = b"GET /v1/snapshot HTTP/1.1\r\nHost: localhost\r\n\r\n";
-@@ -1638,6 +1802,123 @@ mod exporter {
+@@ -1638,6 +1919,210 @@ mod exporter {
              drop(socket);
          }
  
@@ -25384,10 +25914,97 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..59f52fded53a5755da9d51c516a3c5fa
 +            assert!(response.ends_with(ERROR_REQUEST_TOO_LARGE));
 +        }
 +
++        /// A direct error must release its client permit before the bounded
++        /// drain starts, while the independent worker limit still prevents an
++        /// unbounded number of lingering sockets.
++        #[tokio::test]
++        async fn detached_lingering_close_releases_client_permit_and_is_bounded() {
++            let client_semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
++            let lingering_semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
++
++            let (mut first_client, first_server) = UnixStream::pair().unwrap();
++            let (entered, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
++            let release = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
++            let first_hook = LingeringCloseHook {
++                inner: Some(LingeringCloseTestHook {
++                    entered,
++                    release: release.clone(),
++                }),
++            };
++            let first_permit = client_semaphore.clone().try_acquire_owned().unwrap();
++            write_direct_json_and_detach(
++                first_server,
++                first_permit,
++                std::time::Duration::from_secs(5),
++                StatusCode::PAYLOAD_TOO_LARGE,
++                ERROR_REQUEST_TOO_LARGE,
++                lingering_semaphore.clone(),
++                first_hook,
++            )
++            .await;
++
++            tokio::time::timeout(std::time::Duration::from_secs(1), entered_rx.recv())
++                .await
++                .unwrap()
++                .expect("the first lingering worker must enter before it is inspected");
++
++            assert_eq!(
++                client_semaphore.available_permits(),
++                1,
++                "the client permit must be returned before lingering drain"
++            );
++            assert_eq!(
++                lingering_semaphore.available_permits(),
++                0,
++                "the first lingering close must consume the sole worker permit"
++            );
++
++            // A second direct error still returns its client permit, but it
++            // must not create a second drain task while the worker bound is full.
++            let (mut second_client, second_server) = UnixStream::pair().unwrap();
++            let second_permit = client_semaphore.clone().try_acquire_owned().unwrap();
++            write_direct_json_and_detach(
++                second_server,
++                second_permit,
++                std::time::Duration::from_secs(5),
++                StatusCode::PAYLOAD_TOO_LARGE,
++                ERROR_REQUEST_TOO_LARGE,
++                lingering_semaphore.clone(),
++                LingeringCloseHook::default(),
++            )
++            .await;
++            assert_eq!(client_semaphore.available_permits(), 1);
++
++            let mut second_response = Vec::new();
++            tokio::time::timeout(
++                std::time::Duration::from_secs(1),
++                second_client.read_to_end(&mut second_response),
++            )
++            .await
++            .unwrap()
++            .unwrap();
++            assert!(String::from_utf8_lossy(&second_response).starts_with("HTTP/1.1 413 "));
++
++            // Keep the first peer open until the worker has been observed as
++            // active, then let its read side finish and reclaim the worker slot.
++            release.add_permits(1);
++            first_client.shutdown().await.unwrap();
++            tokio::time::timeout(std::time::Duration::from_secs(1), async {
++                loop {
++                    if lingering_semaphore.available_permits() == 1 {
++                        break;
++                    }
++                    tokio::task::yield_now().await;
++                }
++            })
++            .await
++            .expect("lingering worker must release its permit after EOF");
++        }
++
          #[test]
          fn lock_path_verification_rejects_an_inode_replacement() {
              let directory = tempfile::tempdir().unwrap();
-@@ -1669,10 +1950,7 @@ mod tests {
+@@ -1669,10 +2154,7 @@ mod tests {
          T: Send + 'static,
          F: FnOnce() -> T + Send + 'static,
      {
@@ -25399,7 +26016,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..59f52fded53a5755da9d51c516a3c5fa
          let (started_tx, started_rx) = std::sync::mpsc::channel();
          let (result_tx, result_rx) = std::sync::mpsc::channel();
          let worker = std::thread::spawn(move || {
-@@ -1791,7 +2069,10 @@ mod tests {
+@@ -1791,7 +2273,10 @@ mod tests {
              assert_eq!(prior.servers[0].server_id, snapshot.servers[0].server_id);
              assert_eq!(prior.servers[0].generation, snapshot.servers[0].generation);
              assert_eq!(prior.servers[0].users[0].name, snapshot.servers[0].users[0].name);
@@ -25411,7 +26028,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..59f52fded53a5755da9d51c516a3c5fa
          }
          assert!(active_snapshot.servers[0].active);
          assert_eq!(active_snapshot.servers[0].users[0].tcp_uplink_bytes, 7);
-@@ -2038,10 +2319,7 @@ mod tests {
+@@ -2038,10 +2523,7 @@ mod tests {
              response.headers.get("cache-control").map(String::as_str),
              Some("no-store")
          );
@@ -25423,7 +26040,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..59f52fded53a5755da9d51c516a3c5fa
          assert!(!response.headers.contains_key("transfer-encoding"));
          assert_eq!(
              response.headers["content-length"].parse::<usize>().unwrap(),
-@@ -2123,8 +2401,7 @@ mod tests {
+@@ -2123,8 +2605,7 @@ mod tests {
          assert_eq!(response.body, exporter::ERROR_INVALID_REQUEST);
  
          for declared_body in [
@@ -25433,7 +26050,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..59f52fded53a5755da9d51c516a3c5fa
              b"GET /v1/snapshot HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: gzip\r\n\r\n".as_slice(),
              b"GET /v1/snapshot HTTP/1.1\r\nHost: localhost\r\nContent-Length: nope\r\n\r\n".as_slice(),
              b"GET /v1/snapshot HTTP/1.1\r\nHost: localhost\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\n"
-@@ -2158,7 +2435,10 @@ mod tests {
+@@ -2158,7 +2639,10 @@ mod tests {
              .unwrap()
              .unwrap();
          assert_eq!(
@@ -25445,7 +26062,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..59f52fded53a5755da9d51c516a3c5fa
              1
          );
          let response = parse_response(bytes);
-@@ -2207,8 +2487,7 @@ mod tests {
+@@ -2207,8 +2691,7 @@ mod tests {
          }
  
          for unsupported_version in ["HTTP/1.0", "HTTP/1.2", "HTTP/2.0"] {
@@ -25455,7 +26072,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..59f52fded53a5755da9d51c516a3c5fa
              let response = request(&path, request_bytes.as_bytes()).await;
              assert_eq!(response.status, 505);
              assert_eq!(response.body, exporter::ERROR_HTTP_VERSION_NOT_SUPPORTED);
-@@ -2218,13 +2497,7 @@ mod tests {
+@@ -2218,13 +2701,7 @@ mod tests {
          assert_eq!(response.status, 400);
          assert_eq!(response.body, exporter::ERROR_INVALID_REQUEST);
  
@@ -25470,7 +26087,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..59f52fded53a5755da9d51c516a3c5fa
              let request_bytes = format!("GET /healthz HTTP/1.1\r\nHost: {valid_host}\r\n\r\n");
              let response = request(&path, request_bytes.as_bytes()).await;
              assert_eq!(response.status, 200);
-@@ -2258,11 +2531,7 @@ mod tests {
+@@ -2258,11 +2735,7 @@ mod tests {
          let exporter = UserStatsExporter::bind(exporter_config(&path), registry.clone()).unwrap();
          let task = tokio::spawn(exporter.run());
  
@@ -25483,7 +26100,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..59f52fded53a5755da9d51c516a3c5fa
          let response = split_response(bytes);
          assert_eq!(response.status, 405);
          assert_eq!(response.headers.get("allow").map(String::as_str), Some("GET"));
-@@ -2274,10 +2543,7 @@ mod tests {
+@@ -2274,10 +2747,7 @@ mod tests {
              response.headers.get("cache-control").map(String::as_str),
              Some("no-store")
          );
@@ -25495,7 +26112,57 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..59f52fded53a5755da9d51c516a3c5fa
          assert_eq!(
              response.headers["content-length"].parse::<usize>().unwrap(),
              exporter::ERROR_METHOD_NOT_ALLOWED.len()
-@@ -2508,10 +2774,23 @@ mod tests {
+@@ -2393,6 +2863,49 @@ mod tests {
+         let _ = task.await;
+     }
+ 
++    #[cfg(unix)]
++    #[tokio::test]
++    async fn direct_error_lingering_does_not_hold_client_permit() {
++        let directory = trusted_tempdir();
++        let path = directory.path().join("user-stats.sock");
++        let mut config = exporter_config(&path);
++        config.max_concurrent_clients = 1;
++        let (registry, _server) = exporter_registry();
++        let mut exporter = UserStatsExporter::bind(config, registry).unwrap();
++        let (mut lingering_closes_entered, release_lingering_closes) = exporter.block_lingering_closes();
++        let task = tokio::spawn(exporter.run());
++
++        // Keep the rejected peer's write half open.  The direct-error path has
++        // to wait for the bounded lingering drain timeout, so this connection
++        // deliberately remains in that worker while the healthy request runs.
++        let mut rejected = UnixStream::connect(&path).await.unwrap();
++        rejected
++            .write_all(b"GET /v1/snapshot HTTP/1.0\r\nHost: localhost\r\n\r\n")
++            .await
++            .unwrap();
++        let mut first_byte = [0u8; 1];
++        tokio::time::timeout(Duration::from_secs(1), rejected.read(&mut first_byte))
++            .await
++            .unwrap()
++            .unwrap();
++        tokio::time::timeout(Duration::from_secs(1), lingering_closes_entered.recv())
++            .await
++            .unwrap()
++            .expect("direct error must enter the bounded lingering worker");
++
++        let healthy = request(&path, exporter::tests::HEALTH_REQUEST).await;
++        assert_eq!(
++            healthy.status, 200,
++            "a direct error's lingering drain must not consume the client permit"
++        );
++        assert_eq!(healthy.body, exporter::HEALTH_OK);
++
++        release_lingering_closes.add_permits(1);
++        drop(rejected);
++        task.abort();
++        let _ = task.await;
++    }
++
+     #[cfg(unix)]
+     #[tokio::test]
+     async fn exporter_rejects_clients_above_the_concurrency_limit() {
+@@ -2508,10 +3021,23 @@ mod tests {
          let mut overflow = UnixStream::connect(&path).await.unwrap();
          overflow.write_all(exporter::tests::HEALTH_REQUEST).await.unwrap();
          let mut overflow_response = Vec::new();
@@ -26398,3 +27065,927 @@ index f010ed5c1bcfa62e70b7ed7e4e856ef1ce27c4ff..b37699a20dc1d9e1075daaa45b97eee1
          }
      };
  
+diff --git a/crates/shadowsocks-auditd/src/spool.rs b/crates/shadowsocks-auditd/src/spool.rs
+index 3869ab55937e87d6f14e85733ff1fd1da8d31a72..75c32db9ab03aeb4b1788b1885b87732cdfe6f45 100644
+--- a/crates/shadowsocks-auditd/src/spool.rs
++++ b/crates/shadowsocks-auditd/src/spool.rs
+@@ -983,6 +983,10 @@ struct TestFaults {
+     seal_after_open_rename: bool,
+     seal_rollback: bool,
+     persist_tombstones: bool,
++    // Report an error after the aggregate ledger rename has completed.  This
++    // models a parent-directory fsync failure and must not trigger an in-memory
++    // rollback of the already-visible ledger transition.
++    persist_tombstones_after_commit: bool,
+     // Skip one aggregate-ledger write, then fail the next one.  This models
+     // the pending-marker write succeeding while the later ledger removal
+     // fails, which is the retry window for quarantine eviction accounting.
+@@ -993,6 +997,7 @@ struct TestFaults {
+ /// destructive transaction. Marker cleanup is a second, best-effort barrier:
+ /// it must still be reported to the caller, but an error there must not make
+ /// callers forget accounting for a ledger transition that is already durable.
++#[derive(Debug)]
+ struct TombstoneCommit {
+     marker_cleanup_error: Option<SpoolError>,
+ }
+@@ -3331,11 +3336,17 @@ impl Spool {
+             };
+             inner.tombstones.remove(index);
+         }
+-        if inner.tombstones != old
+-            && let Err(error) = self.persist_tombstones_locked(inner)
+-        {
+-            inner.tombstones = old;
+-            return Err(error);
++        if inner.tombstones != old {
++            match self.persist_tombstones_locked(inner) {
++                Ok(()) => {}
++                Err(AtomicWriteError::BeforeRename(error)) => {
++                    inner.tombstones = old;
++                    return Err(error);
++                }
++                Err(AtomicWriteError::AfterRename(_)) => {
++                    return Err(self.mark_durability_uncertain_locked(inner));
++                }
++            }
+         }
+         Self::prune_durable_gap_reasons_locked(inner);
+         Ok(())
+@@ -3384,9 +3395,15 @@ impl Spool {
+             inner.tombstones.remove(index);
+         }
+         inner.tombstones.push(entry);
+-        if let Err(error) = self.persist_tombstones_locked(inner) {
+-            inner.tombstones = old;
+-            return Err(error);
++        match self.persist_tombstones_locked(inner) {
++            Ok(()) => {}
++            Err(AtomicWriteError::BeforeRename(error)) => {
++                inner.tombstones = old;
++                return Err(error);
++            }
++            Err(AtomicWriteError::AfterRename(_)) => {
++                return Err(self.mark_durability_uncertain_locked(inner));
++            }
+         }
+         Ok(())
+     }
+@@ -3398,9 +3415,15 @@ impl Spool {
+         let old = inner.tombstones.clone();
+         let removed = inner.tombstones[index].clone();
+         inner.tombstones.remove(index);
+-        if let Err(error) = self.persist_tombstones_locked(inner) {
+-            inner.tombstones = old;
+-            return Err(error);
++        match self.persist_tombstones_locked(inner) {
++            Ok(()) => {}
++            Err(AtomicWriteError::BeforeRename(error)) => {
++                inner.tombstones = old;
++                return Err(error);
++            }
++            Err(AtomicWriteError::AfterRename(_)) => {
++                return Err(self.mark_durability_uncertain_locked(inner));
++            }
+         }
+         let marker_cleanup_error = removed
+             .gap_event_id()
+@@ -3424,9 +3447,15 @@ impl Spool {
+         } else {
+             inner.tombstones.remove(index);
+         }
+-        if let Err(error) = self.persist_tombstones_locked(inner) {
+-            inner.tombstones = old;
+-            return Err(error);
++        match self.persist_tombstones_locked(inner) {
++            Ok(()) => {}
++            Err(AtomicWriteError::BeforeRename(error)) => {
++                inner.tombstones = old;
++                return Err(error);
++            }
++            Err(AtomicWriteError::AfterRename(_)) => {
++                return Err(self.mark_durability_uncertain_locked(inner));
++            }
+         }
+         let marker_cleanup_error = replaced
+             .gap_event_id()
+@@ -3438,19 +3467,31 @@ impl Spool {
+         self.add_tombstone_locked(inner, entry)
+     }
+ 
+-    fn persist_tombstones_locked(&self, inner: &mut SpoolInner) -> Result<(), SpoolError> {
++    fn persist_tombstones_locked(&self, inner: &mut SpoolInner) -> Result<(), AtomicWriteError> {
+         #[cfg(test)]
+         if !std::mem::take(&mut inner.faults.persist_tombstones_skip)
+             && std::mem::take(&mut inner.faults.persist_tombstones)
+         {
+-            return Err(io::Error::other("injected tombstone persistence failure").into());
++            return Err(AtomicWriteError::BeforeRename(
++                io::Error::other("injected tombstone persistence failure").into(),
++            ));
+         }
+         let path = self.root.join("tombstones.json");
+-        let before = file_len(&path)?;
++        let before = file_len(&path).map_err(|error| AtomicWriteError::BeforeRename(error.into()))?;
+         let result = persist_tombstones(&self.root, &inner.tombstones);
+-        if let Err(error) = Self::update_path_size(inner, &path, before) {
+-            mark_storage_rejection(inner, true);
+-            return Err(error.into());
++        #[cfg(test)]
++        let result = if result.is_ok() && std::mem::take(&mut inner.faults.persist_tombstones_after_commit) {
++            Err(AtomicWriteError::AfterRename(
++                io::Error::other("injected tombstone failure after durable commit").into(),
++            ))
++        } else {
++            result
++        };
++        if result.is_ok() || matches!(&result, Err(AtomicWriteError::AfterRename(_))) {
++            if let Err(error) = Self::update_path_size(inner, &path, before) {
++                inner.spool_bytes_known = false;
++                return Err(AtomicWriteError::AfterRename(error.into()));
++            }
+         }
+         result
+     }
+@@ -5247,12 +5288,12 @@ fn salvage_tombstones(root: &Path) -> Result<Vec<TombstoneEntry>, SpoolError> {
+     Ok(recovered)
+ }
+ 
+-fn persist_tombstones(root: &Path, entries: &[TombstoneEntry]) -> Result<(), SpoolError> {
++fn persist_tombstones(root: &Path, entries: &[TombstoneEntry]) -> Result<(), AtomicWriteError> {
+     let ledger = wire::TombstoneLedger::new(entries.to_vec());
+     let bytes = ledger
+         .canonical_bytes()
+-        .map_err(|error| SpoolError::Protocol(ProtocolError::from(error)))?;
+-    write_atomic_file(&root.join("tombstones.json"), &bytes, 0o600)
++        .map_err(|error| AtomicWriteError::BeforeRename(SpoolError::Protocol(ProtocolError::from(error))))?;
++    write_atomic_file_staged(&root.join("tombstones.json"), &bytes, 0o600)
+ }
+ 
+ fn ensure_dir(path: &Path, mode: u32) -> io::Result<()> {
+@@ -6210,6 +6251,106 @@ mod tests {
+         }
+     }
+ 
++    /// An aggregate-ledger rename can succeed before its parent-directory
++    /// fsync reports an error.  Every tombstone mutation must retain the
++    /// in-memory post-transition state and stop the daemon, otherwise a later
++    /// request can overwrite the newer on-disk ledger with the rolled-back
++    /// view.  Exercise all mutation entry points that can persist the ledger.
++    #[test]
++    fn tombstone_after_rename_failure_keeps_post_commit_state() {
++        // add_tombstone_locked
++        {
++            let dir = tempfile::tempdir().expect("tempdir");
++            let spool = Spool::open(config(dir.path())).expect("spool");
++            let entry = TombstoneEntry::AckedReceipt(wire::AckedReceipt::new(
++                "a".repeat(32),
++                "b".repeat(64),
++                1,
++            ));
++            let mut inner = lock(&spool.inner);
++            inner.faults.persist_tombstones_after_commit = true;
++            let error = spool
++                .add_tombstone_locked(&mut inner, entry.clone())
++                .expect_err("post-rename ledger failure");
++            assert!(matches!(error, SpoolError::DurabilityUncertain));
++            assert_eq!(inner.tombstones, vec![entry.clone()]);
++            drop(inner);
++            assert_eq!(load_tombstones(dir.path()).expect("ledger"), vec![entry]);
++        }
++
++        // prune_receipts_locked
++        {
++            let dir = tempfile::tempdir().expect("tempdir");
++            let spool = Spool::open(config(dir.path())).expect("spool");
++            let entry = TombstoneEntry::AckedReceipt(wire::AckedReceipt::new(
++                "c".repeat(32),
++                "d".repeat(64),
++                1,
++            ));
++            {
++                let mut inner = lock(&spool.inner);
++                spool
++                    .add_tombstone_locked(&mut inner, entry)
++                    .expect("initial ledger");
++                inner.faults.persist_tombstones_after_commit = true;
++                let error = spool
++                    .prune_receipts_locked(&mut inner)
++                    .expect_err("post-rename ledger failure");
++                assert!(matches!(error, SpoolError::DurabilityUncertain));
++                assert!(inner.tombstones.is_empty(), "retain the committed prune");
++            }
++            assert!(load_tombstones(dir.path()).expect("ledger").is_empty());
++        }
++
++        // remove_tombstone_locked
++        {
++            let dir = tempfile::tempdir().expect("tempdir");
++            let spool = Spool::open(config(dir.path())).expect("spool");
++            let pending = eviction_pending_for_test(
++                "spool:11111111111111111111111111111111",
++                "e".repeat(32).as_str(),
++            );
++            let mut inner = lock(&spool.inner);
++            spool
++                .add_tombstone_locked(&mut inner, pending)
++                .expect("initial ledger");
++            inner.faults.persist_tombstones_after_commit = true;
++            let error = spool
++                .remove_tombstone_locked(&mut inner, 0)
++                .expect_err("post-rename ledger failure");
++            assert!(matches!(error, SpoolError::DurabilityUncertain));
++            assert!(inner.tombstones.is_empty(), "retain the committed removal");
++            drop(inner);
++            assert!(load_tombstones(dir.path()).expect("ledger").is_empty());
++        }
++
++        // replace_tombstone_locked
++        {
++            let dir = tempfile::tempdir().expect("tempdir");
++            let spool = Spool::open(config(dir.path())).expect("spool");
++            let pending = match eviction_pending_for_test(
++                "spool:22222222222222222222222222222222",
++                "f".repeat(32).as_str(),
++            ) {
++                TombstoneEntry::EvictionPending(value) => value,
++                _ => unreachable!("test helper must build an eviction pending entry"),
++            };
++            let replacement = TombstoneEntry::EvictedReceipt(wire::EvictedReceipt::from_pending(&pending));
++            let mut inner = lock(&spool.inner);
++            spool
++                .add_tombstone_locked(&mut inner, TombstoneEntry::EvictionPending(pending.clone()))
++                .expect("initial ledger");
++            inner.faults.persist_tombstones_after_commit = true;
++            let error = spool
++                .replace_tombstone_locked(&mut inner, 0, Some(replacement.clone()))
++                .expect_err("post-rename ledger failure");
++            assert!(matches!(error, SpoolError::DurabilityUncertain));
++            assert_eq!(inner.tombstones, vec![replacement.clone()]);
++            drop(inner);
++            assert_eq!(load_tombstones(dir.path()).expect("ledger"), vec![replacement]);
++        }
++    }
++
+     #[test]
+     fn orphan_open_marker_failure_prevents_rename_and_retry_accounts_every_byte() {
+         let dir = tempfile::tempdir().expect("tempdir");
++diff --git a/crates/shadowsocks-auditd/src/export.rs b/crates/shadowsocks-auditd/src/export.rs
+index 52ffdc64619377471d67e0830c0aa26177e0bf83..82966d69285534eb8121e94c6b5715aaa4c9fce3 100644
+--- a/crates/shadowsocks-auditd/src/export.rs
++++ b/crates/shadowsocks-auditd/src/export.rs
+@@ -717,11 +717,18 @@ async fn write_response(stream: &mut UnixStream, response: &WireResponse) -> io:
+     stream.write_all(&response.bytes).await
+ }
+ 
++/// Add a bounded request interval without allowing `Instant` overflow to
++/// abort the audit daemon.  If the platform clock cannot represent the
++/// interval, treating the request as immediately expired is fail-closed.
++fn deadline_after(now: time::Instant, interval: Duration) -> time::Instant {
++    now.checked_add(interval).unwrap_or(now)
++}
++
+ async fn read_request(stream: &mut UnixStream) -> Result<HttpRequest, RequestReadError> {
+     // One deadline covers the whole request read, so a slow peer cannot extend
+     // it chunk by chunk.  Expiry is a framing failure and keeps the parsed
+     // prefix, which is what decides whether the fixed 400 can be signed.
+-    let deadline = time::Instant::now() + HTTP_DEADLINE;
++    let deadline = deadline_after(time::Instant::now(), HTTP_DEADLINE);
+     let mut bytes = Vec::with_capacity(4096);
+     let mut header_end = None;
+     let mut chunk = [0_u8; 1024];
+@@ -1268,6 +1275,15 @@ mod tests {
+         assert!(!is_canonical_decimal("+1"));
+     }
+ 
++    #[test]
++    fn export_deadline_is_checked_against_overflow() {
++        let now = time::Instant::now();
++        assert!(deadline_after(now, HTTP_DEADLINE) > now);
++        // A duration this clock cannot represent must expire immediately
++        // rather than panic in the `Instant + Duration` implementation.
++        assert_eq!(deadline_after(now, Duration::MAX), now);
++    }
++
+     #[test]
+     fn token_validation_rejects_separators() {
+         assert!(is_token_byte(b'X'));
+diff --git a/crates/shadowsocks-auditd/src/spool.rs b/crates/shadowsocks-auditd/src/spool.rs
+index 75c32db9ab03aeb4b1788b1885b87732cdfe6f45..13e833ad543da0e91aedcae777d37b03501c5360 100644
+--- a/crates/shadowsocks-auditd/src/spool.rs
++++ b/crates/shadowsocks-auditd/src/spool.rs
+@@ -1105,8 +1105,21 @@ impl Spool {
+                     // isolated; replacing it would erase the only artifact
+                     // available for operator salvage.
+                     storage_rejected_attempts = saturating_inc(storage_rejected_attempts);
+-                } else if !salvaged.is_empty() && persist_tombstones(&root, &salvaged).is_err() {
+-                    storage_rejected_attempts = saturating_inc(storage_rejected_attempts);
++                } else if !salvaged.is_empty() {
++                    match persist_tombstones(&root, &salvaged) {
++                        Ok(()) => {}
++                        Err(AtomicWriteError::BeforeRename(_)) => {
++                            storage_rejected_attempts = saturating_inc(storage_rejected_attempts);
++                        }
++                        Err(AtomicWriteError::AfterRename(_)) => {
++                            // The replacement ledger is already visible, but
++                            // its parent-directory sync did not complete.  A
++                            // partially acknowledged startup cannot safely
++                            // continue: refuse service and let the supervisor
++                            // retry recovery after the storage is repaired.
++                            return Err(SpoolError::DurabilityUncertain);
++                        }
++                    }
+                 }
+                 salvaged
+             }
+diff --git a/crates/shadowsocks-service/src/server/user_audit.rs b/crates/shadowsocks-service/src/server/user_audit.rs
+index 4a5d399..d87cda5 100644
+--- a/crates/shadowsocks-service/src/server/user_audit.rs
++++ b/crates/shadowsocks-service/src/server/user_audit.rs
+@@ -463,6 +463,29 @@ struct GapSnapshot {
+     last_time: u64,
+ }
+ 
++const GAP_FIRST_UNKNOWN: u8 = 1 << 0;
++const GAP_LAST_UNKNOWN: u8 = 1 << 1;
++const GAP_FIRST_TIME_UNKNOWN: u8 = 1 << 2;
++const GAP_LAST_TIME_UNKNOWN: u8 = 1 << 3;
++
++fn gap_unknown_mask(snapshot: GapSnapshot) -> u8 {
++    let mut mask = 0;
++    // The wire contract requires first/last sequence to be jointly present
++    // or jointly null.  Treat a partial input as unknown on both sides so a
++    // later merge cannot manufacture an invalid half-known range.
++    if snapshot.first.is_none() || snapshot.last.is_none() {
++        mask |= GAP_LAST_UNKNOWN;
++        mask |= GAP_FIRST_UNKNOWN;
++    }
++    if snapshot.first_time == 0 {
++        mask |= GAP_FIRST_TIME_UNKNOWN;
++    }
++    if snapshot.last_time == 0 {
++        mask |= GAP_LAST_TIME_UNKNOWN;
++    }
++    mask
++}
++
+ /// A fixed set of tiny seqlock slots used by the relay-facing diagnostic
+ /// accumulators.  A relay never waits for a mutex: it claims any currently
+ /// free slot with one CAS and updates all fields while that slot is odd.  The
+@@ -478,6 +501,11 @@ struct GapSlot {
+     last: AtomicU64,
+     first_time: AtomicU64,
+     last_time: AtomicU64,
++    /// Each bit records a boundary that was unknown for at least one event in
++    /// this slot.  Keeping these bits beside the aggregate prevents a
++    /// diagnostic snapshot requeued after an encode/NACK failure from having
++    /// its `None`/zero fields treated as neutral by a later merge.
++    metadata_unknown: AtomicU8,
+ }
+ 
+ impl GapSlot {
+@@ -501,25 +529,35 @@ impl GapSlot {
+         let count = previous_count.saturating_add(snapshot.count);
+         let saturated = count == u64::MAX;
+         self.count.store(count, Ordering::Relaxed);
+-        if let Some(first) = snapshot.first {
++        let unknown = gap_unknown_mask(snapshot);
++        self.metadata_unknown.fetch_or(unknown, Ordering::Relaxed);
++        let known = self.metadata_unknown.load(Ordering::Relaxed);
++        if let Some(first) = snapshot.first
++            && known & GAP_FIRST_UNKNOWN == 0
++        {
+             let current = self.first.load(Ordering::Relaxed);
+             if current == 0 || first < current {
+                 self.first.store(first, Ordering::Relaxed);
+             }
+         }
+-        if let Some(last) = snapshot.last {
++        if let Some(last) = snapshot.last
++            && known & GAP_LAST_UNKNOWN == 0
++        {
+             let current = self.last.load(Ordering::Relaxed);
+             if last > current {
+                 self.last.store(last, Ordering::Relaxed);
+             }
+         }
+-        if snapshot.first_time != 0 {
++        if snapshot.first_time != 0 && known & GAP_FIRST_TIME_UNKNOWN == 0 {
+             let current = self.first_time.load(Ordering::Relaxed);
+             if current == 0 || snapshot.first_time < current {
+                 self.first_time.store(snapshot.first_time, Ordering::Relaxed);
+             }
+         }
+-        if snapshot.last_time > self.last_time.load(Ordering::Relaxed) {
++        if snapshot.last_time != 0
++            && known & GAP_LAST_TIME_UNKNOWN == 0
++            && snapshot.last_time > self.last_time.load(Ordering::Relaxed)
++        {
+             self.last_time.store(snapshot.last_time, Ordering::Relaxed);
+         }
+         self.sequence.store(version.wrapping_add(2), Ordering::Release);
+@@ -542,21 +580,36 @@ impl GapSlot {
+         {
+             return None;
+         }
+-        let snapshot = GapSnapshot {
+-            count: self.count.swap(0, Ordering::Relaxed),
+-            first: match self.first.swap(0, Ordering::Relaxed) {
+-                0 => None,
+-                value => Some(value),
++        let count = self.count.swap(0, Ordering::Relaxed);
++        let first = self.first.swap(0, Ordering::Relaxed);
++        let last = self.last.swap(0, Ordering::Relaxed);
++        let first_time = self.first_time.swap(0, Ordering::Relaxed);
++        let last_time = self.last_time.swap(0, Ordering::Relaxed);
++        let unknown = self.metadata_unknown.swap(0, Ordering::Relaxed);
++        self.sequence.store(version.wrapping_add(2), Ordering::Release);
++        Some(GapSnapshot {
++            count,
++            first: if unknown & (GAP_FIRST_UNKNOWN | GAP_LAST_UNKNOWN) != 0 {
++                None
++            } else {
++                (first != 0).then_some(first)
+             },
+-            last: match self.last.swap(0, Ordering::Relaxed) {
+-                0 => None,
+-                value => Some(value),
++            last: if unknown & (GAP_FIRST_UNKNOWN | GAP_LAST_UNKNOWN) != 0 {
++                None
++            } else {
++                (last != 0).then_some(last)
+             },
+-            first_time: self.first_time.swap(0, Ordering::Relaxed),
+-            last_time: self.last_time.swap(0, Ordering::Relaxed),
+-        };
+-        self.sequence.store(version.wrapping_add(2), Ordering::Release);
+-        Some(snapshot)
++            first_time: if unknown & GAP_FIRST_TIME_UNKNOWN != 0 {
++                0
++            } else {
++                first_time
++            },
++            last_time: if unknown & GAP_LAST_TIME_UNKNOWN != 0 {
++                0
++            } else {
++                last_time
++            },
++        })
+     }
+ 
+     fn is_nonempty(&self) -> bool {
+@@ -575,12 +628,21 @@ impl GapSlot {
+ #[derive(Default)]
+ struct GapFallback {
+     lock: AtomicBool,
++    /// Count merged while the fallback lock was available.  Its boundary
++    /// fields below describe exactly this counter's aggregate.
+     count: AtomicU64,
++    /// Count merged while the fallback lock was busy.  Keep it separate from
++    /// `count`: a producer can update this path while `try_take` is swapping
++    /// the coherent fields, and a single sticky marker cannot identify which
++    /// side of that swap the count belongs to.
++    unknown_count: AtomicU64,
+     first: AtomicU64,
+     last: AtomicU64,
+     first_time: AtomicU64,
+     last_time: AtomicU64,
+-    metadata_unknown: AtomicBool,
++    /// Unknown boundary bits for the lock-protected counter.  The separate
++    /// `unknown_count` below implies all four bits for its own count.
++    metadata_unknown: AtomicU8,
+ }
+ 
+ impl GapFallback {
+@@ -599,11 +661,10 @@ impl GapFallback {
+             return saturated;
+         }
+ 
+-        // Do not wait for the fallback lock.  A count-only merge is still a
+-        // useful and honest diagnostic: sequence/time boundaries are nullable
+-        // when concurrent gaps cannot be determined precisely.
+-        self.metadata_unknown.store(true, Ordering::Release);
+-        saturating_add_atomic(&self.count, snapshot.count)
++        // Do not wait for the fallback lock.  Keep this count separate from
++        // the coherent counter so a concurrent `try_take` cannot consume a
++        // metadata-unknown marker for the wrong side of its count swap.
++        saturating_add_atomic(&self.unknown_count, snapshot.count)
+     }
+ 
+     fn merge_locked(&self, snapshot: GapSnapshot) -> bool {
+@@ -611,25 +672,35 @@ impl GapFallback {
+         // fallback lock is held.  Use the same CAS-based saturating addition
+         // here so that a stale load cannot overwrite that concurrent update.
+         let saturated = saturating_add_atomic(&self.count, snapshot.count);
+-        if let Some(first) = snapshot.first {
++        let unknown = gap_unknown_mask(snapshot);
++        self.metadata_unknown.fetch_or(unknown, Ordering::Relaxed);
++        let known = self.metadata_unknown.load(Ordering::Relaxed);
++        if let Some(first) = snapshot.first
++            && known & GAP_FIRST_UNKNOWN == 0
++        {
+             let current = self.first.load(Ordering::Relaxed);
+             if current == 0 || first < current {
+                 self.first.store(first, Ordering::Relaxed);
+             }
+         }
+-        if let Some(last) = snapshot.last {
++        if let Some(last) = snapshot.last
++            && known & GAP_LAST_UNKNOWN == 0
++        {
+             let current = self.last.load(Ordering::Relaxed);
+             if last > current {
+                 self.last.store(last, Ordering::Relaxed);
+             }
+         }
+-        if snapshot.first_time != 0 {
++        if snapshot.first_time != 0 && known & GAP_FIRST_TIME_UNKNOWN == 0 {
+             let current = self.first_time.load(Ordering::Relaxed);
+             if current == 0 || snapshot.first_time < current {
+                 self.first_time.store(snapshot.first_time, Ordering::Relaxed);
+             }
+         }
+-        if snapshot.last_time > self.last_time.load(Ordering::Relaxed) {
++        if snapshot.last_time != 0
++            && known & GAP_LAST_TIME_UNKNOWN == 0
++            && snapshot.last_time > self.last_time.load(Ordering::Relaxed)
++        {
+             self.last_time.store(snapshot.last_time, Ordering::Relaxed);
+         }
+         saturated
+@@ -643,39 +714,59 @@ impl GapFallback {
+         {
+             return None;
+         }
+-        let snapshot = GapSnapshot {
+-            count: self.count.swap(0, Ordering::Relaxed),
+-            first: match self.first.swap(0, Ordering::Relaxed) {
+-                0 => None,
+-                value => Some(value),
+-            },
+-            last: match self.last.swap(0, Ordering::Relaxed) {
+-                0 => None,
+-                value => Some(value),
+-            },
+-            first_time: self.first_time.swap(0, Ordering::Relaxed),
+-            last_time: self.last_time.swap(0, Ordering::Relaxed),
+-        };
+-        let metadata_unknown = self.metadata_unknown.swap(false, Ordering::AcqRel);
++        let count = self.count.swap(0, Ordering::Relaxed);
++        let first = self.first.swap(0, Ordering::Relaxed);
++        let last = self.last.swap(0, Ordering::Relaxed);
++        let first_time = self.first_time.swap(0, Ordering::Relaxed);
++        let last_time = self.last_time.swap(0, Ordering::Relaxed);
++        let metadata_unknown = self.metadata_unknown.swap(0, Ordering::Relaxed);
++        // `lock` also excludes coherent merges, while count-only producers
++        // use the independent atomic below.  Swapping it before releasing the
++        // lock gives this snapshot an exact count boundary: updates racing
++        // after the swap remain pending for the next take.
++        let unknown_count = self.unknown_count.swap(0, Ordering::Relaxed);
+         self.lock.store(false, Ordering::Release);
+ 
+-        if metadata_unknown {
++        let count = count.saturating_add(unknown_count);
++        if unknown_count != 0 {
+             Some(GapSnapshot {
+-                count: snapshot.count,
++                count,
+                 first: None,
+                 last: None,
+                 first_time: 0,
+                 last_time: 0,
+             })
+         } else {
+-            Some(snapshot)
++            Some(GapSnapshot {
++                count,
++                first: if metadata_unknown & (GAP_FIRST_UNKNOWN | GAP_LAST_UNKNOWN) != 0 {
++                    None
++                } else {
++                    (first != 0).then_some(first)
++                },
++                last: if metadata_unknown & (GAP_FIRST_UNKNOWN | GAP_LAST_UNKNOWN) != 0 {
++                    None
++                } else {
++                    (last != 0).then_some(last)
++                },
++                first_time: if metadata_unknown & GAP_FIRST_TIME_UNKNOWN != 0 {
++                    0
++                } else {
++                    first_time
++                },
++                last_time: if metadata_unknown & GAP_LAST_TIME_UNKNOWN != 0 {
++                    0
++                } else {
++                    last_time
++                },
++            })
+         }
+     }
+ 
+     fn is_nonempty(&self) -> bool {
+         self.lock.load(Ordering::Acquire)
+             || self.count.load(Ordering::Acquire) != 0
+-            || self.metadata_unknown.load(Ordering::Acquire)
++            || self.unknown_count.load(Ordering::Acquire) != 0
+     }
+ }
+ 
+@@ -751,6 +842,7 @@ impl GapAccumulator {
+ 
+     fn approximate_count(&self) -> u64 {
+         let mut total = self.fallback.count.load(Ordering::Acquire);
++        total = total.saturating_add(self.fallback.unknown_count.load(Ordering::Acquire));
+         for slot in &self.slots {
+             total = total.saturating_add(slot.count.load(Ordering::Acquire));
+         }
+@@ -791,25 +883,27 @@ impl GapAccumulator {
+ }
+ 
+ fn combine_gap_snapshots(left: GapSnapshot, right: GapSnapshot) -> GapSnapshot {
++    let sequence_unknown = left.first.is_none() || left.last.is_none() || right.first.is_none() || right.last.is_none();
++    let first = match (left.first, right.first) {
++        (Some(a), Some(b)) if !sequence_unknown => Some(a.min(b)),
++        _ => None,
++    };
++    let last = match (left.last, right.last) {
++        (Some(a), Some(b)) if !sequence_unknown => Some(a.max(b)),
++        _ => None,
++    };
+     GapSnapshot {
+         count: left.count.saturating_add(right.count),
+-        first: match (left.first, right.first) {
+-            (None, value) | (value, None) => value,
+-            (Some(a), Some(b)) => Some(a.min(b)),
++        first,
++        last,
++        first_time: match (left.first_time, right.first_time) {
++            (0, _) | (_, 0) => 0,
++            (a, b) => a.min(b),
+         },
+-        last: match (left.last, right.last) {
+-            (None, value) | (value, None) => value,
+-            (Some(a), Some(b)) => Some(a.max(b)),
++        last_time: match (left.last_time, right.last_time) {
++            (0, _) | (_, 0) => 0,
++            (a, b) => a.max(b),
+         },
+-        first_time: min_nonzero(left.first_time, right.first_time),
+-        last_time: left.last_time.max(right.last_time),
+-    }
+-}
+-
+-fn min_nonzero(left: u64, right: u64) -> u64 {
+-    match (left, right) {
+-        (0, value) | (value, 0) => value,
+-        (a, b) => a.min(b),
+     }
+ }
+ 
+@@ -4261,6 +4355,113 @@ mod tests {
+         assert_eq!(snapshot.last_time, 22);
+     }
+ 
++    #[test]
++    fn fallback_unknown_count_keeps_metadata_unknown() {
++        let fallback = GapFallback::default();
++        assert!(!fallback.merge(GapSnapshot {
++            count: 1,
++            first: Some(1),
++            last: Some(1),
++            first_time: 10,
++            last_time: 10,
++        }));
++
++        // Force the count-only path.  The unknown count must stay associated
++        // with this take rather than being consumed by a concurrent coherent
++        // metadata snapshot.
++        fallback.lock.store(true, Ordering::Release);
++        assert!(!fallback.merge(GapSnapshot {
++            count: 2,
++            first: Some(2),
++            last: Some(2),
++            first_time: 20,
++            last_time: 20,
++        }));
++        fallback.lock.store(false, Ordering::Release);
++
++        let snapshot = fallback.try_take().expect("fallback snapshot");
++        assert_eq!(snapshot.count, 3);
++        assert!(snapshot.first.is_none());
++        assert!(snapshot.last.is_none());
++        assert_eq!(snapshot.first_time, 0);
++        assert_eq!(snapshot.last_time, 0);
++        assert!(!fallback.is_nonempty());
++    }
++
++    #[test]
++    fn requeued_unknown_metadata_stays_unknown_in_accumulators() {
++        let known = GapSnapshot {
++            count: 1,
++            first: Some(1),
++            last: Some(1),
++            first_time: 10,
++            last_time: 10,
++        };
++        let unknown = GapSnapshot {
++            count: 2,
++            first: None,
++            last: None,
++            first_time: 20,
++            last_time: 20,
++        };
++
++        let slot = GapSlot::default();
++        slot.try_merge(known).expect("slot should be claimable");
++        slot.try_merge(unknown).expect("slot should be claimable");
++        let slot_snapshot = slot.try_take().expect("slot snapshot");
++        assert_eq!(slot_snapshot.count, 3);
++        assert!(slot_snapshot.first.is_none());
++        assert!(slot_snapshot.last.is_none());
++        assert_eq!(slot_snapshot.first_time, 10);
++        assert_eq!(slot_snapshot.last_time, 20);
++
++        let fallback = GapFallback::default();
++        assert!(!fallback.merge(known));
++        assert!(!fallback.merge(unknown));
++        let fallback_snapshot = fallback.try_take().expect("fallback snapshot");
++        assert_eq!(fallback_snapshot.count, 3);
++        assert!(fallback_snapshot.first.is_none());
++        assert!(fallback_snapshot.last.is_none());
++        assert_eq!(fallback_snapshot.first_time, 10);
++        assert_eq!(fallback_snapshot.last_time, 20);
++    }
++
++    #[test]
++    fn combining_snapshots_preserves_unknown_boundaries() {
++        let known = GapSnapshot {
++            count: 1,
++            first: Some(1),
++            last: Some(1),
++            first_time: 10,
++            last_time: 10,
++        };
++        let unknown_sequence = GapSnapshot {
++            count: 1,
++            first: None,
++            last: None,
++            first_time: 20,
++            last_time: 20,
++        };
++        let combined = combine_gap_snapshots(known, unknown_sequence);
++        assert!(combined.first.is_none());
++        assert!(combined.last.is_none());
++        assert_eq!(combined.first_time, 10);
++        assert_eq!(combined.last_time, 20);
++
++        let unknown_time = GapSnapshot {
++            count: 1,
++            first: Some(3),
++            last: Some(3),
++            first_time: 0,
++            last_time: 0,
++        };
++        let combined = combine_gap_snapshots(known, unknown_time);
++        assert_eq!(combined.first, Some(1));
++        assert_eq!(combined.last, Some(3));
++        assert_eq!(combined.first_time, 0);
++        assert_eq!(combined.last_time, 0);
++    }
++
+     #[test]
+     fn frozen_diagnostic_failure_does_not_requeue_or_recurse() {
+         let config = UserAuditConfig::new("/tmp/audit.sock", test_auditd_user());
+diff --git a/crates/shadowsocks-service/src/server/user_audit.rs b/crates/shadowsocks-service/src/server/user_audit.rs
+index d87cda5..584b13a 100644
+--- a/crates/shadowsocks-service/src/server/user_audit.rs
++++ b/crates/shadowsocks-service/src/server/user_audit.rs
+@@ -19,6 +19,9 @@ use std::{
+     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+ };
+ 
++#[cfg(test)]
++use std::{cell::RefCell, sync::Barrier};
++
+ #[cfg(target_os = "linux")]
+ use std::{
+     ffi::CString,
+@@ -67,6 +70,14 @@ const SHUTDOWN_RETRY_DELAY: Duration = Duration::from_millis(100);
+ const MAX_RECONNECT_BACKOFF: Duration = Duration::from_secs(5);
+ const MAX_RECONNECT_JITTER_PERCENT: u32 = 20;
+ 
++#[cfg(test)]
++thread_local! {
++    // A one-shot hook lets the saturation regression force a failed CAS after
++    // the closure has observed a value near u64::MAX without perturbing the
++    // production hot path or making the test scheduler-dependent.
++    static SATURATING_ADD_BEFORE_CAS: RefCell<Option<(Arc<Barrier>, Arc<Barrier>)>> = RefCell::new(None);
++}
++
+ #[cfg(test)]
+ struct IdleSessionWaitHook {
+     entered: oneshot::Sender<()>,
+@@ -776,14 +787,22 @@ fn saturating_add_atomic(atom: &AtomicU64, amount: u64) -> bool {
+-    if amount == 0 {
+-        return atom.load(Ordering::Acquire) == u64::MAX;
+-    }
+-    let mut saturated = false;
+-    atom.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
++    let result = atom.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+         let next = current.saturating_add(amount);
+-        saturated |= next == u64::MAX;
++
++        #[cfg(test)]
++        SATURATING_ADD_BEFORE_CAS.with(|hook| {
++            if let Some((entered, release)) = hook.borrow_mut().take() {
++                entered.wait();
++                release.wait();
++            }
++        });
++
+         Some(next)
+-    })
+-    .ok();
+-    saturated
++    });
++
++    // `fetch_update` may invoke the closure more than once after a failed
++    // CAS.  Derive saturation from the value that this invocation actually
++    // replaced, rather than retaining a flag from a speculative attempt that
++    // another thread may have invalidated (for example via a snapshot swap).
++    result.is_ok_and(|previous| previous.saturating_add(amount) == u64::MAX)
+ }
+ 
+ struct GapAccumulator {
+@@ -4297,6 +4319,32 @@ mod tests {
+         assert_eq!(counter.load(Ordering::Acquire), 160_000);
+     }
+ 
++    #[test]
++    fn saturating_atomic_add_ignores_saturation_from_failed_cas() {
++        let counter = Arc::new(AtomicU64::new(u64::MAX - 1));
++        let entered = Arc::new(std::sync::Barrier::new(2));
++        let release = Arc::new(std::sync::Barrier::new(2));
++        let worker_counter = counter.clone();
++        let worker_entered = entered.clone();
++        let worker_release = release.clone();
++        let worker = std::thread::spawn(move || {
++            SATURATING_ADD_BEFORE_CAS.with(|hook| {
++                *hook.borrow_mut() = Some((worker_entered, worker_release));
++            });
++            saturating_add_atomic(&worker_counter, 1)
++        });
++
++        // Force the first closure invocation to compute MAX, then invalidate
++        // that compare-exchange before it can commit.  The retry succeeds at
++        // one and must not report the speculative MAX as durable saturation.
++        entered.wait();
++        counter.store(0, Ordering::Release);
++        release.wait();
++        let saturated = worker.join().expect("saturation worker");
++        assert!(!saturated);
++        assert_eq!(counter.load(Ordering::Acquire), 1);
++    }
++
+     #[test]
+     fn gap_observation_time_marks_unknown_wall_clock() {
+         let config = UserAuditConfig::new("/tmp/audit.sock", test_auditd_user());
+@@ -4388,6 +4433,39 @@ mod tests {
+         assert!(!fallback.is_nonempty());
+     }
+ 
++    #[test]
++    fn accumulator_take_propagates_unknown_fallback_bounds() {
++        let accumulator = GapAccumulator::default();
++        accumulator.slots[0]
++            .try_merge(GapSnapshot {
++                count: 1,
++                first: Some(1),
++                last: Some(1),
++                first_time: 10,
++                last_time: 10,
++            })
++            .expect("primary slot should be claimable");
++
++        // Make every primary slot unavailable so the next event takes the
++        // fallback path, then force that fallback's count-only overflow path.
++        for slot in &accumulator.slots {
++            slot.sequence.store(1, Ordering::Release);
++        }
++        accumulator.fallback.lock.store(true, Ordering::Release);
++        accumulator.add(2, Some(2), 20);
++        accumulator.fallback.lock.store(false, Ordering::Release);
++        for slot in &accumulator.slots {
++            slot.sequence.store(0, Ordering::Release);
++        }
++
++        let snapshot = accumulator.take().expect("combined snapshot");
++        assert_eq!(snapshot.count, 3);
++        assert!(snapshot.first.is_none());
++        assert!(snapshot.last.is_none());
++        assert_eq!(snapshot.first_time, 0);
++        assert_eq!(snapshot.last_time, 0);
++    }
++
+     #[test]
+     fn requeued_unknown_metadata_stays_unknown_in_accumulators() {
+         let known = GapSnapshot {

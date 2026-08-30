@@ -12,8 +12,10 @@ require_command python3
 require_command rg
 
 # Parse the switches up front so an invalid value fails before the long
-# prepare/build/test sequence rather than after it.
-require_audit_target="$(require_bool_env SHADOWSOCKS_REQUIRE_AUDIT_TARGET 1)"
+# prepare/build/test sequence rather than after it.  The final coverage
+# conclusion comes from test.sh's recorded execution state below, not from
+# re-evaluating this policy switch.
+require_bool_env SHADOWSOCKS_REQUIRE_AUDIT_TARGET 1 >/dev/null
 strict_fmt="$(require_bool_env SHADOWSOCKS_RUST_PLUS_STRICT_FMT 0)"
 
 [[ -f "$SHADOWSOCKS_RUST_PLUS_ROOT/config/auditd.example.json" ]] || \
@@ -70,6 +72,7 @@ python3 -m json.tool "$SHADOWSOCKS_RUST_PLUS_ROOT/config/auditd.example.json" >/
 temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/shadowsocks-rust-plus.XXXXXX")"
 trap 'safe_remove_temp_dir "$temp_dir"' EXIT
 source_dir="$temp_dir/source"
+coverage_status="$temp_dir/test-coverage.json"
 "$SHADOWSOCKS_RUST_PLUS_ROOT/scripts/prepare-source.sh" "$source_dir"
 expected_prepared_tree_sha256="$(lock_value prepared_tree_sha256)"
 [[ "$expected_prepared_tree_sha256" =~ ^[0-9a-f]{64}$ ]] || \
@@ -88,12 +91,15 @@ actual_prepared_tree_sha256="$(
 if [[ "$strict_fmt" == 1 ]]; then
   cargo fmt --manifest-path "$source_dir/Cargo.toml" --all -- --check
 fi
-"$SHADOWSOCKS_RUST_PLUS_ROOT/scripts/test.sh" --source "$source_dir"
+"$SHADOWSOCKS_RUST_PLUS_ROOT/scripts/test.sh" \
+  --source "$source_dir" --coverage-status "$coverage_status"
 
 bash "$SHADOWSOCKS_RUST_PLUS_ROOT/scripts/check-sensitive.sh"
 
-if [[ "$require_audit_target" == 1 ]]; then
-  printf '验证完成：锁定版本、零 fuzz 补丁重放、测试与敏感信息扫描均通过。\n'
+coverage_complete="$(read_test_coverage_status "$coverage_status")" || \
+  die "无法验证 scripts/test.sh 的测试覆盖面状态"
+if [[ "$coverage_complete" == 1 ]]; then
+  printf '验证完成：锁定版本、零 fuzz 补丁重放、测试、auditd crate/runtime 覆盖与敏感信息扫描均通过。\n'
 else
-  printf '验证完成（覆盖面不完整）：锁定版本、零 fuzz 补丁重放与敏感信息扫描通过；auditd 交叉检查已被 SHADOWSOCKS_REQUIRE_AUDIT_TARGET=0 显式降级。\n'
+  printf '验证完成（覆盖面不完整）：锁定版本、零 fuzz 补丁重放、测试与敏感信息扫描通过；scripts/test.sh 的实际状态未同时证明 auditd crate 编译和 Linux runtime 集成执行。\n'
 fi

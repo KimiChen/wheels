@@ -1,27 +1,30 @@
-# shadowsocks-rust-plus 用户成功访问审计 · 待办与未决事项（V2）
+# shadowsocks-rust-plus 用户成功访问审计 · 待办、审阅与处置记录（V2）
 
-> 文档定位：**当前活动的待办清单**。记录截至 2026-08-30 仍未解决、未执行或需要决策的事项。
+> 文档定位：**当前活动的待办清单与本轮审阅处置记录**。记录截至 2026-08-30 仍未解决、未执行、需要决策，
+> 或在本轮审阅中发现并已修复的事项。
 >
 > 与 [`USER_ACCESS_AUDIT.md`](USER_ACCESS_AUDIT.md) 的关系：
 >
 > - 那份是**历史文档**，保存规范合同（v8，第 1–16 节）与第 1–8 轮审计、整改及 Linux 实装验收的
 >   完整过程记录（第 17–30 节）。合同条文仍以那份为准，本文不复制、不改写合同。
-> - 本文只列**尚未闭合**的条目。已闭合项不再重复，只在需要时引用其出处小节。
+> - 本文保留本轮新增问题的根因、修复和验证边界；已闭合项明确标注“已修复”，避免与待办混淆。
 >
 > 基线：overlay `main`，规范版本 v8，`patches/0003-user-audit.patch` 与
-> `upstream.lock` 的 `prepared_tree_sha256` 一致（`7f57d709…`）。
+> `upstream.lock` 的 `prepared_tree_sha256` 一致（`4643abe734bf64d3ed3c801c9526afddef264fe6e1a292b707eef19dfb92ebf3`）。
 
 ## 1. 当前真机验收状态（背景）
 
 2026-08-29/30 在 Debian 13 (trixie) 节点按 `packaging/README.md` 完整实装一次，README 五步全部
-通过，详见历史文档第 30 节。**已在真机证实**：两次独立 musl 构建产物字节一致、签名与独立验签
+通过，详见历史文档第 30 节。**真机基线已证实**：两次独立 musl 构建产物字节一致、签名与独立验签
 通过、§11 权限模型逐项一致、`C-2`/`C-4`/`C-7` 三条 packaging critical 修复成立、
-`cargo test -p shadowsocks-auditd` 99 passed/0 failed（root 与非 root 各一次）、
-`tests/integration_audit.py` 端到端通过。
+`cargo test -p shadowsocks-auditd` 102 passed/0 failed（原 99 + 已交付的三条回归）、
+`tests/integration_audit.py` 端到端通过。本轮 m-221 至 m-224 增加 4 条 auditd 回归，AfterRename
+再增加 1 条；最终目标为 107 条，最终源码尚未在 Linux 真机复跑，状态见 §3.2，未把 Linux 测试二进制
+误报为已执行。
 
 **这不等于第 16 节验收通过**，原因见下文第 2、3 节。
 
-## 2. 待解决的代码问题
+## 2. 审阅发现与处置
 
 ### m-142（minor）`Instant` 算术下溢模式未纳入静态护栏
 
@@ -32,7 +35,7 @@
   规则**，因此同类回归仍无护栏。
 - 出处：历史文档 §23.6 `m-142`、§27.5 `m-170`、§27.4「遗留未修」。
 
-### m-219（minor）`verify.sh` 从环境变量重算覆盖面结论，两个方向都会失配
+### m-219（minor，已修复）`verify.sh` 从环境变量重算覆盖面结论，两个方向都会失配
 
 - **位置**：`scripts/verify.sh` 结尾的结论分支。
 - **现象**：`test.sh` 自己知道本次到底跑了什么（`auditd_crate_checked`、`auditd_runtime_available`），
@@ -41,26 +44,123 @@
   已安装时，`test.sh` 如实打印「auditd Linux runtime 未在当前主机执行」，而 `verify.sh` 打印的
   「验证完成：……均通过」一个字都不提缺失的 runtime 覆盖面（乐观方向）。
 - **影响**：只影响措辞，两条分支都退出 0，Linux 全量验收本就是另一道发布前置。
-- **修复方向**：让 `test.sh` 把覆盖面结论写成机器可读的产物，`verify.sh` 读取而不是重算。
-- 出处：本轮对 `M-72` 的复核（该条已修，见第 6 节）。
+- **修复**：`test.sh --coverage-status <JSON>` 记录本次实际执行的 auditd crate/runtime 状态；`verify.sh`
+  严格解析该 JSON，不再从策略环境变量重算结论，并修复无 `.env` 时非法 `NO_DOTENV` 值可能被吞掉的问题。
+- **回归与验证**：`tests/test_script_switches.py` 覆盖严格 JSON、篡改/不一致记录、无 `.env` 三态开关以及
+  fake test 分支（12 tests passed）；`bash -n scripts/*.sh`、与发布/文档测试联合 69 tests passed。
+- 出处：本轮对 `M-72` 的复核；修复已写入工作树并纳入最终 `0003` 旁路门禁。
 
-### m-220（minor）exporter 的 lingering close 期间仍占着 client permit
+### m-220（minor，已修复）exporter 的 lingering close 期间仍占着 client permit
 
 - **位置**：`crates/shadowsocks-service/src/server/user_stats.rs` 的 `handle_client` 直接错误响应路径。
 - **现象**：`write_direct_json` 的有界 drain 最多再占 100 毫秒，这段时间 `OwnedSemaphorePermit`
   仍被持有。被 413 大量拒绝时，`max_concurrent_clients` 个 permit 会被 drain 占住，正常连接吞吐下降。
 - **对比**：busy（429）路径本来就不占 client permit——它用独立的 `busy_response_semaphore`。
-- **修复方向**：主路径在 drain 之前释放 permit，把 shutdown+drain 挪进一个独立限量的任务
-  （形如 busy 路径）。两条上界一字不改。属可用性改进，不是正确性缺陷。
-- 出处：本轮对 `M-73` 的复核（`M-73` 中成立的那半已修，见第 6 节）。
+- **修复**：直接错误响应写完后立即释放普通 client permit，drain 交给独立 semaphore（最多 32 个）
+  的后台 worker；worker 满时直接关闭连接。`64 KiB / 100 ms` 两个 drain 上界保持不变。
+- **回归与验证**：`detached_lingering_close_releases_client_permit_and_is_bounded` 与
+  `direct_error_lingering_does_not_hold_client_permit` 已加入；Linux `cargo test --locked -p shadowsocks-service
+  --features user-stats --lib --no-fail-fast` 67/67 通过。
+- 出处：本轮对 `M-73` 的复核（`M-73` 中成立的那半已修）。
+
+### m-221（minor，已修复）恢复期 ACKed quarantine 丢失来源，误计未确认损失
+
+- **位置**：`recover_layout` 对 `acked/` 中 body/meta 损坏对象的隔离，以及后续 `evict_quarantine_locked`。
+- **根因**：恢复期按 `inspect_batch_dir` 隔离对象时，旧 basename 只写 `batch-corrupt-*`，驱逐阶段重新构造
+  pending entry 时无法知道对象原先来自 `acked/`，于是把已经收到 ACK 的 `event_count` 计入
+  `evicted_unacked_records`。
+- **影响**：健康计数高报，告警把已交付事件误报成未确认丢失；gap 的 `lost_events` 仍按损坏对象 metadata
+  自称的总数保留，符合 §9.5，不能用该字段替代来源判断。
+- **修复**：恢复期按父目录写入持久 basename label：`acked-corrupt-*` 或 `batch-corrupt-*`；驱逐与崩溃恢复
+  统一按 label 守卫计账。
+- **回归与验证**：`pending_quarantine_recovery_preserves_acked_source_label`、
+  `evicting_an_acked_quarantine_object_reports_no_unacknowledged_loss`；最终 Linux 测试计数见 §3.2。
+
+### m-222（minor，已修复）tombstone 已提交后 marker cleanup 失败破坏事务语义
+
+- **位置**：`remove_tombstone_locked`、`replace_tombstone_locked` 与启动时 pending-marker 合并。
+- **根因**：aggregate ledger 已经 durable 后，私有 marker 的 unlink/fsync 失败仍被当作整个事务失败；重启时
+  重新把已完成的 marker 放回 aggregate ledger，可能再次执行破坏性操作并重复健康计账。
+- **影响**：同一 gap 可能被重复恢复/计数，或因错误回滚而遗留不可解释的 pending 状态。
+- **修复**：引入 `TombstoneCommit` 区分 ledger 提交和 marker 清理；ledger 成功后保留提交后的内存状态，cleanup
+  错误只作为可观测的后续错误；已存在 durable gap 的 stale marker 不再重新加入 aggregate ledger。
+- **回归与验证**：`committed_quarantine_eviction_counts_once_when_marker_cleanup_fails`、
+  `pending_quarantine_survives_corrupt_tombstone_ledger`；Linux 目标交叉检查通过。
+
+### m-223（minor，已修复）旧版 `batch-corrupt-*` 无法识别 ACK 来源
+
+- **根因**：升级前已经落盘的 quarantine 对象没有 `acked-corrupt` label，单靠新命名规则会把历史 ACKed 对象
+  当作未确认对象。
+- **修复**：对 legacy basename 使用 pending 中的 `batch_id + body_sha256` 与 durable `AckedReceipt` 做保守匹配；
+  只有匹配成功才抑制 `evicted_unacked_records`，缺少可靠字段时维持 fail-closed 计账。
+- **回归与验证**：`legacy_acked_quarantine_uses_the_durable_ack_receipt`；与 m-221 一起纳入最终
+  `0003-user-audit.patch`，并通过 Linux 目标 `cargo check --locked -p shadowsocks-auditd --lib --tests`。
+
+### m-224（minor，已修复）eviction ledger 重试造成重复计账
+
+- **根因**：`reconcile_tombstones_locked` 在 pending→receipt 的 aggregate ledger 替换提交前就增加
+  `evicted_unacked_records`；若写盘失败并回滚 pending，下一轮重试会再次增加同一批次的计数。
+- **修复**：把计数移动到 durable pending removal/replacement 成功之后；marker cleanup 失败也不回滚已提交的
+  ledger 状态，下一轮只重试 cleanup，不重复收费。
+- **回归与验证**：`quarantine_eviction_ledger_retry_does_not_double_count`、
+  `recovered_eviction_counts_lost_records_once_across_a_persistence_failure`；Linux 目标交叉检查通过。
+
+### m-225（文档，已修复）README 对缺失 auditd target 的策略表述矛盾
+
+- **现象**：README 同时声称缺失 target 会继续执行并打印“未验证”，又声称默认 fail-closed；与脚本实际
+  默认行为不一致。
+- **修复**：明确 target 缺失时默认 fail-closed，只有显式设置 `SHADOWSOCKS_REQUIRE_AUDIT_TARGET=0` 才继续其余
+  检查并报告“未验证”。脚本行为未被放宽。
+- **验证**：脚本开关回归与文档一致性测试通过；该条不改变运行时合同。
+
+### m-226（minor，已修复）export deadline 的 `Instant` 加法可能在边界时钟上溢出
+
+- **位置**：`crates/shadowsocks-auditd/src/export.rs` 的 `read_request`。
+- **根因**：请求读取截止时间直接使用 `Instant::now() + HTTP_DEADLINE`；在平台时钟表示范围接近上界时，
+  `Instant` 加法可能 panic，审计进程的 `panic=abort` 配置会把一次畸形请求升级为进程退出。
+- **修复**：通过 `checked_add` 封装 `deadline_after`；无法表示的间隔按“当前时刻已到期”处理，保持
+  fail-closed，同时不改变正常 100 ms 请求窗口。
+- **同轮耐久性边界**：tombstone aggregate ledger 的 rename 已发生后，后续 fsync/计量错误统一进入 sticky
+  `DurabilityUncertain`；内存中的 post-state 不回滚。启动 salvage 对 `AfterRename` 同样拒绝继续服务并交由
+  supervisor 重试；`BeforeRename` 仍按 degraded 计账。这样不会把“文件已替换但目录耐久性未知”误报成普通可重试失败。
+- **回归与验证**：`export_deadline_is_checked_against_overflow` 覆盖正常与 `Duration::MAX` 两条路径；
+  `tombstone_after_rename_failure_keeps_post_commit_state` 覆盖 add/prune/remove/replace 四个入口。当前
+  macOS 临时移除 Linux-only compile gate 后的 service 测试为 122/122；auditd native tests 仍受 Linux libc
+  API 限制，未在 macOS 执行。`x86_64-unknown-linux-gnu` 的 `cargo check --all-targets` 已通过；Linux 真机
+  新增用例仍待 §3.2 所述复跑。
+
+### m-227（minor，已修复）GapFallback 的未知边界与并发计数被错误合并
+
+- **位置**：`crates/shadowsocks-service/src/server/user_audit.rs` 的 `GapSlot`、`GapFallback` 和
+  `combine_gap_snapshots`。
+- **根因**：fallback 锁竞争时原实现只设置一个 sticky `metadata_unknown`，并把 count 写进同一个原子；
+  `try_take` 与生产者交错时，未知 count 可能被配到另一代的已知边界。后续合并还把 `None`/零时间当成中性值，
+  能重新制造并不存在的 sequence/time 范围。
+- **修复**：增加独立 `unknown_count`，为 sequence/time 边界保留逐字段 unknown 位，并让 slot、fallback、
+  requeue 与 snapshot combine 贯穿传播；未知 count 仍保留并按饱和规则计数，未知边界不再被猜测。
+- **回归与验证**：`fallback_unknown_count_keeps_metadata_unknown`、`requeued_unknown_metadata_stays_unknown_in_accumulators`
+  和 `combining_snapshots_preserves_unknown_boundaries` 三条 service 回归已加入。macOS 临时移除 Linux-only
+  compile gate 的 feature-on service 测试为 122/122；这不是 Linux auditd runtime 的实机结果。
+
+### m-228（minor，已修复）`fetch_update` 重试把 speculative saturation 记成真实饱和
+
+- **位置**：`saturating_add_atomic` 及 producer-gap 健康计数。
+- **根因**：旧实现把闭包每次试算的 `next == u64::MAX` 写入外部 flag；`fetch_update` 的 CAS 失败后会再次调用
+  闭包，早期失败尝试留下的 flag 可能把尚未达到上限的当前代标成 saturated，进而错误触发 sticky degraded health。
+- **修复**：只依据成功 CAS 返回的 previous 值计算本次是否达到上限，不采纳 speculative 尝试；并以独立回归锁定
+  一次确定性的失败 CAS/重试交错。
+- **回归与验证**：`saturating_atomic_add_ignores_saturation_from_failed_cas` 与
+  `accumulator_take_propagates_unknown_fallback_bounds` 两条 service 回归已加入；源码级 feature-on 测试仍以
+  122/122 的 macOS 临时结果为边界，Linux 真机复跑尚未完成。
 
 ## 3. 待执行的验证
 
-以下为发布前置。第一项已收窄（v6→v7→v8）并**已在 Linux 上全绿执行**（见 §3.2），原始宽命令的失败记录见 §3.1；其余三项**从未在任何机器上执行过**：
+以下为发布前置。§16 已收窄为 v8 门禁并有 Linux 基线结果（见 §3.2）；本轮补丁新增的 Linux 用例尚需在
+Linux 真机复跑确认。原始宽命令的失败记录见 §3.1；其余三项**从未在任何机器上执行过**：
 
 | 项目 | 说明 | 阻塞因素 |
 | --- | --- | --- |
-| §16 收窄 Rust 门禁（v8：两条 workspace 命令 + ①②两类集成目标） | §16 验收项 | **已在 Linux 全绿执行**（见 §3.2）；v7 的过度排除已修正 |
+| §16 收窄 Rust 门禁（v8：两条 workspace 命令 + ①②两类集成目标） | §16 验收项 | 基线已在 Linux 全绿；最终补丁需复跑（见 §3.2） |
 | `cargo-fuzz` sanitizer 实跑 | §3.2/§14.4 要求交付并运行 fuzz target | 无，尚未安排 |
 | §14.5 目标机压测 | 吞吐 ≤5%、CPU ≤10%、ssserver RSS ≤64 MiB、auditd RSS ≤128 MiB，及离线/队列满/慢 ACK/spool 满四类专项 | 需目标机与真实数据面负载 |
 | 真实流量端到端审计事件 | 经 ssserver 转发真实 TCP/UDP 流量后，验证 access event 落入 spool 并可经 lease 导出 | `integration_audit.py` 覆盖的是 ingest/export 协议链路，**不含**真实代理流量 |
@@ -81,14 +181,14 @@
 
 由此得到一个此前没暴露过的结论：**只要 overlay 继续原样携带上游 v1.24.0，旧的
 「`cargo test --workspace --features user-audit` 全绿」按字面在任何主机上都不可能成立。**
-现已按第 5 节第 4 项选择收窄命令；当前合同命令和排除边界以历史文档 v7 §16 为准。
+现已按第 5 节第 4 项选择收窄命令；当前合同命令和排除边界以历史文档 v8 §16 为准。
 
 第四项值得单独强调：目前**没有任何一次验证**证明过「真实用户流量 → 产生 access event →
 写入 spool → 被 collector 取走」这条完整链路。§6 的两类成功事件语义在真机上仍未被端到端验证。
 
-### 3.2 收窄门禁的 Linux 首次执行（2026-08-30，Debian 13 / rustc 1.97.0）
+### 3.2 收窄门禁的 Linux 执行与本轮复跑状态（2026-08-30，Debian 13 / rustc 1.97.0）
 
-v7 收窄后的门禁此前只在设计上成立、从未在 Linux 上跑过。本轮实跑，三条命令全部 `EXIT=0`：
+v8 收窄后的基线门禁已在 Linux 实跑；本轮最终源码还需复跑新增用例。已确认的基线命令全部 `EXIT=0`：
 
 | 命令 | 结果 |
 | --- | --- |
@@ -96,7 +196,7 @@ v7 收窄后的门禁此前只在设计上成立、从未在 Linux 上跑过。�
 | feature-on `--workspace --lib --bins --features user-audit` | 全绿（`auditd` 99、`shadowsocks-service` 121，其余同上） |
 | `-p shadowsocks --test tcp_eih_user` | 4 passed |
 | v8 新增的三个 loopback 目标（`-p shadowsocks --test udp`、`--test udp`、`--test tunnel udp_tunnel`） | 4 / 1 / 1 passed |
-| `-p shadowsocks-auditd`（含本轮三条新用例） | 102 passed |
+| `-p shadowsocks-auditd`（基线含此前三条回归） | 102 passed；本轮新增 5 条后目标为 107，最终补丁待 Linux 真机复跑 |
 | `-p shadowsocks-audit-protocol` | 25 passed |
 
 **顺带澄清一处对 §3.1 的误判。** 有人以「macOS 上同一条 feature-off 命令的 `shadowsocks-service`
@@ -124,13 +224,33 @@ lib 是 309，不可能少到 121」为由怀疑 §3.1 的计数有误。实测�
 1. `M-66` 的归属 → 并入 `0003`（已修复）；
 2. `D-5` 是否收窄发布构建的 feature 集 → 收窄（已实施，规范升版到 v6）；
 3. 实装节点的处置 → 清理（`10.0.1.3`、`10.0.2.3` 均已回到基线）。
-4. **§16 的工作区测试判据如何收口** → 选择收窄命令（已实施，规范升版到 v7）：
+4. **§16 的工作区测试判据如何收口** → 选择收窄命令（已实施，规范升版到 v8）：
    workspace 命令只运行 `--lib --bins` 的 feature-off/feature-on 目标，再单独运行 overlay 自有的
    `tcp_eih_user` 集成目标；其余 workspace integration targets 不纳入这两个 workspace 命令，
    上游公网 targets 保留为基线诊断，不改写、不纳入 §16 全绿判据。
 
 ## 6. 变更记录
 
+- 2026-08-30：完成对 `20ac4784e4735ab115469c936082e04717218e02^..ee6829bf3699012eef9229b44296f77851710215`
+  的全部 98 个 commit（含起始 commit；起始之后 97 个）审阅。新增 m-219 至 m-228 的问题记录；其中
+  m-219 至 m-228 已按本节所述修复或更正，m-142 与发布前置仍未闭合。
+- 2026-08-30：**m-219/m-220 已修复**。`test.sh` 记录真实 auditd 覆盖面并由 `verify.sh` 严格读取；
+  exporter 直接错误响应在释放 client permit 后进入独立上限的 lingering worker。补丁重放、脚本语法检查、
+  Python 回归及 `shadowsocks-service` user-stats 目标检查通过。
+- 2026-08-30：**m-221 至 m-224 已修复**。quarantine basename 持久记录 ACK 来源并兼容旧版
+  `batch-corrupt-*`；tombstone ledger 提交与 marker cleanup 分离；eviction 计数移到 durable 状态转换之后，
+  避免重试重复计账。新增 4 条 focused auditd 回归，并完成 x86_64 Linux 目标 `cargo check`。
+- 2026-08-30：**AfterRename 边界已补齐**。tombstone aggregate ledger rename 后的 fsync/计量错误不再回滚
+  内存 post-state，改为 sticky `DurabilityUncertain`；新增 `tombstone_after_rename_failure_keeps_post_commit_state`
+  覆盖 add/prune/remove/replace 四个入口。最终 `prepared_tree_sha256` 更新为
+  `4643abe734bf64d3ed3c801c9526afddef264fe6e1a292b707eef19dfb92ebf3`。
+- 2026-08-30：**m-225 已修复**。README 明确缺失 auditd target 默认 fail-closed，只有显式
+  `SHADOWSOCKS_REQUIRE_AUDIT_TARGET=0` 才报告“未验证”并继续其余检查。
+- 2026-08-30：**m-226 至 m-228 已修复**。export deadline 改用 checked arithmetic；rename 后的
+  `DurabilityUncertain` 与启动 salvage 边界已固定；GapFallback 以独立 `unknown_count` 和逐字段 unknown
+  位传播未知边界；saturation 只从成功 CAS 结果计账。新增 auditd deadline/耐久性回归、3 条 m-227
+  service 和 2 条 m-228 service 回归；clean replay 的最终 `prepared_tree_sha256` 为
+  `4643abe734bf64d3ed3c801c9526afddef264fe6e1a292b707eef19dfb92ebf3`。
 - 2026-08-30：自历史文档第 17–30 节抽取仍未闭合的事项，建立本文件。
 - 2026-08-30：清理两台实装节点。`10.0.1.3` 停用并移除两个 systemd unit、账号/组、
   `/etc/shadowsocks-{audit,rust-plus}`、`/usr/local/bin/{ssserver,shadowsocks-auditd}`、

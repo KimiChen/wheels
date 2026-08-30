@@ -4,12 +4,13 @@ set -euo pipefail
 source "$(dirname "$0")/lib.sh"
 
 usage() {
-  printf '用法：%s [--source <已准备源码目录>] [--no-integration] [--without-audit] [--print-gate]\n' "$(basename "$0")" >&2
+  printf '用法：%s [--source <已准备源码目录>] [--no-integration] [--without-audit] [--coverage-status <JSON>] [--print-gate]\n' "$(basename "$0")" >&2
 }
 
 source_dir=""
 run_integration=1
 run_audit=1
+coverage_status="${SHADOWSOCKS_TEST_COVERAGE_STATUS_FILE:-}"
 print_gate=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -25,6 +26,11 @@ while [[ $# -gt 0 ]]; do
     --without-audit)
       run_audit=0
       shift
+      ;;
+    --coverage-status)
+      [[ $# -ge 2 ]] || { usage; exit 2; }
+      coverage_status="$2"
+      shift 2
       ;;
     --print-gate)
       print_gate=1
@@ -46,8 +52,9 @@ run_fuzz="$(require_bool_env SHADOWSOCKS_RUN_FUZZ 0)"
 
 host_os="$(uname -s)"
 audit_native=0
-auditd_crate_checked=1
+auditd_crate_checked=0
 auditd_runtime_available=0
+auditd_runtime_executed=0
 if [[ "$host_os" == "Linux" ]]; then
   audit_native=1
   auditd_runtime_available=1
@@ -90,6 +97,10 @@ gate_commands() {
 if [[ "$print_gate" -eq 1 ]]; then
   gate_commands
   exit 0
+fi
+
+if [[ -n "$coverage_status" ]]; then
+  coverage_status="$(absolute_path "$coverage_status")"
 fi
 
 temp_dir=""
@@ -138,6 +149,7 @@ if [[ "$run_audit" -eq 1 ]]; then
     CARGO_TARGET_DIR="$target_dir" cargo test \
       --manifest-path "$source_dir/Cargo.toml" \
       --locked -p shadowsocks-auditd
+    auditd_crate_checked=1
   else
     audit_target="${SHADOWSOCKS_AUDIT_CHECK_TARGET:-x86_64-unknown-linux-gnu}"
     audit_libdir="$(rustc --print target-libdir --target "$audit_target" 2>/dev/null || true)"
@@ -146,6 +158,7 @@ if [[ "$run_audit" -eq 1 ]]; then
       CARGO_TARGET_DIR="$target_dir" cargo check \
         --manifest-path "$source_dir/Cargo.toml" \
         --locked --target "$audit_target" -p shadowsocks-auditd --all-targets
+      auditd_crate_checked=1
     elif [[ "$require_audit_target" == 1 ]]; then
       die "非 Linux 主机缺少 auditd 交叉检查 target：$audit_target（\`rustup target add $audit_target\` 安装；确知要放弃该覆盖面时用 SHADOWSOCKS_REQUIRE_AUDIT_TARGET=0 显式降级）"
     else
@@ -191,7 +204,14 @@ if [[ "$run_integration" -eq 1 ]]; then
     CARGO_TARGET_DIR="$target_dir" \
       python3 "$SHADOWSOCKS_RUST_PLUS_ROOT/tests/integration_audit.py" --source "$source_dir" \
         --auditd-binary "$target_dir/debug/shadowsocks-auditd"
+    auditd_runtime_executed=1
   fi
+fi
+
+if [[ -n "$coverage_status" ]]; then
+  write_test_coverage_status "$coverage_status" \
+    "$run_audit" "$run_integration" "$auditd_crate_checked" \
+    "$auditd_runtime_available" "$auditd_runtime_executed"
 fi
 
 if [[ "$run_audit" -eq 0 ]]; then
@@ -201,8 +221,12 @@ if [[ "$run_audit" -eq 0 ]]; then
   printf '测试通过（--without-audit：auditd crate、audit-protocol 与 user-audit feature 路径本次一行都没有编译）。\n'
 elif [[ "$run_audit" -eq 1 && "$auditd_crate_checked" -eq 0 ]]; then
   printf '测试通过，但覆盖面不完整：auditd crate 与 user_audit.rs 未编译，auditd Linux runtime 未执行。\n'
-elif [[ "$run_audit" -eq 1 && "$auditd_runtime_available" -eq 0 ]]; then
-  printf '测试通过（auditd crate 已交叉检查；auditd Linux runtime 未在当前主机执行）。\n'
+elif [[ "$run_audit" -eq 1 && "$auditd_runtime_executed" -eq 0 ]]; then
+  if [[ "$auditd_runtime_available" -eq 0 ]]; then
+    printf '测试通过（auditd crate 已交叉检查；auditd Linux runtime 未在当前主机执行）。\n'
+  else
+    printf '测试通过（auditd crate 已检查；auditd Linux runtime 未在本次运行执行）。\n'
+  fi
 else
   printf '测试通过。\n'
 fi
