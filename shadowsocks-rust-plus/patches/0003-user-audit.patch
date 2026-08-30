@@ -8089,10 +8089,10 @@ index 0000000000000000000000000000000000000000..6cf8d005dfef917c852be4f611d5b945
 +}
 diff --git a/crates/shadowsocks-auditd/src/spool.rs b/crates/shadowsocks-auditd/src/spool.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..38daaa1b2c98421327cf5cf3bfa7167006bc8200
+index 0000000000000000000000000000000000000000..7528ac893a0cec97a48b85318d09ca3dfe759fe6
 --- /dev/null
 +++ b/crates/shadowsocks-auditd/src/spool.rs
-@@ -0,0 +1,9348 @@
+@@ -0,0 +1,9408 @@
 +//! Durable, node-local audit spool.
 +//!
 +//! The spool is deliberately synchronous.  Ingest and export perform their
@@ -9096,6 +9096,7 @@ index 0000000000000000000000000000000000000000..38daaa1b2c98421327cf5cf3bfa71670
 +    // models a parent-directory fsync failure and must not trigger an in-memory
 +    // rollback of the already-visible ledger transition.
 +    persist_tombstones_after_commit: bool,
++    persist_tombstones_accounting: bool,
 +    marker_cleanup: bool,
 +    // Skip one aggregate-ledger write, then fail the next one.  This models
 +    // the pending-marker write succeeding while the later ledger removal
@@ -11634,9 +11635,28 @@ index 0000000000000000000000000000000000000000..38daaa1b2c98421327cf5cf3bfa71670
 +            result
 +        };
 +        if result.is_ok() || matches!(&result, Err(AtomicWriteError::AfterRename(_))) {
-+            if let Err(error) = Self::update_path_size(inner, &path, before) {
++            #[cfg(test)]
++            let accounting = if std::mem::take(&mut inner.faults.persist_tombstones_accounting) {
++                Err(io::Error::other("injected tombstone path-size accounting failure"))
++            } else {
++                Self::update_path_size(inner, &path, before)
++            };
++            #[cfg(not(test))]
++            let accounting = Self::update_path_size(inner, &path, before);
++            if accounting.is_err() {
++                // Measuring the file afterwards says nothing about the write
++                // barrier that already ran.  When the barrier succeeded the
++                // ledger on disk is exactly what memory holds; only the
++                // incremental byte index is now untrustworthy, and clearing
++                // `spool_bytes_known` forces a full measurement before the next
++                // capacity decision.  Escalating this to `DurabilityUncertain`
++                // would stop the daemon over an accounting read -- and
++                // `tombstones.json` is rewritten on every ACK and every
++                // eviction, so that exposure is far larger than `state.json`'s.
++                // `OPERATIONS.md` scopes the fail-closed exit to a write barrier
++                // whose *outcome* cannot be determined; this is not that.
 +                inner.spool_bytes_known = false;
-+                return Err(AtomicWriteError::AfterRename(error.into()));
++                mark_storage_rejection(inner, true);
 +            }
 +        }
 +        result
@@ -16160,6 +16180,46 @@ index 0000000000000000000000000000000000000000..38daaa1b2c98421327cf5cf3bfa71670
 +        assert_eq!(
 +            inner.evicted_unacked_records, 3,
 +            "the resumed destruction must be counted even when marker cleanup fails"
++        );
++    }
++
++    /// `m-234`：写屏障已确定成功之后，事后量文件大小失败**不得**升级成
++    /// `DurabilityUncertain` 并关停守护进程。
++    ///
++    /// `persist_tombstones` 完整成功（rename + 父目录 fsync 都过了）意味着盘上的
++    /// ledger 就是内存里的那份；此时 `file_len` 失败只让增量字节索引不可信，清掉
++    /// `spool_bytes_known` 就会强制下次全量重测。`OPERATIONS.md` 把 fail-closed
++    /// 退出限定在「写屏障的结果无法判定时」，这一格不属于该范围——而
++    /// `tombstones.json` 每次 ACK 与每次驱逐都要重写，误退出的暴露面远大于
++    /// `state.json`。
++    #[test]
++    fn post_commit_accounting_failure_does_not_poison_durability() {
++        let dir = tempfile::tempdir().expect("tempdir");
++        let spool = Spool::open(config(dir.path())).expect("spool");
++        let gap_id = format!("{GAP_ID_PREFIX}{}", "c".repeat(32));
++        let mut inner = lock(&spool.inner);
++        inner.faults.persist_tombstones_accounting = true;
++        spool
++            .add_tombstone_locked(&mut inner, eviction_pending_for_test(&gap_id, &"d".repeat(32)))
++            .expect("a successful write barrier must not fail on its accounting read");
++        assert_eq!(inner.tombstones.len(), 1, "the ledger entry is durable");
++        assert!(
++            !inner.spool_bytes_known,
++            "the byte index must be invalidated so the next capacity decision re-measures"
++        );
++        assert!(
++            inner.storage_rejected_attempts > 0,
++            "the accounting failure must still be observable"
++        );
++        drop(inner);
++        assert!(
++            !*spool.durability_uncertain_tx.borrow(),
++            "a post-commit accounting read must not mark durability uncertain"
++        );
++        assert_eq!(
++            load_tombstones(dir.path()).expect("ledger"),
++            vec![eviction_pending_for_test(&gap_id, &"d".repeat(32))],
++            "the ledger on disk matches memory"
 +        );
 +    }
 +
