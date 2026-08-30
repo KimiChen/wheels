@@ -212,6 +212,22 @@ print(value["coverage_complete"])
 PY
 }
 
+# The release-facing conclusion, derived only from what `test.sh` recorded.
+# Kept here rather than inline in `verify.sh` so it can be exercised directly:
+# inlined, the only way to reach it was a full prepare + build + test run, and
+# the branch could be inverted without any test noticing.
+report_verification_conclusion() {
+  [[ $# -eq 1 ]] || die "验证结论参数数量错误"
+  local coverage_complete
+  coverage_complete="$(read_test_coverage_status "$1")" || \
+    die "无法验证 scripts/test.sh 的测试覆盖面状态"
+  if [[ "$coverage_complete" == 1 ]]; then
+    printf '验证完成：锁定版本、零 fuzz 补丁重放、测试、auditd crate/runtime 覆盖与敏感信息扫描均通过。\n'
+  else
+    printf '验证完成（覆盖面不完整）：锁定版本、零 fuzz 补丁重放、测试与敏感信息扫描通过；scripts/test.sh 的实际状态未同时证明 auditd crate 编译和 Linux runtime 集成执行。\n'
+  fi
+}
+
 require_command() {
   command -v "$1" >/dev/null 2>&1 || die "缺少命令：$1"
 }

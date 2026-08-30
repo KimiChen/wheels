@@ -96,10 +96,4 @@ fi
 
 bash "$SHADOWSOCKS_RUST_PLUS_ROOT/scripts/check-sensitive.sh"
 
-coverage_complete="$(read_test_coverage_status "$coverage_status")" || \
-  die "无法验证 scripts/test.sh 的测试覆盖面状态"
-if [[ "$coverage_complete" == 1 ]]; then
-  printf '验证完成：锁定版本、零 fuzz 补丁重放、测试、auditd crate/runtime 覆盖与敏感信息扫描均通过。\n'
-else
-  printf '验证完成（覆盖面不完整）：锁定版本、零 fuzz 补丁重放、测试与敏感信息扫描通过；scripts/test.sh 的实际状态未同时证明 auditd crate 编译和 Linux runtime 集成执行。\n'
-fi
+report_verification_conclusion "$coverage_status"

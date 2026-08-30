@@ -201,14 +201,24 @@ class BooleanSwitchTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("coverage_complete", result.stderr)
 
-    def test_verify_uses_recorded_coverage_instead_of_policy_switch(self) -> None:
-        script = (ROOT / "scripts" / "verify.sh").read_text(encoding="utf-8")
-        self.assertIn("--coverage-status", script)
-        self.assertIn("read_test_coverage_status", script)
-        self.assertNotIn('if [[ "$require_audit_target" == 1 ]]', script)
+    def test_verify_derives_its_conclusion_from_the_recorded_coverage(self) -> None:
+        """`verify.sh` 必须把结论交给记录状态，而不是重新评估策略开关。
+
+        只断言 `read_test_coverage_status` 出现在 verify.sh 里是形状匹配——把结论
+        逻辑挪进 lib.sh 的函数它就失效了，而行为一点没变。这里绑定真实调用：
+        verify.sh 用它自己写下的状态文件调 `report_verification_conclusion`，
+        且不再出现按 `require_audit_target` 分支的旧结论。
+        """
+
+        verify = (ROOT / "scripts" / "verify.sh").read_text(encoding="utf-8")
+        self.assertIn('report_verification_conclusion "$coverage_status"', verify)
+        self.assertIn('--coverage-status "$coverage_status"', verify)
+        self.assertNotIn('if [[ "$require_audit_target" == 1 ]]', verify)
+        # 结论文案本身不得留在 verify.sh 里——否则等于有两份实现。
+        self.assertNotIn("验证完成：", verify)
 
     def run_fake_test_script(
-        self, *, host_os: str, without_audit: bool = False
+        self, *, host_os: str, without_audit: bool = False, integration: bool = False
     ) -> tuple[subprocess.CompletedProcess[str], dict[str, int] | None]:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -242,10 +252,11 @@ class BooleanSwitchTests(unittest.TestCase):
                 str(TEST_SCRIPT),
                 "--source",
                 str(source),
-                "--no-integration",
                 "--coverage-status",
                 str(status),
             ]
+            if not integration:
+                arguments.insert(4, "--no-integration")
             if without_audit:
                 arguments.insert(-2, "--without-audit")
             environment = os.environ.copy()
@@ -294,6 +305,122 @@ class BooleanSwitchTests(unittest.TestCase):
         self.assertEqual(payload["auditd_runtime_available"], 0)
         self.assertEqual(payload["coverage_complete"], 0)
         self.assertIn("未验证", result.stderr)
+
+
+    def test_test_script_records_a_complete_run(self) -> None:
+        """必须有一条用例真的跑出 `coverage_complete=1`。
+
+        此前三条 fake 用例全都固定传 `--no-integration`，于是两处置位赋值
+        （`auditd_crate_checked=1`、`auditd_runtime_executed=1`）删掉都不会被发现。
+        真实后果是发布门禁的**正向结论永远无法达成**——Linux 上跑完整流程也只会
+        打印「覆盖面不完整」。
+        """
+
+        result, payload = self.run_fake_test_script(host_os="Linux", integration=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIsNotNone(payload)
+        self.assertEqual(payload["auditd_crate_checked"], 1)
+        self.assertEqual(payload["auditd_runtime_available"], 1)
+        self.assertEqual(payload["auditd_runtime_executed"], 1)
+        self.assertEqual(payload["coverage_complete"], 1)
+        self.assertIn("测试通过。", result.stdout)
+
+
+class VerificationConclusionTests(unittest.TestCase):
+    """`verify.sh` 的结论必须由记录的执行状态决定，而不是由策略开关决定。"""
+
+    def conclude(self, path: Path) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["bash", "-c", f'source "{LIB}"; report_verification_conclusion "{path}"'],
+            capture_output=True,
+            text=True,
+            env={"PATH": "/usr/bin:/bin", "HOME": str(ROOT)},
+            cwd=ROOT,
+        )
+
+    def write_status(self, path: Path, *values: str) -> None:
+        result = subprocess.run(
+            ["bash", "-c", f'source "{LIB}"; write_test_coverage_status "{path}" ' + " ".join(values)],
+            capture_output=True,
+            text=True,
+            env={"PATH": "/usr/bin:/bin", "HOME": str(ROOT)},
+            cwd=ROOT,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_a_complete_record_yields_the_positive_conclusion(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            status = Path(temporary) / "coverage.json"
+            self.write_status(status, "1", "1", "1", "1", "1")
+            result = self.conclude(status)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("auditd crate/runtime 覆盖", result.stdout)
+            self.assertNotIn("覆盖面不完整", result.stdout)
+
+    def test_an_incomplete_record_yields_the_qualified_conclusion(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            status = Path(temporary) / "coverage.json"
+            self.write_status(status, "1", "1", "1", "1", "0")
+            result = self.conclude(status)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("覆盖面不完整", result.stdout)
+
+    def test_a_structurally_invalid_record_is_rejected(self) -> None:
+        """严格解析必须真的严格：字段集合、类型、取值、重复键、schema 版本。
+
+        这些校验此前一条都没有被绑定——删掉字段集合检查，整套用例仍全绿。
+        """
+
+        base = {
+            "schema_version": 1,
+            "run_audit": 1,
+            "run_integration": 1,
+            "auditd_crate_checked": 1,
+            "auditd_runtime_available": 1,
+            "auditd_runtime_executed": 0,
+            "coverage_complete": 0,
+        }
+        extra = dict(base, unexpected=0)
+        missing = {key: value for key, value in base.items() if key != "run_integration"}
+        wrong_type = dict(base, run_audit="1")
+        wrong_value = dict(base, run_integration=2)
+        wrong_schema = dict(base, schema_version=2)
+        cases = {
+            "多出字段": json.dumps(extra),
+            "缺少字段": json.dumps(missing),
+            "字段类型错误": json.dumps(wrong_type),
+            "字段取值非 0/1": json.dumps(wrong_value),
+            "schema 版本错误": json.dumps(wrong_schema),
+            "重复键": '{"schema_version": 1, "schema_version": 1, "run_audit": 1, "run_integration": 1,'
+            ' "auditd_crate_checked": 1, "auditd_runtime_available": 1, "auditd_runtime_executed": 0,'
+            ' "coverage_complete": 0}',
+            "顶层不是对象": "[]",
+            "不是 JSON": "{",
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            status = Path(temporary) / "coverage.json"
+            for label, payload in cases.items():
+                with self.subTest(case=label):
+                    status.write_text(payload, encoding="utf-8")
+                    result = self.conclude(status)
+                    self.assertNotEqual(result.returncode, 0, f"{label} 被接受了：{result.stdout!r}")
+                    self.assertEqual(result.stdout, "", f"{label} 仍然产出了结论")
+
+    def test_a_missing_or_tampered_record_aborts_instead_of_downgrading(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            status = Path(temporary) / "coverage.json"
+            missing = self.conclude(status)
+            self.assertNotEqual(missing.returncode, 0, missing.stdout)
+            self.assertIn("无法验证", missing.stderr)
+            self.assertEqual(missing.stdout, "")
+
+            self.write_status(status, "1", "1", "1", "1", "0")
+            payload = json.loads(status.read_text(encoding="utf-8"))
+            payload["coverage_complete"] = 1
+            status.write_text(json.dumps(payload), encoding="utf-8")
+            tampered = self.conclude(status)
+            self.assertNotEqual(tampered.returncode, 0, tampered.stdout)
+            self.assertEqual(tampered.stdout, "", "篡改的记录不得产出任何结论")
 
 
 class CoverageStatusWriterTests(unittest.TestCase):
