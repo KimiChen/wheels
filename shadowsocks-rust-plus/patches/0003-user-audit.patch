@@ -25657,7 +25657,7 @@ index 0000000000000000000000000000000000000000..d8a730d159d970a86a23d51d58193173
 +    }
 +}
 diff --git a/crates/shadowsocks-service/src/server/user_stats.rs b/crates/shadowsocks-service/src/server/user_stats.rs
-index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..c5a96e1d8655612742709ec71aede263c807fab0 100644
+index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..74bd38dc121961484918848065a07547642b6b29 100644
 --- a/crates/shadowsocks-service/src/server/user_stats.rs
 +++ b/crates/shadowsocks-service/src/server/user_stats.rs
 @@ -11,11 +11,16 @@ use std::{
@@ -26256,7 +26256,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..c5a96e1d8655612742709ec71aede263
  
          pub(crate) const BUSY_RESPONSE_WORKERS: usize = super::MAX_BUSY_RESPONSE_WORKERS;
          pub(crate) const SNAPSHOT_REQUEST: &[u8] = b"GET /v1/snapshot HTTP/1.1\r\nHost: localhost\r\n\r\n";
-@@ -1638,6 +1933,261 @@ mod exporter {
+@@ -1638,6 +1933,321 @@ mod exporter {
              drop(socket);
          }
  
@@ -26515,10 +26515,70 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..c5a96e1d8655612742709ec71aede263
 +            assert!(response.ends_with(ERROR_REQUEST_TOO_LARGE));
 +        }
 +
++        /// worker 上界必须真的生效：满槽时不再新建 drain 任务。
++        ///
++        /// `detached_lingering_close_releases_client_permit_and_is_bounded` 的
++        /// 名字带 `_and_is_bounded`，但它对第二个连接的唯一观察是「能读到 413」
++        /// ——无论是否 spawn worker 这都成立，因为 `lingering_close` 第一句就是
++        /// `shutdown()`，客户端立刻拿到 EOF。变异检验：把
++        /// `try_acquire_owned()` 的 `else { return; }` 去掉、改成无条件 spawn，
++        /// 49 条用例全绿。这一条把上界绑回来。
++        ///
++        /// 观察量与上一条互为反面：满槽时不排空，客户端那笔写不完的请求会在
++        /// 服务端关闭时拿到 EPIPE/ECONNRESET，而不是写完。
++        #[tokio::test]
++        async fn an_exhausted_lingering_pool_closes_without_draining() {
++            const QUEUED: usize = 32 * 1_024;
++            let lingering = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
++            let _occupied = lingering.clone().try_acquire_owned().expect("occupy the only worker slot");
++
++            let (client, server) = UnixStream::pair().unwrap();
++            set_socket_buffers(std::os::fd::AsRawFd::as_raw_fd(&client), 4_096);
++            set_socket_buffers(std::os::fd::AsRawFd::as_raw_fd(&server), 4_096);
++
++            let writer = tokio::spawn(async move {
++                let mut client = client;
++                client.write_all(&vec![b'x'; QUEUED]).await
++            });
++
++            let client_semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
++            let permit = client_semaphore.clone().try_acquire_owned().unwrap();
++            write_direct_json_and_detach(
++                server,
++                permit,
++                std::time::Duration::from_secs(5),
++                StatusCode::PAYLOAD_TOO_LARGE,
++                ERROR_REQUEST_TOO_LARGE,
++                lingering.clone(),
++                LingeringCloseHook::default(),
++            )
++            .await;
++
++            assert_eq!(
++                client_semaphore.available_permits(),
++                1,
++                "the client permit is returned even when no worker is available"
++            );
++            assert_eq!(
++                lingering.available_permits(),
++                0,
++                "no second worker slot may be created past the bound"
++            );
++
++            let written = tokio::time::timeout(std::time::Duration::from_secs(5), writer)
++                .await
++                .expect("the stream must be closed promptly rather than drained")
++                .unwrap();
++            assert!(
++                written.is_err(),
++                "past the bound the request is not drained, so the client's write cannot complete"
++            );
++        }
++
          #[test]
          fn lock_path_verification_rejects_an_inode_replacement() {
              let directory = tempfile::tempdir().unwrap();
-@@ -1669,10 +2219,7 @@ mod tests {
+@@ -1669,10 +2279,7 @@ mod tests {
          T: Send + 'static,
          F: FnOnce() -> T + Send + 'static,
      {
@@ -26530,7 +26590,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..c5a96e1d8655612742709ec71aede263
          let (started_tx, started_rx) = std::sync::mpsc::channel();
          let (result_tx, result_rx) = std::sync::mpsc::channel();
          let worker = std::thread::spawn(move || {
-@@ -1791,7 +2338,10 @@ mod tests {
+@@ -1791,7 +2398,10 @@ mod tests {
              assert_eq!(prior.servers[0].server_id, snapshot.servers[0].server_id);
              assert_eq!(prior.servers[0].generation, snapshot.servers[0].generation);
              assert_eq!(prior.servers[0].users[0].name, snapshot.servers[0].users[0].name);
@@ -26542,7 +26602,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..c5a96e1d8655612742709ec71aede263
          }
          assert!(active_snapshot.servers[0].active);
          assert_eq!(active_snapshot.servers[0].users[0].tcp_uplink_bytes, 7);
-@@ -2038,10 +2588,7 @@ mod tests {
+@@ -2038,10 +2648,7 @@ mod tests {
              response.headers.get("cache-control").map(String::as_str),
              Some("no-store")
          );
@@ -26554,7 +26614,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..c5a96e1d8655612742709ec71aede263
          assert!(!response.headers.contains_key("transfer-encoding"));
          assert_eq!(
              response.headers["content-length"].parse::<usize>().unwrap(),
-@@ -2123,8 +2670,7 @@ mod tests {
+@@ -2123,8 +2730,7 @@ mod tests {
          assert_eq!(response.body, exporter::ERROR_INVALID_REQUEST);
  
          for declared_body in [
@@ -26564,7 +26624,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..c5a96e1d8655612742709ec71aede263
              b"GET /v1/snapshot HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: gzip\r\n\r\n".as_slice(),
              b"GET /v1/snapshot HTTP/1.1\r\nHost: localhost\r\nContent-Length: nope\r\n\r\n".as_slice(),
              b"GET /v1/snapshot HTTP/1.1\r\nHost: localhost\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\n"
-@@ -2158,7 +2704,10 @@ mod tests {
+@@ -2158,7 +2764,10 @@ mod tests {
              .unwrap()
              .unwrap();
          assert_eq!(
@@ -26576,7 +26636,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..c5a96e1d8655612742709ec71aede263
              1
          );
          let response = parse_response(bytes);
-@@ -2207,8 +2756,7 @@ mod tests {
+@@ -2207,8 +2816,7 @@ mod tests {
          }
  
          for unsupported_version in ["HTTP/1.0", "HTTP/1.2", "HTTP/2.0"] {
@@ -26586,7 +26646,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..c5a96e1d8655612742709ec71aede263
              let response = request(&path, request_bytes.as_bytes()).await;
              assert_eq!(response.status, 505);
              assert_eq!(response.body, exporter::ERROR_HTTP_VERSION_NOT_SUPPORTED);
-@@ -2218,13 +2766,7 @@ mod tests {
+@@ -2218,13 +2826,7 @@ mod tests {
          assert_eq!(response.status, 400);
          assert_eq!(response.body, exporter::ERROR_INVALID_REQUEST);
  
@@ -26601,7 +26661,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..c5a96e1d8655612742709ec71aede263
              let request_bytes = format!("GET /healthz HTTP/1.1\r\nHost: {valid_host}\r\n\r\n");
              let response = request(&path, request_bytes.as_bytes()).await;
              assert_eq!(response.status, 200);
-@@ -2258,11 +2800,7 @@ mod tests {
+@@ -2258,11 +2860,7 @@ mod tests {
          let exporter = UserStatsExporter::bind(exporter_config(&path), registry.clone()).unwrap();
          let task = tokio::spawn(exporter.run());
  
@@ -26614,7 +26674,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..c5a96e1d8655612742709ec71aede263
          let response = split_response(bytes);
          assert_eq!(response.status, 405);
          assert_eq!(response.headers.get("allow").map(String::as_str), Some("GET"));
-@@ -2274,10 +2812,7 @@ mod tests {
+@@ -2274,10 +2872,7 @@ mod tests {
              response.headers.get("cache-control").map(String::as_str),
              Some("no-store")
          );
@@ -26626,7 +26686,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..c5a96e1d8655612742709ec71aede263
          assert_eq!(
              response.headers["content-length"].parse::<usize>().unwrap(),
              exporter::ERROR_METHOD_NOT_ALLOWED.len()
-@@ -2393,6 +2928,49 @@ mod tests {
+@@ -2393,6 +2988,49 @@ mod tests {
          let _ = task.await;
      }
  
@@ -26676,7 +26736,7 @@ index ec4619695cdfd7a0dc7dce68a7ee7b9656759fee..c5a96e1d8655612742709ec71aede263
      #[cfg(unix)]
      #[tokio::test]
      async fn exporter_rejects_clients_above_the_concurrency_limit() {
-@@ -2508,10 +3086,23 @@ mod tests {
+@@ -2508,10 +3146,23 @@ mod tests {
          let mut overflow = UnixStream::connect(&path).await.unwrap();
          overflow.write_all(exporter::tests::HEALTH_REQUEST).await.unwrap();
          let mut overflow_response = Vec::new();
