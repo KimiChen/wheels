@@ -8,6 +8,10 @@ source "$(dirname "$0")/lib.sh"
 # shellcheck disable=SC1091
 source "$SHADOWSOCKS_RUST_PLUS_ROOT/packaging/release-toolchain.lock"
 
+# Parse the switch through the shared three-state helper: an invalid value must
+# not silently fall onto the "discard the evidence" branch.
+keep_failed_build="$(require_bool_env SHADOWSOCKS_RUST_PLUS_KEEP_FAILED_BUILD 0)"
+
 usage() {
   printf '用法：%s [--repository <锁定上游的本地镜像或 URL>] [--output-dir <目录>]\n' \
     "$(basename "$0")" >&2
@@ -253,7 +257,7 @@ auditd_binary_b="$target_b/$RELEASE_TARGET/release/shadowsocks-auditd"
 if ! cmp -s "$binary_a" "$binary_b"; then
   printf '第一次构建 SHA-256：%s\n' "$(shasum -a 256 "$binary_a" | awk '{ print $1 }')" >&2
   printf '第二次构建 SHA-256：%s\n' "$(shasum -a 256 "$binary_b" | awk '{ print $1 }')" >&2
-  if [[ "${SHADOWSOCKS_RUST_PLUS_KEEP_FAILED_BUILD:-0}" == "1" ]]; then
+  if [[ "$keep_failed_build" == 1 ]]; then
     trap - EXIT
     printf '失败构建保留在：%s\n' "$temp_dir" >&2
   fi
@@ -262,7 +266,7 @@ fi
 if ! cmp -s "$auditd_binary_a" "$auditd_binary_b"; then
   printf '第一次 auditd 构建 SHA-256：%s\n' "$(shasum -a 256 "$auditd_binary_a" | awk '{ print $1 }')" >&2
   printf '第二次 auditd 构建 SHA-256：%s\n' "$(shasum -a 256 "$auditd_binary_b" | awk '{ print $1 }')" >&2
-  if [[ "${SHADOWSOCKS_RUST_PLUS_KEEP_FAILED_BUILD:-0}" == "1" ]]; then
+  if [[ "$keep_failed_build" == 1 ]]; then
     trap - EXIT
     printf '失败构建保留在：%s\n' "$temp_dir" >&2
   fi

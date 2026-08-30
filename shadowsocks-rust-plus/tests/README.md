@@ -30,6 +30,19 @@
 ./scripts/test.sh --source /path/to/prepared-shadowsocks-rust --no-integration
 ```
 
+把本次运行实际达成的 auditd 覆盖面写成机器可读的 JSON（`verify.sh` 就是这样取得它的发布结论的，
+不再从策略开关反推）：
+
+```bash
+./scripts/test.sh --source /path/to/prepared-shadowsocks-rust --coverage-status /tmp/coverage.json
+```
+
+也可用 `SHADOWSOCKS_TEST_COVERAGE_STATUS_FILE` 指定同一路径。文件记录 `run_audit`、
+`run_integration`、`auditd_crate_checked`、`auditd_runtime_available`、`auditd_runtime_executed`
+与派生的 `coverage_complete`；只有三者同时为 1（请求了 audit、crate 被编译过、Linux runtime 集成
+真的跑过）才算覆盖完整。**非 Linux 主机上 `auditd_runtime_executed` 恒为 0**，因此 `verify.sh`
+在 macOS 上必然打印「覆盖面不完整」——这是如实报告，不是失败。
+
 跳过 Linux-only 的 user-audit feature/runtime 检查及 protocol/auditd Rust 检查（feature-off
 workspace 与静态、文档和 Python 工具门禁仍会执行）：
 
@@ -63,8 +76,9 @@ workspace 与静态、文档和 Python 工具门禁仍会执行）：
    [`test_integration_audit.py`](test_integration_audit.py)，以及
    [`benchmark_audit.py`](benchmark_audit.py) 的一次短参数合成预检冒烟；
 9. 文档与实现一致性检查 [`test_docs_consistency.py`](test_docs_consistency.py)；
-10. 开关变量三态解析门禁 [`test_script_switches.py`](test_script_switches.py)——`SHADOWSOCKS_REQUIRE_AUDIT_TARGET`、`SHADOWSOCKS_RUN_FUZZ`、
-    `SHADOWSOCKS_RUST_PLUS_STRICT_FMT`、`SHADOWSOCKS_RUST_PLUS_NO_DOTENV` 只接受 `0` 或 `1`，其它取值一律报错退出，
+10. 开关变量三态解析与覆盖面状态门禁 [`test_script_switches.py`](test_script_switches.py)——`SHADOWSOCKS_REQUIRE_AUDIT_TARGET`、`SHADOWSOCKS_RUN_FUZZ`、
+    `SHADOWSOCKS_RUST_PLUS_STRICT_FMT`、`SHADOWSOCKS_RUST_PLUS_NO_DOTENV`、
+    `SHADOWSOCKS_RUST_PLUS_KEEP_FAILED_BUILD` 只接受 `0` 或 `1`，其它取值一律报错退出，
     笔误不会被当成显式降级。
 
 只有未给出 `--no-integration` 时才追加执行的检查是：

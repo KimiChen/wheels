@@ -27,6 +27,7 @@ SWITCHES = {
     "SHADOWSOCKS_RUN_FUZZ": "0",
     "SHADOWSOCKS_RUST_PLUS_STRICT_FMT": "0",
     "SHADOWSOCKS_RUST_PLUS_NO_DOTENV": "0",
+    "SHADOWSOCKS_RUST_PLUS_KEEP_FAILED_BUILD": "0",
 }
 
 
@@ -74,7 +75,7 @@ class BooleanSwitchTests(unittest.TestCase):
     def test_every_switch_is_parsed_through_the_shared_helper(self) -> None:
         """没有哪个开关可以绕过三态解析退回到 `${VAR:-x} == 1`。"""
 
-        for script_name in ("lib.sh", "test.sh", "verify.sh"):
+        for script_name in ("lib.sh", "test.sh", "verify.sh", "build-linux-release.sh"):
             body = (ROOT / "scripts" / script_name).read_text(encoding="utf-8")
             for name in SWITCHES:
                 # 不用 assertNotIn：失败信息会把整份脚本倒灌进输出。
