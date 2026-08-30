@@ -4,12 +4,13 @@ set -euo pipefail
 source "$(dirname "$0")/lib.sh"
 
 usage() {
-  printf '用法：%s [--source <已准备源码目录>] [--no-integration] [--without-audit]\n' "$(basename "$0")" >&2
+  printf '用法：%s [--source <已准备源码目录>] [--no-integration] [--without-audit] [--print-gate]\n' "$(basename "$0")" >&2
 }
 
 source_dir=""
 run_integration=1
 run_audit=1
+print_gate=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --source)
@@ -25,6 +26,10 @@ while [[ $# -gt 0 ]]; do
       run_audit=0
       shift
       ;;
+    --print-gate)
+      print_gate=1
+      shift
+      ;;
     *)
       usage
       exit 2
@@ -38,6 +43,45 @@ require_command cargo
 # build, not after it.
 require_audit_target="$(require_bool_env SHADOWSOCKS_REQUIRE_AUDIT_TARGET 1)"
 run_fuzz="$(require_bool_env SHADOWSOCKS_RUN_FUZZ 0)"
+
+host_os="$(uname -s)"
+audit_native=0
+auditd_crate_checked=1
+auditd_runtime_available=0
+if [[ "$host_os" == "Linux" ]]; then
+  audit_native=1
+  auditd_runtime_available=1
+fi
+
+# The §16 Rust gate, as data: one `scope<TAB>arguments` line per command, in
+# execution order.  There is exactly one place that runs them and exactly one
+# place that prints them (`--print-gate`), so the documented gate and the
+# executed gate cannot drift apart -- and a test can bind the gate without
+# re-implementing this script's control flow.
+#
+# `--lib --bins` on the workspace commands selects no integration target at all,
+# so every target that still belongs in the gate is named below.  §16 sorts them
+# into overlay-owned, pure-loopback and public-network; the first two run here,
+# the third is exempt.  The loopback ones cover the UDP data path this overlay
+# modifies -- dropping them along with the public-network targets would be a
+# silent loss of coverage, not a narrowing.
+gate_commands() {
+  printf 'always\t%s\n' \
+    "--locked --workspace --lib --bins --features user-stats --no-fail-fast --exclude shadowsocks-auditd"
+  printf 'linux-audit\t%s\n' \
+    "--locked --workspace --lib --bins --features user-audit --no-fail-fast"
+  printf 'always\t%s\n' \
+    "--locked --no-fail-fast -p shadowsocks --test tcp_eih_user --features aead-cipher-2022,user-stats"
+  printf 'always\t%s\n' \
+    "--locked --no-fail-fast -p shadowsocks --test udp --features aead-cipher-2022,user-stats"
+  printf 'always\t%s\n' "--locked --no-fail-fast --test udp --features user-stats"
+  printf 'always\t%s\n' "--locked --no-fail-fast --test tunnel --features user-stats udp_tunnel"
+}
+
+if [[ "$print_gate" -eq 1 ]]; then
+  gate_commands
+  exit 0
+fi
 
 temp_dir=""
 if [[ -z "$source_dir" ]]; then
@@ -56,38 +100,16 @@ cmp -s "$SHADOWSOCKS_RUST_PLUS_ROOT/tests/golden_vectors.json" "$protocol_vector
   die "Rust protocol 与 mock collector 的 golden vectors 不一致"
 
 target_dir="$SHADOWSOCKS_RUST_PLUS_ROOT/.cache/cargo-target"
-host_os="$(uname -s)"
-audit_native=0
-auditd_crate_checked=1
-auditd_runtime_available=0
-if [[ "$host_os" == "Linux" ]]; then
-  audit_native=1
-  auditd_runtime_available=1
-fi
 
-workspace_args=(--workspace --lib --bins --no-fail-fast)
-run_workspace_tests() {
-  local feature_set="$1"
-  shift
+while IFS=$'\t' read -r gate_scope gate_args; do
+  if [[ "$gate_scope" == "linux-audit" && ! ( "$run_audit" -eq 1 && "$audit_native" -eq 1 ) ]]; then
+    continue
+  fi
+  # `gate_args` is deliberately unquoted: it carries a whole argument list.
+  # shellcheck disable=SC2086
   CARGO_TARGET_DIR="$target_dir" cargo test \
-    --manifest-path "$source_dir/Cargo.toml" \
-    --locked "${workspace_args[@]}" --features "$feature_set" "$@"
-}
-
-# `--lib --bins` is deliberate.  The locked upstream integration targets make
-# public-network assumptions (including a stale HTTP/1.0 response assertion),
-# so they are a separate upstream-baseline diagnostic rather than this gate.
-# Keep the feature-off regression independent from Cargo feature unification;
-# on Linux the audit-enabled workspace is then run as a second, explicit gate.
-run_workspace_tests user-stats --exclude shadowsocks-auditd
-if [[ "$run_audit" -eq 1 && "$audit_native" -eq 1 ]]; then
-  run_workspace_tests user-audit
-fi
-
-CARGO_TARGET_DIR="$target_dir" cargo test \
-  --manifest-path "$source_dir/Cargo.toml" \
-  --locked --no-fail-fast -p shadowsocks --test tcp_eih_user \
-  --features aead-cipher-2022,user-stats
+    --manifest-path "$source_dir/Cargo.toml" $gate_args
+done < <(gate_commands)
 
 # Compile the normal server path independently so a feature-gating mistake cannot
 # hide behind Cargo's workspace feature unification.

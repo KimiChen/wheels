@@ -42,8 +42,9 @@ printf '%s\n' 0001-eih-user-stats-http-unix-exporter.patch 0002-reproducible-bui
 `scripts/test.sh` 中的 §16 收窄门禁：
 `cargo test --locked --workspace --lib --bins --features user-stats --no-fail-fast --exclude shadowsocks-auditd`
 和
-`cargo test --locked --workspace --lib --bins --features user-audit --no-fail-fast`，再运行
-`cargo test --locked --no-fail-fast -p shadowsocks --test tcp_eih_user --features aead-cipher-2022,user-stats`
-及 auditd 原生测试。`--lib --bins` 明确排除所有 workspace integration targets；overlay 的
-`tcp_eih_user` 已在上面单独运行，其余上游公网 targets 只作为 `docs/UPSTREAM_BASELINE.md` 中的
-基线诊断，Linux runtime 路径不能由非 Linux 的交叉检查替代。
+`cargo test --locked --workspace --lib --bins --features user-audit --no-fail-fast`，再运行 §16 ①②两类
+integration target（overlay 自有的 `tcp_eih_user` 与三个纯 loopback 的 UDP 目标）及 auditd 原生测试。
+`--lib --bins` 使 workspace 命令不选择任何 integration target，但被排除的目标不设兜底豁免——只有依赖
+公网的那一类（`crates/shadowsocks/tests/{tcp,tcp_tfo}.rs`、`tests/{socks4,socks5,http,dns}.rs` 与
+`tests/tunnel.rs::tcp_tunnel`）作为 `docs/UPSTREAM_BASELINE.md` 的基线诊断豁免。Linux runtime 路径
+不能由非 Linux 的交叉检查替代。

@@ -1,6 +1,6 @@
 # shadowsocks-rust-plus 用户成功访问审计实现规格
 
-> **本文件为历史文档。** 它保存本功能的规范合同（v7，第 1–16 节）与第 1–8 轮代码审计、
+> **本文件为历史文档。** 它保存本功能的规范合同（v8，第 1–16 节）与第 1–8 轮代码审计、
 > 历次整改及 Linux 节点实装验收的完整过程记录（第 17–30 节），作为可追溯的审计档案保留，
 > 内容不再随新发现滚动更新。
 >
@@ -14,7 +14,7 @@
 >
 > 目标读者：独立负责 `shadowsocks-rust-plus` 节点侧审计功能的开发同事
 >
-> 规范版本：7
+> 规范版本：8
 >
 > 最后决策日期：2026-08-30
 >
@@ -41,6 +41,11 @@
 > - v7（2026-08-30）：按 `USER_ACCESS_AUDIT_V2.md` 第 5 节第 4 项的决策收窄 §16 的 Rust 工作区门禁。
 >   feature-off 与 Linux feature-on 均只选择 `--lib --bins` 目标，并以 `tcp_eih_user` 单独运行
 >   overlay 自有集成目标；锁定上游的公网 HTTP/1.0 集成用例不再被误报为本项目门禁失败。
+> - v8（2026-08-30）：修正 v7 收窄的过度排除。v7 用"其余 workspace integration targets 一律不计入"
+>   的兜底条款，把三个**纯 loopback**、且正对着本 overlay 改动过的 UDP 数据面的目标
+>   （`crates/shadowsocks/tests/udp.rs`、`tests/udp.rs`、`tests/tunnel.rs::udp_tunnel`）一并排除了；
+>   §16 改为按 overlay 自有／纯 loopback／依赖公网三类逐一枚举，取消兜底。同时更正 v7 对公网目标的
+>   点名——漏了 `tests/http.rs` 与 `tests/dns.rs`。
 
 本文是节点侧成功访问审计的规范性合同。实现者不需要再决定产品语义、组件边界、失败策略、
 存储上限或协议形态。文中的“必须”“不得”“应当”分别对应 MUST、MUST NOT、SHOULD。
@@ -1637,18 +1642,44 @@ SHA-256、两份 build receipt、artifact SHA 和 detached signature。
 
 只有同时满足以下条件，节点侧交付才算完成：
 
-- feature-off 回归与 Linux feature-on 回归均通过下列**收窄的 Rust 门禁**（workspace 命令用
-  `--lib --bins`，明确不选择任何 workspace integration target）：
-  `cargo test --locked --workspace --lib --bins --features user-stats --no-fail-fast --exclude shadowsocks-auditd`
-  （feature-off），以及 Linux 上的
-  `cargo test --locked --workspace --lib --bins --features user-audit --no-fail-fast`
-  （feature-on）；另须运行 overlay 自有集成目标
-  `cargo test --locked --no-fail-fast -p shadowsocks --test tcp_eih_user --features aead-cipher-2022,user-stats`。
-  其余 workspace integration targets 也不属于 §16 全绿判据或这两个 workspace 命令的全绿判据；本项目的
-  `tcp_eih_user` 已作为上面的显式例外单独运行，真实 TCP/UDP 数据面由本脚本的本机集成门禁覆盖。
-  上游 v1.24.0 的公网 targets（`crates/shadowsocks/tests/{tcp,tcp_tfo}.rs`、
-  `tests/{socks4,socks5,tunnel}.rs`）仍可按 `docs/UPSTREAM_BASELINE.md` 的原始命令单独复现并记录，
-  但不得计入本项目门禁。
+- 下列**收窄的 Rust 门禁**全部通过。workspace 命令用 `--lib --bins`，因而不选择任何 workspace
+  integration target；被它排除掉的 integration target 按下面三类逐一处置，不设兜底条款。
+
+  两条 workspace 命令：
+
+  ```text
+  cargo test --locked --workspace --lib --bins --features user-stats --no-fail-fast --exclude shadowsocks-auditd
+  cargo test --locked --workspace --lib --bins --features user-audit --no-fail-fast
+  ```
+
+  第一条是 feature-off 回归，任何主机都必须跑；`shadowsocks-auditd` 是 Linux-only crate，排除它是为了
+  让这条命令在所有主机上逐字相同，它的覆盖由第二条与 `cargo test --locked -p shadowsocks-auditd` 承担。
+  第二条是 feature-on 回归，只能在 Linux 主机执行，且是发布前置硬条件。
+
+  ① **overlay 自有、必跑**：
+
+  ```text
+  cargo test --locked --no-fail-fast -p shadowsocks --test tcp_eih_user --features aead-cipher-2022,user-stats
+  ```
+
+  ② **纯 loopback、必跑**——它们不依赖任何外部网络，且正对着本 overlay 改动过的 UDP 数据面
+  （`0001` 改 `relay/udprelay/{proxy_socket,aead_2022}.rs`，`0003` 改 `net/udp.rs`、
+  `server/udprelay.rs`、`local/net/udp/association.rs`），因此不得因为"是上游 target"被一并排除：
+
+  ```text
+  cargo test --locked --no-fail-fast -p shadowsocks --test udp --features aead-cipher-2022,user-stats
+  cargo test --locked --no-fail-fast --test udp --features user-stats
+  cargo test --locked --no-fail-fast --test tunnel --features user-stats udp_tunnel
+  ```
+
+  ③ **依赖公网、豁免**：`crates/shadowsocks/tests/{tcp,tcp_tfo}.rs`、`tests/{socks4,socks5,http,dns}.rs`
+  与 `tests/tunnel.rs` 的 `tcp_tunnel`。它们向 `www.example.com`、`detectportal.firefox.com`、
+  `8.8.8.8`/`114.114.114.114` 发起真实请求，且断言过时的 `HTTP/1.0` 状态行，在任何主机上都必然失败。
+  仍可按 [`docs/UPSTREAM_BASELINE.md`](UPSTREAM_BASELINE.md) 的原始命令单独复现并记录，但不计入本项目门禁。
+
+  上述所有命令由 `scripts/test.sh` 无条件执行（不受 `--no-integration` 影响）。真实 TCP/UDP 数据面另由
+  `tests/integration_user_stats.py` 覆盖，该项在 `--no-integration` 下会被跳过，**发布验收不得使用
+  `--no-integration`**。
 - 两类成功事件的生成时机与本文件逐字一致；
 - 合法配置下所有可处理的运行时审计故障均不会拒绝或等待代理流量；审计路径 panic 视为发布缺陷；
 - queue、UDP cache、dedup、nonce cache、segment 和 spool 均有硬上限；

@@ -117,10 +117,11 @@ feature 的开发用 `ssserver` 与 `shadowsocks-auditd`；该 feature 在非 Li
 workspace、service/协议测试，并在 target 已安装时对上述 Linux target 执行 auditd
 `cargo check --all-targets`；target 缺失时只报告未验证，使用
 该门禁默认 fail-closed，`SHADOWSOCKS_REQUIRE_AUDIT_TARGET=0` 才显式降级为“未验证”。feature-off 的收窄
-workspace 回归，以及 Linux 上额外的 `user-audit` 收窄 workspace 回归和 overlay 自有 `tcp_eih_user`
-集成测试，均只能在 Linux 主机完成完整发布验收，且仍是发布前置硬条件。这些 workspace 门禁使用
-`--lib --bins`，不把任何 workspace integration target 混入全绿判据；上游基线命令仍按
-[`docs/UPSTREAM_BASELINE.md`](docs/UPSTREAM_BASELINE.md) 单独记录。
+workspace 回归，以及 §16 ①②两类集成目标（overlay 自有的 `tcp_eih_user` 与三个纯 loopback 的 UDP
+目标），在任何主机上都会运行；`user-audit` feature-on 收窄 workspace 回归、auditd 原生单元测试与
+auditd 集成测试只能在 Linux 主机执行，且是发布前置硬条件。workspace 门禁使用 `--lib --bins`，因而不
+选择任何 integration target，被排除的目标由 §16 按 overlay 自有／纯 loopback／依赖公网三类逐一处置；
+依赖公网的那一类按 [`docs/UPSTREAM_BASELINE.md`](docs/UPSTREAM_BASELINE.md) 单独记录。
 
 ### 2. Linux x86_64 可复现发布包与验签
 

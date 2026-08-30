@@ -27,7 +27,12 @@ cargo test --workspace --all-targets
 `HTTP/1.1 200 OK`，但固定上游测试在第 144 行只接受 `HTTP/1.0 200 OK`。
 
 这是依赖公网 `www.example.com` 响应格式的上游基线问题，不由本项目补丁修改或隐藏。
-本项目验证脚本运行收窄的 workspace `--lib --bins` 库和二进制单元测试，并单独运行 overlay 的 EIH 及本机化
-TCP/UDP 数据面集成测试替代该公网断言；所有锁定上游的 workspace integration targets 都不属于
-§16 workspace 门禁的全绿判据。
+
+本项目验证脚本运行收窄的 workspace `--lib --bins` 库和二进制单元测试。workspace 命令因此不选择
+任何 integration target，但被排除的目标并非一律豁免——§16 按三类逐一处置：overlay 自有的
+`tcp_eih_user` 与三个纯 loopback 目标（`crates/shadowsocks/tests/udp.rs`、`tests/udp.rs`、
+`tests/tunnel.rs::udp_tunnel`）由 `scripts/test.sh` 显式单独运行并计入全绿判据；只有依赖公网的
+`crates/shadowsocks/tests/{tcp,tcp_tfo}.rs` 与 `tests/{socks4,socks5,http,dns}.rs`、
+`tests/tunnel.rs::tcp_tunnel` 被豁免，作为本文的基线诊断保留。
+
 上游升级时仍应再次运行完整原始命令并记录结果。

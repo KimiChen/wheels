@@ -10,6 +10,7 @@ these tests exist for, so each check must fail when either side moves alone.
 from __future__ import annotations
 
 import re
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -116,69 +117,132 @@ class TestScriptDocsTests(unittest.TestCase):
 
 
 class WorkspaceGateDocsTests(unittest.TestCase):
-    """§16 的收窄 workspace 命令必须和测试入口、维护文档保持一致。"""
+    """§16 的 Rust 门禁必须与 `scripts/test.sh` 真正会执行的命令逐条一致。
 
-    FEATURE_OFF_COMMAND = (
-        "cargo test --locked --workspace --lib --bins --features user-stats "
-        "--no-fail-fast --exclude shadowsocks-auditd"
-    )
-    FEATURE_ON_COMMAND = (
-        "cargo test --locked --workspace --lib --bins --features user-audit --no-fail-fast"
-    )
-    OVERLAY_INTEGRATION_COMMAND = (
-        "cargo test --locked --no-fail-fast -p shadowsocks --test tcp_eih_user "
-        "--features aead-cipher-2022,user-stats"
-    )
-    LEGACY_WIDE_COMMAND = "cargo test --workspace --features user-audit"
+    早先这些断言是在 `scripts/test.sh` 的文本里 grep 字面量，于是把命令整行注释
+    掉、加 `|| true` 吞掉失败、把数组声明留着却不传给 cargo，测试都照样全绿。改为
+    向脚本本身索取门禁（`--print-gate`，与执行点同一份数据），再与 §16 做集合相等。
+    """
 
     def setUp(self) -> None:
         self.script = read(ROOT / "scripts" / "test.sh")
         self.spec = read(DOCS / "USER_ACCESS_AUDIT.md")
-        self.v2 = read(DOCS / "USER_ACCESS_AUDIT_V2.md")
-        self.readme = read(ROOT / "README.md")
-        self.tests_readme = read(TESTS / "README.md")
-        self.patches_readme = read(ROOT / "patches" / "README.md")
-        self.upstream_baseline = read(DOCS / "UPSTREAM_BASELINE.md")
+        self.gate = self.printed_gate()
 
-    def section(self, heading: str, next_heading: str) -> str:
-        self.assertIn(heading, self.spec)
-        start = self.spec.index(heading)
-        end = self.spec.index(next_heading, start)
-        return self.spec[start:end]
+    def printed_gate(self, *arguments: str) -> list[tuple[str, str]]:
+        result = subprocess.run(
+            ["bash", str(ROOT / "scripts" / "test.sh"), "--print-gate", *arguments],
+            capture_output=True,
+            text=True,
+            cwd=ROOT,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = []
+        for line in result.stdout.splitlines():
+            scope, _, args = line.partition("\t")
+            self.assertIn(scope, {"always", "linux-audit"}, line)
+            self.assertTrue(args, line)
+            rows.append((scope, args))
+        self.assertTrue(rows, "--print-gate 没有输出任何门禁命令")
+        return rows
 
-    def test_script_selects_only_narrow_workspace_targets(self) -> None:
-        self.assertIn("workspace_args=(--workspace --lib --bins --no-fail-fast)", self.script)
-        self.assertIn("run_workspace_tests user-stats --exclude shadowsocks-auditd", self.script)
-        self.assertIn("run_workspace_tests user-audit", self.script)
-        self.assertIn("--no-fail-fast -p shadowsocks --test tcp_eih_user", self.script)
-        self.assertNotIn(self.LEGACY_WIDE_COMMAND, self.script)
+    def spec_section(self) -> str:
+        start = self.spec.index("## 16. 最终验收清单")
+        return self.spec[start : self.spec.index("## 17.", start)]
 
-    def test_spec_v7_binds_the_narrow_commands(self) -> None:
-        self.assertIn("规范版本：7", self.spec)
-        section = flat(self.section("## 16. 最终验收清单", "## 17."))
-        for command in (
-            self.FEATURE_OFF_COMMAND,
-            self.FEATURE_ON_COMMAND,
-            self.OVERLAY_INTEGRATION_COMMAND,
+    def test_the_spec_lists_exactly_the_commands_the_script_runs(self) -> None:
+        """集合相等：多一条、少一条、改一个旗标都判红。"""
+
+        documented = set()
+        for block in re.findall(r"```text\n(.*?)```", self.spec_section(), re.DOTALL):
+            for line in block.splitlines():
+                line = line.strip()
+                if line.startswith("cargo test"):
+                    documented.add(line)
+        executed = {f"cargo test {args}" for _, args in self.gate}
+        self.assertEqual(
+            documented,
+            executed,
+            "§16 声明的门禁命令与 scripts/test.sh 实际执行的不一致",
+        )
+
+    def test_the_loopback_targets_are_in_the_gate(self) -> None:
+        """v8：三个纯 loopback 目标覆盖 overlay 改过的 UDP 数据面，不得随公网目标一并豁免。"""
+
+        executed = [args for _, args in self.gate]
+        for required in (
+            "-p shadowsocks --test tcp_eih_user",
+            "-p shadowsocks --test udp",
+            "--test udp --features user-stats",
+            "--test tunnel --features user-stats udp_tunnel",
         ):
-            self.assertIn(flat(command), section, command)
-        self.assertIn(flat("不属于 §16 全绿判据"), section)
-        self.assertNotIn(flat(self.LEGACY_WIDE_COMMAND + " 全绿"), section)
+            self.assertTrue(
+                any(required in args for args in executed),
+                f"门禁缺少 integration target：{required}",
+            )
 
-    def test_active_docs_use_the_same_narrow_gate(self) -> None:
-        for document in (
-            self.v2,
-            self.readme,
-            self.tests_readme,
-            self.patches_readme,
-            self.upstream_baseline,
-        ):
-            normalized = flat(document)
-            self.assertIn("--lib--bins", normalized, document)
-        self.assertIn(flat("选择收窄命令（已实施，规范升版到 v7）"), flat(self.v2))
-        self.assertIn(flat("tcp_eih_user"), flat(self.tests_readme))
-        self.assertIn(flat("所有 workspace integration targets"), flat(self.patches_readme))
-        self.assertIn(flat("所有锁定上游的 workspace integration targets"), flat(self.upstream_baseline))
+    def test_the_workspace_commands_stay_narrow_and_locked(self) -> None:
+        workspace = [args for _, args in self.gate if "--workspace" in args]
+        self.assertEqual(len(workspace), 2, "应当恰好两条 workspace 命令")
+        for args in workspace:
+            for flag in ("--lib", "--bins", "--locked", "--no-fail-fast"):
+                self.assertIn(flag, args, args)
+        features = {args.split("--features ")[1].split()[0] for args in workspace}
+        self.assertEqual(features, {"user-stats", "user-audit"})
+        for _, args in self.gate:
+            self.assertIn("--locked", args, args)
+
+    def test_the_feature_on_command_is_the_only_linux_gated_one(self) -> None:
+        gated = [args for scope, args in self.gate if scope == "linux-audit"]
+        self.assertEqual(len(gated), 1)
+        self.assertIn("--features user-audit", gated[0])
+        # `--without-audit` must drop it and nothing else.
+        without = self.printed_gate("--without-audit")
+        self.assertEqual(without, self.gate, "--print-gate 必须输出完整门禁与作用域，由执行点过滤")
+        self.assertIn(
+            'if [[ "$gate_scope" == "linux-audit" && ! ( "$run_audit" -eq 1 && "$audit_native" -eq 1 ) ]]',
+            self.script,
+            "linux-audit 作用域的守卫条件被改动了",
+        )
+
+    def test_the_gate_has_exactly_one_execution_point_and_cannot_swallow_failures(self) -> None:
+        self.assertIn("set -euo pipefail", self.script)
+        self.assertEqual(
+            self.script.count("done < <(gate_commands)"),
+            1,
+            "门禁必须只有一个执行点",
+        )
+        code = "\n".join(
+            line for line in self.script.splitlines() if not line.lstrip().startswith("#")
+        )
+        end = code.index("done < <(gate_commands)")
+        loop = code[code.rindex("while IFS=", 0, end) : end]
+        self.assertEqual(loop.count("cargo test"), 1, "门禁循环体里应当只有一条 cargo test")
+        for swallow in ("|| true", "|| :"):
+            self.assertFalse(swallow in loop, f"门禁不得用 {swallow} 吞掉失败")
+        self.assertNotIn("|| true", self.script[: self.script.index("gate_commands() {")])
+
+    def test_declared_spec_version_covers_the_v8_gate(self) -> None:
+        declared = re.search(r"^> 规范版本：(\d+)$", self.spec, re.M)
+        self.assertIsNotNone(declared)
+        self.assertGreaterEqual(int(declared.group(1)), 8)
+
+    def test_maintenance_docs_quote_only_real_gate_commands(self) -> None:
+        """文档里引用的每条 cargo test 命令都必须真的在门禁里。"""
+
+        executed = {f"cargo test {args}" for _, args in self.gate}
+        for path in (TESTS / "README.md", ROOT / "patches" / "README.md"):
+            quoted = {
+                span
+                # 单反引号跨度：不能与 ``` 围栏配错对。
+                for span in re.findall(r"(?<!`)`([^`\n]+)`(?!`)", read(path))
+                if span.startswith("cargo test")
+            }
+            self.assertTrue(quoted, f"{path} 没有引用任何门禁命令")
+            self.assertTrue(
+                quoted <= executed,
+                f"{path} 引用了门禁里不存在的命令：{sorted(quoted - executed)}",
+            )
 
 
 class ProducerHealthDocsTests(unittest.TestCase):

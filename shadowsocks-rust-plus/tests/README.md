@@ -46,7 +46,11 @@ workspace 与静态、文档和 Python 工具门禁仍会执行）：
    `cargo test --locked --workspace --lib --bins --features user-audit --no-fail-fast`。
    `--lib --bins` 有意不选择任何 workspace integration target，避免锁定上游的公网 HTTP/1.0
    断言进入 §16 全绿判据；overlay 的 `tcp_eih_user` 由独立命令显式运行；
-3. core 的 AEAD-2022 TCP EIH 认证用户透传测试；
+3. §16 ①②两类 integration target——overlay 自有的 `tcp_eih_user`，以及三个纯 loopback 目标：
+   `cargo test --locked --no-fail-fast -p shadowsocks --test udp --features aead-cipher-2022,user-stats`、
+   `cargo test --locked --no-fail-fast --test udp --features user-stats`、
+   `cargo test --locked --no-fail-fast --test tunnel --features user-stats udp_tunnel`。
+   它们不依赖外部网络，且正对着本 overlay 改动过的 UDP 数据面，不随公网目标一并豁免；
 4. service 只启用普通 `server`、不启用 `user-stats` 的独立 `cargo check`，防止 Cargo workspace
    feature 合并掩盖 gating 错误；
 5. `shadowsocks-audit-protocol` 单元测试，以及 `shadowsocks-auditd` 的 Linux 单元测试或非 Linux
@@ -88,13 +92,18 @@ auditd，并把 workspace feature 降为 `user-stats`；producer 的 `user-audit
 其余检查并明确打印“未验证”，该降级需显式设置 `SHADOWSOCKS_REQUIRE_AUDIT_TARGET=0`；默认缺失 target 即失败。auditd
 运行时测试、producer feature-on 测试和上述收窄 workspace 回归必须在 Linux 主机执行并作为发布硬门禁。
 
-§16 的 Rust workspace 门禁只选择 lib/bin 目标，并单独运行 overlay 新增的
-`cargo test --locked --no-fail-fast -p shadowsocks --test tcp_eih_user --features aead-cipher-2022,user-stats`。
-其余 workspace integration targets 也不属于该 workspace 门禁；本项目的真实 TCP/UDP 数据面
-由本脚本的本机集成检查覆盖。锁定上游 v1.24.0 的公网 targets（`crates/shadowsocks/tests/{tcp,tcp_tfo}.rs`、
-`tests/{socks4,socks5,tunnel}.rs`）会请求 `www.example.com` 并断言过时的 HTTP/1.0 状态行，
-因此不属于 §16 门禁；需要复现上游基线时按 [`docs/UPSTREAM_BASELINE.md`](../docs/UPSTREAM_BASELINE.md)
-单独运行并记录，不能把它们的失败计入 overlay 失败。
+§16 的 Rust workspace 门禁只选择 lib/bin 目标，因而不选择任何 integration target。被排除的目标不设
+兜底豁免，按三类逐一处置：① overlay 自有的 `tcp_eih_user`；② 三个纯 loopback 目标
+（`crates/shadowsocks/tests/udp.rs`、`tests/udp.rs`、`tests/tunnel.rs::udp_tunnel`）——两类都由
+`scripts/test.sh` 显式单独运行并计入全绿判据；③ 依赖公网的
+`crates/shadowsocks/tests/{tcp,tcp_tfo}.rs` 与 `tests/{socks4,socks5,http,dns}.rs`、
+`tests/tunnel.rs::tcp_tunnel`，它们向 `www.example.com`、`detectportal.firefox.com`、
+`8.8.8.8`/`114.114.114.114` 发起真实请求并断言过时的 HTTP/1.0 状态行，因此豁免；需要复现上游基线时按
+[`docs/UPSTREAM_BASELINE.md`](../docs/UPSTREAM_BASELINE.md) 单独运行并记录，不能把它们的失败计入
+overlay 失败。
+
+真实 TCP/UDP 数据面另由 `integration_user_stats.py` 覆盖，它在 `--no-integration` 下会被跳过，
+因此**发布验收不得使用 `--no-integration`**。
 
 不准备上游源码、也不访问网络时，可单独运行新增的纯本地工具测试：
 
