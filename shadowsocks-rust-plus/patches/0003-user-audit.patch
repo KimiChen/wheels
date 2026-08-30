@@ -8089,10 +8089,10 @@ index 0000000000000000000000000000000000000000..6cf8d005dfef917c852be4f611d5b945
 +}
 diff --git a/crates/shadowsocks-auditd/src/spool.rs b/crates/shadowsocks-auditd/src/spool.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..cdc364601dde503eb02b444137f85a1779567f4b
+index 0000000000000000000000000000000000000000..629d0b47f869e9be917db47ed764d324bcb44311
 --- /dev/null
 +++ b/crates/shadowsocks-auditd/src/spool.rs
-@@ -0,0 +1,9193 @@
+@@ -0,0 +1,9283 @@
 +//! Durable, node-local audit spool.
 +//!
 +//! The spool is deliberately synchronous.  Ingest and export perform their
@@ -9046,6 +9046,10 @@ index 0000000000000000000000000000000000000000..cdc364601dde503eb02b444137f85a17
 +    sealed_paths: HashMap<String, PathBuf>,
 +    integrity_queue: VecDeque<String>,
 +    durable_gap_reasons: HashMap<String, wire::SpoolGapReason>,
++    /// Gap IDs whose private marker could not be unlinked after its ledger
++    /// transition committed.  Retried on every reconcile so a stale marker
++    /// does not have to wait for the next startup.
++    pending_marker_cleanup: HashSet<String>,
 +    durability_uncertain: bool,
 +    last_spool_measurement: Instant,
 +    last_retention_sweep: Instant,
@@ -9370,6 +9374,7 @@ index 0000000000000000000000000000000000000000..cdc364601dde503eb02b444137f85a17
 +                sealed_paths: HashMap::new(),
 +                integrity_queue: VecDeque::new(),
 +                durable_gap_reasons: HashMap::new(),
++                pending_marker_cleanup: HashSet::new(),
 +                durability_uncertain: false,
 +                last_spool_measurement: Instant::now()
 +                    .checked_sub(INDEX_REBUILD_RETRY_INTERVAL)
@@ -11679,12 +11684,6 @@ index 0000000000000000000000000000000000000000..cdc364601dde503eb02b444137f85a17
 +    }
 +
 +    fn remove_tombstone_pending_marker_locked(&self, inner: &mut SpoolInner, event_id: &str) -> Result<(), SpoolError> {
-+        #[cfg(test)]
-+        if std::mem::take(&mut inner.faults.marker_cleanup) {
-+            inner.spool_bytes_known = false;
-+            mark_storage_rejection(inner, true);
-+            return Err(io::Error::other("injected marker cleanup failure").into());
-+        }
 +        let path = match tombstone_pending_marker_path_for_id(&self.root, event_id) {
 +            Ok(path) => path,
 +            Err(error) => {
@@ -11704,10 +11703,32 @@ index 0000000000000000000000000000000000000000..cdc364601dde503eb02b444137f85a17
 +                return Err(error.into());
 +            }
 +        };
-+        match remove_tombstone_pending_marker(&self.root, event_id) {
-+            Ok(true) => Self::adjust_spool_bytes(inner, -i128::from(before)),
-+            Ok(false) => {}
++        #[cfg(test)]
++        let outcome = if std::mem::take(&mut inner.faults.marker_cleanup) {
++            Err(io::Error::other("injected marker cleanup failure").into())
++        } else {
++            remove_tombstone_pending_marker(&self.root, event_id)
++        };
++        #[cfg(not(test))]
++        let outcome = remove_tombstone_pending_marker(&self.root, event_id);
++        match outcome {
++            Ok(true) => {
++                Self::adjust_spool_bytes(inner, -i128::from(before));
++                inner.pending_marker_cleanup.remove(event_id);
++            }
++            Ok(false) => {
++                inner.pending_marker_cleanup.remove(event_id);
++            }
 +            Err(error) => {
++                // Retry on the next reconcile rather than waiting for a restart.
++                // A marker that outlives its resolved transaction long enough for
++                // the gap it names to age out of the spool gets resurrected as a
++                // pending entry at startup, and reconcile then rewrites the same
++                // fixed gap ID -- a duplicate the collector reports as a payload
++                // conflict.  Bounded by the ledger's own entry cap.
++                if inner.pending_marker_cleanup.len() < MAX_TOMBSTONES {
++                    inner.pending_marker_cleanup.insert(event_id.to_owned());
++                }
 +                // `remove_file` can succeed before the parent directory fsync
 +                // fails.  In either case the incremental byte index cannot be
 +                // trusted until the next full scan.
@@ -11973,8 +11994,38 @@ index 0000000000000000000000000000000000000000..cdc364601dde503eb02b444137f85a17
 +        Ok(())
 +    }
 +
++    /// Retry marker unlinks that failed after their ledger transition committed.
++    ///
++    /// Leaving them for the next startup is what makes `m-233` reachable: a
++    /// marker whose transaction is long resolved gets resurrected as a pending
++    /// entry once the gap it names has aged out of the spool, and reconcile then
++    /// rewrites the same fixed gap ID.  Retrying here bounds the exposure to one
++    /// reconcile interval instead of one restart.  A retry that fails again is
++    /// simply kept for the next pass; the error was already reported when the
++    /// transition committed.
++    fn retry_pending_marker_cleanup_locked(&self, inner: &mut SpoolInner) {
++        if inner.pending_marker_cleanup.is_empty() {
++            return;
++        }
++        let pending: Vec<String> = inner.pending_marker_cleanup.iter().cloned().collect();
++        for event_id in pending {
++            if inner
++                .tombstones
++                .iter()
++                .any(|entry| entry.gap_event_id() == Some(event_id.as_str()))
++            {
++                // The transaction is live again (a marker replayed into the
++                // ledger); its own path owns the cleanup.
++                inner.pending_marker_cleanup.remove(&event_id);
++                continue;
++            }
++            let _ = self.remove_tombstone_pending_marker_locked(inner, &event_id);
++        }
++    }
++
 +    fn reconcile_tombstones_locked(&self, inner: &mut SpoolInner) -> Result<(), SpoolError> {
 +        self.prune_receipts_locked(inner)?;
++        self.retry_pending_marker_cleanup_locked(inner);
 +        let mut index = 0;
 +        while index < inner.tombstones.len() {
 +            let entry = inner.tombstones[index].clone();
@@ -16006,6 +16057,45 @@ index 0000000000000000000000000000000000000000..cdc364601dde503eb02b444137f85a17
 +            outcome.as_ref().err()
 +        );
 +        SALVAGE_PERSIST_AFTER_RENAME.with(|hook| hook.set(false));
++    }
++
++    /// `m-233`：marker 清理失败后必须在运行期重试，而不是等到下次启动。
++    ///
++    /// 留到启动才清是这条缺陷的前提：一个事务早已了结的 marker，等它命名的那条
++    /// gap 随批次被 ACK 并过了保留期而从 spool 里消失，启动时就会被复活成 pending，
++    /// reconcile 随即用同一个固定 gap ID 再写一条——collector 侧表现为重复。
++    #[test]
++    fn a_failed_marker_cleanup_is_retried_on_the_next_reconcile() {
++        let dir = tempfile::tempdir().expect("tempdir");
++        let spool = Spool::open(config(dir.path())).expect("spool");
++        let gap_id = format!("{GAP_ID_PREFIX}{}", "8".repeat(32));
++        let marker = tombstone_pending_marker_path_for_id(&spool.root, &gap_id).expect("marker path");
++
++        let mut inner = lock(&spool.inner);
++        spool
++            .add_tombstone_locked(&mut inner, eviction_pending_for_test(&gap_id, &"a".repeat(32)))
++            .expect("pending eviction");
++        assert!(marker.is_file(), "the pending transaction has a private marker");
++
++        // The ledger transition commits; only the marker unlink fails.
++        inner.faults.marker_cleanup = true;
++        let commit = spool
++            .remove_tombstone_locked(&mut inner, 0)
++            .expect("the ledger removal itself commits");
++        commit
++            .finish()
++            .expect_err("the injected cleanup failure must surface");
++        assert!(marker.is_file(), "the marker is still on disk after the failed unlink");
++        assert!(
++            inner.pending_marker_cleanup.contains(&gap_id),
++            "the failed unlink must be queued for retry"
++        );
++
++        // The storage fault clears; the next reconcile must sweep the marker
++        // instead of leaving it for a restart.
++        spool.reconcile_tombstones_locked(&mut inner).expect("reconcile");
++        assert!(!marker.exists(), "a resolved marker must not survive to the next startup");
++        assert!(inner.pending_marker_cleanup.is_empty());
 +    }
 +
 +    /// `m-222` 的另一半：aggregate ledger 提交之后，私有 marker 清理失败必须
