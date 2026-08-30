@@ -185,7 +185,12 @@ if [[ "$run_integration" -eq 1 ]]; then
   fi
 fi
 
-if [[ "$run_audit" -eq 1 && "$auditd_crate_checked" -eq 0 ]]; then
+if [[ "$run_audit" -eq 0 ]]; then
+  # `--without-audit` now also drops auditd from the feature-off workspace run,
+  # so on Linux this mode compiles the crate nowhere at all.  Say so rather than
+  # printing an unqualified pass that covers less than the macOS default does.
+  printf '测试通过（--without-audit：auditd crate、audit-protocol 与 user-audit feature 路径本次一行都没有编译）。\n'
+elif [[ "$run_audit" -eq 1 && "$auditd_crate_checked" -eq 0 ]]; then
   printf '测试通过，但覆盖面不完整：auditd crate 与 user_audit.rs 未编译，auditd Linux runtime 未执行。\n'
 elif [[ "$run_audit" -eq 1 && "$auditd_runtime_available" -eq 0 ]]; then
   printf '测试通过（auditd crate 已交叉检查；auditd Linux runtime 未在当前主机执行）。\n'
