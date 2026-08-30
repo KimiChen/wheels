@@ -8073,10 +8073,10 @@ index 0000000000000000000000000000000000000000..6cf8d005dfef917c852be4f611d5b945
 +}
 diff --git a/crates/shadowsocks-auditd/src/spool.rs b/crates/shadowsocks-auditd/src/spool.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..af9c3278f1308c97edee6eb7180c7eaeb0e70b3b
+index 0000000000000000000000000000000000000000..83d635d84c23d2aa28bb0e6d30906a66c5483f17
 --- /dev/null
 +++ b/crates/shadowsocks-auditd/src/spool.rs
-@@ -0,0 +1,8239 @@
+@@ -0,0 +1,8472 @@
 +//! Durable, node-local audit spool.
 +//!
 +//! The spool is deliberately synchronous.  Ingest and export perform their
@@ -8792,6 +8792,14 @@ index 0000000000000000000000000000000000000000..af9c3278f1308c97edee6eb7180c7eae
 +/// disappear.  Recovery can continue with the source object in place (the
 +/// durable gap/marker remains retryable), but the failure must keep health
 +/// degraded and contribute to the bounded storage-rejection counter.
++/// Whether a `quarantine/` basename records an already-acknowledged source.
++///
++/// `quarantine_path` writes `{label}-{nanos}-{original}`, so the label survives
++/// restarts along with the object itself.
++fn quarantine_source_is_acked(basename: &str) -> bool {
++    basename.starts_with(&format!("{QUARANTINE_LABEL_ACKED}-"))
++}
++
 +fn quarantine_recovery_path(
 +    root: &Path,
 +    path: &Path,
@@ -9009,6 +9017,13 @@ index 0000000000000000000000000000000000000000..af9c3278f1308c97edee6eb7180c7eae
 +    faults: TestFaults,
 +}
 +
++/// Quarantine basename labels.  The label is the only piece of provenance that
++/// survives a restart -- `quarantine/` objects carry no other record of which
++/// directory they came from -- so eviction accounting reads it back from the
++/// basename rather than from the in-memory ledger.
++const QUARANTINE_LABEL_UNACKED: &str = "batch-corrupt";
++const QUARANTINE_LABEL_ACKED: &str = "acked-corrupt";
++
 +#[cfg(test)]
 +#[derive(Debug, Default)]
 +struct TestFaults {
@@ -9026,6 +9041,7 @@ index 0000000000000000000000000000000000000000..af9c3278f1308c97edee6eb7180c7eae
 +    recovery_marker_remove_sync: bool,
 +    seal_after_open_rename: bool,
 +    seal_rollback: bool,
++    persist_tombstones: bool,
 +}
 +
 +pub struct Spool {
@@ -9514,7 +9530,7 @@ index 0000000000000000000000000000000000000000..af9c3278f1308c97edee6eb7180c7eae
 +                        // batch; silently skipping it would hide a spool gap.
 +                        inner.degraded = true;
 +                        mark_storage_rejection(&mut inner, true);
-+                        if let Err(error) = self.quarantine_batch_locked(&mut inner, &path, "batch-corrupt") {
++                        if let Err(error) = self.quarantine_batch_locked(&mut inner, &path, QUARANTINE_LABEL_UNACKED) {
 +                            mark_storage_rejection(&mut inner, true);
 +                            return Err(error);
 +                        }
@@ -9547,7 +9563,7 @@ index 0000000000000000000000000000000000000000..af9c3278f1308c97edee6eb7180c7eae
 +            };
 +            let Some(info) = info else {
 +                mark_storage_rejection(&mut inner, true);
-+                if let Err(error) = self.quarantine_batch_locked(&mut inner, &path, "batch-corrupt") {
++                if let Err(error) = self.quarantine_batch_locked(&mut inner, &path, QUARANTINE_LABEL_UNACKED) {
 +                    mark_storage_rejection(&mut inner, true);
 +                    return Err(error);
 +                }
@@ -9578,7 +9594,7 @@ index 0000000000000000000000000000000000000000..af9c3278f1308c97edee6eb7180c7eae
 +                Ok(None) | Err(_) => {
 +                    inner.degraded = true;
 +                    mark_storage_rejection(&mut inner, true);
-+                    if let Err(error) = self.quarantine_batch_locked(&mut inner, &path, "batch-corrupt") {
++                    if let Err(error) = self.quarantine_batch_locked(&mut inner, &path, QUARANTINE_LABEL_UNACKED) {
 +                        mark_storage_rejection(&mut inner, true);
 +                        return Err(error);
 +                    }
@@ -10065,7 +10081,7 @@ index 0000000000000000000000000000000000000000..af9c3278f1308c97edee6eb7180c7eae
 +                | Err(SpoolError::InvalidState(_)) => {
 +                    inner.degraded = true;
 +                    mark_storage_rejection(inner, true);
-+                    if self.quarantine_batch_locked(inner, &path, "batch-corrupt").is_err() {
++                    if self.quarantine_batch_locked(inner, &path, QUARANTINE_LABEL_UNACKED).is_err() {
 +                        inner.integrity_queue.push_back(batch_id);
 +                    }
 +                }
@@ -10076,7 +10092,7 @@ index 0000000000000000000000000000000000000000..af9c3278f1308c97edee6eb7180c7eae
 +                Err(_) => {
 +                    inner.degraded = true;
 +                    mark_storage_rejection(inner, true);
-+                    if self.quarantine_batch_locked(inner, &path, "batch-corrupt").is_err() {
++                    if self.quarantine_batch_locked(inner, &path, QUARANTINE_LABEL_UNACKED).is_err() {
 +                        inner.integrity_queue.push_back(batch_id);
 +                    }
 +                }
@@ -10894,7 +10910,7 @@ index 0000000000000000000000000000000000000000..af9c3278f1308c97edee6eb7180c7eae
 +                };
 +                let Some(info) = info else {
 +                    inner.degraded = true;
-+                    if let Err(error) = self.quarantine_batch_locked(inner, &path, "acked-corrupt") {
++                    if let Err(error) = self.quarantine_batch_locked(inner, &path, QUARANTINE_LABEL_ACKED) {
 +                        first_error.get_or_insert(error);
 +                        inner.storage_rejected_attempts = saturating_inc(inner.storage_rejected_attempts);
 +                    }
@@ -11261,7 +11277,7 @@ index 0000000000000000000000000000000000000000..af9c3278f1308c97edee6eb7180c7eae
 +            };
 +            let Some(info) = info else {
 +                inner.degraded = true;
-+                if let Err(error) = self.quarantine_batch_locked(inner, &path, "acked-corrupt") {
++                if let Err(error) = self.quarantine_batch_locked(inner, &path, QUARANTINE_LABEL_ACKED) {
 +                    first_error.get_or_insert(error);
 +                    inner.storage_rejected_attempts = saturating_inc(inner.storage_rejected_attempts);
 +                }
@@ -11463,6 +11479,10 @@ index 0000000000000000000000000000000000000000..af9c3278f1308c97edee6eb7180c7eae
 +    }
 +
 +    fn persist_tombstones_locked(&self, inner: &mut SpoolInner) -> Result<(), SpoolError> {
++        #[cfg(test)]
++        if std::mem::take(&mut inner.faults.persist_tombstones) {
++            return Err(io::Error::other("injected tombstone persistence failure").into());
++        }
 +        let path = self.root.join("tombstones.json");
 +        let before = file_len(&path)?;
 +        let result = persist_tombstones(&self.root, &inner.tombstones);
@@ -11621,7 +11641,7 @@ index 0000000000000000000000000000000000000000..af9c3278f1308c97edee6eb7180c7eae
 +            Ok(Some(value)) => value,
 +            Ok(None) | Err(_) => {
 +                mark_storage_rejection(inner, true);
-+                self.quarantine_batch_locked(inner, path, "batch-corrupt")?;
++                self.quarantine_batch_locked(inner, path, QUARANTINE_LABEL_UNACKED)?;
 +                return Ok(());
 +            }
 +        };
@@ -11742,9 +11762,17 @@ index 0000000000000000000000000000000000000000..af9c3278f1308c97edee6eb7180c7eae
 +        };
 +        inner.gap_degraded = true;
 +        self.write_gap_locked(inner, &spec)?;
-+        // The isolated object held unacknowledged events as well; health must
-+        // account for them exactly like a sealed eviction.
-+        Self::add_evicted_unacked_records(inner, spec.lost_events.unwrap_or(0));
++        // An object isolated out of `sealed/` held unacknowledged events, so its
++        // destruction is a real loss and health must account for it exactly like
++        // a sealed eviction.  An object isolated out of `acked/` must not be:
++        // the collector already holds those events, and `event_count` is the
++        // batch total, not an undelivered count.  The gap still reports the
++        // destroyed range -- §9.5 defines `lost_events` as what the corrupt
++        // object's metadata says it held -- but `evicted_unacked_records` is
++        // named for undelivered records and drives loss alerting.
++        if !quarantine_source_is_acked(&pending.quarantine_basename) {
++            Self::add_evicted_unacked_records(inner, spec.lost_events.unwrap_or(0));
++        }
 +        if let Some(index) = inner.tombstones.iter().position(|entry| {
 +            matches!(entry, TombstoneEntry::QuarantinePending(value) if value.gap_event_id == pending.gap_event_id)
 +        }) {
@@ -11783,7 +11811,7 @@ index 0000000000000000000000000000000000000000..af9c3278f1308c97edee6eb7180c7eae
 +                                    // directly instead of creating a second,
 +                                    // unrelated corruption gap.
 +                                    inner.degraded = true;
-+                                    let result = quarantine_path(&self.root, &path, "batch-corrupt");
++                                    let result = quarantine_path(&self.root, &path, QUARANTINE_LABEL_UNACKED);
 +                                    if result.is_ok() || !path.exists() {
 +                                        self.rebuild_runtime_indexes_locked(inner);
 +                                    }
@@ -11810,9 +11838,6 @@ index 0000000000000000000000000000000000000000..af9c3278f1308c97edee6eb7180c7eae
 +                        if !inner.durable_gap_reasons.contains_key(&pending.gap_event_id) {
 +                            self.write_gap_locked(inner, &spec)?;
 +                        }
-+                        // Finishing a crashed eviction loses the same records
-+                        // the in-process path would have counted.
-+                        Self::add_evicted_unacked_records(inner, pending.event_count.0);
 +                        self.replace_tombstone_locked(
 +                            inner,
 +                            index,
@@ -11820,6 +11845,16 @@ index 0000000000000000000000000000000000000000..af9c3278f1308c97edee6eb7180c7eae
 +                                &pending,
 +                            ))),
 +                        )?;
++                        // Finishing a crashed eviction loses the same records the
++                        // in-process path would have counted -- but only account
++                        // for them once the durable pending -> evicted transition
++                        // has actually committed.  `replace_tombstone_locked`
++                        // rolls the in-memory entry back when `tombstones.json`
++                        // cannot be written, so counting first would let every
++                        // retry of a recoverable storage failure add the same
++                        // batch again.  `evict_sealed_locked` already orders it
++                        // this way.
++                        Self::add_evicted_unacked_records(inner, pending.event_count.0);
 +                        Ok(true)
 +                    }
 +                    TombstoneEntry::QuarantinePending(pending) => {
@@ -11870,7 +11905,7 @@ index 0000000000000000000000000000000000000000..af9c3278f1308c97edee6eb7180c7eae
 +                        if let Some(path) = source_path {
 +                            let source_parent = path.parent().map(Path::to_path_buf);
 +                            let source_hint = read_meta_hint(&path, &self.config.node_id);
-+                            let result = quarantine_path(&self.root, &path, "batch-corrupt");
++                            let result = quarantine_path(&self.root, &path, QUARANTINE_LABEL_UNACKED);
 +                            if result.is_err() && !path.exists() {
 +                                self.rebuild_runtime_indexes_locked(inner);
 +                            }
@@ -11935,6 +11970,18 @@ index 0000000000000000000000000000000000000000..af9c3278f1308c97edee6eb7180c7eae
 +                        }
 +                        self.discard_recovery_gap_locked(inner, &pending.gap_event_id)?;
 +                        self.remove_tombstone_locked(inner, index)?;
++                        // Finishing a crashed quarantine eviction destroys the same
++                        // records `evict_quarantine_locked` would have accounted for,
++                        // so this leg must count them too -- it is the same durable
++                        // transaction, resumed.  Only the eviction leg: a
++                        // `segment_corruption` pending merely moved a damaged batch
++                        // into `quarantine/`, the object is still on disk and the
++                        // in-process path does not count that either.  The
++                        // already-acknowledged source rule from
++                        // `evict_quarantine_locked` applies here unchanged.
++                        if !is_corruption_quarantine && !quarantine_source_is_acked(&pending.quarantine_basename) {
++                            Self::add_evicted_unacked_records(inner, spec.lost_events.unwrap_or(0));
++                        }
 +                        Ok(false)
 +                    }
 +                    TombstoneEntry::AckedReceipt(_) | TombstoneEntry::EvictedReceipt(_) => Ok(true),
@@ -12390,13 +12437,18 @@ index 0000000000000000000000000000000000000000..af9c3278f1308c97edee6eb7180c7eae
 +                    let spec =
 +                        corruption_gap_spec_or_existing(&recovery_gaps, hint.as_ref(), source_fingerprint(&path))?;
 +                    enqueue_recovery_gap(root, &mut recovery_gaps, spec, &mut degraded)?;
-+                    quarantine_recovery_path(
-+                        root,
-+                        &path,
-+                        "batch-corrupt",
-+                        &mut degraded,
-+                        &mut storage_rejected_attempts,
-+                    );
++                    // Unlike the in-process quarantine paths, this one isolates on
++                    // any `inspect_batch_dir` failure -- a readable meta.json with a
++                    // corrupt body included -- so an object from `acked/` arrives in
++                    // quarantine with its event count intact.  Record the source in
++                    // the label or the later eviction cannot tell delivered events
++                    // from lost ones.
++                    let label = if parent_name == "acked" {
++                        QUARANTINE_LABEL_ACKED
++                    } else {
++                        QUARANTINE_LABEL_UNACKED
++                    };
++                    quarantine_recovery_path(root, &path, label, &mut degraded, &mut storage_rejected_attempts);
 +                }
 +            }
 +        }
@@ -15364,6 +15416,187 @@ index 0000000000000000000000000000000000000000..af9c3278f1308c97edee6eb7180c7eae
 +            lock(&spool.inner).evicted_unacked_records,
 +            6,
 +            "a recovery-completed eviction must be counted too"
++        );
++    }
++
++    /// `M-69`: a quarantine eviction finished by crash recovery destroys the same
++    /// records the in-process path would have -- it is the same durable
++    /// transaction, resumed -- so it must be accounted for the same way.  A
++    /// `segment_corruption` pending only moved a damaged batch into
++    /// `quarantine/`; nothing was destroyed and neither leg counts it.
++    #[test]
++    fn recovered_quarantine_eviction_counts_lost_records() {
++        fn pending(gap_suffix: &str, basename: &str, events: u64) -> wire::QuarantinePending {
++            wire::QuarantinePending::new(
++                format!("{GAP_ID_PREFIX}{}", gap_suffix.repeat(32)),
++                basename.to_owned(),
++                unix_millis().expect("clock"),
++                Some("b".repeat(32)),
++                Some("c".repeat(64)),
++                Some("e".repeat(32)),
++                Some(4096),
++                Some(4096 + events - 1),
++                Some(events),
++                Some(512),
++            )
++        }
++
++        let dir = tempfile::tempdir().expect("tempdir");
++        let spool = Spool::open(config(dir.path())).expect("spool");
++        let mut inner = lock(&spool.inner);
++        assert_eq!(inner.evicted_unacked_records, 0);
++
++        // The quarantine object is already gone: the crash happened after the
++        // delete barrier, so recovery only has to finish the gap and the ledger.
++        let mut corruption = pending("d", "batch-corrupt-1-aaaa", 5);
++        corruption.reason = "segment_corruption".to_owned();
++        spool
++            .add_tombstone_locked(&mut inner, TombstoneEntry::QuarantinePending(corruption))
++            .expect("segment_corruption pending");
++        spool.reconcile_tombstones_locked(&mut inner).expect("reconcile");
++        assert_eq!(
++            inner.evicted_unacked_records, 0,
++            "isolating a damaged batch destroys nothing"
++        );
++
++        spool
++            .add_tombstone_locked(
++                &mut inner,
++                TombstoneEntry::QuarantinePending(pending("a", "batch-corrupt-2-bbbb", 3)),
++            )
++            .expect("quarantine_eviction pending");
++        spool.reconcile_tombstones_locked(&mut inner).expect("reconcile");
++        assert_eq!(
++            inner.evicted_unacked_records, 3,
++            "a recovery-completed quarantine eviction loses unacknowledged records"
++        );
++
++        // The acked-source rule from `evict_quarantine_locked` holds here too.
++        spool
++            .add_tombstone_locked(
++                &mut inner,
++                TombstoneEntry::QuarantinePending(pending("f", "acked-corrupt-3-cccc", 7)),
++            )
++            .expect("acked-source pending");
++        spool.reconcile_tombstones_locked(&mut inner).expect("reconcile");
++        assert_eq!(
++            inner.evicted_unacked_records, 3,
++            "already-acknowledged events must not be counted on the recovery leg either"
++        );
++    }
++
++    /// `M-68`: startup recovery isolates an `acked/` batch whose body rotted but
++    /// whose meta.json still parses, so the quarantined object arrives with its
++    /// full event count.  Destroying it must not be reported as undelivered loss
++    /// -- the collector already acknowledged those events.
++    #[test]
++    fn evicting_an_acked_quarantine_object_reports_no_unacknowledged_loss() {
++        let dir = tempfile::tempdir().expect("tempdir");
++        let spool = Spool::open(config(dir.path())).expect("spool");
++        spool.append(&event(1), 1).expect("append");
++        spool.append(&event(2), 2).expect("append");
++        {
++            let mut inner = lock(&spool.inner);
++            spool.seal_locked(&mut inner).expect("seal");
++        }
++        let lease = spool.lease().expect("lease").expect("a sealed batch to lease");
++        assert_eq!(
++            spool.ack(&lease.info.batch_id, &lease.info.body_sha256).expect("ack"),
++            AckOutcome::Acked,
++            "the batch must be delivered before its copy rots"
++        );
++        drop(lease);
++        drop(spool);
++
++        let acked = list_batch_dirs(&dir.path().join("acked")).expect("acked");
++        assert_eq!(acked.len(), 1);
++        // Body-only damage: meta.json stays readable, so the event count survives.
++        fs::write(acked[0].join("segment.ndjson"), b"corrupt\n").expect("corrupt body");
++
++        let spool = Spool::open(config(dir.path())).expect("reopen quarantines the damaged copy");
++        let isolated = list_entries(&dir.path().join("quarantine")).expect("quarantine");
++        assert_eq!(isolated.len(), 1, "recovery must isolate the damaged acked batch");
++        let basename = isolated[0]
++            .file_name()
++            .and_then(|value| value.to_str())
++            .expect("basename")
++            .to_owned();
++        assert!(
++            quarantine_source_is_acked(&basename),
++            "the acked source must survive in the basename: {basename}"
++        );
++        assert_eq!(lock(&spool.inner).evicted_unacked_records, 0);
++
++        {
++            let mut inner = lock(&spool.inner);
++            spool
++                .evict_quarantine_locked(&mut inner, &isolated[0])
++                .expect("quarantine eviction");
++        }
++        assert_eq!(
++            lock(&spool.inner).evicted_unacked_records,
++            0,
++            "already-acknowledged events must not be counted as undelivered loss"
++        );
++    }
++
++    /// `M-70`: a recoverable `tombstones.json` write failure must not let the
++    /// same evicted batch be counted once per retry.
++    #[test]
++    fn recovered_eviction_counts_lost_records_once_across_a_persistence_failure() {
++        let dir = tempfile::tempdir().expect("tempdir");
++        let spool = Spool::open(config(dir.path())).expect("spool");
++        let pending = wire::EvictionPending::new(
++            "b".repeat(32),
++            "c".repeat(64),
++            unix_millis().expect("clock"),
++            format!("{GAP_ID_PREFIX}{}", "d".repeat(32)),
++            "capacity_eviction",
++            "e".repeat(32),
++            4096,
++            4099,
++            4,
++            512,
++        );
++        let mut inner = lock(&spool.inner);
++        spool
++            .add_tombstone_locked(&mut inner, TombstoneEntry::EvictionPending(pending))
++            .expect("pending eviction");
++        assert_eq!(inner.evicted_unacked_records, 0);
++
++        // The gap is written first and stays durable; only the pending ->
++        // evicted ledger transition fails.  `reconcile_tombstones_locked`
++        // deliberately keeps a failed candidate for a later retry instead of
++        // propagating, so the pass itself still returns `Ok`.
++        inner.faults.persist_tombstones = true;
++        spool
++            .reconcile_tombstones_locked(&mut inner)
++            .expect("a failed candidate is retained, not propagated");
++        assert!(
++            inner
++                .tombstones
++                .iter()
++                .any(|entry| matches!(entry, TombstoneEntry::EvictionPending(_))),
++            "the rolled-back entry must be retained for a retry"
++        );
++        assert_eq!(
++            inner.evicted_unacked_records, 0,
++            "a rolled-back transition must not be accounted for"
++        );
++
++        spool
++            .reconcile_tombstones_locked(&mut inner)
++            .expect("retry after the storage failure clears");
++        assert!(
++            inner
++                .tombstones
++                .iter()
++                .any(|entry| matches!(entry, TombstoneEntry::EvictedReceipt(_))),
++            "the retry must commit the pending -> evicted transition"
++        );
++        assert_eq!(
++            inner.evicted_unacked_records, 4,
++            "the retried eviction must be counted exactly once"
 +        );
 +    }
 +
