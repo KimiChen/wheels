@@ -2148,6 +2148,36 @@ raise SystemExit(90)
             self.assertTrue(stat.S_ISREG(metadata.st_mode))
             self.assertTrue(metadata.st_mode & 0o111)
 
+    def test_tool_resolution_keeps_the_proxy_for_a_relative_path_entry(self) -> None:
+        """M-71: the M-63 fix only covered absolute `PATH` hits.
+
+        A relative `PATH` entry makes `shutil.which` return a relative path,
+        which took the branch that resolved the whole path and collapsed the
+        very proxy symlink this resolution exists to preserve -- the release
+        build then ran `rustup -V` and rejected its own pinned toolchain.
+        """
+
+        module = self.load_artifact_module()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binary_dir = root / "bin"
+            binary_dir.mkdir()
+            proxy = binary_dir / "rustup"
+            proxy.write_text("#!/bin/sh\nexec echo \"cargo 1.97.0 (deadbeef 2026-01-01)\"\n", encoding="utf-8")
+            proxy.chmod(0o755)
+            (binary_dir / "cargo").symlink_to("rustup")
+
+            previous = os.getcwd()
+            os.chdir(root)
+            try:
+                for entry in ("bin", "./bin"):
+                    resolved = module._resolve_build_tool("cargo", {"PATH": entry})
+                    self.assertEqual(resolved.name, "cargo", f"{entry} collapsed the proxy symlink")
+                    self.assertEqual(resolved, binary_dir.resolve() / "cargo")
+                    self.assertTrue(resolved.is_absolute())
+            finally:
+                os.chdir(previous)
+
     def test_tool_resolution_rejects_non_regular_target(self) -> None:
         module = self.load_artifact_module()
         with tempfile.TemporaryDirectory() as directory:

@@ -567,12 +567,13 @@ def _absolute_tool_path(candidate: Path) -> Path:
     proxy binary, and the proxy picks its behaviour from argv[0]; executing the
     resolved path runs `rustup` instead of `cargo`.  Only the directory part is
     resolved so the result stays absolute and symlinked *directories* still
-    cannot hide the tool.
+    cannot hide the tool.  A relative `PATH` entry produces a relative hit, and
+    resolving the directory absolutises it just as well, so the same rule
+    applies to both -- resolving the whole path would collapse the proxy that
+    this function exists to preserve.
     """
 
-    if candidate.is_absolute():
-        return candidate.parent.resolve(strict=True) / candidate.name
-    return candidate.resolve(strict=True)
+    return candidate.parent.resolve(strict=True) / candidate.name
 
 
 def _resolve_cargo_zigbuild(environment: dict[str, str]) -> Path:
