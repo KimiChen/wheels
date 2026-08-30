@@ -8089,10 +8089,10 @@ index 0000000000000000000000000000000000000000..6cf8d005dfef917c852be4f611d5b945
 +}
 diff --git a/crates/shadowsocks-auditd/src/spool.rs b/crates/shadowsocks-auditd/src/spool.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..d2ea662fa33b99a418dff8aad425ad5e117058e7
+index 0000000000000000000000000000000000000000..574e2dca5c486ae6a80da0795196a884026f4c13
 --- /dev/null
 +++ b/crates/shadowsocks-auditd/src/spool.rs
-@@ -0,0 +1,8997 @@
+@@ -0,0 +1,9057 @@
 +//! Durable, node-local audit spool.
 +//!
 +//! The spool is deliberately synchronous.  Ingest and export perform their
@@ -9082,6 +9082,7 @@ index 0000000000000000000000000000000000000000..d2ea662fa33b99a418dff8aad425ad5e
 +    // models a parent-directory fsync failure and must not trigger an in-memory
 +    // rollback of the already-visible ledger transition.
 +    persist_tombstones_after_commit: bool,
++    marker_cleanup: bool,
 +    // Skip one aggregate-ledger write, then fail the next one.  This models
 +    // the pending-marker write succeeding while the later ledger removal
 +    // fails, which is the retry window for quarantine eviction accounting.
@@ -9093,6 +9094,11 @@ index 0000000000000000000000000000000000000000..d2ea662fa33b99a418dff8aad425ad5e
 +/// it must still be reported to the caller, but an error there must not make
 +/// callers forget accounting for a ledger transition that is already durable.
 +#[derive(Debug)]
++/// A committed ledger transition, plus whatever went wrong cleaning up its
++/// private marker afterwards.  `#[must_use]` is load-bearing: the whole point
++/// of splitting commit from cleanup is that the cleanup error stays reportable,
++/// and a call site that drops the value would silently undo that.
++#[must_use = "the marker cleanup error must be surfaced with `finish()`"]
 +struct TombstoneCommit {
 +    marker_cleanup_error: Option<SpoolError>,
 +}
@@ -11646,6 +11652,12 @@ index 0000000000000000000000000000000000000000..d2ea662fa33b99a418dff8aad425ad5e
 +    }
 +
 +    fn remove_tombstone_pending_marker_locked(&self, inner: &mut SpoolInner, event_id: &str) -> Result<(), SpoolError> {
++        #[cfg(test)]
++        if std::mem::take(&mut inner.faults.marker_cleanup) {
++            inner.spool_bytes_known = false;
++            mark_storage_rejection(inner, true);
++            return Err(io::Error::other("injected marker cleanup failure").into());
++        }
 +        let path = match tombstone_pending_marker_path_for_id(&self.root, event_id) {
 +            Ok(path) => path,
 +            Err(error) => {
@@ -15858,6 +15870,54 @@ index 0000000000000000000000000000000000000000..d2ea662fa33b99a418dff8aad425ad5e
 +            inner.evicted_unacked_records, 0,
 +            "the durable ACK receipt must override the legacy ambiguous label"
 +        );
++    }
++
++    /// `m-222` 的另一半：aggregate ledger 提交之后，私有 marker 清理失败必须
++    /// 沿着**真实调用路径**作为可观测的后续错误报出来，同时提交后的状态与计账
++    /// 都保留。
++    ///
++    /// 变异检验的对象是生产调用点：把 4 处 `commit.finish()?` 改成
++    /// `let _ = commit.finish();`（吞掉清理错误）后，整套 spool 用例仍全绿。
++    /// 只断言 `TombstoneCommit::finish` 自己返回 Err 抓不到这个变异——必须驱动
++    /// `evict_quarantine_locked` 这样的真实调用方。`TombstoneCommit` 同时加了
++    /// `#[must_use]`，让编译器拦住新增调用点上被丢弃的 commit。
++    #[test]
++    fn marker_cleanup_failure_propagates_out_of_quarantine_eviction() {
++        let dir = tempfile::tempdir().expect("tempdir");
++        let spool = Spool::open(config(dir.path())).expect("spool");
++        spool.append(&event(1), 1).expect("append");
++        spool.append(&event(2), 2).expect("append");
++        {
++            let mut inner = lock(&spool.inner);
++            spool.seal_locked(&mut inner).expect("seal");
++        }
++        let sealed = list_batch_dirs(&dir.path().join("sealed")).expect("sealed");
++        fs::write(sealed[0].join("segment.ndjson"), b"corrupt\n").expect("corrupt body");
++        assert!(spool.lease().expect("lease").is_none());
++        let isolated = list_entries(&dir.path().join("quarantine")).expect("quarantine");
++        assert_eq!(isolated.len(), 1);
++
++        let mut inner = lock(&spool.inner);
++        inner.faults.marker_cleanup = true;
++        let error = spool
++            .evict_quarantine_locked(&mut inner, &isolated[0])
++            .expect_err("a marker cleanup failure must reach the caller");
++        assert!(
++            error.to_string().contains("injected marker cleanup failure"),
++            "unexpected error: {error}"
++        );
++        assert_eq!(
++            inner.evicted_unacked_records, 2,
++            "the destruction is already durable, so its accounting must stand"
++        );
++        assert!(
++            !inner
++                .tombstones
++                .iter()
++                .any(|entry| matches!(entry, TombstoneEntry::QuarantinePending(_))),
++            "the committed ledger removal must not be rolled back"
++        );
++        assert!(!inner.spool_bytes_known, "a failed marker unlink forces a full measurement");
 +    }
 +
 +    /// `m-223` 的兼容分支必须是**保守**匹配：只有 `batch_id` 与 `body_sha256`
