@@ -4,11 +4,11 @@
 >
 > 与 [`USER_ACCESS_AUDIT.md`](USER_ACCESS_AUDIT.md) 的关系：
 >
-> - 那份是**历史文档**，保存规范合同（v7，第 1–16 节）与第 1–8 轮审计、整改及 Linux 实装验收的
+> - 那份是**历史文档**，保存规范合同（v8，第 1–16 节）与第 1–8 轮审计、整改及 Linux 实装验收的
 >   完整过程记录（第 17–30 节）。合同条文仍以那份为准，本文不复制、不改写合同。
 > - 本文只列**尚未闭合**的条目。已闭合项不再重复，只在需要时引用其出处小节。
 >
-> 基线：overlay `main`，规范版本 v7，`patches/0003-user-audit.patch` 与
+> 基线：overlay `main`，规范版本 v8，`patches/0003-user-audit.patch` 与
 > `upstream.lock` 的 `prepared_tree_sha256` 一致（`7f57d709…`）。
 
 ## 1. 当前真机验收状态（背景）
@@ -32,108 +32,35 @@
   规则**，因此同类回归仍无护栏。
 - 出处：历史文档 §23.6 `m-142`、§27.5 `m-170`、§27.4「遗留未修」。
 
-### 本轮审阅新增问题（P2，`20ac4784e4735ab115469c936082e04717218e02^..47a65a4e175879e0a758644f185f4d93ca6eac1d`）
+### m-219（minor）`verify.sh` 从环境变量重算覆盖面结论，两个方向都会失配
 
-> 2026-08-30 对该范围共 89 个 commit（含起始 commit，截至当前 `HEAD`）进行复核。以下条目接续
-> 历史文档 §30 已记录的 `M-67`，编号为 `M-68`–`M-73`，当前均未修复；`P2` 表示应在发布前处理的代码/交付门禁
-> 缺陷。行号以当前工作树中的交付文件为准，补丁内的行号指 `patches/0003-user-audit.patch` 的
-> post-image 行。
+- **位置**：`scripts/verify.sh` 结尾的结论分支。
+- **现象**：`test.sh` 自己知道本次到底跑了什么（`auditd_crate_checked`、`auditd_runtime_available`），
+  但 `verify.sh` 不读这个结果，而是从 `SHADOWSOCKS_REQUIRE_AUDIT_TARGET` 与 target 是否存在重新推断。
+  两个方向都会错：`=0` 且 target 其实存在时误报「覆盖面不完整」（保守方向）；变量未设置、target
+  已安装时，`test.sh` 如实打印「auditd Linux runtime 未在当前主机执行」，而 `verify.sh` 打印的
+  「验证完成：……均通过」一个字都不提缺失的 runtime 覆盖面（乐观方向）。
+- **影响**：只影响措辞，两条分支都退出 0，Linux 全量验收本就是另一道发布前置。
+- **修复方向**：让 `test.sh` 把覆盖面结论写成机器可读的产物，`verify.sh` 读取而不是重算。
+- 出处：本轮对 `M-72` 的复核（该条已修，见第 6 节）。
 
-#### M-68（P2）ACKed 批次进入 `quarantine/` 后被计入未确认丢失
+### m-220（minor）exporter 的 lingering close 期间仍占着 client permit
 
-- **位置**：`patches/0003-user-audit.patch:10348-10360,11745-11747,2195-2207`。
-- **现象/影响**：`quarantine_batch_locked` 将来源目录同时判定为 `sealed/` 或 `acked/`，并把
-  `QuarantinePending.event_count` 保存为该批次的总事件数。后续 `evict_quarantine_locked` 不区分
-  来源，始终以 `spec.lost_events` 调用 `add_evicted_unacked_records`。因此，一个已经收到 ACK、因
-  损坏从 `acked/` 移入 `quarantine/` 的批次在随后被清理时，会把已经交付的事件重复算成
-  `evicted_unacked_records`，健康状态和丢失告警均被高报。
-- **触发/复现**：构造一个 meta 可读但 body 损坏的 ACKed 批次，令完整性检查将其隔离，再触发
-  `quarantine` 驱逐；gap 的 `lost_events` 为该批次总数，而实际未 ACK 数应为 0。
-- **修复建议**：在 pending 记录中保留来源的 ACK 状态或直接保存未 ACK 计数，所有驱逐路径只按该
-  计数更新 health；补充 ACKed quarantine → eviction 的回归测试，并断言 gap 与 health 计数语义不混用。
-- **出处/引入**：`fc5bfb7b5ebfe0e18c97bfc4cb98d7f84a528c44`（修复 m-191）。
-
-#### M-69（P2）`QuarantinePending` 崩溃恢复完成删除和 gap 后漏计未确认丢失
-
-- **位置**：`patches/0003-user-audit.patch:11825-11938`。
-- **现象/影响**：重启恢复 `TombstoneEntry::QuarantinePending` 时，代码会重试 rename/删除、写入
-  固定 gap，并移除 pending marker/tombstone，但该分支没有调用 `add_evicted_unacked_records`。
-  对 `reason=quarantine_eviction` 且 `event_count=N` 的事务，崩溃前后实际丢失了 N 条未 ACK 事件，
-  但恢复后的 `evicted_unacked_records` 少 N，health 低报丢失量（而普通进程内路径
-  `evict_quarantine_locked` 会计数）。
-- **触发/复现**：在 quarantine eviction 的删除屏障之后、gap 持久化/事务收尾之前终止 auditd，
-  再启动触发 `reconcile_tombstones_locked`；检查 gap 的 `lost_events` 与 health counter 不一致。
-- **修复建议**：把“完成 quarantine eviction”设计成带 gap ID 的幂等会计事务，在成功完成 durable
-  状态转换时补记一次未 ACK 数；区分 `segment_corruption`（可能来自 ACKed 批次）与
-  `quarantine_eviction`，并增加崩溃恢复回归测试。
-- **出处/引入**：`fc5bfb7b5ebfe0e18c97bfc4cb98d7f84a528c44`（修复 m-191）。
-
-#### M-70（P2）`EvictionPending` 恢复计数在 tombstone 持久化失败后重复累加
-
-- **位置**：`patches/0003-user-audit.patch:11813-11822`，关联
-  `11435-11457` 的 `replace_tombstone_locked`。
-- **现象/影响**：`reconcile_tombstones_locked` 在把 `EvictionPending` 替换为
-  `EvictedReceipt` 之前就调用 `add_evicted_unacked_records`。若随后
-  `replace_tombstone_locked` 写 `tombstones.json` 失败，该函数会回滚内存 tombstone 并返回错误；
-  下次 reconcile 再走同一分支，又会先累加一次。单个被驱逐批次因此可在可恢复的存储故障期间按
-  重试次数放大 `evicted_unacked_records`，健康数据失真。
-- **触发/复现**：注入一次 `persist_tombstones_locked` 失败，使 pending entry 保留，然后恢复存储
-  并再次执行 reconcile；gap 只应存在一条，但 counter 增加两次。
-- **修复建议**：将计数更新放在成功的 durable tombstone 状态转换之后，或为每个 gap ID 持久化
-  “计数已应用”标记并以其做幂等保护；用失败后重试测试绑定该顺序。
-- **出处/引入**：`fc5bfb7b5ebfe0e18c97bfc4cb98d7f84a528c44`（修复 m-191）。
-
-#### M-71（P2）相对 `PATH` 仍会折叠 `rustup` 代理，发布构建失败
-
-- **位置**：`scripts/release-artifact.py:563-575,636-644`。
-- **现象/影响**：`d0c29ff` 新增 `_absolute_tool_path` 以保留 `cargo`/`rustc` 的 rustup 代理文件名，
-  但只处理绝对候选路径；当 `PATH` 含相对目录时，`shutil.which` 可返回相对的
-  `bin/cargo`，随后 `candidate.resolve(strict=True)` 又把符号链接折叠为 `rustup`。执行版本检查时
-  实际运行的是 `rustup -V` 而不是 `cargo -V`，合法的固定 rustup 工具链会被误判为版本不一致，
-  README 的发布构建步骤因此不可完成。
-- **触发/复现**：准备 `bin/cargo -> rustup` 的 rustup 风格目录，设置 `PATH=bin`（相对当前工作目录），
-  调用 `_resolve_build_tool("cargo", environment)`；返回路径的 basename 变为 `rustup`。
-- **修复建议**：无论候选路径是否绝对，都只解析其父目录并保留原 basename（同时保留现有
-  `stat`、普通文件、执行位和 inode 校验）；增加相对 `PATH` 的代理符号链接回归测试。
-- **出处/引入**：`d0c29ff49b4ff4a8303606fe3285c23b522cdf45`（修复 M-63 的不完整分支）。
-
-#### M-72（P2）`SHADOWSOCKS_REQUIRE_AUDIT_TARGET` 非法值绕过 fail-closed 门禁
-
-- **位置**：`scripts/test.sh:113-119`、`scripts/verify.sh:90-93`。
-- **现象/影响**：缺少 auditd 交叉检查 target 时，脚本只判断变量是否精确等于字符串 `1`；除合法
-  `0` 外的其它非空值（如 `yes`、`2`、`false`）都会进入降级分支，等同于用户明确设置 `=0`，并可能让
-  `verify.sh` 打印“验证完成（覆盖面不完整）”。这使拼写错误、CI 统一注入的布尔值或恶意环境值
-  将应失败的 auditd 编译覆盖面静默变成成功，违背 `b918b8f` 设定的 fail-closed 合同。
-- **触发/复现**：在未安装 `x86_64-unknown-linux-gnu` target 的非 Linux 主机执行
-  `SHADOWSOCKS_REQUIRE_AUDIT_TARGET=yes scripts/verify.sh`（同样适用于 `2`/`false`）；返回码可为
-  0，且 auditd crate 实际未被编译。
-- **修复建议**：集中解析为三态：仅 `0` 允许显式降级、仅 `1`要求失败闭合、其它值立即报错；
-  `test.sh` 与 `verify.sh` 共用规范化结果，并为 `0/1/非法值` 分别补 shell 回归测试。
-- **出处/引入**：`b918b8f34dd50351e6e1310b2698380de908327c`（修复 M-62 的门禁解析）。
-
-#### M-73（P2）AF_UNIX lingering close 的有界 drain 仍可能在错误响应后复位连接
-
-- **位置**：`patches/0003-user-audit.patch:24933-24937,24980-25003`，对应原始 exporter
-  `patches/0001-eih-user-stats-http-unix-exporter.patch:4623-4627` 的错误响应路径。
-- **现象/影响**：Linux 在关闭接收队列非空的 AF_UNIX stream 时可能向对端报告 `ECONNRESET`。
-  `69069b3` 将直接错误响应改为 lingering close，但 drain 上限仍只有 65,536 字节或 100 ms。
-  `PAYLOAD_TOO_LARGE` 可能在更大的请求尚未读完时返回，`TOO_MANY_REQUESTS` 更可能完全未读入站
-  数据；对超大、持续发送或慢速客户端，预算耗尽时队列仍非空，客户端会在已收到完整 413/429 后
-  读到 `ECONNRESET`。这使错误响应的 HTTP 语义在 Linux 上仍不稳定。
-- **触发/复现**：向 busy/超限路径持续发送超过 65,536 字节的请求，或以低于 drain 预算的速率发送，
-  读取完整响应后继续读 socket；可观察响应已写出但读取以 `ECONNRESET` 结束。
-- **修复建议**：定义可证明的 graceful-close 策略（例如在拒绝前消耗完整请求、把排空与 permit
-  生命周期解耦并设置明确的连接级上限），而不是仅提高常量；Linux 上补充超大和慢速发送者的
-  回归/压力测试，确保客户端能稳定看到响应后的 EOF 或合同规定的错误。
-- **出处/引入**：`69069b3f57846aab6027d570454166f8eb39a1c4`（修复 M-66 的不完整 lingering close）。
+- **位置**：`crates/shadowsocks-service/src/server/user_stats.rs` 的 `handle_client` 直接错误响应路径。
+- **现象**：`write_direct_json` 的有界 drain 最多再占 100 毫秒，这段时间 `OwnedSemaphorePermit`
+  仍被持有。被 413 大量拒绝时，`max_concurrent_clients` 个 permit 会被 drain 占住，正常连接吞吐下降。
+- **对比**：busy（429）路径本来就不占 client permit——它用独立的 `busy_response_semaphore`。
+- **修复方向**：主路径在 drain 之前释放 permit，把 shutdown+drain 挪进一个独立限量的任务
+  （形如 busy 路径）。两条上界一字不改。属可用性改进，不是正确性缺陷。
+- 出处：本轮对 `M-73` 的复核（`M-73` 中成立的那半已修，见第 6 节）。
 
 ## 3. 待执行的验证
 
-以下为发布前置。第一项已经按第 5 节决策收窄，原始宽命令的失败记录见表下；其余三项**从未在任何机器上执行过**：
+以下为发布前置。第一项已收窄（v6→v7→v8）并**已在 Linux 上全绿执行**（见 §3.2），原始宽命令的失败记录见 §3.1；其余三项**从未在任何机器上执行过**：
 
 | 项目 | 说明 | 阻塞因素 |
 | --- | --- | --- |
-| §16 收窄 Rust 门禁（`--workspace --lib --bins`，并单跑 `tcp_eih_user`） | §16 验收项 | 已决策并实施（规范 v6 → v7）；原始宽命令的 9 条上游联网用例不属于该门禁 |
+| §16 收窄 Rust 门禁（v8：两条 workspace 命令 + ①②两类集成目标） | §16 验收项 | **已在 Linux 全绿执行**（见 §3.2）；v7 的过度排除已修正 |
 | `cargo-fuzz` sanitizer 实跑 | §3.2/§14.4 要求交付并运行 fuzz target | 无，尚未安排 |
 | §14.5 目标机压测 | 吞吐 ≤5%、CPU ≤10%、ssserver RSS ≤64 MiB、auditd RSS ≤128 MiB，及离线/队列满/慢 ACK/spool 满四类专项 | 需目标机与真实数据面负载 |
 | 真实流量端到端审计事件 | 经 ssserver 转发真实 TCP/UDP 流量后，验证 access event 落入 spool 并可经 lease 导出 | `integration_audit.py` 覆盖的是 ingest/export 协议链路，**不含**真实代理流量 |
@@ -158,6 +85,25 @@
 
 第四项值得单独强调：目前**没有任何一次验证**证明过「真实用户流量 → 产生 access event →
 写入 spool → 被 collector 取走」这条完整链路。§6 的两类成功事件语义在真机上仍未被端到端验证。
+
+### 3.2 收窄门禁的 Linux 首次执行（2026-08-30，Debian 13 / rustc 1.97.0）
+
+v7 收窄后的门禁此前只在设计上成立、从未在 Linux 上跑过。本轮实跑，三条命令全部 `EXIT=0`：
+
+| 命令 | 结果 |
+| --- | --- |
+| feature-off `--workspace --lib --bins --features user-stats --exclude shadowsocks-auditd` | 全绿（`shadowsocks` 9、`audit-protocol` 25、根 crate 10、`shadowsocks-service` 65） |
+| feature-on `--workspace --lib --bins --features user-audit` | 全绿（`auditd` 99、`shadowsocks-service` 121，其余同上） |
+| `-p shadowsocks --test tcp_eih_user` | 4 passed |
+| v8 新增的三个 loopback 目标（`-p shadowsocks --test udp`、`--test udp`、`--test tunnel udp_tunnel`） | 4 / 1 / 1 passed |
+| `-p shadowsocks-auditd`（含本轮三条新用例） | 102 passed |
+| `-p shadowsocks-audit-protocol` | 25 passed |
+
+**顺带澄清一处对 §3.1 的误判。** 有人以「macOS 上同一条 feature-off 命令的 `shadowsocks-service`
+lib 是 309，不可能少到 121」为由怀疑 §3.1 的计数有误。实测：macOS 那 309 里有 **244 个是
+`local::redir::sys::unix::pfvar`**——macOS PF 结构体的 bindgen 布局用例，Linux 上根本不存在。
+309 − 244 = 65，与 Linux 的 feature-off 逐一对上；user-audit 再加到 121。**§3.1 的数字是对的**，
+两个平台的计数本就不可直接相比。
 
 ## 4. 待补的文档（Linux 实装中发现，均非代码缺陷）
 
@@ -216,3 +162,33 @@
   不再阻塞本项目 §16 全绿判据。
 - 2026-08-30：完成对 `20ac4784e4735ab115469c936082e04717218e02^..47a65a4e175879e0a758644f185f4d93ca6eac1d`
   的 89 个 commit（含起始 commit）审阅，新增并记录 `M-68`–`M-73` 六条 P2；均待修复，未改变规范合同或源码。
+- 2026-08-30：**对同事回写的 `M-68`–`M-73` 逐条独立核实并做对抗性复核**（每条两名互不知情的审阅者，
+  第二名被要求尽力驳倒第一名），六条全部处置完毕，均已修复：
+  - `M-68`（**上调为 major**）成立，但**触发路径不是同事描述的那条**。acked/ 没有在线 body 巡检，
+    两条进程内的 acked→quarantine 路径只在 meta 不可读时触发（此时 `event_count` 为 `None`，加 0）。
+    真正的入口是**启动恢复** `recover_layout`：它对 `sealed/` 与 `acked/` 同构处理，隔离判据是
+    `inspect_batch_dir` 失败——**meta.json 完好、body 摘要/成帧损坏**正好落在这里，于是隔离对象带着
+    完整 `event_count` 进 quarantine/，随后被当成未确认丢失计数。修复是把来源写进 quarantine basename
+    的 label（跨重启持久），驱逐时据此不计。同事建议的「在 `QuarantinePending` 里存来源」治不了这条
+    路径——`recover_layout` 根本不写 `QuarantinePending`。
+  - `M-69`、`M-70` 成立（minor），描述基本准确；`M-70` 同事建议的「持久化『计数已应用』标记」**不采纳**：
+    该计数器每次 `Spool::open` 归零，持久标记会把高报换成漏报。改为把记账移到 durable 状态转换提交之后。
+  - `M-71` 部分成立，**定级由 P2 下调为 minor**：故障是 fail-closed 的（构建中止，不产出错误产物），
+    且发布链路从不构造 `PATH`，触发前提是操作员宿主 PATH 自带相对/空条目。缺陷本身属实，已修。
+  - `M-72` 成立（minor）。**「静默」一词偏重**——两条降级提示都会打印，真正坏掉的是退出码。
+    发布链路不经过该分支，Linux 主机走真 `cargo test`，该 fail-open 只能污染非 Linux 自查。
+  - `M-73` 部分成立。真正的缺陷是**注释无条件承诺了 "clean end of stream"**，已改为陈述实际保证。
+    同事建议的「在拒绝前消耗完整请求」**不采纳**：`ReadHeadError::TooLarge` 在未解析任何 header 时
+    就返回，没有请求边界，等价于读到 EOF，恶意客户端不 `shutdown(SHUT_WR)` 就能无限期钉住 client
+    permit——那正是 `max_request_bytes` 要防的。残留窗口是有界 drain 的固有代价，已写进注释与用例。
+    同事原文的第二个建议（排空与 permit 解耦）成立，另立为 `m-220`。
+- 2026-08-30：**审阅同事的 §16 收窄改动本身，发现并修复两处**（规范 v7 → v8，overlay `255b27f`）：
+  v7 的兜底条款把三个纯 loopback、正对着本 overlay UDP 改动面的目标一并排除；新增的
+  `WorkspaceGateDocsTests` 是文本 grep，36 个变异漏 17 个（含把门禁整行注释掉、加 `|| true`、
+  数组留着不传给 cargo）。改为门禁即数据 + `--print-gate` + 与 §16 做集合相等，17 变异 17 抓 0 漏。
+  另修 `--without-audit` 的无保留「测试通过」提示（`5a80797`）与 `--exclude` 的注释（`fb1f43b`）。
+- 2026-08-30：**一处明确不改的判断**。`recover_layout` 为 acked 来源写出的 `segment_corruption` gap
+  与驱逐时的 `quarantine_eviction` gap，`lost_events` 仍是该批次总数 N。§9.5 把 gap 的这些字段定义为
+  「能够从损坏对象可靠取得的 nullable batch/digest/epoch/sequence/count/bytes」，即"损坏对象自称持有
+  多少"，**不是**"未交付多少"；collector 手上有该批次的 ACK，可自行对账。故 gap 保持原样，只修名字
+  就叫"未确认"的 `evicted_unacked_records`。
