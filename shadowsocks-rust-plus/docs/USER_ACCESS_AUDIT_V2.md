@@ -10,7 +10,7 @@
 > - 本文保留本轮新增问题的根因、修复和验证边界；已闭合项明确标注“已修复”，避免与待办混淆。
 >
 > 基线：overlay `main`，规范版本 v8，`patches/0003-user-audit.patch` 与
-> `upstream.lock` 的 `prepared_tree_sha256` 一致（`eb0e0166…`，见第 6 节本轮提交链）。
+> `upstream.lock` 的 `prepared_tree_sha256` 一致（`b8c7d6ac…`）。
 
 ## 1. 当前真机验收状态（背景）
 
@@ -176,21 +176,21 @@
   `accumulator_take_propagates_unknown_fallback_bounds` 两条 service 回归已加入；源码级 feature-on 测试仍以
   122/122 的 macOS 临时结果为边界，Linux 真机复跑尚未完成。
 
-### 本轮审阅新增、**未修复**的条目（m-229 – m-234）
+### 本轮审阅新增的条目（m-229 – m-234，**已全部修复**）
 
 上一轮的 `31993e0` 把十条修复捆在一个提交里、提交说明只有一行标题、且自述「最终源码尚未在 Linux
 真机复跑」。本轮逐条核实后，**行为层面没有发现功能缺陷**——事务语义、permit 释放、饱和计账都站得住，
 Linux 全量门禁也已跑通。问题集中在**回归覆盖面**：多处自述的「已绑定」经变异检验并不成立。已修的见
-第 6 节；以下六条确认成立但本轮未修。
+第 6 节；以下六条随后也已逐条修复，每条一个提交，见第 6 节末尾。
 
-| # | 事项 | 变异证据 |
-| --- | --- | --- |
-| m-229 | `m-227` 的核心改动（独立 `unknown_count`）无鉴别性绑定；`approximate_count`、`is_nonempty` 的新增项与两个时间 unknown 位同样无绑定 | 把 `merge`/`try_take` 精确退回旧的「sticky bool + 共用 count」设计，124 条 service 用例全绿；单独删掉 `approximate_count` 或 `is_nonempty` 里的 `unknown_count` 项，也全绿。后者的真实后果是关机 drain 判空时静默丢弃只挂在无锁 fallback 上的计数 |
-| m-230 | `m-222` 的**启动期**那一半零覆盖 | 把 salvage 里删掉的 `tombstones.push(marker)` 加回去、或把新增的 `AfterRename => DurabilityUncertain` 换回旧的计数递增，整套 auditd 用例都全绿 |
-| m-231 | `m-224` 的「先提交后记账」四个提交点里仍有两个无绑定 | 把 `evict_sealed_locked` 与 reconcile 的 QuarantinePending 腿的 `commit.finish()?` 挪到记账之前，全绿（`evict_quarantine_locked` 那个点已由 989a0aa 绑住） |
-| m-232 | lingering worker 用 `tokio::spawn`，不在 `run()` 的 `JoinSet` 里 | `run()` 被 abort 后最多 32 个任务带着 fd 再活 ≤100 ms。有界且短，但打破了「exporter 的所有 client I/O 任务由 run() 拥有」这条既有性质 |
-| m-233 | 孤儿 marker 只在启动时清理 | marker 清理失败后一直留在盘上；运行期 reconcile 只看内存 ledger。若该 gap 的批次已被 ACK 并过了 24 小时保留期，下次启动时 `gap_already_durable` 变假，marker 会被复活成 pending 并用同一固定 ID 再写一条 `spool_gap`。非本轮引入，但与 `m-222` 的自述直接相关 |
-| m-234 | 提交后的纯记账 `stat` 失败被升级成 sticky `DurabilityUncertain` 与进程退出 | `persist_tombstones_locked` 在 rename + 目录 fsync **都已成功**之后，若 `file_len` 失败仍返回 `AfterRename`，daemon 关停退出。`OPERATIONS.md` 把 fail-closed 退出限定在「写屏障结果无法判定时」，这一格不属于该范围。与既有 `persist_state_locked` 同构，但 tombstone 是每次 ACK/驱逐都要写的高频路径 |
+| # | 事项 | 变异证据（修复前） | 处置 |
+| --- | --- | --- | --- |
+| m-229 | `m-227` 的核心改动（独立 `unknown_count`）无鉴别性绑定；`approximate_count`、`is_nonempty` 的新增项与两个时间 unknown 位同样无绑定 | 把 `merge`/`try_take` 精确退回旧的「sticky bool + 共用 count」设计，124 条 service 用例全绿；单独删掉 `approximate_count` 或 `is_nonempty` 里的 `unknown_count` 项，也全绿。后者的真实后果是关机 drain 判空时静默丢弃只挂在无锁 fallback 上的计数 | `46584ca` 补两条鉴别性用例，四个变异全部转红 |
+| m-230 | `m-222` 的**启动期**那一半零覆盖 | 把 salvage 里删掉的 `tombstones.push(marker)` 加回去、或把新增的 `AfterRename => DurabilityUncertain` 换回旧的计数递增，整套 auditd 用例都全绿 | `7da8935` 加两个启动期 thread-local 故障开关并补两条用例 |
+| m-231 | `m-224` 的「先提交后记账」四个提交点里仍有两个无绑定 | 把 `evict_sealed_locked` 与 reconcile 的 QuarantinePending 腿的 `commit.finish()?` 挪到记账之前，全绿（`evict_quarantine_locked` 那个点已由 989a0aa 绑住） | `ab4a2a4` 为另外两个提交点各补一条用例 |
+| m-232 | lingering worker 用 `tokio::spawn`，不在 `run()` 的 `JoinSet` 里 | `run()` 被 abort 后最多 32 个任务带着 fd 再活 ≤100 ms。有界且短，但打破了「exporter 的所有 client I/O 任务由 run() 拥有」这条既有性质 | `e0be754` 改为经 channel 交回接受循环，`workers.spawn` 拥有 |
+| m-233 | 孤儿 marker 只在启动时清理 | marker 清理失败后一直留在盘上；运行期 reconcile 只看内存 ledger。若该 gap 的批次已被 ACK 并过了 24 小时保留期，下次启动时 `gap_already_durable` 变假，marker 会被复活成 pending 并用同一固定 ID 再写一条 `spool_gap`。非本轮引入，但与 `m-222` 的自述直接相关 | `b192938` 清理失败记入重试集合，每次 reconcile 重试 |
+| m-234 | 提交后的纯记账 `stat` 失败被升级成 sticky `DurabilityUncertain` 与进程退出 | `persist_tombstones_locked` 在 rename + 目录 fsync **都已成功**之后，若 `file_len` 失败仍返回 `AfterRename`，daemon 关停退出。`OPERATIONS.md` 把 fail-closed 退出限定在「写屏障结果无法判定时」，这一格不属于该范围。与既有 `persist_state_locked` 同构，但 tombstone 是每次 ACK/驱逐都要写的高频路径 | `9d8b7bc` 屏障已成功时不再升级为 `DurabilityUncertain` |
 
 另记两条交付层面的观察（不影响运行时）：`31993e0` 一次提交涵盖 10 条修复、正文为空、无
 `Co-Authored-By`，与仓库「一个问题一个 commit + 根因/修复/绑定/变异检验」的既有约定不符；`m-221`、
@@ -386,3 +386,21 @@ lib 是 309，不可能少到 121」为由怀疑 §3.1 的计数有误。实测�
   「能够从损坏对象可靠取得的 nullable batch/digest/epoch/sequence/count/bytes」，即"损坏对象自称持有
   多少"，**不是**"未交付多少"；collector 手上有该批次的 ACK，可自行对账。故 gap 保持原样，只修名字
   就叫"未确认"的 `evicted_unacked_records`。
+- 2026-08-30：**m-229–m-234 已全部修复**，一个问题一个提交（`e0be754`、`7da8935`、`b192938`、
+  `ab4a2a4`、`9d8b7bc`、`46584ca`），每条附变异检验。其中四条是补绑定、两条是改行为：
+  - 行为改动：`m-232` 把 lingering worker 从 `tokio::spawn` 改为经 channel 交回接受循环、由
+    `run()` 的 `JoinSet` 拥有（`select!` 在等 accept 的同时服务 hand-back，保持排空的及时性）；
+    `m-234` 让写屏障已确定成功后的纯记账失败不再升级为 `DurabilityUncertain` 与进程退出。
+    `m-233` 介于两者之间：把 marker 清理的重试从「下次启动」提前到「下次 reconcile」，
+    把复活重放固定 ID gap 的窗口从跨重启 24 小时压到一个 reconcile 间隔。彻底消除它需要一份
+    能跨保留期的「已了结 gap」durable 记录，属合同层面的新结构，未做。
+  - 补绑定：`m-230`（启动期两个 thread-local 故障开关）、`m-231`（另外两个提交点）、
+    `m-229`（独立 `unknown_count` 与三处派生量）。
+  三条测试脚手架上的教训值得记下：`salvage_tombstones` 自己要求文件是合法 JSON，截断文件会让
+  「替换 ledger」整段被跳过；被复活的 pending 会被 `Spool::open` 自己那趟 reconcile 立刻消化掉，
+  所以只能观察它留下的重复计账；`GapAccumulator::merge` 优先选空闲 slot，验 fallback 的派生量
+  必须直接驱动 `fallback.merge`。三处我都先写错过一版，变异照样全绿。
+- 2026-08-30：**重建了本轮的提交序列**。`m-229` 的提交在生成补丁时把当时工作树里已有的
+  `m-230`/`m-231`/`m-233`/`m-234` 代码一并带了进去，违反「一个问题一个 commit」。做法是把四条
+  的改动按文本块切分、以「逐条移除后须与基线逐字节相同」自证分区完整，再从 `m-232` 之后重放成
+  五个提交。
