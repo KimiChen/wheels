@@ -10,7 +10,7 @@
 > - 本文保留本轮新增问题的根因、修复和验证边界；已闭合项明确标注“已修复”，避免与待办混淆。
 >
 > 基线：overlay `main`，规范版本 v8，`patches/0003-user-audit.patch` 与
-> `upstream.lock` 的 `prepared_tree_sha256` 一致（`4643abe734bf64d3ed3c801c9526afddef264fe6e1a292b707eef19dfb92ebf3`）。
+> `upstream.lock` 的 `prepared_tree_sha256` 一致（`eb0e0166…`，见第 6 节本轮提交链）。
 
 ## 1. 当前真机验收状态（背景）
 
@@ -18,21 +18,25 @@
 通过，详见历史文档第 30 节。**真机基线已证实**：两次独立 musl 构建产物字节一致、签名与独立验签
 通过、§11 权限模型逐项一致、`C-2`/`C-4`/`C-7` 三条 packaging critical 修复成立、
 `cargo test -p shadowsocks-auditd` 102 passed/0 failed（原 99 + 已交付的三条回归）、
-`tests/integration_audit.py` 端到端通过。本轮 m-221 至 m-224 增加 4 条 auditd 回归，AfterRename
-再增加 1 条；最终目标为 107 条，最终源码尚未在 Linux 真机复跑，状态见 §3.2，未把 Linux 测试二进制
-误报为已执行。
+`tests/integration_audit.py` 端到端通过。
+
+`31993e0` 交付时自述「最终目标为 107 条、最终源码尚未在 Linux 真机复跑」。两处都已更正：
+实际新增 **6** 条而非 5 条（漏数了 m-226 的 `export_deadline_is_checked_against_overflow`），
+即 108；**该源码已由本轮审阅在 Linux 真机跑通**，逐目标结果见 §3.2。
 
 **这不等于第 16 节验收通过**，原因见下文第 2、3 节。
 
 ## 2. 审阅发现与处置
 
-### m-142（minor）`Instant` 算术下溢模式未纳入静态护栏
+### m-142（minor，已修复）`Instant` 算术下溢模式未纳入静态护栏
 
 - **位置**：`tests/check_audit_static.py`（全文无 `Instant`/`Duration` 相关规则）。
 - **背景**：`C-6` 是 `Instant::now() - Duration` 在开机 60 秒内下溢 panic，`panic=abort` 下击落
   整个进程。该缺陷由第五轮发现、第六轮修复，但现有静态护栏抓不到同类模式。
-- **现状**：本轮 `m-170` 修复补上了 checked 助手与 C-6 的绑定单测，**但未实施 m-142 建议的静态
-  规则**，因此同类回归仍无护栏。
+- **修复**：`tests/check_audit_static.py` 新增 `INSTANT_ARITHMETIC` 规则——审计路径的非测试代码里
+  不得出现裸的 `Instant` 加减，必须走 checked 助手（`deadline_after`、`rate_limit_stamp_*` 一族）。
+  当前树零误报；把 `export.rs` 或 `user_audit.rs` 任一处改回裸加法即报错。它同时补上了 `m-226`
+  缺失的生产调用点绑定（85fe4c2）。
 - 出处：历史文档 §23.6 `m-142`、§27.5 `m-170`、§27.4「遗留未修」。
 
 ### m-219（minor，已修复）`verify.sh` 从环境变量重算覆盖面结论，两个方向都会失配
@@ -59,8 +63,15 @@
 - **修复**：直接错误响应写完后立即释放普通 client permit，drain 交给独立 semaphore（最多 32 个）
   的后台 worker；worker 满时直接关闭连接。`64 KiB / 100 ms` 两个 drain 上界保持不变。
 - **回归与验证**：`detached_lingering_close_releases_client_permit_and_is_bounded` 与
-  `direct_error_lingering_does_not_hold_client_permit` 已加入；Linux `cargo test --locked -p shadowsocks-service
-  --features user-stats --lib --no-fail-fast` 67/67 通过。
+  `direct_error_lingering_does_not_hold_client_permit` 已加入。
+- **本轮审阅更正**：这两条只绑住了「提前释放 permit」那一半。变异检验（macOS，49 条 user_stats 用例）——
+  ① 去掉 worker 上界改成无条件 spawn，**全绿**；② 把 worker 体内的 drain 换成 `shutdown` + `drop`，即对
+  413 路径完整复原 `M-73` 的缺陷，**也全绿**。原因是守 `M-73` 的两条旧用例调的是
+  `write_direct_json`，而该函数在生产代码里已只剩 429 busy 一个调用点。已补
+  `a_detached_direct_error_drains_the_unread_request`（659f149）与
+  `an_exhausted_lingering_pool_closes_without_draining`（476c411），两条变异均转红。
+  另外 `lingering_close` 的文档在改造后仍写着无条件的「干净 EOF」，而 worker 池耗尽时一次 drain 都不跑，
+  已更正（ad8bcfd）。自述里「67/67」这个数在 macOS 上即可复现，与 §1「尚未在 Linux 复跑」矛盾。
 - 出处：本轮对 `M-73` 的复核（`M-73` 中成立的那半已修）。
 
 ### m-221（minor，已修复）恢复期 ACKed quarantine 丢失来源，误计未确认损失
@@ -91,8 +102,15 @@
 
 - **根因**：升级前已经落盘的 quarantine 对象没有 `acked-corrupt` label，单靠新命名规则会把历史 ACKed 对象
   当作未确认对象。
-- **修复**：对 legacy basename 使用 pending 中的 `batch_id + body_sha256` 与 durable `AckedReceipt` 做保守匹配；
+- **修复**：使用 pending 中的 `batch_id + body_sha256` 与 durable `AckedReceipt` 做保守匹配；
   只有匹配成功才抑制 `evicted_unacked_records`，缺少可靠字段时维持 fail-closed 计账。
+- **本轮审阅更正两处**：(1) 这条 fallback **并不限于 legacy 对象**——`QUARANTINE_LABEL_UNACKED` 的字面值
+  就是 `"batch-corrupt"`，与自述中的 legacy 名字完全相同，代码与文档里没有任何东西把它限制在升级前落盘的
+  对象上。今天不出假阴性，靠的是 `ack()` 先做 rename+两次 `sync_dir`、之后才写 receipt，且 `batch_id` 是
+  128-bit 随机值——这个时序不变量既无注释也无测试守护。(2) 「保守匹配」这条主张原先只有正例，三种放宽
+  （任意 receipt / 只比 batch_id / 只比 body_sha256）下 70 条用例全绿，已补负例（00444bb）。
+  另需注意兼容窗口只有 7 天（`RECEIPT_RETENTION_SECONDS`），超期后 legacy 对象会退回按未确认计账
+  ——方向是 fail-closed 的高报，可接受。
 - **回归与验证**：`legacy_acked_quarantine_uses_the_durable_ack_receipt`；与 m-221 一起纳入最终
   `0003-user-audit.patch`，并通过 Linux 目标 `cargo check --locked -p shadowsocks-auditd --lib --tests`。
 
@@ -123,6 +141,11 @@
 - **同轮耐久性边界**：tombstone aggregate ledger 的 rename 已发生后，后续 fsync/计量错误统一进入 sticky
   `DurabilityUncertain`；内存中的 post-state 不回滚。启动 salvage 对 `AfterRename` 同样拒绝继续服务并交由
   supervisor 重试；`BeforeRename` 仍按 degraded 计账。这样不会把“文件已替换但目录耐久性未知”误报成普通可重试失败。
+- **本轮审阅更正**：自述把它写成「一次畸形请求可以打死审计进程」并称窗口是「100 ms」，两处都不准确。
+  `HTTP_DEADLINE` 是编译期常量 **5 秒**（`EXPORT_DEADLINE_SECONDS`），请求内容影响不了这次加法；实测
+  `Instant::now()` 距表示上界还有约 2.9e11 年，在 Linux/macOS 上该 panic **不可达**。这是无害加固，
+  不是修一个可触发的缺陷。原用例只对助手函数断言——把生产调用点改回裸加法（即整个撤销 m-226），
+  auditd 全量用例仍全绿；该缺口已由 `m-142` 的静态规则一并堵上（85fe4c2）。
 - **回归与验证**：`export_deadline_is_checked_against_overflow` 覆盖正常与 `Duration::MAX` 两条路径；
   `tombstone_after_rename_failure_keeps_post_commit_state` 覆盖 add/prune/remove/replace 四个入口。当前
   macOS 临时移除 Linux-only compile gate 后的 service 测试为 122/122；auditd native tests 仍受 Linux libc
@@ -152,6 +175,26 @@
 - **回归与验证**：`saturating_atomic_add_ignores_saturation_from_failed_cas` 与
   `accumulator_take_propagates_unknown_fallback_bounds` 两条 service 回归已加入；源码级 feature-on 测试仍以
   122/122 的 macOS 临时结果为边界，Linux 真机复跑尚未完成。
+
+### 本轮审阅新增、**未修复**的条目（m-229 – m-234）
+
+上一轮的 `31993e0` 把十条修复捆在一个提交里、提交说明只有一行标题、且自述「最终源码尚未在 Linux
+真机复跑」。本轮逐条核实后，**行为层面没有发现功能缺陷**——事务语义、permit 释放、饱和计账都站得住，
+Linux 全量门禁也已跑通。问题集中在**回归覆盖面**：多处自述的「已绑定」经变异检验并不成立。已修的见
+第 6 节；以下六条确认成立但本轮未修。
+
+| # | 事项 | 变异证据 |
+| --- | --- | --- |
+| m-229 | `m-227` 的核心改动（独立 `unknown_count`）无鉴别性绑定；`approximate_count`、`is_nonempty` 的新增项与两个时间 unknown 位同样无绑定 | 把 `merge`/`try_take` 精确退回旧的「sticky bool + 共用 count」设计，124 条 service 用例全绿；单独删掉 `approximate_count` 或 `is_nonempty` 里的 `unknown_count` 项，也全绿。后者的真实后果是关机 drain 判空时静默丢弃只挂在无锁 fallback 上的计数 |
+| m-230 | `m-222` 的**启动期**那一半零覆盖 | 把 salvage 里删掉的 `tombstones.push(marker)` 加回去、或把新增的 `AfterRename => DurabilityUncertain` 换回旧的计数递增，整套 auditd 用例都全绿 |
+| m-231 | `m-224` 的「先提交后记账」四个提交点里仍有两个无绑定 | 把 `evict_sealed_locked` 与 reconcile 的 QuarantinePending 腿的 `commit.finish()?` 挪到记账之前，全绿（`evict_quarantine_locked` 那个点已由 989a0aa 绑住） |
+| m-232 | lingering worker 用 `tokio::spawn`，不在 `run()` 的 `JoinSet` 里 | `run()` 被 abort 后最多 32 个任务带着 fd 再活 ≤100 ms。有界且短，但打破了「exporter 的所有 client I/O 任务由 run() 拥有」这条既有性质 |
+| m-233 | 孤儿 marker 只在启动时清理 | marker 清理失败后一直留在盘上；运行期 reconcile 只看内存 ledger。若该 gap 的批次已被 ACK 并过了 24 小时保留期，下次启动时 `gap_already_durable` 变假，marker 会被复活成 pending 并用同一固定 ID 再写一条 `spool_gap`。非本轮引入，但与 `m-222` 的自述直接相关 |
+| m-234 | 提交后的纯记账 `stat` 失败被升级成 sticky `DurabilityUncertain` 与进程退出 | `persist_tombstones_locked` 在 rename + 目录 fsync **都已成功**之后，若 `file_len` 失败仍返回 `AfterRename`，daemon 关停退出。`OPERATIONS.md` 把 fail-closed 退出限定在「写屏障结果无法判定时」，这一格不属于该范围。与既有 `persist_state_locked` 同构，但 tombstone 是每次 ACK/驱逐都要写的高频路径 |
+
+另记两条交付层面的观察（不影响运行时）：`31993e0` 一次提交涵盖 10 条修复、正文为空、无
+`Co-Authored-By`，与仓库「一个问题一个 commit + 根因/修复/绑定/变异检验」的既有约定不符；`m-221`、
+`m-222`、`m-224` 的「回归与验证」各混入一条上一轮交付、本轮逐字节未改的旧用例，读者会高估其绑定强度。
 
 ## 3. 待执行的验证
 
@@ -199,6 +242,18 @@ v8 收窄后的基线门禁已在 Linux 实跑；本轮最终源码还需复跑�
 | `-p shadowsocks-auditd`（基线含此前三条回归） | 102 passed；本轮新增 5 条后目标为 107，最终补丁待 Linux 真机复跑 |
 | `-p shadowsocks-audit-protocol` | 25 passed |
 
+### 3.3 `31993e0` 最终源码的 Linux 复跑（2026-08-30，本轮审阅执行）
+
+`31993e0` 自述未复跑。本轮在同一节点跑完，**八条命令全部 `EXIT=0`**：
+
+| 目标 | 31993e0 | 本轮修复后 |
+| --- | --- | --- |
+| `-p shadowsocks-auditd` | 108 passed（自述写 107，漏数 m-226 的 export 用例） | 110 passed |
+| `-p shadowsocks-audit-protocol` | 25 | 25 |
+| feature-on workspace 的 `shadowsocks-service` lib | 129（自述给的是 macOS 打桩的 122） | 131 |
+| feature-off workspace 的 `shadowsocks-service` lib | 68 | 70 |
+| `tcp_eih_user` / `-p shadowsocks --test udp` / `--test udp` / `--test tunnel udp_tunnel` | 4 / 4 / 1 / 1 | 同左 |
+
 **顺带澄清一处对 §3.1 的误判。** 有人以「macOS 上同一条 feature-off 命令的 `shadowsocks-service`
 lib 是 309，不可能少到 121」为由怀疑 §3.1 的计数有误。实测：macOS 那 309 里有 **244 个是
 `local::redir::sys::unix::pfvar`**——macOS PF 结构体的 bindgen 布局用例，Linux 上根本不存在。
@@ -230,6 +285,25 @@ lib 是 309，不可能少到 121」为由怀疑 §3.1 的计数有误。实测�
    上游公网 targets 保留为基线诊断，不改写、不纳入 §16 全绿判据。
 
 ## 6. 变更记录
+
+- 2026-08-30：**对 `31993e0`（m-219–m-228）的审阅与整改**。逐条核实 + 对抗性复核后，行为层面未发现
+  功能缺陷；十条修复共产生 **10 个整改提交**，全部为「一个问题一个 commit」并附变异检验：
+  - `530c480` 补丁重新规范化。`31993e0` 的 `patches/0003-user-audit.patch` 是**拼接产物**——53 个
+    `+++ b/` 文件头、去重后 48（`spool.rs`/`user_audit.rs` 各 3 次、`export.rs` 2 次），还有一行带 `+`
+    前缀的 `diff --git` 夹在 spool.rs 的 hunk 里。它能应用只是因为前一个 hunk 的行数恰好耗尽、git 把
+    该行当垃圾跳过再从 `--- a/` 恢复；生成的源码未被污染，重放树 SHA-256 也对。但它无法由文档规定的
+    `git diff --full-index --binary --no-renames HEAD~1 HEAD` 复现（27991 行 vs 27516 行），
+    「重新生成再逐字节比对」这条校验链就此断掉。已用规范输出替换（源码一字未改、锚点不变），并新增
+    `test_patches_are_canonical_single_stanza_diffs` 拦住同类产物。
+  - `ad8bcfd` / `659f149` / `476c411`：`m-220` 的三处——文档承诺失准、413 路径的 drain 失去绑定、
+    worker 上界无护栏。
+  - `00444bb`：`m-223` 的「保守匹配」补负例。
+  - `989a0aa`：`m-222` 的「cleanup 错误可观测」补绑定，`TombstoneCommit` 加 `#[must_use]`。
+  - `a4c372b`：`write_test_coverage_status` 被 `mv` 的目录语义骗过（真 bug，静默成功却无文件）。
+  - `7dac9ec`：`m-219` 整条链路补行为绑定，结论逻辑抽成 `report_verification_conclusion` 以便单测。
+  - `85fe4c2`：落实挂了五轮的 `m-142` 静态规则，同时补上 `m-226` 缺失的生产调用点绑定。
+  - `7f465c7`：最后一个绕过三态契约的开关（`KEEP_FAILED_BUILD`），以及 `--coverage-status` 的交付说明。
+  仍未修的六条记为 `m-229`–`m-234`，见第 2 节。
 
 - 2026-08-30：完成对 `20ac4784e4735ab115469c936082e04717218e02^..ee6829bf3699012eef9229b44296f77851710215`
   的全部 98 个 commit（含起始 commit；起始之后 97 个）审阅。新增 m-219 至 m-228 的问题记录；其中
