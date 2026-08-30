@@ -228,6 +228,58 @@ class AuditPackagingTest(unittest.TestCase):
             self.assertIn("SHADOWSOCKS_REQUIRE_AUDIT_TARGET=0", text)
             self.assertIn("未验证", text)
 
+    def test_patches_are_canonical_single_stanza_diffs(self) -> None:
+        """每个补丁必须是一次 `git diff` 的规范输出，不能是拼接产物。
+
+        拼接出来的补丁会给同一个文件留下多个 stanza，甚至把 `diff --git` 头当成
+        内容行写进上一个文件的 hunk。这种补丁靠 git 的容错恢复仍能应用、生成的
+        源码也可能正确，但它无法由文档规定的
+        `git diff --full-index --binary --no-renames HEAD~1 HEAD` 复现——于是
+        「重新生成再逐字节比对」这条校验链就断了，改动漂移无从发现。
+        """
+
+        for patch in sorted((ROOT / "patches").glob("*.patch")):
+            with self.subTest(patch=patch.name):
+                targets: list[str] = []
+                old_left = new_left = 0
+                binary = False
+                for number, line in enumerate(
+                    patch.read_text(encoding="utf-8", errors="surrogateescape").splitlines(), 1
+                ):
+                    if old_left or new_left:
+                        self.assertFalse(
+                            line.lstrip("+- ").startswith("diff --git "),
+                            f"{patch.name}:{number} hunk 内出现 diff 头，补丁是拼接产物",
+                        )
+                        if line.startswith("\\"):
+                            continue
+                        if line.startswith("-"):
+                            old_left -= 1
+                        elif line.startswith("+"):
+                            new_left -= 1
+                        elif line.startswith(" ") or line == "":
+                            old_left -= 1
+                            new_left -= 1
+                        else:
+                            self.fail(f"{patch.name}:{number} hunk 内出现非法行：{line[:60]}")
+                        self.assertGreaterEqual(old_left, 0, f"{patch.name}:{number} 删除行数超出声明")
+                        self.assertGreaterEqual(new_left, 0, f"{patch.name}:{number} 新增行数超出声明")
+                        continue
+                    if line.startswith("GIT binary patch"):
+                        binary = True
+                    elif line.startswith("diff --git "):
+                        binary = False
+                    elif line.startswith("+++ b/"):
+                        targets.append(line[len("+++ b/") :])
+                    elif line.startswith("@@") and not binary:
+                        header = re.match(r"^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@", line)
+                        self.assertIsNotNone(header, f"{patch.name}:{number} 非法 hunk 头")
+                        old_left = int(header.group(1) if header.group(1) is not None else 1)
+                        new_left = int(header.group(2) if header.group(2) is not None else 1)
+                self.assertEqual((old_left, new_left), (0, 0), f"{patch.name} 末尾 hunk 行数与声明不符")
+                duplicates = sorted({name for name in targets if targets.count(name) > 1})
+                self.assertEqual(duplicates, [], f"{patch.name} 含重复 stanza：{duplicates}")
+
     def test_patch_deletion_guard_is_shared_by_both_replay_paths(self) -> None:
         for script_name in ("prepare-source.sh", "verify.sh"):
             script = (ROOT / "scripts" / script_name).read_text(encoding="utf-8")

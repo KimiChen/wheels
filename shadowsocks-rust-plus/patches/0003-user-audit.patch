@@ -5410,10 +5410,10 @@ index 0000000000000000000000000000000000000000..38e23ec1d9458d24404b4659d03b7c87
 +}
 diff --git a/crates/shadowsocks-auditd/src/export.rs b/crates/shadowsocks-auditd/src/export.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..52ffdc64619377471d67e0830c0aa26177e0bf83
+index 0000000000000000000000000000000000000000..82966d69285534eb8121e94c6b5715aaa4c9fce3
 --- /dev/null
 +++ b/crates/shadowsocks-auditd/src/export.rs
-@@ -0,0 +1,1444 @@
+@@ -0,0 +1,1460 @@
 +//! Strict HTTP/1.1 export endpoint for the node-local audit spool.
 +
 +use std::{
@@ -6133,11 +6133,18 @@ index 0000000000000000000000000000000000000000..52ffdc64619377471d67e0830c0aa261
 +    stream.write_all(&response.bytes).await
 +}
 +
++/// Add a bounded request interval without allowing `Instant` overflow to
++/// abort the audit daemon.  If the platform clock cannot represent the
++/// interval, treating the request as immediately expired is fail-closed.
++fn deadline_after(now: time::Instant, interval: Duration) -> time::Instant {
++    now.checked_add(interval).unwrap_or(now)
++}
++
 +async fn read_request(stream: &mut UnixStream) -> Result<HttpRequest, RequestReadError> {
 +    // One deadline covers the whole request read, so a slow peer cannot extend
 +    // it chunk by chunk.  Expiry is a framing failure and keeps the parsed
 +    // prefix, which is what decides whether the fixed 400 can be signed.
-+    let deadline = time::Instant::now() + HTTP_DEADLINE;
++    let deadline = deadline_after(time::Instant::now(), HTTP_DEADLINE);
 +    let mut bytes = Vec::with_capacity(4096);
 +    let mut header_end = None;
 +    let mut chunk = [0_u8; 1024];
@@ -6682,6 +6689,15 @@ index 0000000000000000000000000000000000000000..52ffdc64619377471d67e0830c0aa261
 +        assert!(is_canonical_decimal("12"));
 +        assert!(!is_canonical_decimal("01"));
 +        assert!(!is_canonical_decimal("+1"));
++    }
++
++    #[test]
++    fn export_deadline_is_checked_against_overflow() {
++        let now = time::Instant::now();
++        assert!(deadline_after(now, HTTP_DEADLINE) > now);
++        // A duration this clock cannot represent must expire immediately
++        // rather than panic in the `Instant + Duration` implementation.
++        assert_eq!(deadline_after(now, Duration::MAX), now);
 +    }
 +
 +    #[test]
@@ -8073,10 +8089,10 @@ index 0000000000000000000000000000000000000000..6cf8d005dfef917c852be4f611d5b945
 +}
 diff --git a/crates/shadowsocks-auditd/src/spool.rs b/crates/shadowsocks-auditd/src/spool.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..3869ab55937e87d6f14e85733ff1fd1da8d31a72
+index 0000000000000000000000000000000000000000..13e833ad543da0e91aedcae777d37b03501c5360
 --- /dev/null
 +++ b/crates/shadowsocks-auditd/src/spool.rs
-@@ -0,0 +1,8775 @@
+@@ -0,0 +1,8929 @@
 +//! Durable, node-local audit spool.
 +//!
 +//! The spool is deliberately synchronous.  Ingest and export perform their
@@ -9062,6 +9078,10 @@ index 0000000000000000000000000000000000000000..3869ab55937e87d6f14e85733ff1fd1d
 +    seal_after_open_rename: bool,
 +    seal_rollback: bool,
 +    persist_tombstones: bool,
++    // Report an error after the aggregate ledger rename has completed.  This
++    // models a parent-directory fsync failure and must not trigger an in-memory
++    // rollback of the already-visible ledger transition.
++    persist_tombstones_after_commit: bool,
 +    // Skip one aggregate-ledger write, then fail the next one.  This models
 +    // the pending-marker write succeeding while the later ledger removal
 +    // fails, which is the retry window for quarantine eviction accounting.
@@ -9072,6 +9092,7 @@ index 0000000000000000000000000000000000000000..3869ab55937e87d6f14e85733ff1fd1d
 +/// destructive transaction. Marker cleanup is a second, best-effort barrier:
 +/// it must still be reported to the caller, but an error there must not make
 +/// callers forget accounting for a ledger transition that is already durable.
++#[derive(Debug)]
 +struct TombstoneCommit {
 +    marker_cleanup_error: Option<SpoolError>,
 +}
@@ -9179,8 +9200,21 @@ index 0000000000000000000000000000000000000000..3869ab55937e87d6f14e85733ff1fd1d
 +                    // isolated; replacing it would erase the only artifact
 +                    // available for operator salvage.
 +                    storage_rejected_attempts = saturating_inc(storage_rejected_attempts);
-+                } else if !salvaged.is_empty() && persist_tombstones(&root, &salvaged).is_err() {
-+                    storage_rejected_attempts = saturating_inc(storage_rejected_attempts);
++                } else if !salvaged.is_empty() {
++                    match persist_tombstones(&root, &salvaged) {
++                        Ok(()) => {}
++                        Err(AtomicWriteError::BeforeRename(_)) => {
++                            storage_rejected_attempts = saturating_inc(storage_rejected_attempts);
++                        }
++                        Err(AtomicWriteError::AfterRename(_)) => {
++                            // The replacement ledger is already visible, but
++                            // its parent-directory sync did not complete.  A
++                            // partially acknowledged startup cannot safely
++                            // continue: refuse service and let the supervisor
++                            // retry recovery after the storage is repaired.
++                            return Err(SpoolError::DurabilityUncertain);
++                        }
++                    }
 +                }
 +                salvaged
 +            }
@@ -11410,11 +11444,17 @@ index 0000000000000000000000000000000000000000..3869ab55937e87d6f14e85733ff1fd1d
 +            };
 +            inner.tombstones.remove(index);
 +        }
-+        if inner.tombstones != old
-+            && let Err(error) = self.persist_tombstones_locked(inner)
-+        {
-+            inner.tombstones = old;
-+            return Err(error);
++        if inner.tombstones != old {
++            match self.persist_tombstones_locked(inner) {
++                Ok(()) => {}
++                Err(AtomicWriteError::BeforeRename(error)) => {
++                    inner.tombstones = old;
++                    return Err(error);
++                }
++                Err(AtomicWriteError::AfterRename(_)) => {
++                    return Err(self.mark_durability_uncertain_locked(inner));
++                }
++            }
 +        }
 +        Self::prune_durable_gap_reasons_locked(inner);
 +        Ok(())
@@ -11463,9 +11503,15 @@ index 0000000000000000000000000000000000000000..3869ab55937e87d6f14e85733ff1fd1d
 +            inner.tombstones.remove(index);
 +        }
 +        inner.tombstones.push(entry);
-+        if let Err(error) = self.persist_tombstones_locked(inner) {
-+            inner.tombstones = old;
-+            return Err(error);
++        match self.persist_tombstones_locked(inner) {
++            Ok(()) => {}
++            Err(AtomicWriteError::BeforeRename(error)) => {
++                inner.tombstones = old;
++                return Err(error);
++            }
++            Err(AtomicWriteError::AfterRename(_)) => {
++                return Err(self.mark_durability_uncertain_locked(inner));
++            }
 +        }
 +        Ok(())
 +    }
@@ -11477,9 +11523,15 @@ index 0000000000000000000000000000000000000000..3869ab55937e87d6f14e85733ff1fd1d
 +        let old = inner.tombstones.clone();
 +        let removed = inner.tombstones[index].clone();
 +        inner.tombstones.remove(index);
-+        if let Err(error) = self.persist_tombstones_locked(inner) {
-+            inner.tombstones = old;
-+            return Err(error);
++        match self.persist_tombstones_locked(inner) {
++            Ok(()) => {}
++            Err(AtomicWriteError::BeforeRename(error)) => {
++                inner.tombstones = old;
++                return Err(error);
++            }
++            Err(AtomicWriteError::AfterRename(_)) => {
++                return Err(self.mark_durability_uncertain_locked(inner));
++            }
 +        }
 +        let marker_cleanup_error = removed
 +            .gap_event_id()
@@ -11503,9 +11555,15 @@ index 0000000000000000000000000000000000000000..3869ab55937e87d6f14e85733ff1fd1d
 +        } else {
 +            inner.tombstones.remove(index);
 +        }
-+        if let Err(error) = self.persist_tombstones_locked(inner) {
-+            inner.tombstones = old;
-+            return Err(error);
++        match self.persist_tombstones_locked(inner) {
++            Ok(()) => {}
++            Err(AtomicWriteError::BeforeRename(error)) => {
++                inner.tombstones = old;
++                return Err(error);
++            }
++            Err(AtomicWriteError::AfterRename(_)) => {
++                return Err(self.mark_durability_uncertain_locked(inner));
++            }
 +        }
 +        let marker_cleanup_error = replaced
 +            .gap_event_id()
@@ -11517,19 +11575,31 @@ index 0000000000000000000000000000000000000000..3869ab55937e87d6f14e85733ff1fd1d
 +        self.add_tombstone_locked(inner, entry)
 +    }
 +
-+    fn persist_tombstones_locked(&self, inner: &mut SpoolInner) -> Result<(), SpoolError> {
++    fn persist_tombstones_locked(&self, inner: &mut SpoolInner) -> Result<(), AtomicWriteError> {
 +        #[cfg(test)]
 +        if !std::mem::take(&mut inner.faults.persist_tombstones_skip)
 +            && std::mem::take(&mut inner.faults.persist_tombstones)
 +        {
-+            return Err(io::Error::other("injected tombstone persistence failure").into());
++            return Err(AtomicWriteError::BeforeRename(
++                io::Error::other("injected tombstone persistence failure").into(),
++            ));
 +        }
 +        let path = self.root.join("tombstones.json");
-+        let before = file_len(&path)?;
++        let before = file_len(&path).map_err(|error| AtomicWriteError::BeforeRename(error.into()))?;
 +        let result = persist_tombstones(&self.root, &inner.tombstones);
-+        if let Err(error) = Self::update_path_size(inner, &path, before) {
-+            mark_storage_rejection(inner, true);
-+            return Err(error.into());
++        #[cfg(test)]
++        let result = if result.is_ok() && std::mem::take(&mut inner.faults.persist_tombstones_after_commit) {
++            Err(AtomicWriteError::AfterRename(
++                io::Error::other("injected tombstone failure after durable commit").into(),
++            ))
++        } else {
++            result
++        };
++        if result.is_ok() || matches!(&result, Err(AtomicWriteError::AfterRename(_))) {
++            if let Err(error) = Self::update_path_size(inner, &path, before) {
++                inner.spool_bytes_known = false;
++                return Err(AtomicWriteError::AfterRename(error.into()));
++            }
 +        }
 +        result
 +    }
@@ -13326,12 +13396,12 @@ index 0000000000000000000000000000000000000000..3869ab55937e87d6f14e85733ff1fd1d
 +    Ok(recovered)
 +}
 +
-+fn persist_tombstones(root: &Path, entries: &[TombstoneEntry]) -> Result<(), SpoolError> {
++fn persist_tombstones(root: &Path, entries: &[TombstoneEntry]) -> Result<(), AtomicWriteError> {
 +    let ledger = wire::TombstoneLedger::new(entries.to_vec());
 +    let bytes = ledger
 +        .canonical_bytes()
-+        .map_err(|error| SpoolError::Protocol(ProtocolError::from(error)))?;
-+    write_atomic_file(&root.join("tombstones.json"), &bytes, 0o600)
++        .map_err(|error| AtomicWriteError::BeforeRename(SpoolError::Protocol(ProtocolError::from(error))))?;
++    write_atomic_file_staged(&root.join("tombstones.json"), &bytes, 0o600)
 +}
 +
 +fn ensure_dir(path: &Path, mode: u32) -> io::Result<()> {
@@ -14286,6 +14356,106 @@ index 0000000000000000000000000000000000000000..3869ab55937e87d6f14e85733ff1fd1d
 +                "{case}"
 +            );
 +            assert_eq!(positions[1], (original_epoch, 2, producer_id.to_owned()), "{case}");
++        }
++    }
++
++    /// An aggregate-ledger rename can succeed before its parent-directory
++    /// fsync reports an error.  Every tombstone mutation must retain the
++    /// in-memory post-transition state and stop the daemon, otherwise a later
++    /// request can overwrite the newer on-disk ledger with the rolled-back
++    /// view.  Exercise all mutation entry points that can persist the ledger.
++    #[test]
++    fn tombstone_after_rename_failure_keeps_post_commit_state() {
++        // add_tombstone_locked
++        {
++            let dir = tempfile::tempdir().expect("tempdir");
++            let spool = Spool::open(config(dir.path())).expect("spool");
++            let entry = TombstoneEntry::AckedReceipt(wire::AckedReceipt::new(
++                "a".repeat(32),
++                "b".repeat(64),
++                1,
++            ));
++            let mut inner = lock(&spool.inner);
++            inner.faults.persist_tombstones_after_commit = true;
++            let error = spool
++                .add_tombstone_locked(&mut inner, entry.clone())
++                .expect_err("post-rename ledger failure");
++            assert!(matches!(error, SpoolError::DurabilityUncertain));
++            assert_eq!(inner.tombstones, vec![entry.clone()]);
++            drop(inner);
++            assert_eq!(load_tombstones(dir.path()).expect("ledger"), vec![entry]);
++        }
++
++        // prune_receipts_locked
++        {
++            let dir = tempfile::tempdir().expect("tempdir");
++            let spool = Spool::open(config(dir.path())).expect("spool");
++            let entry = TombstoneEntry::AckedReceipt(wire::AckedReceipt::new(
++                "c".repeat(32),
++                "d".repeat(64),
++                1,
++            ));
++            {
++                let mut inner = lock(&spool.inner);
++                spool
++                    .add_tombstone_locked(&mut inner, entry)
++                    .expect("initial ledger");
++                inner.faults.persist_tombstones_after_commit = true;
++                let error = spool
++                    .prune_receipts_locked(&mut inner)
++                    .expect_err("post-rename ledger failure");
++                assert!(matches!(error, SpoolError::DurabilityUncertain));
++                assert!(inner.tombstones.is_empty(), "retain the committed prune");
++            }
++            assert!(load_tombstones(dir.path()).expect("ledger").is_empty());
++        }
++
++        // remove_tombstone_locked
++        {
++            let dir = tempfile::tempdir().expect("tempdir");
++            let spool = Spool::open(config(dir.path())).expect("spool");
++            let pending = eviction_pending_for_test(
++                "spool:11111111111111111111111111111111",
++                "e".repeat(32).as_str(),
++            );
++            let mut inner = lock(&spool.inner);
++            spool
++                .add_tombstone_locked(&mut inner, pending)
++                .expect("initial ledger");
++            inner.faults.persist_tombstones_after_commit = true;
++            let error = spool
++                .remove_tombstone_locked(&mut inner, 0)
++                .expect_err("post-rename ledger failure");
++            assert!(matches!(error, SpoolError::DurabilityUncertain));
++            assert!(inner.tombstones.is_empty(), "retain the committed removal");
++            drop(inner);
++            assert!(load_tombstones(dir.path()).expect("ledger").is_empty());
++        }
++
++        // replace_tombstone_locked
++        {
++            let dir = tempfile::tempdir().expect("tempdir");
++            let spool = Spool::open(config(dir.path())).expect("spool");
++            let pending = match eviction_pending_for_test(
++                "spool:22222222222222222222222222222222",
++                "f".repeat(32).as_str(),
++            ) {
++                TombstoneEntry::EvictionPending(value) => value,
++                _ => unreachable!("test helper must build an eviction pending entry"),
++            };
++            let replacement = TombstoneEntry::EvictedReceipt(wire::EvictedReceipt::from_pending(&pending));
++            let mut inner = lock(&spool.inner);
++            spool
++                .add_tombstone_locked(&mut inner, TombstoneEntry::EvictionPending(pending.clone()))
++                .expect("initial ledger");
++            inner.faults.persist_tombstones_after_commit = true;
++            let error = spool
++                .replace_tombstone_locked(&mut inner, 0, Some(replacement.clone()))
++                .expect_err("post-rename ledger failure");
++            assert!(matches!(error, SpoolError::DurabilityUncertain));
++            assert_eq!(inner.tombstones, vec![replacement.clone()]);
++            drop(inner);
++            assert_eq!(load_tombstones(dir.path()).expect("ledger"), vec![replacement]);
 +        }
 +    }
 +
@@ -20386,10 +20556,10 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..fe9b793919b2c697acb463dce34c012d
  }
 diff --git a/crates/shadowsocks-service/src/server/user_audit.rs b/crates/shadowsocks-service/src/server/user_audit.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..4a5d39945fa2689df5f3cd97703cfbf458ae411e
+index 0000000000000000000000000000000000000000..d8a730d159d970a86a23d51d58193173bdeb03b6
 --- /dev/null
 +++ b/crates/shadowsocks-service/src/server/user_audit.rs
-@@ -0,0 +1,4817 @@
+@@ -0,0 +1,5096 @@
 +//! Non-blocking successful-target access auditing for the server data path.
 +//!
 +//! The relay only constructs a small draft and performs bounded atomic/cache
@@ -20410,6 +20580,9 @@ index 0000000000000000000000000000000000000000..4a5d39945fa2689df5f3cd97703cfbf4
 +    },
 +    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 +};
++
++#[cfg(test)]
++use std::{cell::RefCell, sync::Barrier};
 +
 +#[cfg(target_os = "linux")]
 +use std::{
@@ -20458,6 +20631,14 @@ index 0000000000000000000000000000000000000000..4a5d39945fa2689df5f3cd97703cfbf4
 +const SHUTDOWN_RETRY_DELAY: Duration = Duration::from_millis(100);
 +const MAX_RECONNECT_BACKOFF: Duration = Duration::from_secs(5);
 +const MAX_RECONNECT_JITTER_PERCENT: u32 = 20;
++
++#[cfg(test)]
++thread_local! {
++    // A one-shot hook lets the saturation regression force a failed CAS after
++    // the closure has observed a value near u64::MAX without perturbing the
++    // production hot path or making the test scheduler-dependent.
++    static SATURATING_ADD_BEFORE_CAS: RefCell<Option<(Arc<Barrier>, Arc<Barrier>)>> = RefCell::new(None);
++}
 +
 +#[cfg(test)]
 +struct IdleSessionWaitHook {
@@ -20855,6 +21036,29 @@ index 0000000000000000000000000000000000000000..4a5d39945fa2689df5f3cd97703cfbf4
 +    last_time: u64,
 +}
 +
++const GAP_FIRST_UNKNOWN: u8 = 1 << 0;
++const GAP_LAST_UNKNOWN: u8 = 1 << 1;
++const GAP_FIRST_TIME_UNKNOWN: u8 = 1 << 2;
++const GAP_LAST_TIME_UNKNOWN: u8 = 1 << 3;
++
++fn gap_unknown_mask(snapshot: GapSnapshot) -> u8 {
++    let mut mask = 0;
++    // The wire contract requires first/last sequence to be jointly present
++    // or jointly null.  Treat a partial input as unknown on both sides so a
++    // later merge cannot manufacture an invalid half-known range.
++    if snapshot.first.is_none() || snapshot.last.is_none() {
++        mask |= GAP_LAST_UNKNOWN;
++        mask |= GAP_FIRST_UNKNOWN;
++    }
++    if snapshot.first_time == 0 {
++        mask |= GAP_FIRST_TIME_UNKNOWN;
++    }
++    if snapshot.last_time == 0 {
++        mask |= GAP_LAST_TIME_UNKNOWN;
++    }
++    mask
++}
++
 +/// A fixed set of tiny seqlock slots used by the relay-facing diagnostic
 +/// accumulators.  A relay never waits for a mutex: it claims any currently
 +/// free slot with one CAS and updates all fields while that slot is odd.  The
@@ -20870,6 +21074,11 @@ index 0000000000000000000000000000000000000000..4a5d39945fa2689df5f3cd97703cfbf4
 +    last: AtomicU64,
 +    first_time: AtomicU64,
 +    last_time: AtomicU64,
++    /// Each bit records a boundary that was unknown for at least one event in
++    /// this slot.  Keeping these bits beside the aggregate prevents a
++    /// diagnostic snapshot requeued after an encode/NACK failure from having
++    /// its `None`/zero fields treated as neutral by a later merge.
++    metadata_unknown: AtomicU8,
 +}
 +
 +impl GapSlot {
@@ -20893,25 +21102,35 @@ index 0000000000000000000000000000000000000000..4a5d39945fa2689df5f3cd97703cfbf4
 +        let count = previous_count.saturating_add(snapshot.count);
 +        let saturated = count == u64::MAX;
 +        self.count.store(count, Ordering::Relaxed);
-+        if let Some(first) = snapshot.first {
++        let unknown = gap_unknown_mask(snapshot);
++        self.metadata_unknown.fetch_or(unknown, Ordering::Relaxed);
++        let known = self.metadata_unknown.load(Ordering::Relaxed);
++        if let Some(first) = snapshot.first
++            && known & GAP_FIRST_UNKNOWN == 0
++        {
 +            let current = self.first.load(Ordering::Relaxed);
 +            if current == 0 || first < current {
 +                self.first.store(first, Ordering::Relaxed);
 +            }
 +        }
-+        if let Some(last) = snapshot.last {
++        if let Some(last) = snapshot.last
++            && known & GAP_LAST_UNKNOWN == 0
++        {
 +            let current = self.last.load(Ordering::Relaxed);
 +            if last > current {
 +                self.last.store(last, Ordering::Relaxed);
 +            }
 +        }
-+        if snapshot.first_time != 0 {
++        if snapshot.first_time != 0 && known & GAP_FIRST_TIME_UNKNOWN == 0 {
 +            let current = self.first_time.load(Ordering::Relaxed);
 +            if current == 0 || snapshot.first_time < current {
 +                self.first_time.store(snapshot.first_time, Ordering::Relaxed);
 +            }
 +        }
-+        if snapshot.last_time > self.last_time.load(Ordering::Relaxed) {
++        if snapshot.last_time != 0
++            && known & GAP_LAST_TIME_UNKNOWN == 0
++            && snapshot.last_time > self.last_time.load(Ordering::Relaxed)
++        {
 +            self.last_time.store(snapshot.last_time, Ordering::Relaxed);
 +        }
 +        self.sequence.store(version.wrapping_add(2), Ordering::Release);
@@ -20934,21 +21153,36 @@ index 0000000000000000000000000000000000000000..4a5d39945fa2689df5f3cd97703cfbf4
 +        {
 +            return None;
 +        }
-+        let snapshot = GapSnapshot {
-+            count: self.count.swap(0, Ordering::Relaxed),
-+            first: match self.first.swap(0, Ordering::Relaxed) {
-+                0 => None,
-+                value => Some(value),
-+            },
-+            last: match self.last.swap(0, Ordering::Relaxed) {
-+                0 => None,
-+                value => Some(value),
-+            },
-+            first_time: self.first_time.swap(0, Ordering::Relaxed),
-+            last_time: self.last_time.swap(0, Ordering::Relaxed),
-+        };
++        let count = self.count.swap(0, Ordering::Relaxed);
++        let first = self.first.swap(0, Ordering::Relaxed);
++        let last = self.last.swap(0, Ordering::Relaxed);
++        let first_time = self.first_time.swap(0, Ordering::Relaxed);
++        let last_time = self.last_time.swap(0, Ordering::Relaxed);
++        let unknown = self.metadata_unknown.swap(0, Ordering::Relaxed);
 +        self.sequence.store(version.wrapping_add(2), Ordering::Release);
-+        Some(snapshot)
++        Some(GapSnapshot {
++            count,
++            first: if unknown & (GAP_FIRST_UNKNOWN | GAP_LAST_UNKNOWN) != 0 {
++                None
++            } else {
++                (first != 0).then_some(first)
++            },
++            last: if unknown & (GAP_FIRST_UNKNOWN | GAP_LAST_UNKNOWN) != 0 {
++                None
++            } else {
++                (last != 0).then_some(last)
++            },
++            first_time: if unknown & GAP_FIRST_TIME_UNKNOWN != 0 {
++                0
++            } else {
++                first_time
++            },
++            last_time: if unknown & GAP_LAST_TIME_UNKNOWN != 0 {
++                0
++            } else {
++                last_time
++            },
++        })
 +    }
 +
 +    fn is_nonempty(&self) -> bool {
@@ -20967,12 +21201,21 @@ index 0000000000000000000000000000000000000000..4a5d39945fa2689df5f3cd97703cfbf4
 +#[derive(Default)]
 +struct GapFallback {
 +    lock: AtomicBool,
++    /// Count merged while the fallback lock was available.  Its boundary
++    /// fields below describe exactly this counter's aggregate.
 +    count: AtomicU64,
++    /// Count merged while the fallback lock was busy.  Keep it separate from
++    /// `count`: a producer can update this path while `try_take` is swapping
++    /// the coherent fields, and a single sticky marker cannot identify which
++    /// side of that swap the count belongs to.
++    unknown_count: AtomicU64,
 +    first: AtomicU64,
 +    last: AtomicU64,
 +    first_time: AtomicU64,
 +    last_time: AtomicU64,
-+    metadata_unknown: AtomicBool,
++    /// Unknown boundary bits for the lock-protected counter.  The separate
++    /// `unknown_count` below implies all four bits for its own count.
++    metadata_unknown: AtomicU8,
 +}
 +
 +impl GapFallback {
@@ -20991,11 +21234,10 @@ index 0000000000000000000000000000000000000000..4a5d39945fa2689df5f3cd97703cfbf4
 +            return saturated;
 +        }
 +
-+        // Do not wait for the fallback lock.  A count-only merge is still a
-+        // useful and honest diagnostic: sequence/time boundaries are nullable
-+        // when concurrent gaps cannot be determined precisely.
-+        self.metadata_unknown.store(true, Ordering::Release);
-+        saturating_add_atomic(&self.count, snapshot.count)
++        // Do not wait for the fallback lock.  Keep this count separate from
++        // the coherent counter so a concurrent `try_take` cannot consume a
++        // metadata-unknown marker for the wrong side of its count swap.
++        saturating_add_atomic(&self.unknown_count, snapshot.count)
 +    }
 +
 +    fn merge_locked(&self, snapshot: GapSnapshot) -> bool {
@@ -21003,25 +21245,35 @@ index 0000000000000000000000000000000000000000..4a5d39945fa2689df5f3cd97703cfbf4
 +        // fallback lock is held.  Use the same CAS-based saturating addition
 +        // here so that a stale load cannot overwrite that concurrent update.
 +        let saturated = saturating_add_atomic(&self.count, snapshot.count);
-+        if let Some(first) = snapshot.first {
++        let unknown = gap_unknown_mask(snapshot);
++        self.metadata_unknown.fetch_or(unknown, Ordering::Relaxed);
++        let known = self.metadata_unknown.load(Ordering::Relaxed);
++        if let Some(first) = snapshot.first
++            && known & GAP_FIRST_UNKNOWN == 0
++        {
 +            let current = self.first.load(Ordering::Relaxed);
 +            if current == 0 || first < current {
 +                self.first.store(first, Ordering::Relaxed);
 +            }
 +        }
-+        if let Some(last) = snapshot.last {
++        if let Some(last) = snapshot.last
++            && known & GAP_LAST_UNKNOWN == 0
++        {
 +            let current = self.last.load(Ordering::Relaxed);
 +            if last > current {
 +                self.last.store(last, Ordering::Relaxed);
 +            }
 +        }
-+        if snapshot.first_time != 0 {
++        if snapshot.first_time != 0 && known & GAP_FIRST_TIME_UNKNOWN == 0 {
 +            let current = self.first_time.load(Ordering::Relaxed);
 +            if current == 0 || snapshot.first_time < current {
 +                self.first_time.store(snapshot.first_time, Ordering::Relaxed);
 +            }
 +        }
-+        if snapshot.last_time > self.last_time.load(Ordering::Relaxed) {
++        if snapshot.last_time != 0
++            && known & GAP_LAST_TIME_UNKNOWN == 0
++            && snapshot.last_time > self.last_time.load(Ordering::Relaxed)
++        {
 +            self.last_time.store(snapshot.last_time, Ordering::Relaxed);
 +        }
 +        saturated
@@ -21035,56 +21287,84 @@ index 0000000000000000000000000000000000000000..4a5d39945fa2689df5f3cd97703cfbf4
 +        {
 +            return None;
 +        }
-+        let snapshot = GapSnapshot {
-+            count: self.count.swap(0, Ordering::Relaxed),
-+            first: match self.first.swap(0, Ordering::Relaxed) {
-+                0 => None,
-+                value => Some(value),
-+            },
-+            last: match self.last.swap(0, Ordering::Relaxed) {
-+                0 => None,
-+                value => Some(value),
-+            },
-+            first_time: self.first_time.swap(0, Ordering::Relaxed),
-+            last_time: self.last_time.swap(0, Ordering::Relaxed),
-+        };
-+        let metadata_unknown = self.metadata_unknown.swap(false, Ordering::AcqRel);
++        let count = self.count.swap(0, Ordering::Relaxed);
++        let first = self.first.swap(0, Ordering::Relaxed);
++        let last = self.last.swap(0, Ordering::Relaxed);
++        let first_time = self.first_time.swap(0, Ordering::Relaxed);
++        let last_time = self.last_time.swap(0, Ordering::Relaxed);
++        let metadata_unknown = self.metadata_unknown.swap(0, Ordering::Relaxed);
++        // `lock` also excludes coherent merges, while count-only producers
++        // use the independent atomic below.  Swapping it before releasing the
++        // lock gives this snapshot an exact count boundary: updates racing
++        // after the swap remain pending for the next take.
++        let unknown_count = self.unknown_count.swap(0, Ordering::Relaxed);
 +        self.lock.store(false, Ordering::Release);
 +
-+        if metadata_unknown {
++        let count = count.saturating_add(unknown_count);
++        if unknown_count != 0 {
 +            Some(GapSnapshot {
-+                count: snapshot.count,
++                count,
 +                first: None,
 +                last: None,
 +                first_time: 0,
 +                last_time: 0,
 +            })
 +        } else {
-+            Some(snapshot)
++            Some(GapSnapshot {
++                count,
++                first: if metadata_unknown & (GAP_FIRST_UNKNOWN | GAP_LAST_UNKNOWN) != 0 {
++                    None
++                } else {
++                    (first != 0).then_some(first)
++                },
++                last: if metadata_unknown & (GAP_FIRST_UNKNOWN | GAP_LAST_UNKNOWN) != 0 {
++                    None
++                } else {
++                    (last != 0).then_some(last)
++                },
++                first_time: if metadata_unknown & GAP_FIRST_TIME_UNKNOWN != 0 {
++                    0
++                } else {
++                    first_time
++                },
++                last_time: if metadata_unknown & GAP_LAST_TIME_UNKNOWN != 0 {
++                    0
++                } else {
++                    last_time
++                },
++            })
 +        }
 +    }
 +
 +    fn is_nonempty(&self) -> bool {
 +        self.lock.load(Ordering::Acquire)
 +            || self.count.load(Ordering::Acquire) != 0
-+            || self.metadata_unknown.load(Ordering::Acquire)
++            || self.unknown_count.load(Ordering::Acquire) != 0
 +    }
 +}
 +
 +/// Add without a retry budget so contention cannot fabricate saturation.
 +/// Returns true when the resulting counter has honestly reached its cap.
 +fn saturating_add_atomic(atom: &AtomicU64, amount: u64) -> bool {
-+    if amount == 0 {
-+        return atom.load(Ordering::Acquire) == u64::MAX;
-+    }
-+    let mut saturated = false;
-+    atom.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
++    let result = atom.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
 +        let next = current.saturating_add(amount);
-+        saturated |= next == u64::MAX;
++
++        #[cfg(test)]
++        SATURATING_ADD_BEFORE_CAS.with(|hook| {
++            if let Some((entered, release)) = hook.borrow_mut().take() {
++                entered.wait();
++                release.wait();
++            }
++        });
++
 +        Some(next)
-+    })
-+    .ok();
-+    saturated
++    });
++
++    // `fetch_update` may invoke the closure more than once after a failed
++    // CAS.  Derive saturation from the value that this invocation actually
++    // replaced, rather than retaining a flag from a speculative attempt that
++    // another thread may have invalidated (for example via a snapshot swap).
++    result.is_ok_and(|previous| previous.saturating_add(amount) == u64::MAX)
 +}
 +
 +struct GapAccumulator {
@@ -21143,6 +21423,7 @@ index 0000000000000000000000000000000000000000..4a5d39945fa2689df5f3cd97703cfbf4
 +
 +    fn approximate_count(&self) -> u64 {
 +        let mut total = self.fallback.count.load(Ordering::Acquire);
++        total = total.saturating_add(self.fallback.unknown_count.load(Ordering::Acquire));
 +        for slot in &self.slots {
 +            total = total.saturating_add(slot.count.load(Ordering::Acquire));
 +        }
@@ -21183,25 +21464,27 @@ index 0000000000000000000000000000000000000000..4a5d39945fa2689df5f3cd97703cfbf4
 +}
 +
 +fn combine_gap_snapshots(left: GapSnapshot, right: GapSnapshot) -> GapSnapshot {
++    let sequence_unknown = left.first.is_none() || left.last.is_none() || right.first.is_none() || right.last.is_none();
++    let first = match (left.first, right.first) {
++        (Some(a), Some(b)) if !sequence_unknown => Some(a.min(b)),
++        _ => None,
++    };
++    let last = match (left.last, right.last) {
++        (Some(a), Some(b)) if !sequence_unknown => Some(a.max(b)),
++        _ => None,
++    };
 +    GapSnapshot {
 +        count: left.count.saturating_add(right.count),
-+        first: match (left.first, right.first) {
-+            (None, value) | (value, None) => value,
-+            (Some(a), Some(b)) => Some(a.min(b)),
++        first,
++        last,
++        first_time: match (left.first_time, right.first_time) {
++            (0, _) | (_, 0) => 0,
++            (a, b) => a.min(b),
 +        },
-+        last: match (left.last, right.last) {
-+            (None, value) | (value, None) => value,
-+            (Some(a), Some(b)) => Some(a.max(b)),
++        last_time: match (left.last_time, right.last_time) {
++            (0, _) | (_, 0) => 0,
++            (a, b) => a.max(b),
 +        },
-+        first_time: min_nonzero(left.first_time, right.first_time),
-+        last_time: left.last_time.max(right.last_time),
-+    }
-+}
-+
-+fn min_nonzero(left: u64, right: u64) -> u64 {
-+    match (left, right) {
-+        (0, value) | (value, 0) => value,
-+        (a, b) => a.min(b),
 +    }
 +}
 +
@@ -24596,6 +24879,32 @@ index 0000000000000000000000000000000000000000..4a5d39945fa2689df5f3cd97703cfbf4
 +    }
 +
 +    #[test]
++    fn saturating_atomic_add_ignores_saturation_from_failed_cas() {
++        let counter = Arc::new(AtomicU64::new(u64::MAX - 1));
++        let entered = Arc::new(std::sync::Barrier::new(2));
++        let release = Arc::new(std::sync::Barrier::new(2));
++        let worker_counter = counter.clone();
++        let worker_entered = entered.clone();
++        let worker_release = release.clone();
++        let worker = std::thread::spawn(move || {
++            SATURATING_ADD_BEFORE_CAS.with(|hook| {
++                *hook.borrow_mut() = Some((worker_entered, worker_release));
++            });
++            saturating_add_atomic(&worker_counter, 1)
++        });
++
++        // Force the first closure invocation to compute MAX, then invalidate
++        // that compare-exchange before it can commit.  The retry succeeds at
++        // one and must not report the speculative MAX as durable saturation.
++        entered.wait();
++        counter.store(0, Ordering::Release);
++        release.wait();
++        let saturated = worker.join().expect("saturation worker");
++        assert!(!saturated);
++        assert_eq!(counter.load(Ordering::Acquire), 1);
++    }
++
++    #[test]
 +    fn gap_observation_time_marks_unknown_wall_clock() {
 +        let config = UserAuditConfig::new("/tmp/audit.sock", test_auditd_user());
 +        let emitter = AuditEmitter::new(runtime(), &config);
@@ -24651,6 +24960,146 @@ index 0000000000000000000000000000000000000000..4a5d39945fa2689df5f3cd97703cfbf4
 +        assert_eq!(snapshot.last, Some(11));
 +        assert_eq!(snapshot.first_time, 22);
 +        assert_eq!(snapshot.last_time, 22);
++    }
++
++    #[test]
++    fn fallback_unknown_count_keeps_metadata_unknown() {
++        let fallback = GapFallback::default();
++        assert!(!fallback.merge(GapSnapshot {
++            count: 1,
++            first: Some(1),
++            last: Some(1),
++            first_time: 10,
++            last_time: 10,
++        }));
++
++        // Force the count-only path.  The unknown count must stay associated
++        // with this take rather than being consumed by a concurrent coherent
++        // metadata snapshot.
++        fallback.lock.store(true, Ordering::Release);
++        assert!(!fallback.merge(GapSnapshot {
++            count: 2,
++            first: Some(2),
++            last: Some(2),
++            first_time: 20,
++            last_time: 20,
++        }));
++        fallback.lock.store(false, Ordering::Release);
++
++        let snapshot = fallback.try_take().expect("fallback snapshot");
++        assert_eq!(snapshot.count, 3);
++        assert!(snapshot.first.is_none());
++        assert!(snapshot.last.is_none());
++        assert_eq!(snapshot.first_time, 0);
++        assert_eq!(snapshot.last_time, 0);
++        assert!(!fallback.is_nonempty());
++    }
++
++    #[test]
++    fn accumulator_take_propagates_unknown_fallback_bounds() {
++        let accumulator = GapAccumulator::default();
++        accumulator.slots[0]
++            .try_merge(GapSnapshot {
++                count: 1,
++                first: Some(1),
++                last: Some(1),
++                first_time: 10,
++                last_time: 10,
++            })
++            .expect("primary slot should be claimable");
++
++        // Make every primary slot unavailable so the next event takes the
++        // fallback path, then force that fallback's count-only overflow path.
++        for slot in &accumulator.slots {
++            slot.sequence.store(1, Ordering::Release);
++        }
++        accumulator.fallback.lock.store(true, Ordering::Release);
++        accumulator.add(2, Some(2), 20);
++        accumulator.fallback.lock.store(false, Ordering::Release);
++        for slot in &accumulator.slots {
++            slot.sequence.store(0, Ordering::Release);
++        }
++
++        let snapshot = accumulator.take().expect("combined snapshot");
++        assert_eq!(snapshot.count, 3);
++        assert!(snapshot.first.is_none());
++        assert!(snapshot.last.is_none());
++        assert_eq!(snapshot.first_time, 0);
++        assert_eq!(snapshot.last_time, 0);
++    }
++
++    #[test]
++    fn requeued_unknown_metadata_stays_unknown_in_accumulators() {
++        let known = GapSnapshot {
++            count: 1,
++            first: Some(1),
++            last: Some(1),
++            first_time: 10,
++            last_time: 10,
++        };
++        let unknown = GapSnapshot {
++            count: 2,
++            first: None,
++            last: None,
++            first_time: 20,
++            last_time: 20,
++        };
++
++        let slot = GapSlot::default();
++        slot.try_merge(known).expect("slot should be claimable");
++        slot.try_merge(unknown).expect("slot should be claimable");
++        let slot_snapshot = slot.try_take().expect("slot snapshot");
++        assert_eq!(slot_snapshot.count, 3);
++        assert!(slot_snapshot.first.is_none());
++        assert!(slot_snapshot.last.is_none());
++        assert_eq!(slot_snapshot.first_time, 10);
++        assert_eq!(slot_snapshot.last_time, 20);
++
++        let fallback = GapFallback::default();
++        assert!(!fallback.merge(known));
++        assert!(!fallback.merge(unknown));
++        let fallback_snapshot = fallback.try_take().expect("fallback snapshot");
++        assert_eq!(fallback_snapshot.count, 3);
++        assert!(fallback_snapshot.first.is_none());
++        assert!(fallback_snapshot.last.is_none());
++        assert_eq!(fallback_snapshot.first_time, 10);
++        assert_eq!(fallback_snapshot.last_time, 20);
++    }
++
++    #[test]
++    fn combining_snapshots_preserves_unknown_boundaries() {
++        let known = GapSnapshot {
++            count: 1,
++            first: Some(1),
++            last: Some(1),
++            first_time: 10,
++            last_time: 10,
++        };
++        let unknown_sequence = GapSnapshot {
++            count: 1,
++            first: None,
++            last: None,
++            first_time: 20,
++            last_time: 20,
++        };
++        let combined = combine_gap_snapshots(known, unknown_sequence);
++        assert!(combined.first.is_none());
++        assert!(combined.last.is_none());
++        assert_eq!(combined.first_time, 10);
++        assert_eq!(combined.last_time, 20);
++
++        let unknown_time = GapSnapshot {
++            count: 1,
++            first: Some(3),
++            last: Some(3),
++            first_time: 0,
++            last_time: 0,
++        };
++        let combined = combine_gap_snapshots(known, unknown_time);
++        assert_eq!(combined.first, Some(1));
++        assert_eq!(combined.last, Some(3));
++        assert_eq!(combined.first_time, 0);
++        assert_eq!(combined.last_time, 0);
 +    }
 +
 +    #[test]
@@ -27065,927 +27514,3 @@ index f010ed5c1bcfa62e70b7ed7e4e856ef1ce27c4ff..b37699a20dc1d9e1075daaa45b97eee1
          }
      };
  
-diff --git a/crates/shadowsocks-auditd/src/spool.rs b/crates/shadowsocks-auditd/src/spool.rs
-index 3869ab55937e87d6f14e85733ff1fd1da8d31a72..75c32db9ab03aeb4b1788b1885b87732cdfe6f45 100644
---- a/crates/shadowsocks-auditd/src/spool.rs
-+++ b/crates/shadowsocks-auditd/src/spool.rs
-@@ -983,6 +983,10 @@ struct TestFaults {
-     seal_after_open_rename: bool,
-     seal_rollback: bool,
-     persist_tombstones: bool,
-+    // Report an error after the aggregate ledger rename has completed.  This
-+    // models a parent-directory fsync failure and must not trigger an in-memory
-+    // rollback of the already-visible ledger transition.
-+    persist_tombstones_after_commit: bool,
-     // Skip one aggregate-ledger write, then fail the next one.  This models
-     // the pending-marker write succeeding while the later ledger removal
-     // fails, which is the retry window for quarantine eviction accounting.
-@@ -993,6 +997,7 @@ struct TestFaults {
- /// destructive transaction. Marker cleanup is a second, best-effort barrier:
- /// it must still be reported to the caller, but an error there must not make
- /// callers forget accounting for a ledger transition that is already durable.
-+#[derive(Debug)]
- struct TombstoneCommit {
-     marker_cleanup_error: Option<SpoolError>,
- }
-@@ -3331,11 +3336,17 @@ impl Spool {
-             };
-             inner.tombstones.remove(index);
-         }
--        if inner.tombstones != old
--            && let Err(error) = self.persist_tombstones_locked(inner)
--        {
--            inner.tombstones = old;
--            return Err(error);
-+        if inner.tombstones != old {
-+            match self.persist_tombstones_locked(inner) {
-+                Ok(()) => {}
-+                Err(AtomicWriteError::BeforeRename(error)) => {
-+                    inner.tombstones = old;
-+                    return Err(error);
-+                }
-+                Err(AtomicWriteError::AfterRename(_)) => {
-+                    return Err(self.mark_durability_uncertain_locked(inner));
-+                }
-+            }
-         }
-         Self::prune_durable_gap_reasons_locked(inner);
-         Ok(())
-@@ -3384,9 +3395,15 @@ impl Spool {
-             inner.tombstones.remove(index);
-         }
-         inner.tombstones.push(entry);
--        if let Err(error) = self.persist_tombstones_locked(inner) {
--            inner.tombstones = old;
--            return Err(error);
-+        match self.persist_tombstones_locked(inner) {
-+            Ok(()) => {}
-+            Err(AtomicWriteError::BeforeRename(error)) => {
-+                inner.tombstones = old;
-+                return Err(error);
-+            }
-+            Err(AtomicWriteError::AfterRename(_)) => {
-+                return Err(self.mark_durability_uncertain_locked(inner));
-+            }
-         }
-         Ok(())
-     }
-@@ -3398,9 +3415,15 @@ impl Spool {
-         let old = inner.tombstones.clone();
-         let removed = inner.tombstones[index].clone();
-         inner.tombstones.remove(index);
--        if let Err(error) = self.persist_tombstones_locked(inner) {
--            inner.tombstones = old;
--            return Err(error);
-+        match self.persist_tombstones_locked(inner) {
-+            Ok(()) => {}
-+            Err(AtomicWriteError::BeforeRename(error)) => {
-+                inner.tombstones = old;
-+                return Err(error);
-+            }
-+            Err(AtomicWriteError::AfterRename(_)) => {
-+                return Err(self.mark_durability_uncertain_locked(inner));
-+            }
-         }
-         let marker_cleanup_error = removed
-             .gap_event_id()
-@@ -3424,9 +3447,15 @@ impl Spool {
-         } else {
-             inner.tombstones.remove(index);
-         }
--        if let Err(error) = self.persist_tombstones_locked(inner) {
--            inner.tombstones = old;
--            return Err(error);
-+        match self.persist_tombstones_locked(inner) {
-+            Ok(()) => {}
-+            Err(AtomicWriteError::BeforeRename(error)) => {
-+                inner.tombstones = old;
-+                return Err(error);
-+            }
-+            Err(AtomicWriteError::AfterRename(_)) => {
-+                return Err(self.mark_durability_uncertain_locked(inner));
-+            }
-         }
-         let marker_cleanup_error = replaced
-             .gap_event_id()
-@@ -3438,19 +3467,31 @@ impl Spool {
-         self.add_tombstone_locked(inner, entry)
-     }
- 
--    fn persist_tombstones_locked(&self, inner: &mut SpoolInner) -> Result<(), SpoolError> {
-+    fn persist_tombstones_locked(&self, inner: &mut SpoolInner) -> Result<(), AtomicWriteError> {
-         #[cfg(test)]
-         if !std::mem::take(&mut inner.faults.persist_tombstones_skip)
-             && std::mem::take(&mut inner.faults.persist_tombstones)
-         {
--            return Err(io::Error::other("injected tombstone persistence failure").into());
-+            return Err(AtomicWriteError::BeforeRename(
-+                io::Error::other("injected tombstone persistence failure").into(),
-+            ));
-         }
-         let path = self.root.join("tombstones.json");
--        let before = file_len(&path)?;
-+        let before = file_len(&path).map_err(|error| AtomicWriteError::BeforeRename(error.into()))?;
-         let result = persist_tombstones(&self.root, &inner.tombstones);
--        if let Err(error) = Self::update_path_size(inner, &path, before) {
--            mark_storage_rejection(inner, true);
--            return Err(error.into());
-+        #[cfg(test)]
-+        let result = if result.is_ok() && std::mem::take(&mut inner.faults.persist_tombstones_after_commit) {
-+            Err(AtomicWriteError::AfterRename(
-+                io::Error::other("injected tombstone failure after durable commit").into(),
-+            ))
-+        } else {
-+            result
-+        };
-+        if result.is_ok() || matches!(&result, Err(AtomicWriteError::AfterRename(_))) {
-+            if let Err(error) = Self::update_path_size(inner, &path, before) {
-+                inner.spool_bytes_known = false;
-+                return Err(AtomicWriteError::AfterRename(error.into()));
-+            }
-         }
-         result
-     }
-@@ -5247,12 +5288,12 @@ fn salvage_tombstones(root: &Path) -> Result<Vec<TombstoneEntry>, SpoolError> {
-     Ok(recovered)
- }
- 
--fn persist_tombstones(root: &Path, entries: &[TombstoneEntry]) -> Result<(), SpoolError> {
-+fn persist_tombstones(root: &Path, entries: &[TombstoneEntry]) -> Result<(), AtomicWriteError> {
-     let ledger = wire::TombstoneLedger::new(entries.to_vec());
-     let bytes = ledger
-         .canonical_bytes()
--        .map_err(|error| SpoolError::Protocol(ProtocolError::from(error)))?;
--    write_atomic_file(&root.join("tombstones.json"), &bytes, 0o600)
-+        .map_err(|error| AtomicWriteError::BeforeRename(SpoolError::Protocol(ProtocolError::from(error))))?;
-+    write_atomic_file_staged(&root.join("tombstones.json"), &bytes, 0o600)
- }
- 
- fn ensure_dir(path: &Path, mode: u32) -> io::Result<()> {
-@@ -6210,6 +6251,106 @@ mod tests {
-         }
-     }
- 
-+    /// An aggregate-ledger rename can succeed before its parent-directory
-+    /// fsync reports an error.  Every tombstone mutation must retain the
-+    /// in-memory post-transition state and stop the daemon, otherwise a later
-+    /// request can overwrite the newer on-disk ledger with the rolled-back
-+    /// view.  Exercise all mutation entry points that can persist the ledger.
-+    #[test]
-+    fn tombstone_after_rename_failure_keeps_post_commit_state() {
-+        // add_tombstone_locked
-+        {
-+            let dir = tempfile::tempdir().expect("tempdir");
-+            let spool = Spool::open(config(dir.path())).expect("spool");
-+            let entry = TombstoneEntry::AckedReceipt(wire::AckedReceipt::new(
-+                "a".repeat(32),
-+                "b".repeat(64),
-+                1,
-+            ));
-+            let mut inner = lock(&spool.inner);
-+            inner.faults.persist_tombstones_after_commit = true;
-+            let error = spool
-+                .add_tombstone_locked(&mut inner, entry.clone())
-+                .expect_err("post-rename ledger failure");
-+            assert!(matches!(error, SpoolError::DurabilityUncertain));
-+            assert_eq!(inner.tombstones, vec![entry.clone()]);
-+            drop(inner);
-+            assert_eq!(load_tombstones(dir.path()).expect("ledger"), vec![entry]);
-+        }
-+
-+        // prune_receipts_locked
-+        {
-+            let dir = tempfile::tempdir().expect("tempdir");
-+            let spool = Spool::open(config(dir.path())).expect("spool");
-+            let entry = TombstoneEntry::AckedReceipt(wire::AckedReceipt::new(
-+                "c".repeat(32),
-+                "d".repeat(64),
-+                1,
-+            ));
-+            {
-+                let mut inner = lock(&spool.inner);
-+                spool
-+                    .add_tombstone_locked(&mut inner, entry)
-+                    .expect("initial ledger");
-+                inner.faults.persist_tombstones_after_commit = true;
-+                let error = spool
-+                    .prune_receipts_locked(&mut inner)
-+                    .expect_err("post-rename ledger failure");
-+                assert!(matches!(error, SpoolError::DurabilityUncertain));
-+                assert!(inner.tombstones.is_empty(), "retain the committed prune");
-+            }
-+            assert!(load_tombstones(dir.path()).expect("ledger").is_empty());
-+        }
-+
-+        // remove_tombstone_locked
-+        {
-+            let dir = tempfile::tempdir().expect("tempdir");
-+            let spool = Spool::open(config(dir.path())).expect("spool");
-+            let pending = eviction_pending_for_test(
-+                "spool:11111111111111111111111111111111",
-+                "e".repeat(32).as_str(),
-+            );
-+            let mut inner = lock(&spool.inner);
-+            spool
-+                .add_tombstone_locked(&mut inner, pending)
-+                .expect("initial ledger");
-+            inner.faults.persist_tombstones_after_commit = true;
-+            let error = spool
-+                .remove_tombstone_locked(&mut inner, 0)
-+                .expect_err("post-rename ledger failure");
-+            assert!(matches!(error, SpoolError::DurabilityUncertain));
-+            assert!(inner.tombstones.is_empty(), "retain the committed removal");
-+            drop(inner);
-+            assert!(load_tombstones(dir.path()).expect("ledger").is_empty());
-+        }
-+
-+        // replace_tombstone_locked
-+        {
-+            let dir = tempfile::tempdir().expect("tempdir");
-+            let spool = Spool::open(config(dir.path())).expect("spool");
-+            let pending = match eviction_pending_for_test(
-+                "spool:22222222222222222222222222222222",
-+                "f".repeat(32).as_str(),
-+            ) {
-+                TombstoneEntry::EvictionPending(value) => value,
-+                _ => unreachable!("test helper must build an eviction pending entry"),
-+            };
-+            let replacement = TombstoneEntry::EvictedReceipt(wire::EvictedReceipt::from_pending(&pending));
-+            let mut inner = lock(&spool.inner);
-+            spool
-+                .add_tombstone_locked(&mut inner, TombstoneEntry::EvictionPending(pending.clone()))
-+                .expect("initial ledger");
-+            inner.faults.persist_tombstones_after_commit = true;
-+            let error = spool
-+                .replace_tombstone_locked(&mut inner, 0, Some(replacement.clone()))
-+                .expect_err("post-rename ledger failure");
-+            assert!(matches!(error, SpoolError::DurabilityUncertain));
-+            assert_eq!(inner.tombstones, vec![replacement.clone()]);
-+            drop(inner);
-+            assert_eq!(load_tombstones(dir.path()).expect("ledger"), vec![replacement]);
-+        }
-+    }
-+
-     #[test]
-     fn orphan_open_marker_failure_prevents_rename_and_retry_accounts_every_byte() {
-         let dir = tempfile::tempdir().expect("tempdir");
-+diff --git a/crates/shadowsocks-auditd/src/export.rs b/crates/shadowsocks-auditd/src/export.rs
-index 52ffdc64619377471d67e0830c0aa26177e0bf83..82966d69285534eb8121e94c6b5715aaa4c9fce3 100644
---- a/crates/shadowsocks-auditd/src/export.rs
-+++ b/crates/shadowsocks-auditd/src/export.rs
-@@ -717,11 +717,18 @@ async fn write_response(stream: &mut UnixStream, response: &WireResponse) -> io:
-     stream.write_all(&response.bytes).await
- }
- 
-+/// Add a bounded request interval without allowing `Instant` overflow to
-+/// abort the audit daemon.  If the platform clock cannot represent the
-+/// interval, treating the request as immediately expired is fail-closed.
-+fn deadline_after(now: time::Instant, interval: Duration) -> time::Instant {
-+    now.checked_add(interval).unwrap_or(now)
-+}
-+
- async fn read_request(stream: &mut UnixStream) -> Result<HttpRequest, RequestReadError> {
-     // One deadline covers the whole request read, so a slow peer cannot extend
-     // it chunk by chunk.  Expiry is a framing failure and keeps the parsed
-     // prefix, which is what decides whether the fixed 400 can be signed.
--    let deadline = time::Instant::now() + HTTP_DEADLINE;
-+    let deadline = deadline_after(time::Instant::now(), HTTP_DEADLINE);
-     let mut bytes = Vec::with_capacity(4096);
-     let mut header_end = None;
-     let mut chunk = [0_u8; 1024];
-@@ -1268,6 +1275,15 @@ mod tests {
-         assert!(!is_canonical_decimal("+1"));
-     }
- 
-+    #[test]
-+    fn export_deadline_is_checked_against_overflow() {
-+        let now = time::Instant::now();
-+        assert!(deadline_after(now, HTTP_DEADLINE) > now);
-+        // A duration this clock cannot represent must expire immediately
-+        // rather than panic in the `Instant + Duration` implementation.
-+        assert_eq!(deadline_after(now, Duration::MAX), now);
-+    }
-+
-     #[test]
-     fn token_validation_rejects_separators() {
-         assert!(is_token_byte(b'X'));
-diff --git a/crates/shadowsocks-auditd/src/spool.rs b/crates/shadowsocks-auditd/src/spool.rs
-index 75c32db9ab03aeb4b1788b1885b87732cdfe6f45..13e833ad543da0e91aedcae777d37b03501c5360 100644
---- a/crates/shadowsocks-auditd/src/spool.rs
-+++ b/crates/shadowsocks-auditd/src/spool.rs
-@@ -1105,8 +1105,21 @@ impl Spool {
-                     // isolated; replacing it would erase the only artifact
-                     // available for operator salvage.
-                     storage_rejected_attempts = saturating_inc(storage_rejected_attempts);
--                } else if !salvaged.is_empty() && persist_tombstones(&root, &salvaged).is_err() {
--                    storage_rejected_attempts = saturating_inc(storage_rejected_attempts);
-+                } else if !salvaged.is_empty() {
-+                    match persist_tombstones(&root, &salvaged) {
-+                        Ok(()) => {}
-+                        Err(AtomicWriteError::BeforeRename(_)) => {
-+                            storage_rejected_attempts = saturating_inc(storage_rejected_attempts);
-+                        }
-+                        Err(AtomicWriteError::AfterRename(_)) => {
-+                            // The replacement ledger is already visible, but
-+                            // its parent-directory sync did not complete.  A
-+                            // partially acknowledged startup cannot safely
-+                            // continue: refuse service and let the supervisor
-+                            // retry recovery after the storage is repaired.
-+                            return Err(SpoolError::DurabilityUncertain);
-+                        }
-+                    }
-                 }
-                 salvaged
-             }
-diff --git a/crates/shadowsocks-service/src/server/user_audit.rs b/crates/shadowsocks-service/src/server/user_audit.rs
-index 4a5d399..d87cda5 100644
---- a/crates/shadowsocks-service/src/server/user_audit.rs
-+++ b/crates/shadowsocks-service/src/server/user_audit.rs
-@@ -463,6 +463,29 @@ struct GapSnapshot {
-     last_time: u64,
- }
- 
-+const GAP_FIRST_UNKNOWN: u8 = 1 << 0;
-+const GAP_LAST_UNKNOWN: u8 = 1 << 1;
-+const GAP_FIRST_TIME_UNKNOWN: u8 = 1 << 2;
-+const GAP_LAST_TIME_UNKNOWN: u8 = 1 << 3;
-+
-+fn gap_unknown_mask(snapshot: GapSnapshot) -> u8 {
-+    let mut mask = 0;
-+    // The wire contract requires first/last sequence to be jointly present
-+    // or jointly null.  Treat a partial input as unknown on both sides so a
-+    // later merge cannot manufacture an invalid half-known range.
-+    if snapshot.first.is_none() || snapshot.last.is_none() {
-+        mask |= GAP_LAST_UNKNOWN;
-+        mask |= GAP_FIRST_UNKNOWN;
-+    }
-+    if snapshot.first_time == 0 {
-+        mask |= GAP_FIRST_TIME_UNKNOWN;
-+    }
-+    if snapshot.last_time == 0 {
-+        mask |= GAP_LAST_TIME_UNKNOWN;
-+    }
-+    mask
-+}
-+
- /// A fixed set of tiny seqlock slots used by the relay-facing diagnostic
- /// accumulators.  A relay never waits for a mutex: it claims any currently
- /// free slot with one CAS and updates all fields while that slot is odd.  The
-@@ -478,6 +501,11 @@ struct GapSlot {
-     last: AtomicU64,
-     first_time: AtomicU64,
-     last_time: AtomicU64,
-+    /// Each bit records a boundary that was unknown for at least one event in
-+    /// this slot.  Keeping these bits beside the aggregate prevents a
-+    /// diagnostic snapshot requeued after an encode/NACK failure from having
-+    /// its `None`/zero fields treated as neutral by a later merge.
-+    metadata_unknown: AtomicU8,
- }
- 
- impl GapSlot {
-@@ -501,25 +529,35 @@ impl GapSlot {
-         let count = previous_count.saturating_add(snapshot.count);
-         let saturated = count == u64::MAX;
-         self.count.store(count, Ordering::Relaxed);
--        if let Some(first) = snapshot.first {
-+        let unknown = gap_unknown_mask(snapshot);
-+        self.metadata_unknown.fetch_or(unknown, Ordering::Relaxed);
-+        let known = self.metadata_unknown.load(Ordering::Relaxed);
-+        if let Some(first) = snapshot.first
-+            && known & GAP_FIRST_UNKNOWN == 0
-+        {
-             let current = self.first.load(Ordering::Relaxed);
-             if current == 0 || first < current {
-                 self.first.store(first, Ordering::Relaxed);
-             }
-         }
--        if let Some(last) = snapshot.last {
-+        if let Some(last) = snapshot.last
-+            && known & GAP_LAST_UNKNOWN == 0
-+        {
-             let current = self.last.load(Ordering::Relaxed);
-             if last > current {
-                 self.last.store(last, Ordering::Relaxed);
-             }
-         }
--        if snapshot.first_time != 0 {
-+        if snapshot.first_time != 0 && known & GAP_FIRST_TIME_UNKNOWN == 0 {
-             let current = self.first_time.load(Ordering::Relaxed);
-             if current == 0 || snapshot.first_time < current {
-                 self.first_time.store(snapshot.first_time, Ordering::Relaxed);
-             }
-         }
--        if snapshot.last_time > self.last_time.load(Ordering::Relaxed) {
-+        if snapshot.last_time != 0
-+            && known & GAP_LAST_TIME_UNKNOWN == 0
-+            && snapshot.last_time > self.last_time.load(Ordering::Relaxed)
-+        {
-             self.last_time.store(snapshot.last_time, Ordering::Relaxed);
-         }
-         self.sequence.store(version.wrapping_add(2), Ordering::Release);
-@@ -542,21 +580,36 @@ impl GapSlot {
-         {
-             return None;
-         }
--        let snapshot = GapSnapshot {
--            count: self.count.swap(0, Ordering::Relaxed),
--            first: match self.first.swap(0, Ordering::Relaxed) {
--                0 => None,
--                value => Some(value),
-+        let count = self.count.swap(0, Ordering::Relaxed);
-+        let first = self.first.swap(0, Ordering::Relaxed);
-+        let last = self.last.swap(0, Ordering::Relaxed);
-+        let first_time = self.first_time.swap(0, Ordering::Relaxed);
-+        let last_time = self.last_time.swap(0, Ordering::Relaxed);
-+        let unknown = self.metadata_unknown.swap(0, Ordering::Relaxed);
-+        self.sequence.store(version.wrapping_add(2), Ordering::Release);
-+        Some(GapSnapshot {
-+            count,
-+            first: if unknown & (GAP_FIRST_UNKNOWN | GAP_LAST_UNKNOWN) != 0 {
-+                None
-+            } else {
-+                (first != 0).then_some(first)
-             },
--            last: match self.last.swap(0, Ordering::Relaxed) {
--                0 => None,
--                value => Some(value),
-+            last: if unknown & (GAP_FIRST_UNKNOWN | GAP_LAST_UNKNOWN) != 0 {
-+                None
-+            } else {
-+                (last != 0).then_some(last)
-             },
--            first_time: self.first_time.swap(0, Ordering::Relaxed),
--            last_time: self.last_time.swap(0, Ordering::Relaxed),
--        };
--        self.sequence.store(version.wrapping_add(2), Ordering::Release);
--        Some(snapshot)
-+            first_time: if unknown & GAP_FIRST_TIME_UNKNOWN != 0 {
-+                0
-+            } else {
-+                first_time
-+            },
-+            last_time: if unknown & GAP_LAST_TIME_UNKNOWN != 0 {
-+                0
-+            } else {
-+                last_time
-+            },
-+        })
-     }
- 
-     fn is_nonempty(&self) -> bool {
-@@ -575,12 +628,21 @@ impl GapSlot {
- #[derive(Default)]
- struct GapFallback {
-     lock: AtomicBool,
-+    /// Count merged while the fallback lock was available.  Its boundary
-+    /// fields below describe exactly this counter's aggregate.
-     count: AtomicU64,
-+    /// Count merged while the fallback lock was busy.  Keep it separate from
-+    /// `count`: a producer can update this path while `try_take` is swapping
-+    /// the coherent fields, and a single sticky marker cannot identify which
-+    /// side of that swap the count belongs to.
-+    unknown_count: AtomicU64,
-     first: AtomicU64,
-     last: AtomicU64,
-     first_time: AtomicU64,
-     last_time: AtomicU64,
--    metadata_unknown: AtomicBool,
-+    /// Unknown boundary bits for the lock-protected counter.  The separate
-+    /// `unknown_count` below implies all four bits for its own count.
-+    metadata_unknown: AtomicU8,
- }
- 
- impl GapFallback {
-@@ -599,11 +661,10 @@ impl GapFallback {
-             return saturated;
-         }
- 
--        // Do not wait for the fallback lock.  A count-only merge is still a
--        // useful and honest diagnostic: sequence/time boundaries are nullable
--        // when concurrent gaps cannot be determined precisely.
--        self.metadata_unknown.store(true, Ordering::Release);
--        saturating_add_atomic(&self.count, snapshot.count)
-+        // Do not wait for the fallback lock.  Keep this count separate from
-+        // the coherent counter so a concurrent `try_take` cannot consume a
-+        // metadata-unknown marker for the wrong side of its count swap.
-+        saturating_add_atomic(&self.unknown_count, snapshot.count)
-     }
- 
-     fn merge_locked(&self, snapshot: GapSnapshot) -> bool {
-@@ -611,25 +672,35 @@ impl GapFallback {
-         // fallback lock is held.  Use the same CAS-based saturating addition
-         // here so that a stale load cannot overwrite that concurrent update.
-         let saturated = saturating_add_atomic(&self.count, snapshot.count);
--        if let Some(first) = snapshot.first {
-+        let unknown = gap_unknown_mask(snapshot);
-+        self.metadata_unknown.fetch_or(unknown, Ordering::Relaxed);
-+        let known = self.metadata_unknown.load(Ordering::Relaxed);
-+        if let Some(first) = snapshot.first
-+            && known & GAP_FIRST_UNKNOWN == 0
-+        {
-             let current = self.first.load(Ordering::Relaxed);
-             if current == 0 || first < current {
-                 self.first.store(first, Ordering::Relaxed);
-             }
-         }
--        if let Some(last) = snapshot.last {
-+        if let Some(last) = snapshot.last
-+            && known & GAP_LAST_UNKNOWN == 0
-+        {
-             let current = self.last.load(Ordering::Relaxed);
-             if last > current {
-                 self.last.store(last, Ordering::Relaxed);
-             }
-         }
--        if snapshot.first_time != 0 {
-+        if snapshot.first_time != 0 && known & GAP_FIRST_TIME_UNKNOWN == 0 {
-             let current = self.first_time.load(Ordering::Relaxed);
-             if current == 0 || snapshot.first_time < current {
-                 self.first_time.store(snapshot.first_time, Ordering::Relaxed);
-             }
-         }
--        if snapshot.last_time > self.last_time.load(Ordering::Relaxed) {
-+        if snapshot.last_time != 0
-+            && known & GAP_LAST_TIME_UNKNOWN == 0
-+            && snapshot.last_time > self.last_time.load(Ordering::Relaxed)
-+        {
-             self.last_time.store(snapshot.last_time, Ordering::Relaxed);
-         }
-         saturated
-@@ -643,39 +714,59 @@ impl GapFallback {
-         {
-             return None;
-         }
--        let snapshot = GapSnapshot {
--            count: self.count.swap(0, Ordering::Relaxed),
--            first: match self.first.swap(0, Ordering::Relaxed) {
--                0 => None,
--                value => Some(value),
--            },
--            last: match self.last.swap(0, Ordering::Relaxed) {
--                0 => None,
--                value => Some(value),
--            },
--            first_time: self.first_time.swap(0, Ordering::Relaxed),
--            last_time: self.last_time.swap(0, Ordering::Relaxed),
--        };
--        let metadata_unknown = self.metadata_unknown.swap(false, Ordering::AcqRel);
-+        let count = self.count.swap(0, Ordering::Relaxed);
-+        let first = self.first.swap(0, Ordering::Relaxed);
-+        let last = self.last.swap(0, Ordering::Relaxed);
-+        let first_time = self.first_time.swap(0, Ordering::Relaxed);
-+        let last_time = self.last_time.swap(0, Ordering::Relaxed);
-+        let metadata_unknown = self.metadata_unknown.swap(0, Ordering::Relaxed);
-+        // `lock` also excludes coherent merges, while count-only producers
-+        // use the independent atomic below.  Swapping it before releasing the
-+        // lock gives this snapshot an exact count boundary: updates racing
-+        // after the swap remain pending for the next take.
-+        let unknown_count = self.unknown_count.swap(0, Ordering::Relaxed);
-         self.lock.store(false, Ordering::Release);
- 
--        if metadata_unknown {
-+        let count = count.saturating_add(unknown_count);
-+        if unknown_count != 0 {
-             Some(GapSnapshot {
--                count: snapshot.count,
-+                count,
-                 first: None,
-                 last: None,
-                 first_time: 0,
-                 last_time: 0,
-             })
-         } else {
--            Some(snapshot)
-+            Some(GapSnapshot {
-+                count,
-+                first: if metadata_unknown & (GAP_FIRST_UNKNOWN | GAP_LAST_UNKNOWN) != 0 {
-+                    None
-+                } else {
-+                    (first != 0).then_some(first)
-+                },
-+                last: if metadata_unknown & (GAP_FIRST_UNKNOWN | GAP_LAST_UNKNOWN) != 0 {
-+                    None
-+                } else {
-+                    (last != 0).then_some(last)
-+                },
-+                first_time: if metadata_unknown & GAP_FIRST_TIME_UNKNOWN != 0 {
-+                    0
-+                } else {
-+                    first_time
-+                },
-+                last_time: if metadata_unknown & GAP_LAST_TIME_UNKNOWN != 0 {
-+                    0
-+                } else {
-+                    last_time
-+                },
-+            })
-         }
-     }
- 
-     fn is_nonempty(&self) -> bool {
-         self.lock.load(Ordering::Acquire)
-             || self.count.load(Ordering::Acquire) != 0
--            || self.metadata_unknown.load(Ordering::Acquire)
-+            || self.unknown_count.load(Ordering::Acquire) != 0
-     }
- }
- 
-@@ -751,6 +842,7 @@ impl GapAccumulator {
- 
-     fn approximate_count(&self) -> u64 {
-         let mut total = self.fallback.count.load(Ordering::Acquire);
-+        total = total.saturating_add(self.fallback.unknown_count.load(Ordering::Acquire));
-         for slot in &self.slots {
-             total = total.saturating_add(slot.count.load(Ordering::Acquire));
-         }
-@@ -791,25 +883,27 @@ impl GapAccumulator {
- }
- 
- fn combine_gap_snapshots(left: GapSnapshot, right: GapSnapshot) -> GapSnapshot {
-+    let sequence_unknown = left.first.is_none() || left.last.is_none() || right.first.is_none() || right.last.is_none();
-+    let first = match (left.first, right.first) {
-+        (Some(a), Some(b)) if !sequence_unknown => Some(a.min(b)),
-+        _ => None,
-+    };
-+    let last = match (left.last, right.last) {
-+        (Some(a), Some(b)) if !sequence_unknown => Some(a.max(b)),
-+        _ => None,
-+    };
-     GapSnapshot {
-         count: left.count.saturating_add(right.count),
--        first: match (left.first, right.first) {
--            (None, value) | (value, None) => value,
--            (Some(a), Some(b)) => Some(a.min(b)),
-+        first,
-+        last,
-+        first_time: match (left.first_time, right.first_time) {
-+            (0, _) | (_, 0) => 0,
-+            (a, b) => a.min(b),
-         },
--        last: match (left.last, right.last) {
--            (None, value) | (value, None) => value,
--            (Some(a), Some(b)) => Some(a.max(b)),
-+        last_time: match (left.last_time, right.last_time) {
-+            (0, _) | (_, 0) => 0,
-+            (a, b) => a.max(b),
-         },
--        first_time: min_nonzero(left.first_time, right.first_time),
--        last_time: left.last_time.max(right.last_time),
--    }
--}
--
--fn min_nonzero(left: u64, right: u64) -> u64 {
--    match (left, right) {
--        (0, value) | (value, 0) => value,
--        (a, b) => a.min(b),
-     }
- }
- 
-@@ -4261,6 +4355,113 @@ mod tests {
-         assert_eq!(snapshot.last_time, 22);
-     }
- 
-+    #[test]
-+    fn fallback_unknown_count_keeps_metadata_unknown() {
-+        let fallback = GapFallback::default();
-+        assert!(!fallback.merge(GapSnapshot {
-+            count: 1,
-+            first: Some(1),
-+            last: Some(1),
-+            first_time: 10,
-+            last_time: 10,
-+        }));
-+
-+        // Force the count-only path.  The unknown count must stay associated
-+        // with this take rather than being consumed by a concurrent coherent
-+        // metadata snapshot.
-+        fallback.lock.store(true, Ordering::Release);
-+        assert!(!fallback.merge(GapSnapshot {
-+            count: 2,
-+            first: Some(2),
-+            last: Some(2),
-+            first_time: 20,
-+            last_time: 20,
-+        }));
-+        fallback.lock.store(false, Ordering::Release);
-+
-+        let snapshot = fallback.try_take().expect("fallback snapshot");
-+        assert_eq!(snapshot.count, 3);
-+        assert!(snapshot.first.is_none());
-+        assert!(snapshot.last.is_none());
-+        assert_eq!(snapshot.first_time, 0);
-+        assert_eq!(snapshot.last_time, 0);
-+        assert!(!fallback.is_nonempty());
-+    }
-+
-+    #[test]
-+    fn requeued_unknown_metadata_stays_unknown_in_accumulators() {
-+        let known = GapSnapshot {
-+            count: 1,
-+            first: Some(1),
-+            last: Some(1),
-+            first_time: 10,
-+            last_time: 10,
-+        };
-+        let unknown = GapSnapshot {
-+            count: 2,
-+            first: None,
-+            last: None,
-+            first_time: 20,
-+            last_time: 20,
-+        };
-+
-+        let slot = GapSlot::default();
-+        slot.try_merge(known).expect("slot should be claimable");
-+        slot.try_merge(unknown).expect("slot should be claimable");
-+        let slot_snapshot = slot.try_take().expect("slot snapshot");
-+        assert_eq!(slot_snapshot.count, 3);
-+        assert!(slot_snapshot.first.is_none());
-+        assert!(slot_snapshot.last.is_none());
-+        assert_eq!(slot_snapshot.first_time, 10);
-+        assert_eq!(slot_snapshot.last_time, 20);
-+
-+        let fallback = GapFallback::default();
-+        assert!(!fallback.merge(known));
-+        assert!(!fallback.merge(unknown));
-+        let fallback_snapshot = fallback.try_take().expect("fallback snapshot");
-+        assert_eq!(fallback_snapshot.count, 3);
-+        assert!(fallback_snapshot.first.is_none());
-+        assert!(fallback_snapshot.last.is_none());
-+        assert_eq!(fallback_snapshot.first_time, 10);
-+        assert_eq!(fallback_snapshot.last_time, 20);
-+    }
-+
-+    #[test]
-+    fn combining_snapshots_preserves_unknown_boundaries() {
-+        let known = GapSnapshot {
-+            count: 1,
-+            first: Some(1),
-+            last: Some(1),
-+            first_time: 10,
-+            last_time: 10,
-+        };
-+        let unknown_sequence = GapSnapshot {
-+            count: 1,
-+            first: None,
-+            last: None,
-+            first_time: 20,
-+            last_time: 20,
-+        };
-+        let combined = combine_gap_snapshots(known, unknown_sequence);
-+        assert!(combined.first.is_none());
-+        assert!(combined.last.is_none());
-+        assert_eq!(combined.first_time, 10);
-+        assert_eq!(combined.last_time, 20);
-+
-+        let unknown_time = GapSnapshot {
-+            count: 1,
-+            first: Some(3),
-+            last: Some(3),
-+            first_time: 0,
-+            last_time: 0,
-+        };
-+        let combined = combine_gap_snapshots(known, unknown_time);
-+        assert_eq!(combined.first, Some(1));
-+        assert_eq!(combined.last, Some(3));
-+        assert_eq!(combined.first_time, 0);
-+        assert_eq!(combined.last_time, 0);
-+    }
-+
-     #[test]
-     fn frozen_diagnostic_failure_does_not_requeue_or_recurse() {
-         let config = UserAuditConfig::new("/tmp/audit.sock", test_auditd_user());
-diff --git a/crates/shadowsocks-service/src/server/user_audit.rs b/crates/shadowsocks-service/src/server/user_audit.rs
-index d87cda5..584b13a 100644
---- a/crates/shadowsocks-service/src/server/user_audit.rs
-+++ b/crates/shadowsocks-service/src/server/user_audit.rs
-@@ -19,6 +19,9 @@ use std::{
-     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
- };
- 
-+#[cfg(test)]
-+use std::{cell::RefCell, sync::Barrier};
-+
- #[cfg(target_os = "linux")]
- use std::{
-     ffi::CString,
-@@ -67,6 +70,14 @@ const SHUTDOWN_RETRY_DELAY: Duration = Duration::from_millis(100);
- const MAX_RECONNECT_BACKOFF: Duration = Duration::from_secs(5);
- const MAX_RECONNECT_JITTER_PERCENT: u32 = 20;
- 
-+#[cfg(test)]
-+thread_local! {
-+    // A one-shot hook lets the saturation regression force a failed CAS after
-+    // the closure has observed a value near u64::MAX without perturbing the
-+    // production hot path or making the test scheduler-dependent.
-+    static SATURATING_ADD_BEFORE_CAS: RefCell<Option<(Arc<Barrier>, Arc<Barrier>)>> = RefCell::new(None);
-+}
-+
- #[cfg(test)]
- struct IdleSessionWaitHook {
-     entered: oneshot::Sender<()>,
-@@ -776,14 +787,22 @@ fn saturating_add_atomic(atom: &AtomicU64, amount: u64) -> bool {
--    if amount == 0 {
--        return atom.load(Ordering::Acquire) == u64::MAX;
--    }
--    let mut saturated = false;
--    atom.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-+    let result = atom.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-         let next = current.saturating_add(amount);
--        saturated |= next == u64::MAX;
-+
-+        #[cfg(test)]
-+        SATURATING_ADD_BEFORE_CAS.with(|hook| {
-+            if let Some((entered, release)) = hook.borrow_mut().take() {
-+                entered.wait();
-+                release.wait();
-+            }
-+        });
-+
-         Some(next)
--    })
--    .ok();
--    saturated
-+    });
-+
-+    // `fetch_update` may invoke the closure more than once after a failed
-+    // CAS.  Derive saturation from the value that this invocation actually
-+    // replaced, rather than retaining a flag from a speculative attempt that
-+    // another thread may have invalidated (for example via a snapshot swap).
-+    result.is_ok_and(|previous| previous.saturating_add(amount) == u64::MAX)
- }
- 
- struct GapAccumulator {
-@@ -4297,6 +4319,32 @@ mod tests {
-         assert_eq!(counter.load(Ordering::Acquire), 160_000);
-     }
- 
-+    #[test]
-+    fn saturating_atomic_add_ignores_saturation_from_failed_cas() {
-+        let counter = Arc::new(AtomicU64::new(u64::MAX - 1));
-+        let entered = Arc::new(std::sync::Barrier::new(2));
-+        let release = Arc::new(std::sync::Barrier::new(2));
-+        let worker_counter = counter.clone();
-+        let worker_entered = entered.clone();
-+        let worker_release = release.clone();
-+        let worker = std::thread::spawn(move || {
-+            SATURATING_ADD_BEFORE_CAS.with(|hook| {
-+                *hook.borrow_mut() = Some((worker_entered, worker_release));
-+            });
-+            saturating_add_atomic(&worker_counter, 1)
-+        });
-+
-+        // Force the first closure invocation to compute MAX, then invalidate
-+        // that compare-exchange before it can commit.  The retry succeeds at
-+        // one and must not report the speculative MAX as durable saturation.
-+        entered.wait();
-+        counter.store(0, Ordering::Release);
-+        release.wait();
-+        let saturated = worker.join().expect("saturation worker");
-+        assert!(!saturated);
-+        assert_eq!(counter.load(Ordering::Acquire), 1);
-+    }
-+
-     #[test]
-     fn gap_observation_time_marks_unknown_wall_clock() {
-         let config = UserAuditConfig::new("/tmp/audit.sock", test_auditd_user());
-@@ -4388,6 +4433,39 @@ mod tests {
-         assert!(!fallback.is_nonempty());
-     }
- 
-+    #[test]
-+    fn accumulator_take_propagates_unknown_fallback_bounds() {
-+        let accumulator = GapAccumulator::default();
-+        accumulator.slots[0]
-+            .try_merge(GapSnapshot {
-+                count: 1,
-+                first: Some(1),
-+                last: Some(1),
-+                first_time: 10,
-+                last_time: 10,
-+            })
-+            .expect("primary slot should be claimable");
-+
-+        // Make every primary slot unavailable so the next event takes the
-+        // fallback path, then force that fallback's count-only overflow path.
-+        for slot in &accumulator.slots {
-+            slot.sequence.store(1, Ordering::Release);
-+        }
-+        accumulator.fallback.lock.store(true, Ordering::Release);
-+        accumulator.add(2, Some(2), 20);
-+        accumulator.fallback.lock.store(false, Ordering::Release);
-+        for slot in &accumulator.slots {
-+            slot.sequence.store(0, Ordering::Release);
-+        }
-+
-+        let snapshot = accumulator.take().expect("combined snapshot");
-+        assert_eq!(snapshot.count, 3);
-+        assert!(snapshot.first.is_none());
-+        assert!(snapshot.last.is_none());
-+        assert_eq!(snapshot.first_time, 0);
-+        assert_eq!(snapshot.last_time, 0);
-+    }
-+
-     #[test]
-     fn requeued_unknown_metadata_stays_unknown_in_accumulators() {
-         let known = GapSnapshot {
