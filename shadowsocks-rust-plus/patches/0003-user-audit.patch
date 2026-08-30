@@ -8089,10 +8089,10 @@ index 0000000000000000000000000000000000000000..6cf8d005dfef917c852be4f611d5b945
 +}
 diff --git a/crates/shadowsocks-auditd/src/spool.rs b/crates/shadowsocks-auditd/src/spool.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..13e833ad543da0e91aedcae777d37b03501c5360
+index 0000000000000000000000000000000000000000..d2ea662fa33b99a418dff8aad425ad5e117058e7
 --- /dev/null
 +++ b/crates/shadowsocks-auditd/src/spool.rs
-@@ -0,0 +1,8929 @@
+@@ -0,0 +1,8997 @@
 +//! Durable, node-local audit spool.
 +//!
 +//! The spool is deliberately synchronous.  Ingest and export perform their
@@ -15858,6 +15858,74 @@ index 0000000000000000000000000000000000000000..13e833ad543da0e91aedcae777d37b03
 +            inner.evicted_unacked_records, 0,
 +            "the durable ACK receipt must override the legacy ambiguous label"
 +        );
++    }
++
++    /// `m-223` 的兼容分支必须是**保守**匹配：只有 `batch_id` 与 `body_sha256`
++    /// 双双对上的 durable receipt 才抑制计账。
++    ///
++    /// 只有正例（`legacy_acked_quarantine_uses_the_durable_ack_receipt`）挡不住
++    /// 放宽。三种放宽各需要一个负例：任意 receipt 即抑制、只比 `batch_id`、
++    /// 只比 `body_sha256`——三者都是 fail-open，真实的未确认丢失被静默吞掉，
++    /// 方向比高报严重得多。
++    #[test]
++    fn a_partially_matching_ack_receipt_does_not_suppress_unacknowledged_loss() {
++        // (标签, 用真实 batch_id, 用真实 body_sha256)
++        for (label, real_batch, real_digest) in [
++            ("无关 receipt", false, false),
++            ("只有 batch_id 相同", true, false),
++            ("只有 body_sha256 相同", false, true),
++        ] {
++            let dir = tempfile::tempdir().expect("tempdir");
++            let spool = Spool::open(config(dir.path())).expect("spool");
++            spool.append(&event(1), 1).expect("append");
++            spool.append(&event(2), 2).expect("append");
++            {
++                let mut inner = lock(&spool.inner);
++                spool.seal_locked(&mut inner).expect("seal");
++            }
++            // Never acknowledged: corrupt the body so integrity isolation moves
++            // it into quarantine under the ambiguous legacy label.
++            let sealed = list_batch_dirs(&dir.path().join("sealed")).expect("sealed");
++            let info = read_meta_hint(&sealed[0], &spool.config.node_id).expect("meta");
++            fs::write(sealed[0].join("segment.ndjson"), b"corrupt\n").expect("corrupt body");
++            assert!(spool.lease().expect("lease").is_none());
++            let isolated = list_entries(&dir.path().join("quarantine")).expect("quarantine");
++            assert_eq!(isolated.len(), 1);
++            let basename = isolated[0]
++                .file_name()
++                .and_then(|value| value.to_str())
++                .expect("basename")
++                .to_owned();
++            assert!(
++                !quarantine_source_is_acked(&basename),
++                "{label}: the object must carry the ambiguous label: {basename}"
++            );
++
++            let batch_id = if real_batch { info.batch_id.clone() } else { "9".repeat(32) };
++            let body_sha256 = if real_digest {
++                info.body_sha256.clone()
++            } else {
++                "8".repeat(64)
++            };
++            let mut inner = lock(&spool.inner);
++            spool
++                .add_tombstone_locked(
++                    &mut inner,
++                    TombstoneEntry::AckedReceipt(wire::AckedReceipt::new(
++                        batch_id,
++                        body_sha256,
++                        unix_millis().expect("clock"),
++                    )),
++                )
++                .expect("receipt");
++            spool
++                .evict_quarantine_locked(&mut inner, &isolated[0])
++                .expect("quarantine eviction");
++            assert_eq!(
++                inner.evicted_unacked_records, 2,
++                "{label}: 只有两个字段都对上的 receipt 才可以抑制未确认丢失"
++            );
++        }
 +    }
 +
 +    /// Once the aggregate ledger has committed, a failure removing its private
