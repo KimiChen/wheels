@@ -21035,10 +21035,10 @@ index 1cb2c024c48aa567ee0c9aea75b4216fdbe1906d..fe9b793919b2c697acb463dce34c012d
  }
 diff --git a/crates/shadowsocks-service/src/server/user_audit.rs b/crates/shadowsocks-service/src/server/user_audit.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..d8a730d159d970a86a23d51d58193173bdeb03b6
+index 0000000000000000000000000000000000000000..e713fb03cd287a06bc52c52cc1faf4121cdbea2b
 --- /dev/null
 +++ b/crates/shadowsocks-service/src/server/user_audit.rs
-@@ -0,0 +1,5096 @@
+@@ -0,0 +1,5191 @@
 +//! Non-blocking successful-target access auditing for the server data path.
 +//!
 +//! The relay only constructs a small draft and performs bounded atomic/cache
@@ -25439,6 +25439,101 @@ index 0000000000000000000000000000000000000000..d8a730d159d970a86a23d51d58193173
 +        assert_eq!(snapshot.last, Some(11));
 +        assert_eq!(snapshot.first_time, 22);
 +        assert_eq!(snapshot.last_time, 22);
++    }
++
++    /// `m-229`：`m-227` 的核心改动是把无锁路径的 count 放进**独立**的
++    /// `unknown_count`，而不是旧设计的「sticky bool + 共用 count」。
++    ///
++    /// `fallback_unknown_count_keeps_metadata_unknown` 区分不了这两种实现——
++    /// 把无锁路径改回 `metadata_unknown.fetch_or(全部四位)` +
++    /// `saturating_add_atomic(&self.count, ..)`，它的六条断言逐条仍然成立，124 条
++    /// service 用例全绿。这一条直接观察计数落在哪个字段，以及依赖该字段的两个
++    /// 派生量：`approximate_count`（健康上报）与 `is_nonempty`（关机 drain 判空，
++    /// 少算就会把这批计数静默丢掉）。
++    #[test]
++    fn the_lock_free_fallback_count_lands_in_its_own_field() {
++        let fallback = GapFallback::default();
++        fallback.lock.store(true, Ordering::Release);
++        assert!(!fallback.merge(GapSnapshot {
++            count: 5,
++            first: Some(1),
++            last: Some(1),
++            first_time: 10,
++            last_time: 10,
++        }));
++        fallback.lock.store(false, Ordering::Release);
++
++        assert_eq!(
++            fallback.unknown_count.load(Ordering::Acquire),
++            5,
++            "the lock-free count must be kept apart from the coherent counter"
++        );
++        assert_eq!(
++            fallback.count.load(Ordering::Acquire),
++            0,
++            "the coherent counter describes only what the lock protected"
++        );
++        assert!(
++            fallback.is_nonempty(),
++            "shutdown drain must not treat a lock-free-only fallback as empty"
++        );
++
++        // Drive the fallback directly: `GapAccumulator::merge` prefers a free
++        // slot, and a slot's own count would mask a missing fallback term.
++        let accumulator = GapAccumulator::default();
++        accumulator.fallback.lock.store(true, Ordering::Release);
++        accumulator.fallback.merge(GapSnapshot {
++            count: 7,
++            first: Some(1),
++            last: Some(1),
++            first_time: 10,
++            last_time: 10,
++        });
++        accumulator.fallback.lock.store(false, Ordering::Release);
++        assert_eq!(
++            accumulator.approximate_count(),
++            7,
++            "health reporting must include the lock-free fallback count"
++        );
++        assert!(accumulator.is_nonempty());
++    }
++
++    /// `m-229`：逐字段 unknown 位里的两个**时间**位同样没有测试。
++    ///
++    /// 删掉设置它们的整段，124 条用例全绿——因为现有用例走零时间时槽里只有零时间
++    /// 事件，存储字段本来就是 0，读侧不 mask 也返回 0。真正需要它的形状是：同一个槽
++    /// 先落一个已知时间的事件，再落一个时间未知（0）的事件。
++    #[test]
++    fn a_slot_with_one_unknown_time_reports_both_bounds_as_unknown() {
++        let slot = GapSlot::default();
++        assert!(
++            slot.try_merge(GapSnapshot {
++                count: 1,
++                first: Some(1),
++                last: Some(1),
++                first_time: 1_000,
++                last_time: 2_000,
++            })
++            .is_some()
++        );
++        assert!(
++            slot.try_merge(GapSnapshot {
++                count: 1,
++                first: Some(2),
++                last: Some(2),
++                first_time: 0,
++                last_time: 0,
++            })
++            .is_some()
++        );
++
++        let snapshot = slot.try_take().expect("slot snapshot");
++        assert_eq!(snapshot.count, 2);
++        assert_eq!(
++            snapshot.first_time, 0,
++            "a known observation time must not stand in for an unknown one"
++        );
++        assert_eq!(snapshot.last_time, 0);
 +    }
 +
 +    #[test]
