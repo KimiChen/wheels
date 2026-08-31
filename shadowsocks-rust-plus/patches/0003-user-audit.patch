@@ -8089,10 +8089,10 @@ index 0000000000000000000000000000000000000000..6cf8d005dfef917c852be4f611d5b945
 +}
 diff --git a/crates/shadowsocks-auditd/src/spool.rs b/crates/shadowsocks-auditd/src/spool.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..7528ac893a0cec97a48b85318d09ca3dfe759fe6
+index 0000000000000000000000000000000000000000..9365d427bd63e338513885996886131c2a45ba2c
 --- /dev/null
 +++ b/crates/shadowsocks-auditd/src/spool.rs
-@@ -0,0 +1,9408 @@
+@@ -0,0 +1,9462 @@
 +//! Durable, node-local audit spool.
 +//!
 +//! The spool is deliberately synchronous.  Ingest and export perform their
@@ -10664,9 +10664,9 @@ index 0000000000000000000000000000000000000000..7528ac893a0cec97a48b85318d09ca3d
 +            result
 +        };
 +
-+        // Once rename has succeeded, even a later accounting read failure is
-+        // commit-uncertain: state.json may already contain the advanced cursor
-+        // and the caller must not roll back the corresponding open record.
++        // Once rename has succeeded, the caller must not roll back the
++        // corresponding open record: state.json may already contain the
++        // advanced cursor.
 +        if result.is_ok() || matches!(&result, Err(AtomicWriteError::AfterRename(_))) {
 +            #[cfg(test)]
 +            let accounting = if std::mem::take(&mut inner.faults.persist_state_accounting) {
@@ -10676,9 +10676,21 @@ index 0000000000000000000000000000000000000000..7528ac893a0cec97a48b85318d09ca3d
 +            };
 +            #[cfg(not(test))]
 +            let accounting = Spool::update_path_size(inner, &path, before);
-+            if let Err(error) = accounting {
++            if accounting.is_err() {
++                // A post-commit accounting read says nothing about the write
++                // barrier that already ran.  When the barrier succeeded the
++                // state on disk is exactly what memory holds; only the
++                // incremental byte index is now untrustworthy, and clearing
++                // `spool_bytes_known` forces a full measurement before the
++                // next capacity decision.  Escalating to `DurabilityUncertain`
++                // would stop the daemon over an accounting read on the
++                // per-record write path.  `OPERATIONS.md` scopes the
++                // fail-closed exit to a write barrier whose *outcome* cannot
++                // be determined; this is not that.  When the barrier itself
++                // returned `AfterRename`, that original error is what
++                // escalates below.
 +                inner.spool_bytes_known = false;
-+                return Err(AtomicWriteError::AfterRename(error.into()));
++                mark_storage_rejection(inner, true);
 +            }
 +        }
 +        result
@@ -14398,16 +14410,13 @@ index 0000000000000000000000000000000000000000..7528ac893a0cec97a48b85318d09ca3d
 +
 +    #[test]
 +    fn committed_state_errors_keep_the_record_and_never_reuse_epoch_sequence() {
-+        for (case, fail_after_commit, fail_accounting) in
-+            [("after-commit", true, false), ("path-size-accounting", false, true)]
-+        {
++        for (case, fail_after_commit) in [("after-commit", true)] {
 +            let dir = tempfile::tempdir().expect("tempdir");
 +            let spool_config = config(dir.path());
 +            let spool = Spool::open(spool_config.clone()).expect("spool");
 +            {
 +                let mut inner = lock(&spool.inner);
 +                inner.faults.persist_state_after_commit = fail_after_commit;
-+                inner.faults.persist_state_accounting = fail_accounting;
 +            }
 +
 +            assert!(
@@ -14467,6 +14476,51 @@ index 0000000000000000000000000000000000000000..7528ac893a0cec97a48b85318d09ca3d
 +            );
 +            assert_eq!(positions[1], (original_epoch, 2, producer_id.to_owned()), "{case}");
 +        }
++    }
++
++    /// `m-235`：state.json 的写屏障完整成功之后，事后量文件大小失败不得再
++    /// 升级成 `DurabilityUncertain` 关停守护进程——与 m-234 在 tombstones.json
++    /// 上确立的是同一条规则：屏障结果已确定时，一次纯记账读失败只让增量字节
++    /// 索引不可信，清掉 `spool_bytes_known` 强制全量重测即可。state.json 每条
++    /// record 都要重写，误退出的暴露面比 tombstones.json 更大。
++    ///
++    /// 变异检验：把记账失败改回 `return Err(AtomicWriteError::AfterRename(..))`，
++    /// 第一个 `expect` 立刻 panic，本条转红。
++    #[test]
++    fn post_commit_state_accounting_failure_degrades_without_stopping() {
++        let dir = tempfile::tempdir().expect("tempdir");
++        let spool = Spool::open(config(dir.path())).expect("spool");
++        {
++            let mut inner = lock(&spool.inner);
++            inner.faults.persist_state_accounting = true;
++        }
++        let ack = spool
++            .append(&event(1), 1)
++            .expect("a successful write barrier must not fail on its accounting read");
++        assert_eq!(ack.spool_sequence, 1);
++        {
++            let inner = lock(&spool.inner);
++            assert!(
++                !inner.durability_uncertain,
++                "a post-commit accounting read must not stop the daemon"
++            );
++            assert!(
++                !inner.spool_bytes_known,
++                "the byte index must be invalidated so the next capacity decision re-measures"
++            );
++            assert!(
++                inner.storage_rejected_attempts > 0,
++                "the accounting failure must still be observable"
++            );
++        }
++        let committed = load_state(&dir.path().join("state.json"))
++            .expect("state read")
++            .expect("committed state");
++        assert_eq!(committed.next_spool_sequence.0, 2, "the durable cursor advanced");
++        let retry = spool
++            .append(&event(2), 2)
++            .expect("service continues after a post-commit accounting fault");
++        assert_eq!(retry.spool_sequence, 2);
 +    }
 +
 +    /// An aggregate-ledger rename can succeed before its parent-directory
