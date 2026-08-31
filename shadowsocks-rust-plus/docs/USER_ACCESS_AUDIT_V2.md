@@ -10,7 +10,7 @@
 > - 本文保留本轮新增问题的根因、修复和验证边界；已闭合项明确标注“已修复”，避免与待办混淆。
 >
 > 基线：overlay `main`，规范版本 v8，`patches/0003-user-audit.patch` 与
-> `upstream.lock` 的 `prepared_tree_sha256` 一致（`b8c7d6ac…`）。
+> `upstream.lock` 的 `prepared_tree_sha256` 一致（`58c5e777…`，2026-09-01 复核新增 m-235 后更新）。
 
 ## 1. 当前真机验收状态（背景）
 
@@ -190,20 +190,62 @@ Linux 全量门禁也已跑通。问题集中在**回归覆盖面**：多处自�
 | m-231 | `m-224` 的「先提交后记账」四个提交点里仍有两个无绑定 | 把 `evict_sealed_locked` 与 reconcile 的 QuarantinePending 腿的 `commit.finish()?` 挪到记账之前，全绿（`evict_quarantine_locked` 那个点已由 989a0aa 绑住） | `ab4a2a4` 为另外两个提交点各补一条用例 |
 | m-232 | lingering worker 用 `tokio::spawn`，不在 `run()` 的 `JoinSet` 里 | `run()` 被 abort 后最多 32 个任务带着 fd 再活 ≤100 ms。有界且短，但打破了「exporter 的所有 client I/O 任务由 run() 拥有」这条既有性质 | `e0be754` 改为经 channel 交回接受循环，`workers.spawn` 拥有 |
 | m-233 | 孤儿 marker 只在启动时清理 | marker 清理失败后一直留在盘上；运行期 reconcile 只看内存 ledger。若该 gap 的批次已被 ACK 并过了 24 小时保留期，下次启动时 `gap_already_durable` 变假，marker 会被复活成 pending 并用同一固定 ID 再写一条 `spool_gap`。非本轮引入，但与 `m-222` 的自述直接相关 | `b192938` 清理失败记入重试集合，每次 reconcile 重试 |
-| m-234 | 提交后的纯记账 `stat` 失败被升级成 sticky `DurabilityUncertain` 与进程退出 | `persist_tombstones_locked` 在 rename + 目录 fsync **都已成功**之后，若 `file_len` 失败仍返回 `AfterRename`，daemon 关停退出。`OPERATIONS.md` 把 fail-closed 退出限定在「写屏障结果无法判定时」，这一格不属于该范围。与既有 `persist_state_locked` 同构，但 tombstone 是每次 ACK/驱逐都要写的高频路径 | `9d8b7bc` 屏障已成功时不再升级为 `DurabilityUncertain` |
+| m-234 | 提交后的纯记账 `stat` 失败被升级成 sticky `DurabilityUncertain` 与进程退出 | `persist_tombstones_locked` 在 rename + 目录 fsync **都已成功**之后，若 `file_len` 失败仍返回 `AfterRename`，daemon 关停退出。`OPERATIONS.md` 把 fail-closed 退出限定在「写屏障结果无法判定时」，这一格不属于该范围。与既有 `persist_state_locked` 同构，但 tombstone 是每次 ACK/驱逐都要写的高频路径 | `9d8b7bc` 屏障已成功时不再升级为 `DurabilityUncertain`。**范围理由更正**（2026-09-01 复核）：state.json 每条 record 都要持久化（§9.3 lock-step），频率不低于 tombstones.json，「高频」不是有效的范围理由；state.json 侧的同型残留记为 m-235，见下节 |
 
 另记两条交付层面的观察（不影响运行时）：`31993e0` 一次提交涵盖 10 条修复、正文为空、无
 `Co-Authored-By`，与仓库「一个问题一个 commit + 根因/修复/绑定/变异检验」的既有约定不符；`m-221`、
 `m-222`、`m-224` 的「回归与验证」各混入一条上一轮交付、本轮逐字节未改的旧用例，读者会高估其绑定强度。
 
+### 2026-09-01 复核：六个修复提交逐条核实，新增 m-235（已修复）
+
+复核对象为 `4ad0ffb` 之后同事交付的六个修复提交（`e0be754`–`46584ca`）与文档提交 `e8258bb`。
+**六条修复全部成立，未发现新的行为缺陷。** 逐项核实结果：
+
+- **提交分区**：物化七个提交点的源码树逐对比较，每个提交只动其声明范围内的一个文件
+  （m-232→`user_stats.rs`；m-230/m-233/m-231/m-234→`spool.rs`；m-229→`user_audit.rs`）；
+  七个点的 `prepared_tree_sha256` 全部与干净重放一致，最终态 `b8c7d6ac`；补丁规范性门禁绿。
+  「重建后最终态与原工作树逐字节一致」的自述无法独立复证，但逐提交哈希链 + 单文件分区 +
+  最终态一致三者合起来覆盖了它的实质。
+- **Linux 门禁**（Debian 13 / rustc 1.98.0 / `10.0.1.3`）：八条命令全部 `EXIT=0`，计数与自述逐一对上：
+  auditd 116、protocol 25、service lib 134（user-audit）/ 71（feature-off）、四个集成目标 4/4/1/1。
+- **变异检验**：同事自述的十条变异全部独立复核转红——m-229 四条（sticky-bool 退回、删两个时间
+  unknown 位、删 `approximate_count` 项、删 `is_nonempty` 项）、m-230 两条（复活 marker、salvage
+  退回计数继续）、m-231 两条（两个提交点各交换一次顺序）、m-233（摘掉 reconcile 里的重试）、
+  m-234（恢复旧升级）；m-232 的 `tokio::spawn` 逃逸变异在 macOS 单独复核转红。
+- **审阅方脚手架教训**（与同事上一条记录的三处同类，值得并列）：十个变异共享一个
+  `CARGO_TARGET_DIR` 连跑时，首轮有六条误绿——同一 package 在相同 target dir 下复用了前一棵
+  变异树的测试二进制；逐条 `cargo clean -p` 强制重建后六条全部转红。变异检验必须先证明被测
+  代码真的重新编译过，否则「全绿」什么都不能说明。
+
+**m-235（minor，已修复）`persist_state_locked` 把屏障成功后的纯记账失败升级成致命退出——m-234 的同型残留**
+
+- **位置**：`crates/shadowsocks-auditd/src/spool.rs` 的 `persist_state_locked`。
+- **根因**：与 m-234 完全同型。`persist_state_atomic` 完整成功（rename + 目录 fsync 均已确认）后，
+  `update_path_size`（一次事后 `stat`）失败仍返回 `AfterRename`，`accept_record_locked` 随即升级为
+  sticky `DurabilityUncertain`，fatal watcher 关停整个 daemon。`OPERATIONS.md` 把 fail-closed 退出限定在
+  「写屏障结果无法判定时」，屏障返回 `Ok` 时结果已确定，这一格不属于该范围。state.json 在 §9.3 的
+  lock-step 提交里**每条 record** 都重写，暴露面高于 m-234 修的 tombstones.json——m-234 自述的范围
+  理由方向是反的。该行为由 `committed_state_errors_keep_the_record_and_never_reuse_epoch_sequence`
+  的 `path-size-accounting` 用例绑定，但它源自初版交付（`76f80fc`）的实现惯性，不是规格决策。
+- **修复**：与 m-234 对齐——屏障已确定成功时，记账失败只清 `spool_bytes_known`（强制下次容量决策前
+  全量重测）并记 `storage_rejected_attempts`，返回原 `Ok`；屏障自身返回 `AfterRename` 时维持原有
+  升级路径不变。原用例的 `path-size-accounting` 分支拆出为
+  `post_commit_state_accounting_failure_degrades_without_stopping`，断言非致命降级、游标已 durable、
+  后续 append 继续服务；`after-commit` 分支断言不变。
+- **回归与验证**：Linux auditd 117 passed / 0 failed（116 + 新增一条）；八条门禁在最终态
+  （`58c5e777`）全部 `EXIT=0`；macOS `verify.sh` 通过。变异检验：把记账失败改回
+  `return Err(AtomicWriteError::AfterRename(..))`，新用例立刻转红。
+
+
 ## 3. 待执行的验证
 
-以下为发布前置。§16 已收窄为 v8 门禁并有 Linux 基线结果（见 §3.2）；本轮补丁新增的 Linux 用例尚需在
-Linux 真机复跑确认。原始宽命令的失败记录见 §3.1；其余三项**从未在任何机器上执行过**：
+以下为发布前置。§16 已收窄为 v8 门禁并有 Linux 基线结果（见 §3.2）；m-229–m-234 新增的 Linux 用例与
+m-235 的最终态已由 2026-09-01 复核在 `10.0.1.3` 复跑全绿（见 §2 末节）。原始宽命令的失败记录见
+§3.1；其余三项**从未在任何机器上执行过**：
 
 | 项目 | 说明 | 阻塞因素 |
 | --- | --- | --- |
-| §16 收窄 Rust 门禁（v8：两条 workspace 命令 + ①②两类集成目标） | §16 验收项 | 基线已在 Linux 全绿；最终补丁需复跑（见 §3.2） |
+| §16 收窄 Rust 门禁（v8：两条 workspace 命令 + ①②两类集成目标） | §16 验收项 | 已复跑：2026-09-01 复核在 m-235 最终态（`58c5e777`）八条命令全 `EXIT=0`（auditd 117、protocol 25、service 134/71、集成 4/4/1/1）；下次补丁变更后仍需再跑 |
 | `cargo-fuzz` sanitizer 实跑 | §3.2/§14.4 要求交付并运行 fuzz target | 无，尚未安排 |
 | §14.5 目标机压测 | 吞吐 ≤5%、CPU ≤10%、ssserver RSS ≤64 MiB、auditd RSS ≤128 MiB，及离线/队列满/慢 ACK/spool 满四类专项 | 需目标机与真实数据面负载 |
 | 真实流量端到端审计事件 | 经 ssserver 转发真实 TCP/UDP 流量后，验证 access event 落入 spool 并可经 lease 导出 | `integration_audit.py` 覆盖的是 ingest/export 协议链路，**不含**真实代理流量 |
@@ -404,3 +446,13 @@ lib 是 309，不可能少到 121」为由怀疑 §3.1 的计数有误。实测�
   `m-230`/`m-231`/`m-233`/`m-234` 代码一并带了进去，违反「一个问题一个 commit」。做法是把四条
   的改动按文本块切分、以「逐条移除后须与基线逐字节相同」自证分区完整，再从 `m-232` 之后重放成
   五个提交。
+- 2026-09-01：**复核 m-229–m-234 的六个修复提交**（自 `4ad0ffb` 起）。逐棵物化源码树核实提交分区、
+  逐点核对 `prepared_tree_sha256` 哈希链、在 `10.0.1.3`（Debian 13 / rustc 1.98.0）复跑八条门禁
+  全 `EXIT=0` 且计数与自述一致（auditd 116、protocol 25、service 134/71、集成 4/4/1/1），同事自述的
+  十条变异检验独立复核全部转红，另在 macOS 单独转红 m-232 的 `tokio::spawn` 逃逸变异。复核中发现
+  自己的变异脚手架也踩了一次坑（共享 target dir 复用旧二进制致六条误绿，`cargo clean -p` 后全部
+  转红），已记入 §2 末节。结论：**六条修复全部成立**。新增并修复 `m-235`（m-234 的同型残留，
+  `persist_state_locked` 把屏障成功后的纯记账失败升级为致命退出），一个问题一个提交；同时更正
+  m-234 自述的范围理由（state.json 每条 record 都重写，频率不低于 tombstones.json）。修复后
+  auditd 117 passed，最终态 `prepared_tree_sha256` 为 `58c5e777…`，门禁与 macOS `verify.sh`
+  均已复跑通过。
