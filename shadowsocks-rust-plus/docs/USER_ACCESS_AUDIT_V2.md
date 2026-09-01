@@ -234,9 +234,13 @@ Linux 全量门禁也已跑通。问题集中在**回归覆盖面**：多处自�
   的 `path-size-accounting` 用例绑定，但它源自初版交付（`76f80fc`）的实现惯性，不是规格决策。
 - **修复**：与 m-234 对齐——屏障已确定成功时，记账失败只清 `spool_bytes_known`（强制下次容量决策前
   全量重测）并记 `storage_rejected_attempts`，返回原 `Ok`；屏障自身返回 `AfterRename` 时维持原有
-  升级路径不变。原用例的 `path-size-accounting` 分支拆出为
-  `post_commit_state_accounting_failure_degrades_without_stopping`，断言非致命降级、游标已 durable、
-  后续 append 继续服务；`after-commit` 分支断言不变。
+  升级路径不变。原用例的 `path-size-accounting` 分支拆到新用例
+  `post_commit_state_accounting_failure_degrades_without_stopping`。**这次拆分不是等价重组**：
+  新用例当时只覆盖「非致命降级 + 游标 durable + 服务继续」，原分支在盘上 wrapper 的
+  epoch/sequence、内存 `next_sequence`/`open_meta.event_count`、重启后 epoch 连续、以及
+  `drain_record_positions` 上 (epoch, sequence) 不复用（正是原用例名字里
+  `never_reuse_epoch_sequence` 的落点）这四类断言**一条都没有带过**，还留下一个退化的
+  单元素循环。四类断言与循环已由 m-237 补回/摊平，见下一节。`after-commit` 分支断言不变。
 - **回归与验证**：Linux auditd 117 passed / 0 failed（116 + 新增一条）；八条门禁在最终态
   （`58c5e777`）全部 `EXIT=0`；macOS `verify.sh` 通过。变异检验：把记账失败改回
   `return Err(AtomicWriteError::AfterRename(..))`，新用例立刻转红。
