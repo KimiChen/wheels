@@ -433,5 +433,37 @@ class SpecContractTests(unittest.TestCase):
         )
 
 
+class AuditLedgerV2Tests(unittest.TestCase):
+    """m-240: `USER_ACCESS_AUDIT_V2.md` 是这个项目唯一的问题溯源台账，却不被任何
+    门禁读取。它开头声明的锚点前缀是一条可判真假的断言，实测已随下游提交漂移过一次
+    而无人拦住。把台账里机器可判定的两类断言绑到源码事实上。
+    """
+
+    LEDGER = DOCS / "USER_ACCESS_AUDIT_V2.md"
+    LOCK = ROOT / "upstream.lock"
+
+    def test_declared_anchor_prefix_matches_upstream_lock(self) -> None:
+        declared = re.search(
+            r"`prepared_tree_sha256` 一致（`([0-9a-f]{8})…`", read(self.LEDGER)
+        )
+        self.assertIsNotNone(declared, "台账开头不再声明 prepared_tree_sha256 前缀")
+        anchor = re.search(r"^prepared_tree_sha256=([0-9a-f]{64})$", read(self.LOCK), re.M)
+        self.assertIsNotNone(anchor, "upstream.lock 不再有 prepared_tree_sha256")
+        self.assertTrue(
+            anchor.group(1).startswith(declared.group(1)),
+            f"台账声明的锚点 {declared.group(1)}… 已与 upstream.lock 的 "
+            f"{anchor.group(1)[:8]}… 漂移；改补丁的提交必须同时更新台账开头这一行",
+        )
+
+    def test_every_named_rust_function_in_the_ledger_exists(self) -> None:
+        """台账用反引号引函数名做溯源锚点。写错一个（m-235 条目曾写成不存在的
+        `accept_record_locked`）就让后来者按名搜索直接落空。"""
+        haystack = "\n".join("\n".join(lines) for lines in patch_added_lines().values())
+        names = set(re.findall(r"`([a-z_][a-z0-9_]*_locked)`", read(self.LEDGER)))
+        self.assertTrue(names, "台账不再引用任何 `*_locked` 函数名")
+        missing = sorted(n for n in names if f"fn {n}(" not in haystack)
+        self.assertEqual(missing, [], f"台账引用了补丁中不存在的函数：{missing}")
+
+
 if __name__ == "__main__":
     unittest.main()

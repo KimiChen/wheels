@@ -10,7 +10,8 @@
 > - 本文保留本轮新增问题的根因、修复和验证边界；已闭合项明确标注“已修复”，避免与待办混淆。
 >
 > 基线：overlay `main`，规范版本 v8，`patches/0003-user-audit.patch` 与
-> `upstream.lock` 的 `prepared_tree_sha256` 一致（`849ace0b…`，2026-09-01 二次复核新增 m-236/m-237 后更新）。
+> `upstream.lock` 的 `prepared_tree_sha256` 一致（`523b96d9…`，2026-09-01 二次复核新增 m-236–m-239 后更新；
+> 这一行由 `tests/test_docs_consistency.py` 的 `test_declared_anchor_prefix_matches_upstream_lock` 绑定）。
 
 ## 1. 当前真机验收状态（背景）
 
@@ -224,7 +225,8 @@ Linux 全量门禁也已跑通。问题集中在**回归覆盖面**：多处自�
 - **位置**：`crates/shadowsocks-auditd/src/spool.rs` 的 `persist_state_locked`。
 - **根因**：与 m-234 完全同型。`persist_state_atomic` 完整成功（rename + 目录 fsync 均已确认）后，
   `update_path_size`（一次事后 `stat`）失败仍返回 `AfterRename`，`write_record_locked`（`spool.rs:2435`，
-  升级发生在其 `AfterRename` 分支 2493 行；仓库中没有名为 `accept_record_locked` 的函数）随即升级为
+  升级发生在其 `AfterRename` 分支 2493 行；仓库中没有名为 accept_record_locked 的函数（此处刻意不加反引号：
+  §2 的函数名锚点已被 `test_docs_consistency.py` 校验存在性））随即升级为
   sticky `DurabilityUncertain`，fatal watcher 关停整个 daemon。`OPERATIONS.md` 把 fail-closed 退出限定在
   「写屏障结果无法判定时」，屏障返回 `Ok` 时结果已确定，这一格不属于该范围。state.json 在 §9.3 的
   lock-step 提交里**每条 record** 都重写，暴露面高于 m-234 修的 tombstones.json——m-234 自述的范围
@@ -304,7 +306,7 @@ Linux 全量门禁也已跑通。问题集中在**回归覆盖面**：多处自�
 - **提交**：`cd56a61`，锚点 `8d6f5b5b…` → `849ace0b…`。
 
 **本节顺带更正上一节文档的两处**：①「未发现新的行为缺陷」的宣告已按上文删去；
-②m-235 条目里的 `accept_record_locked` 在仓库中不存在，实际是 `write_record_locked`
+②m-235 条目里的 accept_record_locked 在仓库中不存在，实际是 `write_record_locked`
 （`spool.rs:2435`，升级路径在其 `AfterRename` 分支 2493 行），已改。
 
 
@@ -533,7 +535,7 @@ lib 是 309，不可能少到 121」为由怀疑 §3.1 的计数有误。实测�
   记账失败后不清 `spool_bytes_known` 的，增量字节索引会带永久偏移参与容量判定；变异检验转红）与
   `m-237`（`cd56a61`，m-235 拆分测试时丢掉四类断言并留下退化的单元素循环；该条的变异**不具
   鉴别性**，已在条目里如实标注，依据是可直接比对的覆盖面丢失）。同时更正上一节文档两处：
-  删去被 m-236 证伪的「未发现新的行为缺陷」宣告，改正不存在的函数名 `accept_record_locked`
+  删去被 m-236 证伪的「未发现新的行为缺陷」宣告，改正不存在的函数名 accept_record_locked
   （实为 `write_record_locked`）。最终态 `prepared_tree_sha256` 为 `849ace0b…`；八条 Linux 门禁在
   **锁定的 rustc 1.97.0** 上全部 `EXIT=0`（auditd 118、protocol 25、service 134/71、集成 4/4/1/1），
   本地 12 项 Python/静态门禁与锚点重放一致性全绿。发布前置仍是三项（fuzz 实跑、§14.5 压测、
