@@ -151,7 +151,7 @@
   `tombstone_after_rename_failure_keeps_post_commit_state` 覆盖 add/prune/remove/replace 四个入口。当前
   macOS 临时移除 Linux-only compile gate 后的 service 测试为 122/122；auditd native tests 仍受 Linux libc
   API 限制，未在 macOS 执行。`x86_64-unknown-linux-gnu` 的 `cargo check --all-targets` 已通过；Linux 真机
-  新增用例仍待 §3.2 所述复跑。
+  新增用例已于 2026-08-30 复跑（§3.3）并在后续每轮最终态复核中随门禁一并复跑（§2 末两节）。
 
 ### m-227（minor，已修复）GapFallback 的未知边界与并发计数被错误合并
 
@@ -174,8 +174,8 @@
 - **修复**：只依据成功 CAS 返回的 previous 值计算本次是否达到上限，不采纳 speculative 尝试；并以独立回归锁定
   一次确定性的失败 CAS/重试交错。
 - **回归与验证**：`saturating_atomic_add_ignores_saturation_from_failed_cas` 与
-  `accumulator_take_propagates_unknown_fallback_bounds` 两条 service 回归已加入；源码级 feature-on 测试仍以
-  122/122 的 macOS 临时结果为边界，Linux 真机复跑尚未完成。
+  `accumulator_take_propagates_unknown_fallback_bounds` 两条 service 回归已加入；当时以 122/122 的 macOS 临时结果为边界，
+  Linux 真机复跑已于 2026-08-30 完成（§3.3），并随后续每轮最终态门禁复跑（§2 末两节）。
 
 ### 本轮审阅新增的条目（m-229 – m-234，**已全部修复**）
 
@@ -350,7 +350,8 @@ Linux 全量门禁也已跑通。问题集中在**回归覆盖面**：多处自�
 
 ### 3.2 收窄门禁的 Linux 执行与本轮复跑状态（2026-08-30，Debian 13 / rustc 1.97.0）
 
-v8 收窄后的基线门禁已在 Linux 实跑；本轮最终源码还需复跑新增用例。已确认的基线命令全部 `EXIT=0`：
+v8 收窄后的基线门禁已在 Linux 实跑，命令全部 `EXIT=0`。**下表是 2026-08-30 的基线快照，不是当前状态**——
+最终源码的复跑见 §3.3 与 §2 的两节复核，那里的数字取代本表：
 
 | 命令 | 结果 |
 | --- | --- |
@@ -358,7 +359,7 @@ v8 收窄后的基线门禁已在 Linux 实跑；本轮最终源码还需复跑�
 | feature-on `--workspace --lib --bins --features user-audit` | 全绿（`auditd` 99、`shadowsocks-service` 121，其余同上） |
 | `-p shadowsocks --test tcp_eih_user` | 4 passed |
 | v8 新增的三个 loopback 目标（`-p shadowsocks --test udp`、`--test udp`、`--test tunnel udp_tunnel`） | 4 / 1 / 1 passed |
-| `-p shadowsocks-auditd`（基线含此前三条回归） | 102 passed；本轮新增 5 条后目标为 107，最终补丁待 Linux 真机复跑 |
+| `-p shadowsocks-auditd`（基线含此前三条回归） | 102 passed。此处「本轮新增 5 条后目标为 107」的旧记法已被 §1 与 §3.3 推翻（实际新增 6 条→108）；最终态见 §2 末节，已复跑 |
 | `-p shadowsocks-audit-protocol` | 25 passed |
 
 ### 3.3 `31993e0` 最终源码的 Linux 复跑（2026-08-30，本轮审阅执行）
