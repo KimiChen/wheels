@@ -465,5 +465,39 @@ class AuditLedgerV2Tests(unittest.TestCase):
         self.assertEqual(missing, [], f"台账引用了补丁中不存在的函数：{missing}")
 
 
+    def test_every_commit_hash_in_the_ledger_still_resolves(self) -> None:
+        """m-244: 台账按 7 位短哈希引用具体提交，而 rebase / filter-branch / amend
+        都会让这些引用指向不存在的对象。已经踩过两次——2026-09-01 改 `Co-Authored-By`
+        尾注时失效 15 处；更早 `ee6829b` 写下的一个哈希在某次改写后就一直悬空着没人
+        发现。这条门禁把每个引用绑到「能解析且在当前历史上」这个事实上。
+        """
+        try:
+            subprocess.run(
+                ["git", "rev-parse", "--git-dir"],
+                cwd=ROOT, check=True, capture_output=True,
+            )
+        except (OSError, subprocess.CalledProcessError):  # pragma: no cover - 非 git 检出
+            self.skipTest("不在 git 仓库内，无法校验提交引用")
+
+        broken: list[str] = []
+        for short in sorted(set(re.findall(r"`([0-9a-f]{7})`", read(self.LEDGER)))):
+            resolved = subprocess.run(
+                ["git", "rev-parse", "--verify", "--quiet", f"{short}^{{commit}}"],
+                cwd=ROOT, capture_output=True, text=True,
+            )
+            if resolved.returncode != 0:
+                broken.append(f"{short}（无法解析）")
+                continue
+            reachable = subprocess.run(
+                ["git", "merge-base", "--is-ancestor", short, "HEAD"],
+                cwd=ROOT, capture_output=True,
+            )
+            if reachable.returncode != 0:
+                broken.append(f"{short}（不在当前历史上，多半是历史改写后的悬空对象）")
+        self.assertEqual(
+            broken, [], f"台账引用的提交号已失效：{broken}；改写历史后须按 subject 逐条改回"
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
