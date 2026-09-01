@@ -10,7 +10,7 @@
 > - 本文保留本轮新增问题的根因、修复和验证边界；已闭合项明确标注“已修复”，避免与待办混淆。
 >
 > 基线：overlay `main`，规范版本 v8，`patches/0003-user-audit.patch` 与
-> `upstream.lock` 的 `prepared_tree_sha256` 一致（`58c5e777…`，2026-09-01 复核新增 m-235 后更新）。
+> `upstream.lock` 的 `prepared_tree_sha256` 一致（`849ace0b…`，2026-09-01 二次复核新增 m-236/m-237 后更新）。
 
 ## 1. 当前真机验收状态（背景）
 
@@ -199,7 +199,9 @@ Linux 全量门禁也已跑通。问题集中在**回归覆盖面**：多处自�
 ### 2026-09-01 复核：六个修复提交逐条核实，新增 m-235（已修复）
 
 复核对象为 `4ad0ffb` 之后同事交付的六个修复提交（`e0be754`–`46584ca`）与文档提交 `e8258bb`。
-**六条修复全部成立，未发现新的行为缺陷。** 逐项核实结果：
+**六条修复全部成立。** 逐项核实结果：
+（本节原文同时宣告「未发现新的行为缺陷」。该宣告**已被下一节的 m-236 证伪**：
+同族第四个记账点漏改，属这一轮本应一并看到的同型残留，故此处删去该宣告。）
 
 - **提交分区**：物化七个提交点的源码树逐对比较，每个提交只动其声明范围内的一个文件
   （m-232→`user_stats.rs`；m-230/m-233/m-231/m-234→`spool.rs`；m-229→`user_audit.rs`）；
@@ -221,7 +223,8 @@ Linux 全量门禁也已跑通。问题集中在**回归覆盖面**：多处自�
 
 - **位置**：`crates/shadowsocks-auditd/src/spool.rs` 的 `persist_state_locked`。
 - **根因**：与 m-234 完全同型。`persist_state_atomic` 完整成功（rename + 目录 fsync 均已确认）后，
-  `update_path_size`（一次事后 `stat`）失败仍返回 `AfterRename`，`accept_record_locked` 随即升级为
+  `update_path_size`（一次事后 `stat`）失败仍返回 `AfterRename`，`write_record_locked`（`spool.rs:2435`，
+  升级发生在其 `AfterRename` 分支 2493 行；仓库中没有名为 `accept_record_locked` 的函数）随即升级为
   sticky `DurabilityUncertain`，fatal watcher 关停整个 daemon。`OPERATIONS.md` 把 fail-closed 退出限定在
   「写屏障结果无法判定时」，屏障返回 `Ok` 时结果已确定，这一格不属于该范围。state.json 在 §9.3 的
   lock-step 提交里**每条 record** 都重写，暴露面高于 m-234 修的 tombstones.json——m-234 自述的范围
@@ -237,15 +240,83 @@ Linux 全量门禁也已跑通。问题集中在**回归覆盖面**：多处自�
   `return Err(AtomicWriteError::AfterRename(..))`，新用例立刻转红。
 
 
+### 2026-09-01 二次复核：核实 m-235，新增 m-236、m-237（均已修复）
+
+复核对象为上一节之后交付的修复提交 `0ec6c2c`（m-235）与文档提交 `1e5d112`。
+
+- **提交范围**：`0ec6c2c` 只改 `crates/shadowsocks-auditd/src/spool.rs` 一个文件；补丁规范性门禁
+  （`test_audit_packaging.py` 的单 stanza 规范化检查）绿；起点 `prepared_tree_sha256` `58c5e777…`
+  与干净重放一致。
+- **m-235 成立**：独立复证。`persist_state_atomic` 返回 `Ok` 表示 rename 与目录 fsync 都已确认，
+  此后 `update_path_size` 的一次事后 `stat` 失败纯属记账问题，`OPERATIONS.md` 的 fail-closed
+  退出限定在「写屏障结果无法判定时」，不覆盖这一格。修复方式与 m-234 对齐，范围完整；对
+  m-234 自述范围理由的更正（state.json 在 §9.3 lock-step 里每条 record 都重写，暴露面不低于
+  tombstones.json）也成立。
+- **验证工具链偏差（方法学，非缺陷）**：上一节的 Linux 复跑用的是 rustc **1.98.0**，而
+  `packaging/release-toolchain.lock` 钉的是 `RELEASE_RUSTC_VERSION=1.97.0`。测试门禁不受该 lock
+  约束（它只约束 §15.1 的发布构建），但「门禁在锁定工具链上绿」与「门禁在某个更新的工具链上绿」
+  不是同一条结论。本次二次复核的最终态门禁已在 **1.97.0** 上复跑，两者现均有记录。
+
+**m-236（minor，已修复）pending marker 写路径的记账失败不让增量字节索引失效——m-235 同族的第四个点**
+
+- **位置**：`crates/shadowsocks-auditd/src/spool.rs` 的 `persist_tombstone_pending_marker_locked`。
+- **根因**：`update_path_size` 一共有四个调用点，前三个（`persist_state_locked`、
+  `persist_tombstones_locked`、`persist_recovery_gap_marker_locked`）在记账失败时都会同时
+  `inner.spool_bytes_known = false` + `mark_storage_rejection`，唯独这一个只做了后者：
+
+  | 调用点 | 清 `spool_bytes_known` | 记 storage rejection | 记账失败返回 |
+  | --- | --- | --- | --- |
+  | `persist_state_locked` | 是 | 是 | 原 `result` |
+  | `persist_tombstones_locked` | 是 | 是 | 原 `result` |
+  | `persist_recovery_gap_marker_locked` | 是 | 是 | `Err` |
+  | `persist_tombstone_pending_marker_locked` | **否** | 是 | `Err` |
+
+  marker 此刻可能已经落盘而其大小无法确定，`spool_bytes` 仍被标记为 known，于是增量字节索引
+  带着一个**永久偏移**继续参与 `capacity_ok` 的容量判定——低估则 spool 越过配额仍继续收，
+  高估则未满即开始拒收。它自己的删除对手方 `remove_tombstone_pending_marker_locked` 和同型
+  写入方 `persist_recovery_gap_marker_locked` 的注释里都写明了这条理由，只是写入侧漏掉了。
+- **修复**：补上 `inner.spool_bytes_known = false;`，强制下次容量决策前走一次
+  `refresh_spool_bytes_locked` 全量重测；返回值语义（仍返回 `Err`）不变。
+- **回归与验证**：新增 `a_pending_marker_write_accounting_failure_invalidates_the_byte_index`，
+  配套新增 `TestFaults::tombstone_pending_marker_accounting` 注入点，断言注入记账失败后
+  `spool_bytes_known` 转 false 且 storage rejection 计数递增。Linux auditd 118 passed / 0 failed。
+  **变异检验**：删掉新增的 `inner.spool_bytes_known = false;`，该用例转红（117 passed; 1 failed），
+  恢复后回绿；变异用独立 `CARGO_TARGET_DIR` 编译，已排除上一节记录的旧二进制复用陷阱。
+- **提交**：`76d62b0`，锚点 `58c5e777…` → `8d6f5b5b…`。
+
+**m-237（minor，已修复）m-235 拆分测试时丢掉四类断言，并留下一个退化的单元素循环**
+
+- **位置**：`crates/shadowsocks-auditd/src/spool.rs` 的
+  `committed_state_errors_keep_the_record_and_never_reuse_epoch_sequence` 与拆出的
+  `post_commit_state_accounting_failure_degrades_without_stopping`。
+- **根因**：m-235 把 `path-size-accounting` 分支从原用例拆出去时，新用例只断言了「非致命降级 +
+  游标 durable + 后续 append 可继续」，原用例对该分支覆盖的四类断言没有跟着搬过去：落盘
+  wrapper 的 epoch/sequence、内存里的 `next_sequence` 与 `open_meta.event_count`、重启后
+  epoch 不变而 sequence 续接、drain 出来的 `(epoch, sequence)` 两两不重复。拆分是重构，
+  不应减少覆盖面。同时原用例的循环被裁成
+  `for (case, fail_after_commit) in [("after-commit", true)]`——只剩一个元素，退化成噪声。
+- **修复**：在新用例里补回上述四类断言（按同一分支的原语义重写，不是照抄），并把退化循环
+  内联展开。无生产代码改动。
+- **回归与验证**：Linux auditd 118 passed / 0 failed。**变异检验不具鉴别性，如实记录**：我构造的
+  变异（在提交后把 `inner.open_meta.event_count` 清零）让**修复前与修复后两个版本都转红**——
+  修复前的版本经由别的用例同样能抓到它，因此该变异不能证明补回的断言有独立价值。此条的
+  依据是「拆分导致的覆盖面客观丢失」这一可直接比对的事实，不是变异背书。
+- **提交**：`cd56a61`，锚点 `8d6f5b5b…` → `849ace0b…`。
+
+**本节顺带更正上一节文档的两处**：①「未发现新的行为缺陷」的宣告已按上文删去；
+②m-235 条目里的 `accept_record_locked` 在仓库中不存在，实际是 `write_record_locked`
+（`spool.rs:2435`，升级路径在其 `AfterRename` 分支 2493 行），已改。
+
+
 ## 3. 待执行的验证
 
-以下为发布前置。§16 已收窄为 v8 门禁并有 Linux 基线结果（见 §3.2）；m-229–m-234 新增的 Linux 用例与
-m-235 的最终态已由 2026-09-01 复核在 `10.0.1.3` 复跑全绿（见 §2 末节）。原始宽命令的失败记录见
+以下为发布前置。§16 已收窄为 v8 门禁并有 Linux 基线结果（见 §3.2）；m-229–m-237 新增的 Linux 用例与
+最终态已由 2026-09-01 两轮复核在 `10.0.1.3` 复跑全绿（见 §2 末两节）。原始宽命令的失败记录见
 §3.1；其余三项**从未在任何机器上执行过**：
 
 | 项目 | 说明 | 阻塞因素 |
 | --- | --- | --- |
-| §16 收窄 Rust 门禁（v8：两条 workspace 命令 + ①②两类集成目标） | §16 验收项 | 已复跑：2026-09-01 复核在 m-235 最终态（`58c5e777`）八条命令全 `EXIT=0`（auditd 117、protocol 25、service 134/71、集成 4/4/1/1）；下次补丁变更后仍需再跑 |
+| §16 收窄 Rust 门禁（v8：两条 workspace 命令 + ①②两类集成目标） | §16 验收项 | 已复跑：2026-09-01 二次复核在 m-237 最终态（`849ace0b`）八条命令全 `EXIT=0`（auditd 118、protocol 25、service 134/71、集成 4/4/1/1），**用的是 `release-toolchain.lock` 钉定的 rustc 1.97.0**（前一轮用的是 1.98.0）；下次补丁变更后仍需再跑 |
 | `cargo-fuzz` sanitizer 实跑 | §3.2/§14.4 要求交付并运行 fuzz target | 无，尚未安排 |
 | §14.5 目标机压测 | 吞吐 ≤5%、CPU ≤10%、ssserver RSS ≤64 MiB、auditd RSS ≤128 MiB，及离线/队列满/慢 ACK/spool 满四类专项 | 需目标机与真实数据面负载 |
 | 真实流量端到端审计事件 | 经 ssserver 转发真实 TCP/UDP 流量后，验证 access event 落入 spool 并可经 lease 导出 | `integration_audit.py` 覆盖的是 ingest/export 协议链路，**不含**真实代理流量 |
@@ -456,3 +527,14 @@ lib 是 309，不可能少到 121」为由怀疑 §3.1 的计数有误。实测�
   m-234 自述的范围理由（state.json 每条 record 都重写，频率不低于 tombstones.json）。修复后
   auditd 117 passed，最终态 `prepared_tree_sha256` 为 `58c5e777…`，门禁与 macOS `verify.sh`
   均已复跑通过。
+- 2026-09-01：**二次复核 m-235 的修复提交 `0ec6c2c` 与文档提交 `1e5d112`**。m-235 独立复证成立、
+  范围完整，对 m-234 范围理由的更正也成立。新增并修复两条，一个问题一个提交：`m-236`
+  （`76d62b0`，四个 `update_path_size` 记账点里 `persist_tombstone_pending_marker_locked` 是唯一
+  记账失败后不清 `spool_bytes_known` 的，增量字节索引会带永久偏移参与容量判定；变异检验转红）与
+  `m-237`（`cd56a61`，m-235 拆分测试时丢掉四类断言并留下退化的单元素循环；该条的变异**不具
+  鉴别性**，已在条目里如实标注，依据是可直接比对的覆盖面丢失）。同时更正上一节文档两处：
+  删去被 m-236 证伪的「未发现新的行为缺陷」宣告，改正不存在的函数名 `accept_record_locked`
+  （实为 `write_record_locked`）。最终态 `prepared_tree_sha256` 为 `849ace0b…`；八条 Linux 门禁在
+  **锁定的 rustc 1.97.0** 上全部 `EXIT=0`（auditd 118、protocol 25、service 134/71、集成 4/4/1/1），
+  本地 12 项 Python/静态门禁与锚点重放一致性全绿。发布前置仍是三项（fuzz 实跑、§14.5 压测、
+  真实流量端到端），无变化。
