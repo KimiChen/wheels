@@ -310,6 +310,94 @@ Linux 全量门禁也已跑通。问题集中在**回归覆盖面**：多处自�
   依据是「拆分导致的覆盖面客观丢失」这一可直接比对的事实，不是变异背书。
 - **提交**：`cd56a61`，锚点 `8d6f5b5b…` → `849ace0b…`。
 
+**m-238（nit，已修复）m-234 的代码注释仍写着与已更正范围理由相反的方向**
+
+- **位置**：`crates/shadowsocks-auditd/src/spool.rs` 的 `persist_tombstones_locked` 记账失败分支。
+- **根因**：m-234 的注释原文是「`tombstones.json` is rewritten on every ACK and every eviction,
+  so that exposure is far larger than `state.json`'s」。m-235 已经证明这个方向是反的，但更正只落到
+  台账和提交正文，源码里被否定的那句原封不动地留着——同一文件里紧挨的两段孪生注释因此互相
+  矛盾，后续读者按注释理解范围理由会被误导。
+- **修复**：删掉这半句纯频率比较的从句，写出正确方向，并点明频率不是判据——判据是屏障结果
+  是否已确定。
+- **提交**：`10963e5`，锚点 `849ace0b…` → `523b96d9…`。变异检验不适用（改动全部位于注释行）。
+
+**m-239（nit，已修复）`mark_storage_rejection` 的 `non_gap` 实参在四处记账用例上均无绑定**
+
+- **位置**：`spool.rs` 的四条记账故障用例（`persist_state_locked`、`persist_tombstones_locked`、
+  `persist_recovery_gap_marker_locked`、`persist_tombstone_pending_marker_locked` 各一条）。
+- **根因**：四条用例都只断言 `storage_rejected_attempts > 0`。把修复块里的
+  `mark_storage_rejection(inner, true)` 改成 `(inner, false)`，全部用例照样绿。这个实参不是无关
+  紧要的：`non_gap_degraded` 的唯一读者是 `refresh_degraded_after_ack_locked`，它靠这个标志
+  拦住「一次 gap 的 ACK 把无关的存储拒绝静默清掉」。变异后的行为是——记账失败之后若有
+  `spool_gap` 被 ACK，`degraded` 会被清回 false、health 从 degraded 变回 ok，这次存储拒绝只剩
+  计数器留痕。当前代码写的是 `true`（正确），但没有任何用例守住它。这说明「m-235 的四条变异
+  全杀」并不等于那段修复的每个决策都有绑定。
+- **修复**：四条用例的 `storage_rejected_attempts > 0` 各补一对
+  `assert!(inner.degraded)` + `assert!(inner.non_gap_degraded)`，并在注释里写明这是在绑定实参
+  本身而不只是计数器。无生产代码改动。
+- **回归与验证**：见下节「本轮最终态验证」。
+
+**m-240（minor，已修复）本台账无任何门禁覆盖，开头的锚点声明已实际漂移**
+
+- **根因**：`grep -rl USER_ACCESS_AUDIT_V2 tests/ scripts/` 零命中——本文件是这个项目唯一的问题
+  溯源载体，却不被任何门禁读取。后果不是假设性的：文首「与 `upstream.lock` 的
+  `prepared_tree_sha256` 一致（`849ace0b…`）」是一条可判真假的断言，而 m-238 改补丁后 lock 变成
+  `523b96d9…`，没有任何东西拦住这次漂移。m-235 条目里写成不存在的 accept_record_locked
+  那次属同一类：文档里的可判定断言无人校验。
+- **修复**：`tests/test_docs_consistency.py` 新增 `AuditLedgerV2Tests` 两条门禁——
+  ①文首声明的 8 位锚点前缀必须是 `upstream.lock` 的 `prepared_tree_sha256` 的前缀；
+  ②台账里反引号包起来、以 `_locked` 结尾的函数名必须在 0003 补丁的增行里能找到 `fn <name>(`。
+  加入时**两条都是红的**（分别报出 `849ace0b…` 的漂移和 `['accept_record_locked']`），修正台账后
+  转绿。此后台账中提到「不存在的函数名 accept_record_locked」时一律不加反引号。
+- **变异检验**：把文首前缀改成 `deadbeef…` → 锚点条转红；插入一个不存在的 foo_bar_locked（此处同样刻意不加反引号）→ 函数名条
+  转红；两者恢复后均转绿。已实跑。
+- **提交**：`e43d62a`。
+
+**m-241（minor，已修复）m-235 条目把用例拆分写成等价重组，掩盖了实际的断言丢失**
+
+- **根因**：原文读起来是一次等价重组，实际新用例对四类断言一条都没有继承，连 drain 都没有，
+  还留下退化的单元素循环而文档只字未提。读者会据此高估 m-235 的回归绑定强度——与台账自己
+  在 m-221/m-222/m-224 批评过的「混入旧用例致读者高估绑定」是同一类问题。
+- **修复**：如实写出丢失了哪四类断言、点名 `never_reuse_epoch_sequence` 这个落点、注明遗留的
+  退化循环，并指向已把它们补回的 m-237。**提交**：`dc98c27`。
+
+**m-242（minor，已修复）§3.2 与 m-226/m-227 的「待复跑」措辞与 §3 首行「已复跑」正面冲突**
+
+- **根因**：§3 引言把 §3.2 当作依据来源，首行已改成「已复跑」，而 §3.2 一字未动，仍写「本轮最终
+  源码还需复跑新增用例」「最终补丁待 Linux 真机复跑」；其中「5 条 / 107」两个数早已被 §1 与
+  §3.3 推翻。m-226、m-227 的「待复跑 / 尚未完成」同属这批陈账。
+- **修复**：§3.2 点明该表是 2026-08-30 的基线快照而非当前状态并指向 §3.3 与 §2；被推翻的旧记法
+  标注出处；m-226/m-227 改为陈述已复跑的时点。计数一个未改，只让每个数字挂到它成立的时点。
+  **提交**：`00f4e17`。
+
+**m-243（nit，已修复）复核基线提交写成 `4ad0ffb`，实际是 `8b7b534`**
+
+- **根因**：`e0be754^` 即 `8b7b534`；`4ad0ffb` 与它之间还夹着 `85fe4c2`（m-142）、`7f465c7` 等一批
+  代码提交，按字面读会把它们一并算进复核范围，也说不清第七个物化点是谁。
+- **修复**：基线改为 `8b7b534`，点明第七个物化点就是该基线本身。**提交**：`d2e90b9`。
+
+**两条交付纪律观察（历史提交，不回改）**
+
+- `0ec6c2c` 与 `1e5d112` 都缺 `Co-Authored-By` 尾注。m-229–m-243 这条修复链上只有这两个提交
+  没有；加倍尴尬的是 `1e5d112` 写进本文档的正是「`31993e0` …无 `Co-Authored-By`，与既有约定
+  不符」这句判词。两者已在 `main` 上且有下游提交，不 rebase 重写。
+- `0ec6c2c` 改了 `upstream.lock` 却没有「同一提交刷新 `prepared_tree_sha256`」这一行，是
+  m-229–m-243 十余个改补丁的提交里唯一的例外；其「绑定」内容也折在修复段里，没有独立成段。
+- 这两条都属「靠自觉」的约定。可门禁化的做法：对 `修复：`/`文档：` 开头的提交要求尾注存在
+  `Co-Authored-By:`；改动 `patches/` 的提交要求正文含刷新说明。尚未实施。
+
+**本轮最终态验证（`ee27bfbb…`）**
+
+- **Linux 门禁**（Debian 13 / `10.0.1.3` / **rustc 1.97.0**，即 `packaging/release-toolchain.lock`
+  锁定的版本）：八条命令全部 `EXIT=0`——auditd **118**、protocol **25**、service lib
+  **134**（user-audit）/ **71**（feature-off）、四个集成目标 **4/4/1/1**。
+- **本地门禁**：`check_audit_static.py`、`test_fuzz_target.py`、`test_panic_abort.py` 与
+  11 个 Python 门禁（docs/script-switches/release-artifact/audit-packaging/check-audit-static/
+  cluster-users/http-unix/settlement/mock-collector/integration-audit/benchmark-audit）全绿；
+  `prepare-source.sh` 干净重放的 `source-tree-sha256` 与 `upstream.lock` 一致，且与工作树逐文件相同。
+- **变异纪律**：本轮所有变异一律「单一 `CARGO_TARGET_DIR` + 每段 `cargo clean -p shadowsocks-auditd`」，
+  并在日志里逐段确认出现 `Compiling shadowsocks-auditd`，以排除上一节记录的旧二进制复用陷阱。
+
 **本节顺带更正上一节文档的两处**：①「未发现新的行为缺陷」的宣告已按上文删去；
 ②m-235 条目里的 accept_record_locked 在仓库中不存在，实际是 `write_record_locked`
 （`spool.rs:2435`，升级路径在其 `AfterRename` 分支 2493 行），已改。
@@ -318,7 +406,7 @@ Linux 全量门禁也已跑通。问题集中在**回归覆盖面**：多处自�
 ## 3. 待执行的验证
 
 以下为发布前置。§16 已收窄为 v8 门禁并有 Linux 基线结果（见 §3.2）；m-229–m-237 新增的 Linux 用例与
-最终态已由 2026-09-01 两轮复核在 `10.0.1.3` 复跑全绿（见 §2 末两节）。原始宽命令的失败记录见
+最终态已由 2026-09-01 两轮复核在 `10.0.1.3` 复跑全绿（见 §2 末两节与「本轮最终态验证」）。原始宽命令的失败记录见
 §3.1；其余三项**从未在任何机器上执行过**：
 
 | 项目 | 说明 | 阻塞因素 |
@@ -546,3 +634,13 @@ lib 是 309，不可能少到 121」为由怀疑 §3.1 的计数有误。实测�
   **锁定的 rustc 1.97.0** 上全部 `EXIT=0`（auditd 118、protocol 25、service 134/71、集成 4/4/1/1），
   本地 12 项 Python/静态门禁与锚点重放一致性全绿。发布前置仍是三项（fuzz 实跑、§14.5 压测、
   真实流量端到端），无变化。
+- 2026-09-01：**第三轮复核（同轮内的补充审阅）**，对象为 m-235 一族与 2026-09-01 的两次文档回写。
+  确认成立并逐条修掉六条，一个问题一个提交：`m-238`（`10963e5`，m-234 的代码注释仍写着与已更正
+  范围理由相反的方向）、`m-240`（`e43d62a`，本台账无任何门禁覆盖，文首锚点声明已实际漂移；
+  新增两条门禁并实跑变异确认）、`m-241`（`dc98c27`，m-235 条目把用例拆分写成等价重组）、
+  `m-242`（`00f4e17`，§3.2 与 m-226/m-227 的「待复跑」措辞与 §3 首行「已复跑」冲突）、
+  `m-243`（`d2e90b9`，复核基线提交写成 `4ad0ffb`，实为 `8b7b534`）、`m-239`（`9e3570f`，
+  `mark_storage_rejection` 的 `non_gap` 实参在四处记账用例上均无绑定，变异 `true→false`
+  在补断言前全绿、补后转红）。另记两条不回改的交付纪律观察（`0ec6c2c`/`1e5d112` 缺
+  `Co-Authored-By`；`0ec6c2c` 缺刷新说明），见 §2。最终态 `prepared_tree_sha256` 为
+  `ee27bfbb…`，本地 12 项 Python/静态门禁与锚点重放一致性全绿。发布前置仍是三项，无变化。
