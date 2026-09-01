@@ -8089,10 +8089,10 @@ index 0000000000000000000000000000000000000000..6cf8d005dfef917c852be4f611d5b945
 +}
 diff --git a/crates/shadowsocks-auditd/src/spool.rs b/crates/shadowsocks-auditd/src/spool.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..589ac028fd0fa9c73e376bc5a85770f3bf88e76f
+index 0000000000000000000000000000000000000000..69df2d8aa3f7949ab3eaa58c9250cb8f9a352b1e
 --- /dev/null
 +++ b/crates/shadowsocks-auditd/src/spool.rs
-@@ -0,0 +1,9515 @@
+@@ -0,0 +1,9548 @@
 +//! Durable, node-local audit spool.
 +//!
 +//! The spool is deliberately synchronous.  Ingest and export perform their
@@ -14427,72 +14427,72 @@ index 0000000000000000000000000000000000000000..589ac028fd0fa9c73e376bc5a85770f3
 +
 +    #[test]
 +    fn committed_state_errors_keep_the_record_and_never_reuse_epoch_sequence() {
-+        for (case, fail_after_commit) in [("after-commit", true)] {
++        // 只剩「屏障提交后失败」这一种故障：path-size-accounting 那一支已随 m-235
++        // 拆到 post_commit_state_accounting_failure_degrades_without_stopping。
 +            let dir = tempfile::tempdir().expect("tempdir");
 +            let spool_config = config(dir.path());
 +            let spool = Spool::open(spool_config.clone()).expect("spool");
 +            {
-+                let mut inner = lock(&spool.inner);
-+                inner.faults.persist_state_after_commit = fail_after_commit;
++            let mut inner = lock(&spool.inner);
++            inner.faults.persist_state_after_commit = true;
 +            }
 +
 +            assert!(
-+                matches!(spool.append(&event(1), 1), Err(SpoolError::DurabilityUncertain)),
-+                "{case} must make the daemon fatal"
++            matches!(spool.append(&event(1), 1), Err(SpoolError::DurabilityUncertain)),
++            "after-commit must make the daemon fatal"
 +            );
 +            let committed_state = load_state(&dir.path().join("state.json"))
-+                .expect("state read")
-+                .expect("committed state");
-+            assert_eq!(committed_state.next_spool_sequence.0, 2, "{case}");
++            .expect("state read")
++            .expect("committed state");
++            assert_eq!(committed_state.next_spool_sequence.0, 2, "after-commit");
 +            let original_epoch = committed_state.spool_epoch;
 +            let open_after_failure = fs::read(dir.path().join("open/current.ndjson")).expect("committed open record");
 +            let wrapper = wire::parse_spool_line(&open_after_failure).expect("committed spool line");
-+            assert_eq!(wrapper.spool_epoch, original_epoch, "{case}");
-+            assert_eq!(wrapper.spool_sequence.0, 1, "{case}");
++            assert_eq!(wrapper.spool_epoch, original_epoch, "after-commit");
++            assert_eq!(wrapper.spool_sequence.0, 1, "after-commit");
 +            {
-+                let inner = lock(&spool.inner);
-+                assert!(inner.durability_uncertain, "{case}");
-+                assert_eq!(inner.next_sequence, 2, "{case}");
-+                assert_eq!(inner.open_meta.event_count, 1, "{case}");
++            let inner = lock(&spool.inner);
++            assert!(inner.durability_uncertain, "after-commit");
++            assert_eq!(inner.next_sequence, 2, "after-commit");
++            assert_eq!(inner.open_meta.event_count, 1, "after-commit");
 +            }
 +
 +            let rejections = lock(&spool.inner).storage_rejected_attempts;
 +            assert!(
-+                matches!(spool.append(&event(2), 2), Err(SpoolError::DurabilityUncertain)),
-+                "{case} must reject same-process sequence reuse"
++            matches!(spool.append(&event(2), 2), Err(SpoolError::DurabilityUncertain)),
++            "after-commit must reject same-process sequence reuse"
 +            );
 +            assert_eq!(
-+                lock(&spool.inner).storage_rejected_attempts,
-+                rejections.saturating_add(1),
-+                "{case} sticky rejection count"
++            lock(&spool.inner).storage_rejected_attempts,
++            rejections.saturating_add(1),
++            "after-commit sticky rejection count"
 +            );
 +            assert_eq!(
-+                fs::read(dir.path().join("open/current.ndjson")).expect("unchanged committed open record"),
-+                open_after_failure,
-+                "{case} changed the retained record before restart"
++            fs::read(dir.path().join("open/current.ndjson")).expect("unchanged committed open record"),
++            open_after_failure,
++            "after-commit changed the retained record before restart"
 +            );
 +            drop(spool);
 +
 +            let recovered = Spool::open(spool_config).expect("restart recovery");
 +            let retry = recovered.append(&event(1), 2).expect("producer retry");
-+            assert_eq!(retry.spool_epoch, original_epoch, "{case}");
-+            assert_eq!(retry.spool_sequence, 2, "{case}");
++            assert_eq!(retry.spool_epoch, original_epoch, "after-commit");
++            assert_eq!(retry.spool_sequence, 2, "after-commit");
 +
 +            let producer_id = "0123456789abcdef0123456789abcdef:1";
 +            let positions: Vec<_> = drain_record_positions(&recovered)
-+                .into_iter()
-+                .filter(|(_, _, event_id)| event_id == producer_id)
-+                .collect();
++            .into_iter()
++            .filter(|(_, _, event_id)| event_id == producer_id)
++            .collect();
 +            // §8.3 permits an event_id replay after auditd restart. The spool
 +            // key, unlike event_id, must remain unique within an epoch.
-+            assert_eq!(positions.len(), 2, "{case}");
++            assert_eq!(positions.len(), 2, "after-commit");
 +            assert_eq!(
-+                positions[0],
-+                (original_epoch.clone(), 1, producer_id.to_owned()),
-+                "{case}"
++            positions[0],
++            (original_epoch.clone(), 1, producer_id.to_owned()),
++            "after-commit"
 +            );
-+            assert_eq!(positions[1], (original_epoch, 2, producer_id.to_owned()), "{case}");
-+        }
++            assert_eq!(positions[1], (original_epoch, 2, producer_id.to_owned()), "after-commit");
 +    }
 +
 +    /// `m-236`：pending marker 的**写**路径记账失败时也必须让增量字节索引失效。
@@ -14542,7 +14542,8 @@ index 0000000000000000000000000000000000000000..589ac028fd0fa9c73e376bc5a85770f3
 +    #[test]
 +    fn post_commit_state_accounting_failure_degrades_without_stopping() {
 +        let dir = tempfile::tempdir().expect("tempdir");
-+        let spool = Spool::open(config(dir.path())).expect("spool");
++        let spool_config = config(dir.path());
++        let spool = Spool::open(spool_config.clone()).expect("spool");
 +        {
 +            let mut inner = lock(&spool.inner);
 +            inner.faults.persist_state_accounting = true;
@@ -14551,6 +14552,9 @@ index 0000000000000000000000000000000000000000..589ac028fd0fa9c73e376bc5a85770f3
 +            .append(&event(1), 1)
 +            .expect("a successful write barrier must not fail on its accounting read");
 +        assert_eq!(ack.spool_sequence, 1);
++        let original_epoch = ack.spool_epoch.clone();
++
++        // 降级可观察，但不致命。
 +        {
 +            let inner = lock(&spool.inner);
 +            assert!(
@@ -14565,15 +14569,44 @@ index 0000000000000000000000000000000000000000..589ac028fd0fa9c73e376bc5a85770f3
 +                inner.storage_rejected_attempts > 0,
 +                "the accounting failure must still be observable"
 +            );
++            assert_eq!(inner.next_sequence, 2, "the in-memory cursor advanced");
++            assert_eq!(inner.open_meta.event_count, 1);
 +        }
++
++        // 留存的 record 与 durable 游标：这些断言随 m-235 的拆分从
++        // `committed_state_errors_keep_the_record_and_never_reuse_epoch_sequence`
++        // 丢掉过，`m-237` 把它们补回这条故障路径上。
 +        let committed = load_state(&dir.path().join("state.json"))
 +            .expect("state read")
 +            .expect("committed state");
 +        assert_eq!(committed.next_spool_sequence.0, 2, "the durable cursor advanced");
++        assert_eq!(committed.spool_epoch, original_epoch);
++        let open_record = fs::read(dir.path().join("open/current.ndjson")).expect("committed open record");
++        let wrapper = wire::parse_spool_line(&open_record).expect("committed spool line");
++        assert_eq!(wrapper.spool_epoch, original_epoch);
++        assert_eq!(wrapper.spool_sequence.0, 1);
++
 +        let retry = spool
 +            .append(&event(2), 2)
 +            .expect("service continues after a post-commit accounting fault");
 +        assert_eq!(retry.spool_sequence, 2);
++        drop(spool);
++
++        // 重启后 epoch 不变、序号继续，且 (epoch, sequence) 不复用。
++        let recovered = Spool::open(spool_config).expect("restart recovery");
++        let after_restart = recovered.append(&event(3), 3).expect("append after restart");
++        assert_eq!(after_restart.spool_epoch, original_epoch);
++        assert_eq!(after_restart.spool_sequence, 3);
++        let positions = drain_record_positions(&recovered);
++        let mut keys: Vec<_> = positions
++            .iter()
++            .map(|(epoch, sequence, _)| (epoch.clone(), *sequence))
++            .collect();
++        assert_eq!(keys.len(), 3, "every appended record must drain");
++        let total = keys.len();
++        keys.sort();
++        keys.dedup();
++        assert_eq!(keys.len(), total, "the spool key must stay unique within an epoch");
 +    }
 +
 +    /// An aggregate-ledger rename can succeed before its parent-directory
