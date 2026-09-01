@@ -10,7 +10,7 @@
 > - 本文保留本轮新增问题的根因、修复和验证边界；已闭合项明确标注“已修复”，避免与待办混淆。
 >
 > 基线：overlay `main`，规范版本 v8，`patches/0003-user-audit.patch` 与
-> `upstream.lock` 的 `prepared_tree_sha256` 一致（`523b96d9…`，2026-09-01 二次复核新增 m-236–m-239 后更新；
+> `upstream.lock` 的 `prepared_tree_sha256` 一致（`ee27bfbb…`，2026-09-01 二次复核新增 m-236–m-243 后更新；
 > 这一行由 `tests/test_docs_consistency.py` 的 `test_declared_anchor_prefix_matches_upstream_lock` 绑定）。
 
 ## 1. 当前真机验收状态（背景）
