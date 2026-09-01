@@ -8089,10 +8089,10 @@ index 0000000000000000000000000000000000000000..6cf8d005dfef917c852be4f611d5b945
 +}
 diff --git a/crates/shadowsocks-auditd/src/spool.rs b/crates/shadowsocks-auditd/src/spool.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..9365d427bd63e338513885996886131c2a45ba2c
+index 0000000000000000000000000000000000000000..589ac028fd0fa9c73e376bc5a85770f3bf88e76f
 --- /dev/null
 +++ b/crates/shadowsocks-auditd/src/spool.rs
-@@ -0,0 +1,9462 @@
+@@ -0,0 +1,9515 @@
 +//! Durable, node-local audit spool.
 +//!
 +//! The spool is deliberately synchronous.  Ingest and export perform their
@@ -9083,6 +9083,7 @@ index 0000000000000000000000000000000000000000..9365d427bd63e338513885996886131c
 +    persist_state_after_commit: bool,
 +    persist_state_accounting: bool,
 +    recovery_marker_accounting: bool,
++    tombstone_pending_marker_accounting: bool,
 +    rollback: bool,
 +    recovery_marker: bool,
 +    orphan_after_marker: bool,
@@ -11708,7 +11709,23 @@ index 0000000000000000000000000000000000000000..9365d427bd63e338513885996886131c
 +        let path = tombstone_pending_marker_path(&self.root, entry)?;
 +        let before = file_len(&path)?;
 +        let result = persist_tombstone_pending_marker(&self.root, entry);
-+        if let Err(error) = Self::update_path_size(inner, &path, before) {
++        #[cfg(test)]
++        let accounting = if std::mem::take(&mut inner.faults.tombstone_pending_marker_accounting) {
++            Err(io::Error::other(
++                "injected tombstone pending marker path-size accounting failure",
++            ))
++        } else {
++            Self::update_path_size(inner, &path, before)
++        };
++        #[cfg(not(test))]
++        let accounting = Self::update_path_size(inner, &path, before);
++        if let Err(error) = accounting {
++            // The marker may already be on disk with a size that cannot be
++            // established.  Leaving the incremental index "known" would keep a
++            // permanent offset, exactly as its sibling writer
++            // `persist_recovery_gap_marker_locked` and its own removal
++            // counterpart both note; force a full re-measurement instead.
++            inner.spool_bytes_known = false;
 +            mark_storage_rejection(inner, true);
 +            return Err(error.into());
 +        }
@@ -14476,6 +14493,42 @@ index 0000000000000000000000000000000000000000..9365d427bd63e338513885996886131c
 +            );
 +            assert_eq!(positions[1], (original_epoch, 2, producer_id.to_owned()), "{case}");
 +        }
++    }
++
++    /// `m-236`：pending marker 的**写**路径记账失败时也必须让增量字节索引失效。
++    ///
++    /// `update_path_size` 的四个记账点里，只有 `persist_tombstone_pending_marker_locked`
++    /// 不清 `spool_bytes_known`。它的姊妹写入 `persist_recovery_gap_marker_locked`
++    /// 与它自己的删除对应物 `remove_tombstone_pending_marker_locked` 都清，前者的
++    /// 注释还写明了理由：记账读失败意味着这次写入的大小差没有被计入
++    /// `spool_bytes`，把索引继续标成「已知」就会留下**永久偏移**，其后的容量判定
++    /// （`max_spool_bytes` / `min_free_bytes` 水位）一直用错的总量。
++    ///
++    /// 这不是 m-234/m-235 那种「过度处理」，方向相反——是同一族里唯一一处**处理
++    /// 不足**。
++    #[test]
++    fn a_pending_marker_write_accounting_failure_invalidates_the_byte_index() {
++        let dir = tempfile::tempdir().expect("tempdir");
++        let spool = Spool::open(config(dir.path())).expect("spool");
++        let mut inner = lock(&spool.inner);
++        assert!(inner.spool_bytes_known, "the index starts out measured");
++
++        inner.faults.tombstone_pending_marker_accounting = true;
++        let error = spool
++            .add_tombstone_locked(
++                &mut inner,
++                eviction_pending_for_test(&format!("{GAP_ID_PREFIX}{}", "3".repeat(32)), &"a".repeat(32)),
++            )
++            .expect_err("the injected accounting failure must surface");
++        assert!(
++            error.to_string().contains("path-size accounting failure"),
++            "unexpected error: {error}"
++        );
++        assert!(
++            !inner.spool_bytes_known,
++            "an unmeasured marker write must force a full re-measurement, not leave a permanent offset"
++        );
++        assert!(inner.storage_rejected_attempts > 0);
 +    }
 +
 +    /// `m-235`：state.json 的写屏障完整成功之后，事后量文件大小失败不得再
