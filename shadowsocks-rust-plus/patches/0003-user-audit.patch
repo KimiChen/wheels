@@ -8089,7 +8089,7 @@ index 0000000000000000000000000000000000000000..6cf8d005dfef917c852be4f611d5b945
 +}
 diff --git a/crates/shadowsocks-auditd/src/spool.rs b/crates/shadowsocks-auditd/src/spool.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..9d4924a9b90815a1e79fc9d3c25275883c1010e4
+index 0000000000000000000000000000000000000000..5879a061d81bb40e4d091404dec4979f59a4d3af
 --- /dev/null
 +++ b/crates/shadowsocks-auditd/src/spool.rs
 @@ -0,0 +1,9587 @@
@@ -14581,7 +14581,7 @@ index 0000000000000000000000000000000000000000..9d4924a9b90815a1e79fc9d3c2527588
 +                inner.storage_rejected_attempts > 0,
 +                "the accounting failure must still be observable"
 +            );
-+                // m-239: `mark_storage_rejection` 的 `non_gap` 实参决定
++            // m-239: `mark_storage_rejection` 的 `non_gap` 实参决定
 +            // `refresh_degraded_after_ack_locked` 会不会让一次 gap 的 ACK 把这条存储
 +            // 拒绝静默清掉。把它改成 `false` 曾让全部用例照样绿，因此这里直接断言
 +            // 该实参的效果，而不只是断言计数器动过。
