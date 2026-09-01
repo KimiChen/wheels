@@ -8089,10 +8089,10 @@ index 0000000000000000000000000000000000000000..6cf8d005dfef917c852be4f611d5b945
 +}
 diff --git a/crates/shadowsocks-auditd/src/spool.rs b/crates/shadowsocks-auditd/src/spool.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..69df2d8aa3f7949ab3eaa58c9250cb8f9a352b1e
+index 0000000000000000000000000000000000000000..977e56f0ee7c2ba995ee8fd21fc4d03e37a59ca2
 --- /dev/null
 +++ b/crates/shadowsocks-auditd/src/spool.rs
-@@ -0,0 +1,9548 @@
+@@ -0,0 +1,9551 @@
 +//! Durable, node-local audit spool.
 +//!
 +//! The spool is deliberately synchronous.  Ingest and export perform their
@@ -11663,11 +11663,14 @@ index 0000000000000000000000000000000000000000..69df2d8aa3f7949ab3eaa58c9250cb8f
 +                // incremental byte index is now untrustworthy, and clearing
 +                // `spool_bytes_known` forces a full measurement before the next
 +                // capacity decision.  Escalating this to `DurabilityUncertain`
-+                // would stop the daemon over an accounting read -- and
-+                // `tombstones.json` is rewritten on every ACK and every
-+                // eviction, so that exposure is far larger than `state.json`'s.
++                // would stop the daemon over an accounting read.
 +                // `OPERATIONS.md` scopes the fail-closed exit to a write barrier
-+                // whose *outcome* cannot be determined; this is not that.
++                // whose *outcome* cannot be determined; this is not that.  The
++                // same reasoning covers `persist_state_locked`: the frequency
++                // comparison this comment used to draw was backwards -- §9.3
++                // rewrites `state.json` once per record, so its exposure is at
++                // least as large as this ledger's.  Frequency is not what
++                // decides the scope; barrier outcome is.
 +                inner.spool_bytes_known = false;
 +                mark_storage_rejection(inner, true);
 +            }
