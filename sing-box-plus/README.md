@@ -5,8 +5,8 @@
 > 实施基线：[`v1.14.0`](https://github.com/SagerNet/sing-box/releases/tag/v1.14.0) / `0b899587`
 > （stable 轨道）
 >
-> 参考实现：本仓库 `shadowsocks-rust-plus`（可结算契约的既有落地；本项目复用其**结算语义与
-> 参考模型**，快照 schema 另立 v2，见 §4.5）
+> 参考实现：本仓库 `shadowsocks-rust-plus`（可结算契约的既有落地；本项目沿用其结算语义与
+> 参考模型，快照 schema 按 sing-box 的字段词汇自行定义，见 §4.5）
 >
 > 源码核对：2026-09-05。下文未标版本的 `路径:行号` 均指 `0b899587`；涉及 1.13.x 的历史差异
 > 单独标注。下次核对触发：上游发布新 minor，或本计划进入新里程碑。
@@ -33,10 +33,11 @@ TCP/UDP × 上下行四个累计值、明确的重启边界、可幂等采集，
 （§5.1 的基线键以 `node_id` 打头，否则 inbound tag 命名空间会跨实现串号）。两者的 SS 配置
 纪律是同构的：固定 EIH method、要求具名用户、禁止与各自的动态管理面并存。
 
-两者快照的区分办法有三重，并列生效：本项目是 `GET /v2/snapshot` 与 `schema_version: 2`，
-误接的 v1 采集器在 `/v1/snapshot` 上拿到 404，即使直接打到 `/v2/snapshot` 也会在版本号处硬失败
-（v1 的三个校验器都硬编码 `!= 1 → 拒绝`）；此外两者使用不同的 `node_id` 与不同的 socket 路径。
-若下游中控原本对接 v1，其 `schema_version` 约束与触发器须先放开为接受 2，这是接入本项目的硬前置。
+两者的快照可由三重标志区分，并列生效：本项目是 `GET /v2/snapshot` 与 `schema_version: 2`
+（`shadowsocks-rust-plus` 是 `/v1/snapshot` 与 `1`），两者使用不同的 `node_id`，以及不同的 socket 路径。
+误指到本项目的旧采集器会先在路由上拿到 404，即使直接打到 `/v2/snapshot` 也会在版本号处硬失败——
+`shadowsocks-rust-plus` 的三个校验器都硬编码要求 `schema_version == 1`。因此下游若已对接该实现，
+其 `schema_version` 约束与触发器须先放开为同时接受 `2`，这是接入本项目的硬前置。
 
 **验收定义**：在钉定的上游版本上，选中的 inbound 对所有允许流量都有可验证的非空计费身份；
 四向字节 oracle 误差为 0；快照接口通过 §8 的故障矩阵；下游按 §5 差分入账时不出现漏计、
@@ -328,26 +329,32 @@ registry 由自有 main 持有（§4.7），因此它的生命周期是**进程�
 
 仍需自行实现的部分：
 
-0. **重载不变量校验**：在重载的配置检查阶段比对 `node_id` / `listen_path` 与进程初值，
+1. **重载不变量校验**：在重载的配置检查阶段比对 `node_id` / `listen_path` 与进程初值，
    不一致即拒绝本次重载（§4.6 第 11 条）；
-1. **重载对账**：每次重载后按新配置切换 `active` 与 tombstone（§4.3 第 1、5 条）；
-2. **排空阶段**：若要在重启前排空，必须在 run 循环与 `Box.Close()` 之间插入 drain
+2. **重载对账**：每次重载后按新配置切换 `active` 与 tombstone（§4.3 第 1、5 条）；
+3. **排空阶段**：若要在重启前排空，必须在 run 循环与 `Box.Close()` 之间插入 drain
    （停止 accept → 等待或超时 → 再 Close）并接管 `C.FatalStopTimeout` 看门狗；
-3. **端口不中断**：仍需 SO_REUSEPORT 或 listener fd 传递，作为独立工作项，不在首期范围内。
+4. **端口不中断**：仍需 SO_REUSEPORT 或 listener fd 传递，作为独立工作项，不在首期范围内。
 
 纯内存 registry 无法恢复进程崩溃前尚未采集的尾账。若业务要求“崩溃也不丢一个字节”，
 需另加 WAL 或持久计量数据面，复杂度显著上升；不得把高频轮询描述成严格保证。
 
 ### 4.5 快照接口契约
 
-快照使用本项目自有的 **v2 schema**：`schema_version` 固定为 `2`，路由为 `GET /v2/snapshot`。
-它与 `shadowsocks-rust-plus` 的 v1 **语义同构**——基线键结构、差分规则、health 闸门、错误码表与
-资源上限逐条等价——差异只在 wire 字段命名、`listen` 的形状、版本号与 `identity_kind` 的删除。
+快照 schema 的 `schema_version` 固定为 `2`，路由为 `GET /v2/snapshot`。结算语义——基线键结构、
+差分规则、health 闸门、错误码表与资源上限——与 `shadowsocks-rust-plus` 逐条同构，只是字段按
+sing-box 的词汇命名。
 
-字段命名分两类，不得混为一谈：**有 sing-box 上游依据的**是 `inbounds` / `tag` / `type` / `listen` /
-`listen_port` / `users` / `name`，以及四向计数与会话数的词汇构件；而 `node_id`、`runtime_id`、
-`started_at_unix_ms`、`sequence`、`generation`、`active`、`health` **是本项目自有的计量概念，
-上游没有对应词汇**，沿用既有命名——其语义与协议无关，改名只制造迁移成本。逐字段依据见本节末的映射表。
+字段命名分两类，不得混为一谈：
+
+- **有 sing-box 上游依据的**：`inbounds`（`option/options.go:26`）、`tag` 与 `type`
+  （`option/inbound.go:22-23`）、`listen` 与 `listen_port`（`:80-81`）、`users` 与 `name`
+  （`option/vless.go:5,12`、`option/shadowsocks.go:8,15`），以及四向计数与会话数的词汇构件
+  （`uplink`/`downlink`/`tcp`/`udp`/`sessions`，见 `service/ssmapi/cache.go:20-25`）。
+  这些一律与上游同名同形。
+- **本项目自有的计量概念**：`node_id`、`runtime_id`、`started_at_unix_ms`、`sequence`、
+  `generation`、`active`、`health`。上游没有对应词汇（`generation` 在 `option/` 与 `adapter/` 下
+  零命中），采用与 `shadowsocks-rust-plus` 相同的命名，使两套快照的结算实现可以共用同一套算法。
 
 ```json
 {
@@ -429,8 +436,8 @@ camelCase 只出现在受外部规范约束的面（SSM 遵 SIP008、Clash API �
 传输层：HTTP/1.1-over-Unix-stream，每连接单请求单响应，禁 keep-alive / query / body；
 固定两条路由——`GET /v2/snapshot`（被接受时即推进 `sequence`）与 `GET /healthz`（不带版本段，
 200/503，不推进 `sequence`）。**路径版本号与 `schema_version` 同步推进**：本项目不提供
-`/v1/snapshot`，请求该路径返回 404，使误配了 v1 采集器的部署立即失败，而不是读到半兼容的 body。
-错误一律返回固定 `{"schema_version": 2, "error": {"code": …}}` 对象，错误码取值表沿用 v1
+`/v1/snapshot`，请求该路径返回 404，使误配的采集器立即失败，而不是读到半兼容的 body。
+错误一律返回固定 `{"schema_version": 2, "error": {"code": …}}` 对象，错误码取值表与 `shadowsocks-rust-plus` 一致
 （400/404/405/408/413/429/500/505）——错误码与字段命名正交，复用不产生冲突。
 `/healthz`、全部错误 body 与快照必须**共用同一个 schema 版本常量**，由契约测试逐条断言，
 不得出现 1/2 混用。
@@ -441,30 +448,18 @@ socket 默认 `0600`（可受控 `0660`），绑定前检查父目录、符号�
 Unix socket 不得直接映射为公网监听，远程读取须经节点上的独立反向代理提供 HTTPS/mTLS/来源限制
 与审计，且该代理不得缓存快照。
 
-**v1 → v2 字段映射**（左列即 `shadowsocks-rust-plus` 的 v1 契约；标 ★ 的三项是 sing-box 特有、v1 中不存在）：
+**与 `shadowsocks-rust-plus` 快照的差异**（供已对接该实现的下游评估迁移成本）：容器与标识按
+sing-box 命名——`servers[]` / `server_id` / `inbound_type` 在此为 `inbounds[]` / `tag` / `type`，
+`listen` 由 `host:port` 合成串拆为 `listen` + `listen_port` 两个平级键；`identity_kind` 不设——
+sing-box 侧唯一身份来源是 `metadata.User`，写入点只有 `users[].name`，relay、单用户与 `managed`
+三种非用户形态已由 §4.6 在配置期拒绝，跨版本的失败关闭由 `schema_version` 承担；`health` 多一位
+`identity_limit_reached`。四向计数、信封字段与错误码表同名同义。
 
-| v1 | v2 | 依据与理由 |
-| --- | --- | --- |
-| `schema_version: 1` | `schema_version: 2` | 取 2 而非从 1 重新开始：v1 的三个校验器都硬编码 `!= 1 → 拒绝`，取 2 才能让误接的 v1 采集器失败关闭 |
-| `node_id` / `runtime_id` / `started_at_unix_ms` / `sequence` | 同名保留 | 本项目自有的运行周期与幂等维度，上游无对应词汇 |
-| `health{counter_overflow, sequence_overflow}` | 增 `identity_limit_reached` | 把 §4.3 第 5 条的“标记 unhealthy”变成可机器判定的位。这是对 v1 校验器的破坏性变更——其 health 比较是整字典相等 |
-| `servers[]` | `inbounds[]` | 承载“一个监听服务”的对象在 sing-box 里就叫 inbound（`option/options.go:26`） |
-| `servers[].server_id` | `inbounds[].tag` | `server_id` 在上游全树零命中，是自造词；对应物是 `tag`（`option/inbound.go:23`、`adapter/inbound.go:48`） |
-| `servers[].inbound_type` ★ | `inbounds[].type` | 与配置键同名同值（`option/inbound.go:22`）；放进 `inbounds[]` 后前缀冗余 |
-| `servers[].listen`（`host:port`） | `listen`（host）+ `listen_port`（int） | 上游是两个平级键（`option/inbound.go:80-81`）；合成串同名异形 |
-| `servers[].generation` / `.active` | 同名保留 | lineage 语义为本项目自有（§4.3） |
-| `servers[].tcp_sessions` / `.udp_sessions` ★ | 同名保留 | 上游词汇的 snake_case 形式（`service/ssmapi/cache.go:24-25`） |
-| `servers[].users[]` | `inbounds[].users[]` | 与配置键同名（`option/vless.go:5`、`option/shadowsocks.go:8`） |
-| `users[].identity_kind` | **删除** | v1 里是只有 `user` 一个变体的预留枚举；sing-box 侧唯一身份来源是 `metadata.User`，写入点只有 `users[].name`，relay/单用户/`managed` 三种非用户形态已由 §4.6 在配置期拒绝。跨版本失败关闭由 `schema_version` 承担，它是更强的闸门 |
-| `users[].name` | 同名保留 | 与配置键同名（`option/vless.go:12`、`option/shadowsocks.go:15`） |
-| `users[].generation` / `.active` | 同名保留 | 同上 |
-| `users[].{tcp,udp}_{uplink,downlink}_bytes` | 同名保留（扁平） | 已是上游词汇的组合，且被下游结算表的生成列逐字引用，改名换不来正确性 |
-| `GET /v1/snapshot` | `GET /v2/snapshot` | 路径版本与 `schema_version` 同步推进，旧路径返回 404 |
-
-改名的下游成本已核实**比预估小**：`server_id` 改名不触及下游 DDL 列名（下游服务表的列名本就是
-`exporter_server_id`），也不改变幂等 `batch_id`（v1 参考采集器的批次标签本就与 wire 名解耦）；
-真正与 wire 名字面同一的只有四个 `*_bytes`，而这四个 v2 原样保留。因此 v2 不要求下游改列名，
-也不要求重算历史批次。
+迁移成本因此集中在采集端的字段访问路径：下游服务表的列名（`exporter_server_id` 之类）与幂等
+`batch_id` 的配方都不与 wire 字段名字面绑定，无需改列名，也无需重算历史批次；而
+`shadowsocks-rust-plus` 的参考校验器不能原样复用——它们硬校验 `schema_version == 1`
+与 `identity_kind`，并对 `health` 做整字典相等比较，三处都会整份拒绝本项目的快照。
+契约测试因此须按本 schema 分叉，工作量见 §6。
 
 ### 4.6 配置与失败关闭
 
@@ -673,9 +668,8 @@ exporter 只输出当前进程生命周期内的累计值，不持久化账单�
 node_id + inbounds[].tag + inbounds[].generation + users[].name + users[].generation + runtime_id
 ```
 
-`generation` 恒为 1，但不得从采集键中省略，以保持 schema 与未来兼容性。基线键与 v1 是同一个六元组，
-只是 wire 路径随 v2 改名——采集端的内部标签与下游列名**不需要跟着改**（v1 参考采集器的批次配方本就
-与 wire 名解耦），因此 v2 不改变幂等 `batch_id` 配方，也不要求重算历史批次。幂等批次 ID 必须包含快照
+`generation` 恒为 1，但不得从采集键中省略，以保持 schema 与未来兼容性。采集端的内部标签与下游列名
+不必与 wire 字段同名——键的语义由这个六元组确定，而非由字段拼写确定。幂等批次 ID 必须包含快照
 `sequence` 与本次增量。差分规则：
 
 - 同一 `(node_id, runtime_id)` 内 `started_at_unix_ms` 必须恒定，变化即视为未知 runtime；
@@ -839,8 +833,8 @@ Shadowsocks 与 wrapper 形态的特化补充：
   配置省略 `listen` 时快照输出 `127.0.0.1`（M4）；
 - `/healthz` 与全部错误响应体的 `schema_version` 与快照一致为 `2`，全套响应不出现 1/2 混用（M4）；
 - `GET /v1/snapshot` 返回 404，且 body 的 `schema_version` 为 `2`（M4）；
-- 迁移共存回归：v1 校验器对 v2 快照整份拒绝且不入账，钉死迁移窗口内 v1 collector 误指到 v2 节点时
-  必然失败（M4）。
+- 共存回归：`shadowsocks-rust-plus` 的校验器对本项目快照整份拒绝且不入账，钉死并存窗口内旧
+  collector 误指到本项目节点时必然失败（M4）。
 
 性能验收比较三组：未启用、编译但未配置、启用四向统计。记录吞吐、p50/p99 延迟、CPU、分配、
 goroutine、内存随用户数/并发数增长，以及 exporter 被慢客户端占满时代理数据面的隔离。
@@ -857,7 +851,7 @@ goroutine、内存随用户数/并发数增长，以及 exporter 被慢客户端
 
 | 项 | 值 |
 | --- | --- |
-| Go 工具链 | 钉具体版本并设 `GOTOOLCHAIN=local`；`v1.14.0` 的 `go.mod` 为 `go 1.25.5`，本轮验证用 go1.26.5 |
+| Go 工具链 | 钉具体版本并设 `GOTOOLCHAIN=local`；`v1.14.0` 的 `go.mod` 为 `go 1.25.5`，已验证 go1.26.5 可用 |
 | CGO | `CGO_ENABLED=0` |
 | 可复现参数 | `-trimpath -buildvcs=false -ldflags "-s -w -buildid= $(cat release/LDFLAGS)"`，外加从 `upstream.lock` 读取并注入的 `-X …/constant.Version=<tag>`（§4.7）；`release/LDFLAGS` 内容在 1.14 已改写，必须读取文件而非硬编码 |
 | **生产 tag 集** | **`with_utls` + `badlinkname` + 自有 `with_user_stats`** |
@@ -975,7 +969,7 @@ sing-box 的 LICENSE 是 GPL v3-or-later 的授权声明段，并附带“衍生
 | --- | --- | --- | --- |
 | D1 | overlay 形态 | **零补丁 wrapper**：独立 module + 自有 main，不改上游源码（2026-09-05 在 v1.14.0 上实证） | §4.7 |
 | D2 | 首期协议范围 | **VLESS + Shadowsocks**（仅 `2022-blake3-aes-128-gcm` / `-aes-256-gcm` 的 `users[]` 具名多用户）；拒绝单用户、legacy AEAD、relay、`managed: true`，并与 SSM API 互斥。其余协议按 §2.4 逐个验证后追加 | §1、§2.4、§4.6 |
-| D3 | 快照 schema | **另立 v2**：`schema_version = 2`、路由 `GET /v2/snapshot`；`servers[]`/`server_id`/`inbound_type` 改为 `inbounds[]`/`tag`/`type`，`listen` 拆为 `listen` + `listen_port`，删除 `identity_kind`，`health` 增 `identity_limit_reached`。结算语义与基线键结构与 v1 逐条等价，不改四向计数名、不要求下游改列名；v1 契约测试须分叉 | §1、§4.5、§5.1、§6 |
+| D3 | 快照 schema | **自有 v2**：`schema_version = 2`、路由 `GET /v2/snapshot`，容器与标识按 sing-box 命名（`inbounds[]`/`tag`/`type`，`listen` + `listen_port`），不设 `identity_kind`，`health` 三位。结算语义与 `shadowsocks-rust-plus` 同构，其参考校验器须分叉重写 | §1、§4.5、§5.1、§6 |
 | D4 | 构建 tag 裁剪 | **生产集 = `with_utls` + `badlinkname` + 自有 `with_user_stats`**；上游默认集其余 15 项全砍（含 `with_quic`、`tfogo_checklinkname0`）。裁 tag 不等于隔离上游账本 | §9.1、§4.6 第 7/8 条 |
 | D5 | 热用户增删接口 | **不提供**：快照 socket 只读，用户变更走受控重启或 SIGHUP 重载 | §4.3、§5.3 |
 | D6 | 进程崩溃丢尾账 | **接受**（与 `shadowsocks-rust-plus` 一致）：纯内存 registry，尾账按未闭合窗口审计，不引入 WAL | §1、§4.4、§5.3、§12 |
@@ -992,7 +986,7 @@ D1 的实证覆盖：独立 module 构建（含最小 tag 集与 linux/amd64 交
 
 | # | 已定取值 | 重新评估时点 | 触发条件 |
 | --- | --- | --- | --- |
-| D3 | v2 schema | 首个下游接入方上线后 | 出现 v2 无法表达的计量维度；届时按 §4.5 的命名纪律追加字段并提升 `schema_version` |
+| D3 | 自有 v2 schema | 首个下游接入方上线后 | 出现现有字段无法表达的计量维度；届时按 §4.5 的命名纪律追加字段并提升 `schema_version` |
 | D5 | 不提供热用户增删接口 | 里程碑 6 之后 | 运维反馈“每次改用户都要重载”不可接受，或 §2.4 追加的协议缺少等价的受控重启路径 |
 | D6 | 接受进程崩溃丢尾账 | 里程碑 5 长跑结束 | staging ≥ 7 天实测的未闭合窗口频次与字节量超出业务容忍。改判即引入 WAL 或持久计量数据面 |
 
