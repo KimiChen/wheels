@@ -21,22 +21,31 @@ func TestUsageLogRepositoryCreateSyncRequestTypeAndLegacyFields(t *testing.T) {
 	repo := &usageLogRepository{sql: db}
 
 	createdAt := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	trafficSource := "app_estimate"
+	upstreamRequestID := "req-upstream-traffic"
 	log := &service.UsageLog{
-		UserID:         1,
-		APIKeyID:       2,
-		AccountID:      3,
-		RequestID:      "req-1",
-		Model:          "gpt-5",
-		RequestedModel: "gpt-5",
-		InputTokens:    10,
-		OutputTokens:   20,
-		TotalCost:      1,
-		ActualCost:     1,
-		BillingType:    service.BillingTypeBalance,
-		RequestType:    service.RequestTypeWSV2,
-		Stream:         false,
-		OpenAIWSMode:   false,
-		CreatedAt:      createdAt,
+		UserID:                1,
+		APIKeyID:              2,
+		AccountID:             3,
+		RequestID:             "req-1",
+		Model:                 "gpt-5",
+		RequestedModel:        "gpt-5",
+		InputTokens:           10,
+		OutputTokens:          20,
+		TotalCost:             1,
+		ActualCost:            1,
+		BillingType:           service.BillingTypeBalance,
+		RequestType:           service.RequestTypeWSV2,
+		Stream:                false,
+		OpenAIWSMode:          false,
+		CreatedAt:             createdAt,
+		RequestBytes:          123,
+		ResponseBytes:         456,
+		UpstreamRequestBytes:  789,
+		UpstreamResponseBytes: 987,
+		TrafficSource:         &trafficSource,
+		TrafficEstimated:      true,
+		UpstreamRequestID:     &upstreamRequestID,
 	}
 
 	mock.ExpectQuery("INSERT INTO usage_logs").
@@ -82,7 +91,7 @@ func TestUsageLogRepositoryCreateSyncRequestTypeAndLegacyFields(t *testing.T) {
 			log.ResponseBytes,
 			log.UpstreamRequestBytes,
 			log.UpstreamResponseBytes,
-			sqlmock.AnyArg(), // traffic_source
+			trafficSource,
 			log.TrafficEstimated,
 			log.ImageCount,
 			sqlmock.AnyArg(), // image_size
@@ -105,6 +114,7 @@ func TestUsageLogRepositoryCreateSyncRequestTypeAndLegacyFields(t *testing.T) {
 			sqlmock.AnyArg(), // billing_tier
 			sqlmock.AnyArg(), // billing_mode
 			sqlmock.AnyArg(), // account_stats_cost
+			upstreamRequestID,
 			sqlmock.AnyArg(), // session_id
 			log.NativeCompactionV2,
 			createdAt,
@@ -205,6 +215,7 @@ func TestUsageLogRepositoryCreate_PersistsServiceTier(t *testing.T) {
 			sqlmock.AnyArg(), // billing_tier
 			sqlmock.AnyArg(), // billing_mode
 			sqlmock.AnyArg(), // account_stats_cost
+			sqlmock.AnyArg(), // upstream_request_id
 			sqlmock.AnyArg(), // session_id
 			log.NativeCompactionV2,
 			createdAt,
@@ -973,6 +984,7 @@ func TestScanUsageLogRequestTypeAndLegacyFallback(t *testing.T) {
 			sql.NullString{},
 			sql.NullString{},
 			sql.NullFloat64{},
+			sql.NullString{Valid: true, String: "req-upstream-traffic"}, // upstream_request_id
 			sql.NullString{},
 			false, // native_compaction_v2
 			now,
@@ -995,6 +1007,8 @@ func TestScanUsageLogRequestTypeAndLegacyFallback(t *testing.T) {
 		require.NotNil(t, log.TrafficSource)
 		require.Equal(t, "app_estimate", *log.TrafficSource)
 		require.True(t, log.TrafficEstimated)
+		require.NotNil(t, log.UpstreamRequestID)
+		require.Equal(t, "req-upstream-traffic", *log.UpstreamRequestID)
 	})
 
 	t.Run("request_type_ws_v2_overrides_legacy", func(t *testing.T) {
@@ -1065,6 +1079,7 @@ func TestScanUsageLogRequestTypeAndLegacyFallback(t *testing.T) {
 			sql.NullString{},  // billing_tier
 			sql.NullString{},  // billing_mode
 			sql.NullFloat64{}, // account_stats_cost
+			sql.NullString{},  // upstream_request_id
 			sql.NullString{},  // session_id
 			false,             // native_compaction_v2
 			now,
@@ -1133,6 +1148,7 @@ func TestScanUsageLogRequestTypeAndLegacyFallback(t *testing.T) {
 			sql.NullString{},  // billing_tier
 			sql.NullString{},  // billing_mode
 			sql.NullFloat64{}, // account_stats_cost
+			sql.NullString{},  // upstream_request_id
 			sql.NullString{},  // session_id
 			true,              // native_compaction_v2
 			now,
@@ -1202,6 +1218,7 @@ func TestScanUsageLogRequestTypeAndLegacyFallback(t *testing.T) {
 			sql.NullString{},  // billing_tier
 			sql.NullString{},  // billing_mode
 			sql.NullFloat64{}, // account_stats_cost
+			sql.NullString{},  // upstream_request_id
 			sql.NullString{},  // session_id
 			false,             // native_compaction_v2
 			now,
