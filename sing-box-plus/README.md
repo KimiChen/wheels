@@ -3,31 +3,32 @@
 > 目标上游：[`SagerNet/sing-box`](https://github.com/SagerNet/sing-box)
 >
 > 实施基线：[`v1.14.0`](https://github.com/SagerNet/sing-box/releases/tag/v1.14.0) / `0b899587`
-> （stable 轨道）；观测 PoC 使用 `v1.13.21`
+> （stable 轨道）
 >
-> 参考实现：本仓库 `shadowsocks-rust-plus`（可结算契约的既有落地）
->
-> 接入目标：本仓库 `sing-box-manager`（控制面与计量框架）
+> 参考实现：本仓库 `shadowsocks-rust-plus`（可结算契约的既有落地，其 v1 快照 schema 与结算
+> 参考模型在本项目中复用）
 >
 > 源码核对：2026-09-05。下文未标版本的 `路径:行号` 均指
-> `b5ebaa1fc0f2b94256180b95468e73ef53caa27d`（`v1.13.19`）；1.14 的差异单独标注。
-> 下次核对触发：上游发布新 minor、`sing-box-manager` 升级数据面版本、或本计划进入新里程碑。
+> `b5ebaa1fc0f2b94256180b95468e73ef53caa27d`（`v1.13.19`，与 1.14 在该处语义一致）；
+> 1.14 的差异单独标注。下次核对触发：上游发布新 minor，或本计划进入新里程碑。
 
 ## 1. 目标与范围
 
 给 sing-box 增加可用于多用户配额和结算的流量统计：认证后的稳定用户归属、
-TCP/UDP × 上下行四个累计值、明确的重载边界、可幂等采集，以及受控的本机快照接口。
-能力对标本仓库已实现的 `shadowsocks-rust-plus`，并接入 `sing-box-manager` 现有的计量与结算框架，
-最终解除其对 VLESS 用户 `quotaBytes = 0` 的限制。
+TCP/UDP × 上下行四个累计值、明确的重启边界、可幂等采集，以及受控的本机快照接口。
+能力对标本仓库已实现的 `shadowsocks-rust-plus`。
 
-**交付范围**：数据面身份归属、四向累计计数、本机只读导出，以及为接入 Manager 所必需的
-Agent/Controller 改动。
+**交付范围**：一个固定上游版本的 hardened overlay，包含数据面身份归属、四向累计计数、
+配置校验与失败关闭、本机只读 UDS 导出，以及可复现构建、契约测试与运维文档。
 
-**明确不做**：订阅生成、用户与套餐管理、账单存储、管理后台、限速、实时断开；
-不承诺“进程崩溃也不丢一个字节”（尾账按未闭合窗口审计，与 `shadowsocks-rust-plus` 一致）；
-不支持 `daemon`、libbox 与 1.14 的 `boxdd` 宿主形态，只覆盖 `sing-box run`。
+**明确不做**：订阅生成、用户与套餐管理、账单存储、管理后台、配置分发、硬配额、限速、
+实时断开。这些属于下游集成方，本项目只提供 §5 的采集与结算契约以及一份参考 collector。
+也不承诺“进程崩溃也不丢一个字节”——尾账按未闭合窗口审计，与 `shadowsocks-rust-plus` 一致。
+宿主形态只覆盖 `sing-box run`，不支持 `daemon`、libbox 与 1.14 的 `boxdd`。
 
-**验收定义**：§5.4 的门槛全部通过，`sing-box-manager` 可以对 VLESS 用户设置非零配额并正确执行。
+**验收定义**：在钉定的上游版本上，选中的 inbound 对所有允许流量都有可验证的非空计费身份；
+四向字节 oracle 误差为 0；快照接口通过 §8 的故障矩阵；下游按 §5 差分入账时不出现漏计、
+重复计费或静默降级。
 
 本目录当前只有本计划书。第一步（里程碑 1）产出的骨架为：
 
@@ -60,11 +61,11 @@ sing-box-plus/
 - **进程级 registry 可注入**。`globalCtx` 已持有 service registry（`cmd/sing-box/cmd.go:70`），
   `box.New` 在 ctx 已有 registry 时原样复用（`box.go:101`），因此跨 Box 注入无需改上游签名。
 - **VLESS 具备热用户更新的底层能力**（`sing-vmess vless/service.go:40 UpdateUsers`），
-  为将来的配额热执行留有余地。
+  为将来可能的用户管理接口留有余地（§11 D5）。
 
 ### 2.2 不能依赖的部分
 
-内置 Experimental V2Ray StatsService 可以做观测，但不能承担结算：
+内置 Experimental V2Ray StatsService 可以做观测验证，但不能承担结算：
 
 - 只有 uplink/downlink 两项，TCP、UDP、XUDP 合并；
 - key 不含 inbound tag，同名用户跨 inbound 会合并；`stats.users` 是静态白名单，新用户不自动加入；
@@ -103,14 +104,16 @@ cache 与凭据同文件且按 `0644` 创建（`service/ssmapi/cache.go:80`）�
 
 ### 2.3 结构性限制
 
-以下限制不是实现难度问题，而是上游结构决定的，设计必须绕开或显式声明：
+以下限制由上游结构决定，设计必须绕开或显式声明：
 
-- **重载没有平滑窗口**。SIGHUP 循环是先取消再关旧、然后才建新（`cmd/sing-box/cmd_run.go:188`
+- **重启没有平滑窗口**。SIGHUP 循环是先取消再关旧、然后才建新（`cmd/sing-box/cmd_run.go:188`
   `cancel()` → `:191` `Close()` → `:174` `create()`），`Box.Close()` 关闭 connection manager 后
   `CloseAll()` 遍历强杀全部在途连接（`route/conn.go:52-69`）；仓库内没有 SO_REUSEPORT 或监听 fd
   传递，端口必然有短暂无监听窗口。上游没有任何排空语义。
 - **StatsService 属于 Box，重载即丢未采集增量**，见 `box.go:496-535` 与上游 issue
   [#4059](https://github.com/SagerNet/sing-box/issues/4059)（2026-04-19 开启，同日以 not planned 关闭）。
+  由此推出一条对本项目同样成立的纪律：**任何“改用户就重写配置并重载”的方案都会清零内存计数**，
+  用户增删因此不能与计量实现耦合（§4.3、§11 D5）。
 - **部分数据面对 tracker 不可见**：
   - `hijack-dns` 与以 `reject` 结束的规则动作在 `route/route.go:126-137`（TCP）、`:256-263`（UDP）
     处理并 return，早于 `:152` / `:278` 的 tracker 循环；
@@ -131,7 +134,7 @@ Shadowsocks relay 就是反例。
 | --- | --- | --- |
 | VLESS + REALITY/Vision | 认证后写入 `metadata.User` | **首期支持**；REALITY 伪装中继除外（§2.3） |
 | VMess、Trojan | 具名用户可传播 | 可支持，需集成测试；fallback 路径单独确认 |
-| Shadowsocks multi | 具名用户可传播 | 可支持；但 SSM tracker 在 router 之前包装，会多计 sniff 预读与随后被 reject/block 的字节，**不能与 router tracker 互作 oracle** |
+| Shadowsocks multi | 具名用户可传播 | 可支持；但 SSM tracker 在 router 之前包装，会多计 sniff 预读与随后被 reject/block 的字节，**不能与 router tracker 互作 oracle**，两者不可同时启用 |
 | Shadowsocks relay | `metadata.User` 是 `destinations[].name`（`inbound_relay.go:130`） | 是中继目的地不是终端用户，**不可按用户计费** |
 | Hysteria/Hysteria2、TUIC | 协议层有用户概念 | 可支持，需验证 QUIC stream/datagram 分类 |
 | Naive、AnyTLS、HTTP/SOCKS/Mixed 认证 | 有认证用户名的路径可传播 | 可支持，逐协议确认匿名与 fallback |
@@ -142,21 +145,19 @@ Shadowsocks relay 就是反例。
 匿名、空名、认证 fallback 或 tracker 绕过不得默认为“unknown 后继续转发”；
 若会影响收费，启动或连接必须失败关闭。
 
-## 3. 术语与字段对照
+## 3. 术语与字段
 
-三个子项目对同一概念使用不同名称。实现与 collector 一律按“本项目采用”列取名。
+| 概念 | sing-box | `shadowsocks-rust-plus` | 本项目 |
+| --- | --- | --- | --- |
+| 计费身份名 | `users[].name` → `metadata.User` | `users[].name` / `identity_name` | 快照字段 `name`；正文称 billing name |
+| 入站标识 | inbound `tag` | `server_id` | `server_id` := inbound tag |
+| 节点标识 | — | `node_id` | `node_id`，配置项，需在部署内全局唯一 |
+| 运行周期 | — | `runtime_id`（32 位小写 hex，进程级随机） | 同左 |
+| 快照序号 | — | `sequence`，每次 `/v1/snapshot` 严格递增 | 同左 |
+| 代次 | — | `generation`，同名重激活复用、不递增 | 同左，固定输出 `1`，但不得从采集键中省略 |
 
-| 概念 | sing-box | `shadowsocks-rust-plus` | `sing-box-manager` | 本项目采用 |
-| --- | --- | --- | --- | --- |
-| 计费身份名 | `users[].name` → `metadata.User` | `users[].name` / `identity_name` | `identity_name`，由不可变 `(user_id, route_id)` 派生（`store/users.rs:16-24`） | `name`（快照字段）；正文称 billing name |
-| 入站标识 | inbound `tag` | `server_id` | `inbound_tag`，Agent 硬编码常量 `"in-shared"`（`agent/ssm.rs:14`；SS 与 VLESS Entry 共用，`compiler/entry.rs:65,96`） | `server_id` := inbound tag |
-| 节点标识 | — | `node_id` | Manager 的 `node_id` 指中继出口节点，与此不同 | `node_id` := Manager 的 `entry_id`，由编译器写入 exporter 配置，Agent 拒绝不符的快照 |
-| 运行周期 | — | `runtime_id`（32 位小写 hex，进程级随机） | `singbox_boot_id`（Agent 本地 `MAX+1` 整数，`agent/state.rs:90-92`）；另有 `entry_runtime_epochs.epoch` | 快照给 `runtime_id`，Agent 负责与本地 epoch 一对一绑定（§5.2） |
-| 快照序号 | — | `sequence`，每次 `/v1/snapshot` 严格递增 | `StatsBatch.sequence` 已被结算屏障占用：poll 恒 0，final 由 outbox 分配并作去重键（`agent/stats.rs:17`、`agent/barrier_store.rs:44-49`） | 新字段 `exporter_sequence`，**不得**复用 `StatsBatch.sequence` |
-| 代次 | — | `generation`，同名重激活复用、不递增 | 基线键无此维度（`0006_metering.sql`） | `generation`，语义同 `shadowsocks-rust-plus`，固定输出 `1`，但不得从 collector 键中省略 |
-
-单 Host 最多一个 Entry（`sing-box-manager/docs/architecture.md:56`），因此 `node_id + server_id`
-在本部署中无歧义。下文示例一律使用 `in-shared` 作为 inbound tag。
+计费身份名、`node_id`、`server_id` 均为非空、最多 128 字节、每字节为 ASCII 可显示非空白字符；
+`server_id` 在节点内唯一，billing name 在 server 内唯一。
 
 ## 4. 设计
 
@@ -204,7 +205,8 @@ type UserTraffic struct {
   “目标写成功后”计数，否则回落为“源读成功”计数。自研 wrapper 若包在 `CounterConn` 之外，
   必须实现 `Upstream()` 与 `Reader/WriterReplaceable()`（可参照 clashapi `tracker.go` 的做法），
   否则口径会静默退化；§8 有对应断言测试；
-- 与 trafficcontrol / StatsService 的挂载顺序必须显式确定，避免双层 CounterConn 叠加。
+- 与 trafficcontrol / StatsService 的挂载顺序必须显式确定，避免双层 CounterConn 叠加；
+  统计模式下应禁止同时启用会重复包装同一连接的其他 tracker。
 
 ### 4.2 计数口径
 
@@ -233,10 +235,10 @@ type UserTraffic struct {
 - **Vision padding 不计入**。padding 在 `VisionConn.Read/Write` 内剥离，counter 在其外层。
 
 实现前需完成字节对账矩阵：Vision buffered/direct 切换与 early data、mux、XUDP/UoT、DNS hijack、
-特殊 outbound 直接读写、UDP batch、连接取消与 half-close、重载期间仍存活的长连接。任何绕过标准
+特殊 outbound 直接读写、UDP batch、连接取消与 half-close、重启期间仍存活的长连接。任何绕过标准
 router tracker 的 handler 都必须明确选择“计数、拒绝或声明不支持”，不能静默转发但漏计。
 
-计费用 inbound 不得配置 `hijack-dns` 或以 `reject` 结束的规则动作（§2.3）。
+计费用 inbound 不得配置 `hijack-dns` 或以 `reject` 结束的规则动作（§2.3），配置校验须拒绝。
 
 ### 4.3 身份生命周期
 
@@ -245,61 +247,56 @@ router tracker 的 handler 都必须明确选择“计数、拒绝或声明不�
 1. 删除或停用只把 `active` 切为 `false`，记录保留在快照中；
 2. 同名重建复用原 generation 与原计数器，并把 `active` 切回 `true`；
 3. 凭据轮换不改变 lineage；
-4. `generation` 作为 schema 保留维度固定输出 `1`，但不得从 collector 键中省略；
+4. `generation` 作为 schema 保留维度固定输出 `1`，但不得从采集键中省略；
 5. tombstone 数达到 `max_identities` 时失败关闭或标记 unhealthy，不得丢弃 lineage；
-6. 同一 runtime 内不得把已用名称重分配给不同计费用户；需要改变归属时使用新名称或进入新 runtime。
+6. 同一 runtime 内不得把已用名称重分配给不同计费用户；需要改变归属时使用新名称，
+   或通过受控重启进入新 runtime。
 
-这与 `sing-box-manager` 由不可变 `(user_id, route_id)` 派生 `identity_name`（永不重分配）的做法一致，
-也使 Manager 的基线表无需引入新主键维度。
+用户集合的变更（增、删、停用、凭据轮换）在 v1 中通过修改配置并受控重启生效。由于重启会产生新
+`runtime_id` 并清零内存计数，变更必须走 §5.3 的计划重启流程；这也是 §2.3 那条纪律的直接后果——
+不要为了“热改用户”把计量实现与用户管理耦合。是否提供独立的热更新接口见 §11 D5。
 
-### 4.4 重载与结算模型
+### 4.4 运行周期与重启语义
 
-**主路径 = `sing-box-manager` 现状的进程重启 + 已实现的两阶段结算屏障。**
-Manager 的 Agent 从不发 SIGHUP，`restart` 是 kill 旧子进程再以固定 argv `run -c` spawn
-（`src/agent/runtime.rs:45-71`，全仓无 reload 路径）；每次部署分配新 `runtime_epoch`，final 批经
-`traffic_batches` 按 `(entry, boot_id, sequence)` 精确一次去重（`migrations/0006_metering.sql:27-36`、
-`migrations/agent_0003_barrier.sql`、`src/agent/settle.rs`）。因此首期只需让 VLESS 进入这条已存在的
-屏障，不必先做跨 Box registry。
+进程启动生成 `runtime_id`，创建唯一 registry 与 exporter；同一进程内累计值单调不减；
+进程重启即新 `runtime_id`、计数从零开始。采集端据此识别周期边界（§5）。
 
-进程重启会清零内存计数，屏障保证不丢账：抓取最终统计 → 写入 outbox → 等 Manager ack → 才停旧进程。
-新进程产生新 `runtime_id`，采集端据此选择首快照策略。
+上游重启会强制关闭全部在途连接（§2.3）。由于计数按每次 copy 迭代增量累加，**强杀不丢已计字节**，
+但会打断用户连接，且已计而未采集的增量会随进程消失——这正是 §5.3 的计划重启流程要消除的窗口。
 
-**跨 Box 的进程级 registry 是可选项**，仅在需要 `kill -HUP` 热重载且要求累计值不清零的独立部署形态下
-才必需。若要做：
+**跨 Box 的进程级 registry 是可选项**，仅在需要 `kill -HUP` 热重载且要求累计值不清零的形态下才必需。
+若要做：
 
-1. 进程启动生成 `runtime_id`，创建唯一 registry/exporter；
-2. 每次加载 Box 时把同一 registry 注入新的 UserStatsTracker；
-3. 上游重载**强制关闭全部在途连接**（§2.3）。由于计数按每次 copy 迭代增量累加，强杀不丢已计字节，
-   但会打断用户连接。若要排空，必须在 `run()` 与 `Box.Close()` 之间插入 drain 阶段
-   （停止 accept → 等待或超时 → 再 Close）并接管 `FatalStopTimeout` 看门狗，这是新增改动而非配置策略；
-4. 端口仍有短暂无监听窗口；若要求端口不中断，须单列“引入 SO_REUSEPORT 或 listener fd 传递”
+1. 每次加载 Box 时把同一 registry 注入新的 UserStatsTracker；
+2. 若要排空，必须在 `run()` 与 `Box.Close()` 之间插入 drain 阶段（停止 accept → 等待或超时 → 再
+   Close）并接管 `FatalStopTimeout` 看门狗，这是新增改动而非配置策略；
+3. 端口仍有短暂无监听窗口；若要求端口不中断，须单列“引入 SO_REUSEPORT 或 listener fd 传递”
    为独立工作项；
-5. registry 全进程共享，`MustRegister` 会覆盖旧 Box 的同类服务，代次必须由自有 registry 维护；
-6. 只覆盖 `sing-box run` 宿主。
+4. registry 全进程共享，`MustRegister` 会覆盖旧 Box 的同类服务，代次必须由自有 registry 维护；
+5. 只覆盖 `sing-box run` 宿主。
 
-纯内存 registry 无法恢复进程崩溃前尚未采集的尾账，这与 `shadowsocks-rust-plus` 相同。
-若业务要求“崩溃也不丢一个字节”，需另加 WAL 或持久计量数据面，复杂度显著上升；
-不得把高频轮询描述成严格保证。
+纯内存 registry 无法恢复进程崩溃前尚未采集的尾账。若业务要求“崩溃也不丢一个字节”，
+需另加 WAL 或持久计量数据面，复杂度显著上升；不得把高频轮询描述成严格保证。
 
 ### 4.5 快照接口契约
 
 **采用 `shadowsocks-rust-plus` v1 的既有形状**（其 `docs/API.md`），使
 `tests/http_unix.py`、`scripts/user-stats-client.py`、`tests/settlement_model.py` 与 mock collector
-可直接作为本项目的契约测试。sing-box 特有信息以可选附加字段追加（现有校验器忽略未知键），
-不改动 `health` 对象的字段名。
+可直接作为本项目的契约测试与参考采集器。sing-box 特有信息以可选附加字段追加（现有校验器忽略
+未知键），不改动 `health` 对象的字段名。
 
 ```json
 {
   "schema_version": 1,
-  "node_id": "entry-example-01",
+  "node_id": "node-example-01",
   "runtime_id": "0123456789abcdef0123456789abcdef",
   "started_at_unix_ms": 1787587200000,
   "sequence": 42,
   "health": { "counter_overflow": false, "sequence_overflow": false },
   "servers": [
     {
-      "server_id": "in-shared",
-      "listen": "0.0.0.0:19736",
+      "server_id": "vless-entry-01",
+      "listen": "0.0.0.0:8443",
       "generation": 1,
       "active": true,
       "inbound_type": "vless",
@@ -325,32 +322,36 @@ Manager 的 Agent 从不发 SIGHUP，`restart` 是 kill 旧子进程再以固定
 格式与排序：`runtime_id` 为 32 位小写 hex；`started_at_unix_ms`、`sequence` 为正整数，同一
 `(node_id, runtime_id)` 内 `started_at_unix_ms` 固定；服务按 `server_id` 再按 `generation` 排序，
 用户按 `name` 再按 `generation` 排序。`inbound_type`、`tcp_sessions`、`udp_sessions` 是 sing-box 的
-附加字段，`*_sessions` 是**当前活跃数、不参与结算**，专供 Agent 的排空闸门使用（§5.2）。
+附加字段，`*_sessions` 是**当前活跃数、不参与结算**，供计划重启时判断是否已排空（§5.3）。
 
 传输层：HTTP/1.1-over-Unix-stream，每连接单请求单响应，禁 keep-alive / query / body；
 固定两条路由——`GET /v1/snapshot`（被接受时即推进 `sequence`）与 `GET /healthz`（200/503，
 不推进 `sequence`）。错误一律返回固定 `{schema_version, error:{code}}` 对象，错误码表与 v1 一致
 （400/404/405/408/413/429/500/505）。
 
-采集端处置：429 与连接被直接关闭视为**可重试且不得入账**；其余非 200、`Content-Length` 不符、
-JSON 截断或 `schema_version` 不匹配一律拒绝入账。
-
 安全与资源：非破坏性累计快照；稳定排序；请求/响应大小、身份数、并发数、读写超时均有上限；
-socket 默认 `0600`，绑定前检查父目录、符号链接、旧 socket 与 inode 替换。
-exporter 启动失败必须阻止统计模式启动；运行中异常退出由主服务监督并触发整体失败或重启，
-不得出现“继续转发但停止计量”。Unix socket 不得直接映射为公网监听，远程读取须经节点上的独立
-反向代理提供 HTTPS/mTLS/来源限制与审计。
+socket 默认 `0600`（可受控 `0660`），绑定前检查父目录、符号链接、旧 socket 与 inode 替换。
+单个畸形、超时或超限的请求只影响该连接，不影响代理转发。
+Unix socket 不得直接映射为公网监听，远程读取须经节点上的独立反向代理提供 HTTPS/mTLS/来源限制
+与审计，且该代理不得缓存快照。
 
-外部 collector 保存 baseline 的完整键：
+### 4.6 配置与失败关闭
 
-```text
-node_id + server_id + server_generation + name + identity_generation + runtime_id
-```
+统计是硬依赖，不是可选旁路：
 
-再结合 snapshot sequence、采集批次 ID 和四项 delta 幂等入库。累计值倒退、sequence 倒退、
-未知 runtime、overflow 或 unhealthy 快照一律失败关闭，不得猜测并继续收费。
+1. 顶层 `user_stats` 配置对未知字段失败关闭，不静默回落默认值；
+2. 启用统计时，每个被统计的 inbound 必须属于 §2.4 的白名单类型、有唯一 `server_id`、
+   至少一个具名用户，且用户名在 server 内唯一；任一不满足则启动失败，不以部分覆盖或零归属模式运行；
+3. 未编译统计 build tag 却出现该配置、或在非 Unix 平台使用，都必须明确报错；
+4. exporter 的父目录、lockfile、遗留 socket 或 bind 检查失败时进程启动失败；
+5. 启动后 exporter 与数据面同受监督：exporter 任务意外退出、panic 或连续 `accept()` 失败时，
+   整个进程以失败退出，避免“代理仍在转发但统计已消失”；
+6. 未配置 `user_stats` 时不创建 registry、exporter 或任何附加包装，保持上游快路径与线协议不变。
 
-### 4.6 overlay 形态
+进程失败退出由 systemd `Restart=on-failure` 重启；重启产生新 `runtime_id`，
+采集端按 §5 的周期规则处理，并对连续重启告警——不得通过放宽目录权限或删除活动 socket 绕过检查。
+
+### 4.7 overlay 形态
 
 **默认方案 A：零补丁 wrapper。** `adapter.Router.AppendTracker`、`box.New`、`Box.Router()` 与
 `include.Context` 都已导出，因此一个独立 Go module（`sing-box-plus/cmd/sing-box-plus`，`go.mod` 中
@@ -364,146 +365,78 @@ node_id + server_id + server_generation + name + identity_generation + runtime_i
 选择标准：默认 A；A 覆盖不到的失败关闭点再以最小 patch 补，两者可共存。结论在里程碑 1 写入
 `upstream.lock` 与 `docs/UPSTREAM_BASELINE.md`。
 
-**硬约束**：`sing-box-manager` 的 Controller 与 Agent 都会实跑 `<bin> check -c` 并用
-`sing-box version` 探测版本（`src/agent/singbox.rs`、`src/agent/deploy.rs:60-71`），因此自有二进制
-必须保持 `run` / `check` / `format` / `version` 的 argv 与退出码兼容，版本字符串格式也需与 Manager
-的解析约定一致。
+无论哪种形态，产出的二进制都应保持 `run` / `check` / `format` / `version` 的 argv 与退出码与上游
+兼容，使既有部署与编排工具（包括发布前的 `check -c` 门禁）可以原样沿用。
 
-## 5. 与 sing-box-manager 的接入
+## 5. 采集与结算契约
 
-`sing-box-manager` 已有按 `identity_name` 的上下行 baseline、周期累计、配额评估、runtime epoch、
-最终结算屏障和幂等入库框架；当前数据源是 Shadowsocks SSM，因此它要求 VLESS relay 用户
-`quotaBytes = 0`（`src/manifest/mod.rs:346-350`）。
+exporter 只输出当前进程生命周期内的累计值，不持久化账单，也不决定新运行周期的首快照是否入账。
+下游集成方按本节实现差分与幂等落库；本项目提供参考 collector 与结算模型（§6 交付物）。
 
-### 5.1 版本对齐
+### 5.1 基线键与幂等
 
-Manager 只验证过数据面 `1.13.14`（`src/manifest/mod.rs:476`、其 README:29/79）。任何自定义构建都会
-替换 Controller 与全部 Agent 上已验证的二进制，因此：
+保存 baseline 的完整键：
 
-- **观测 PoC** 使用同 major 的 `v1.13.21` 加 `with_v2ray_api` 构建，先在 Manager 上重跑
-  `check` / `deploy` / 屏障回归，并更新其 README 的已验证版本；
-- **正式 overlay** 基于 `v1.14.x` 时，先把 `singboxVersion` 升到该版本，对全部 Manager 生成的 entry
-  配置做 `sing-box check` 回归（重点关注 1.14 移除的 legacy DNS server 格式与其他弃用项），
-  通过后才允许 Agent 改读新 exporter；
-- Controller 本机与每台 Agent 的 `SINGBOX_BIN` 必须是同一构建，可用
-  `config_artifacts.target_singbox_version` 记录。
+```text
+node_id + server_id + server_generation + name + identity_generation + runtime_id
+```
 
-### 5.2 分两层接入
+`generation` 在 v1 中恒为 1，但不得省略，以保持 schema 与未来兼容性。幂等批次 ID 必须包含快照
+`sequence` 与本次增量。差分规则：
 
-**第 1 层：观测 PoC。** 使用固定的 `with_v2ray_api` 构建，VLESS 的 `users[].name` 复用 Manager 由
-`(user_id, route_id)` 确定性派生的 `identity_name`；Agent 在回环读取累计 uplink/downlink。
-这一层无需改变 usage bucket 结构，但 §2.2 的全部限制仍在，不解除硬配额保护。
+- 同一 `(node_id, runtime_id)` 内 `started_at_unix_ms` 必须恒定，变化即视为未知 runtime；
+- `sequence` ≤ 已处理值 → 丢弃整份快照且不推进基线（重复或乱序响应）；
+- `sequence` 前进但累计值倒退 → 失败关闭并告警，不得猜测并继续收费；
+- `health` 任一项为真、`schema_version` 不匹配、`Content-Length` 不符或 JSON 截断 → 拒绝入账；
+- HTTP 429 与连接被直接关闭视为**可重试且不得入账**；其余非 200 一律拒绝入账；
+- 首次看到新 `runtime_id` 时必须显式选择 `baseline`（只建基线，降低重复风险）或 `include`
+  （首次累计全部计入，降低漏记风险），不得留作隐式行为。
 
-该路线在 `sing-box-manager/_legacy/` 中已在 1.13.14 上实现过一次
-（`_legacy/grpc.rs` 的 StatsService gRPC 只读客户端、`_legacy/backend/reload.rs`、
-`_legacy/singbox.rs:205-217` 生成 `experimental.v2ray_api` 白名单），其中已记录 ServiceName 覆写的坑。
-它后来被 SSM 取代——被放弃的不是 gRPC 统计客户端，而是与它绑定的**身份下发方式**。
-`_legacy` 有两个并存 backend，由 `backend.mode` 选择，且 `_legacy/config.rs:247-253` 强制
-`vless-reality` 入站必须用 `reload`（“VLESS 无 SSM API”）：
+`active=false` 的已观察 lineage 仍会出现在后续快照中，采集端必须继续保留其基线，不得因
+`active=false` 而删除或归零。
 
-| | `ssm` | `reload`（VLESS 唯一可选） |
-| --- | --- | --- |
-| 改用户 | 内存 usersMap，不重建入站、不清零他人计数（注释标注已实测） | 重写配置 `inbounds[].users` + `reload_cmd` |
-| 代价 | 无 | “reload 会重建实例、断连、清零内存计数”（`_legacy/backend/reload.rs:4`） |
-| 统计源故障时 | 仍可下发身份 | **必须整轮跳过下发**（`_legacy/meter.rs:142-144, 228-231`），否则会在统计未读取时重载并永久丢数 |
-| 统计维度 | 按入站 scope | `scope="*"` 全局每身份（v2ray key 不含 inbound tag） |
-| 增量算法 | — | `cu >= lu ? cu-lu : cu`（`_legacy/meter.rs:157-158`），把任何回退当复位并整值计入 |
+### 5.2 计量口径的对外声明
 
-即：每次配额翻转或加删用户都会断开全部连接并清零计数；统计源一挂，配额执行随之停摆；
-而“回退即复位”的增量启发式正是清零逼出来的，也正是现版本改成 `max(0, …)`（F1 回归）要消除的
-重复计费风险。0.1.0 因此只保留 SSM，VLESS 随之失去计量。
+账单口径是认证并解码后、成功进入转发边界的应用负载，不包括协议 header、隧道封装与重传，
+也不记录目标地址、客户端地址或连接明细。该口径不能替代云厂商或 VPS 的网卡计费；
+两者之间的固有差额见 §12。
 
-由此确定两条纪律：
+### 5.3 计划重启与最终结算
 
-- PoC 复用 `_legacy/grpc.rs`（统计客户端本身没有问题），但**不复用 `ReloadBackend` 的身份下发方式**；
-  身份变更仍走 Manager 现有的 revision + 屏障部署路径。
-- 本项目不会重蹈覆辙的原因是屏障：`_legacy` 的“先 read_stats 再 apply”只是时序约定，失败时只能
-  整轮放弃；现在停旧进程前有带回执、可重放、按 `(entry, boot_id, sequence)` 去重的协议。
+因为进程重启会清零内存计数，任何计划内的重启或配置变更必须按下列顺序执行，否则会留下未闭合窗口：
 
-PoC 前置条件：
+1. 停止接入新连接（下线、防火墙或上游负载均衡）；
+2. 轮询快照的 `tcp_sessions` / `udp_sessions` 直至为 0 或达到超时；
+3. 采集最终快照并**确认已持久化入账**；
+4. 停止进程、应用变更、启动新进程（新 `runtime_id`）；
+5. 采集端按 §5.1 的首快照策略处理新周期。
 
-1. 复活 `_legacy/grpc.rs` 并在新基线上回归（重点验证 ServiceName 覆写、静态白名单、SIGHUP 丢数）；
-2. `src/compiler/entry.rs` 为 VLESS Entry 输出 `experimental.v2ray_api` 块，`stats.users` 等于身份投影；
-3. Controller 与所有 Agent 使用同一 `with_v2ray_api` 构建（否则两侧 `check` 都会拒绝该配置）。
+超时强切是允许的——已计字节不会丢失，只是连接被打断——但必须在采集端标记该窗口为未排空，
+以便审计。异常退出（崩溃、OOM、断电）留下的未闭合窗口必须单独审计，不得当作正常周期切换。
 
-**第 2 层：正式计费。** Agent 改读 `sing-box-plus` 的 UDS 快照。现有两方向账单先把 TCP+UDP 各自求和；
-若产品要展示四方向，再扩展 raw usage schema。Manager 侧的能力需区分已具备与需新写：
-
-| 能力 | 现状 | 需要做什么 |
-| --- | --- | --- |
-| final 批精确一次 | 已具备（`traffic_batches` PK 去重） | — |
-| 屏障 ack 后才停旧进程 | 已具备（`agent_0003_barrier.sql`、`settle.rs`） | — |
-| 新 boot id 不产负增量 | 已具备（结构性 include） | — |
-| VLESS 进入计量与屏障 | **无**：`metering/tick.rs:40-45` 对非 shadowsocks 直接返回；`manager/deploy.rs:222-232` 对 `vless-reality` 硬置 `barrier_required=false`；`agent/runtime.rs` 的 VLESS 健康检查是进程型空桩 | 取消 inbound_kind 跳过，置 `barrier_required=true`，补健康检查 |
-| exporter 客户端 | **无**：Agent 只有 reqwest over TCP 的 SSM 客户端（`agent/ssm.rs`） | 新增 HTTP/1.1-over-UDS 严格客户端，按 §4.5 处置错误码 |
-| 未知 runtime 拒绝 | **无**：任何 boot id 都新建基线行 | Agent 在每次 `restart()` 后把首份快照的 `runtime_id` 与本地 epoch 一对一绑定并持久化（新增 agent 迁移列），后续快照 runtime_id 不符即拒绝并告警 |
-| unhealthy 拒绝 | **无**：`StatsBatch` 无 health 字段，也不读 `/healthz` | DTO 增字段，unhealthy 快照失败关闭 |
-| 快照序号跟踪 | **无**：poll 批 `sequence` 恒 0（`agent/stats.rs:17`），该字段已被屏障占用 | 新增 `exporter_runtime_id` / `exporter_sequence`（**不复用** `StatsBatch.sequence`），按 `(entry, runtime_id)` 记高水位 |
-| 累计倒退处理 | **相反**：`store/metering.rs:14-18` 刻意 `max(0, cur-last)`，用于吸收 final/poll 交错的陈旧读（F1 回归） | 改为两层：`exporter_sequence ≤ 高水位` → 丢弃整份快照且不推进基线；序号前进但计数倒退 → 失败关闭并标记 Entry stale |
-| 基线键含 generation/runtime | **无**：PK 为 `(entry_id, inbound_tag, identity_name, singbox_boot_id)`，迁移 additive-only，SQLite 不能改 PK | generation 恒为 1 时无需改主键；以 additive 方式加 `exporter_runtime_id`、`generation` 列（默认 1），主键沿用 boot id，由上面的 runtime 绑定保证等价 |
-| 排空闸门 | 绑死 SSM：`agent/gate.rs:34-46` 轮询 `tcp_sessions + udp_sessions <= 0` | 改读快照的 `*_sessions` 附加字段；若不提供该字段，必须显式声明“VLESS 不排空、`drain_clean` 恒 false 并记 `unsettled_window`”，禁止把缺失字段退化成 0 造成假性 `drain_clean` |
-| 首快照策略 | 结构性 include | 保持 include 并写明理由：Agent 是唯一 spawner，崩溃尾账按未闭合窗口单独审计 |
-| VLESS 非零配额校验 | 硬拒绝（`manifest/mod.rs:346-350`） | 改由能力位门控，条件满足后才放开 |
-
-### 5.3 配额执行
-
-超额后如何把 VLESS 用户踢下线，与 Shadowsocks 完全不同：SS 走资格翻转 → SSM reconcile 热删身份、
-不重启（`metering/tick.rs:130-136`）；VLESS 用户 UUID 静态编译进 inbound，停用需要 `apply --deploy`
-发布新 revision，即每次配额翻转都要走屏障 + 进程重启 + 新 `runtime_id`。
-
-**首版采用方案 (b)：**
-
-- **(a) 热用户增删**：另开受控写入端点（参考 SSM `/users` 语义），Manager 复用 reconcile 路径。
-  底层能力已存在（`sing-vmess vless/service.go:40 UpdateUsers`），但会引入写接口、单独授权、
-  幂等 command id 与失败关闭，攻击面明显扩大，且**不得复用只读快照 socket**。列为后续演进。
-- **(b) 超额即重新部署**：把配额翻转改为触发 Entry 重编译 + 屏障部署，并给出翻转合批与最小间隔策略。
-  周期性配额（月/年）下翻转频率低，成本可接受。
-
-选 (b) 的前提是屏障真正生效：`_legacy` 的 reload 路线正是死在“改用户即清零计数”上（§5.2），
-其缓解手段只是时序约定；现在停旧进程前有带回执、可重放的两阶段屏障，才使“重新部署”从丢数风险
-变成可接受的成本。因此 §5.2 表中“VLESS 进入计量与屏障”是 (b) 的硬前置，
-不得先放开配额、后补屏障。
-
-### 5.4 解除 quotaBytes = 0 的门槛
-
-在下列条件全部通过前，保留 Manager 对 VLESS 的 `quotaBytes = 0` 保护：
-
-- VLESS Reality/Vision TCP、XUDP/UoT 与长连接重载对账无缺口、无重复；
-- exporter 失败、进程重启、Agent/Manager 重试的故障注入通过；
-- 删除、停用、同名重建和凭据轮换的 lineage 语义符合 §4.3；
-- §5.2 表中“需要做什么”一栏全部落地，Manager 能拒绝未知 runtime、倒退累计、重复
-  `exporter_sequence` 和 unhealthy 快照；
-- §5.3 的配额执行路径已验证；
-- 最终结算成功后才允许旧实例退出或新部署完成。
-
-长期可让 Shadowsocks 和 VLESS 都走同一个 exporter，从而删除 SSM 与 V2Ray API 的双采集逻辑；
-但两者口径不同（§2.2），迁移必须作为**新 runtime / 新 lineage 切换**并在文档记录口径差异，
-不得跨口径差分。首期只让 VLESS 使用新 exporter，保持 SSM 路径不变以缩小迁移面。
-
-## 6. 工作分解与工期
+## 6. 工作分解、交付物与工期
 
 按一名熟悉 Go、sing-box 和异步代理数据面的工程师估算，不含灰度等待与法务日历时间。
 人周为单人工作量，多人并行只压缩日历时间、不减少人周。
 
-| 工作项 | 内容 | Manager 接入是否必需 | 粗估 |
+| 工作项 | 内容 | 必需 | 粗估 |
 | --- | --- | --- | --- |
-| 骨架与基线 | §1 目录树、`upstream.lock`、prepare/verify 脚本、可复现发布与签名 | 必需 | 1–2 人周 |
-| PoC | 复用 `_legacy/grpc.rs`，在钉定构建上验证 VLESS 归属 | 必需 | 1–2 人日 |
-| 观测接入 | 自定义构建、静态白名单、Agent collector、仪表与基础故障处理 | 必需 | 1–2 人周 |
-| 四向 registry | 通用 tracker、饱和计数、稳定 lineage、配置校验 | 必需 | 2–4 人周 |
-| UDS exporter | schema、安全加固、资源上限、监督与故障注入 | 必需 | 2–3 人周 |
-| 协议与性能验证 | Vision direct 切换、mux、XUDP/UoT、QUIC、UDP batch、bench/pprof | 必需 | 2–4 人周 |
-| Agent exporter 客户端 + runtime 绑定 | UDS 客户端、runtime_id↔epoch 绑定与迁移、健康/序号校验 | 必需 | 1–2 人周 |
-| Manager schema 与结算规则 | additive 迁移、倒退两层处理、VLESS 进入 tick/屏障 | 必需 | 1–2 人周 |
-| VLESS 配额执行 | §5.3 方案 (b) | 必需 | 1–2 人周 |
-| 文档与运维手册 | `docs/` 六件套 | 必需 | 1–2 人周 |
-| SIGHUP 跨 Box 存活 | 进程级 registry、drain 阶段、看门狗接管 | **可选**（§4.4） | 2–4 人周 |
+| 骨架与基线 | §1 目录树、`upstream.lock`、prepare/verify 脚本 | 是 | 1–2 人周 |
+| 观测 PoC | 在钉定构建上用最小 gRPC 客户端验证 VLESS 归属，并复现 §2.2 的各项边界 | 是 | 2–4 人日 |
+| 四向 tracker / registry | 通用 tracker、饱和计数、稳定 lineage | 是 | 2–4 人周 |
+| 配置与失败关闭 | §4.6 全部校验路径与错误信息 | 是 | 0.5–1 人周 |
+| UDS exporter | schema、安全加固、资源上限、监督与故障注入 | 是 | 2–3 人周 |
+| 协议与性能验证 | Vision direct 切换、mux、XUDP/UoT、QUIC、UDP batch、bench/pprof | 是 | 2–4 人周 |
+| 参考 collector 与契约测试 | 复用并适配 `shadowsocks-rust-plus` 的 `http_unix.py`、`settlement_model.py`、`mock_collector.py` | 是 | 1–2 人周 |
+| 可复现发布与签名 | 两次独立构建、manifest、detached 签名与验签 | 是 | 1–2 人周 |
+| 文档与运维手册 | `docs/` 六件套 | 是 | 1–2 人周 |
+| SIGHUP 跨 Box 存活 | 进程级 registry、drain 阶段、看门狗接管 | 否（§4.4） | 2–4 人周 |
 | 上游 rebase 储备 | 每次 minor 升级 | 周期性 | 1–2 人周/次 |
 
-必需项合计约 **13–24 人周**，另加 15–25% 的复核返工缓冲；含可选的 SIGHUP 存活为 15–28 人周。
+必需项合计约 **10–19 人周**，另加 15–25% 的复核返工缓冲；含可选的 SIGHUP 存活为 12–23 人周。
 “能看每用户上下行”的 PoC 不等于完整功能，不得据此宣告阶段完成。
 
-交付物清单（对照 `shadowsocks-rust-plus` 的既有工程要素）：
+交付物清单：
 
 | 交付物 | 说明 |
 | --- | --- |
@@ -512,9 +445,11 @@ PoC 前置条件：
 | `scripts/verify.sh` | `go vet`、`go test -race ./...`、lint、敏感信息扫描（私钥、access key、`PrivateKey`/`Passphrase` 赋值） |
 | `scripts/build-linux-release.sh` | 两次独立路径构建逐字节一致才产出 manifest + SHA-256 |
 | `scripts/sign-release.sh` / `verify-release.sh` | detached 签名与验签，私钥离线保管 |
-| `packaging/` | 复用上游 `release/config/sing-box.service`、`sing-box.sysusers`，追加 `RuntimeDirectory=` 承载 UDS；上游无 tmpfiles 模板，需自建 |
+| `scripts/user-stats-client.py` | 带 schema 与健康校验的快照读取客户端 |
+| `packaging/` | 复用上游 `release/config/sing-box.service`、`sing-box.sysusers`，追加 `RuntimeDirectory=` 承载 UDS 与 `Restart=on-failure`；上游无 tmpfiles 模板，需自建 |
+| `config/server.example.json` | 脱敏的最小可用配置，含 `user_stats` 全字段与默认值 |
 | `docs/` | `API.md`、`ARCHITECTURE.md`、`OPERATIONS.md`、`UPSTREAM_BASELINE.md`、`PERFORMANCE.md` |
-| `tests/` | 复用 `shadowsocks-rust-plus/tests/{http_unix,settlement_model,mock_collector}.py`，另加字节 oracle |
+| `tests/` | 契约测试、字节 oracle、故障注入与 benchmark |
 | `THIRD_PARTY_NOTICES.md` | 见 §10 |
 | `.env.example` | `UPSTREAM_REPOSITORY`、`GOMODCACHE`、`SING_BOX_BUILD_TAGS` 等占位 |
 | `.gitattributes` | `*.patch -whitespace` 等 |
@@ -523,12 +458,12 @@ PoC 前置条件：
 
 | # | 里程碑 | 完成标准 / 证据 |
 | --- | --- | --- |
-| 1 | 冻结基线与骨架 | `upstream.lock` 已记录 tag/commit/`prepared_tree_sha256`；overlay 形态已定（§4.6）；两次独立构建 SHA-256 相同；`sing-box version` 显示钉定版本；`docs/UPSTREAM_BASELINE.md` 落库 |
-| 2 | 观测 PoC | 回环 VLESS Reality/Vision 多用户 TCP+UDP 字节 oracle 差 = 0 的报告；复现并记录 ServiceName 覆写与 SIGHUP 丢数；§5.2 的三项前置通过 |
-| 3 | 四向 tracker / registry | `go test -race` 全绿；四向 oracle 误差 = 0；Linux amd64 真实 splice 用例覆盖；多 tracker 叠加 unwrap 断言通过 |
-| 4 | UDS exporter | 权限 / 符号链接 / inode 替换 / 超限 / 慢客户端故障用例通过；exporter 异常退出导致进程失败退出；`tests/http_unix.py` 与 mock collector 直接通过 |
-| 5 | 接入 Manager（只记账） | staging 只记账 ≥ 7 天：负增量 = 0、未知 runtime = 0、`exporter_sequence` 重复 = 0、unhealthy 快照全部被拒 |
-| 6 | 启用配额 | §8 故障矩阵与性能三组对照报告归档；§5.3 配额执行路径验证通过；§5.4 门槛全部满足后才解除 `quotaBytes = 0` |
+| 1 | 冻结基线与骨架 | `upstream.lock` 已记录 tag/commit/`prepared_tree_sha256`；overlay 形态已定（§4.7）；两次独立构建 SHA-256 相同；`sing-box version` 显示钉定版本；`docs/UPSTREAM_BASELINE.md` 落库 |
+| 2 | 观测 PoC | 回环 VLESS Reality/Vision 多用户 TCP+UDP 字节 oracle 差 = 0 的报告；复现并记录 ServiceName 覆写、静态白名单与重载丢数三项边界 |
+| 3 | 四向 tracker / registry | `go test -race` 全绿；四向 oracle 误差 = 0；Linux amd64 真实 splice 用例覆盖；多 tracker 叠加 unwrap 断言通过；§4.6 全部失败关闭路径有用例 |
+| 4 | UDS exporter | 权限 / 符号链接 / inode 替换 / 超限 / 慢客户端故障用例通过；exporter 异常退出导致进程失败退出；契约测试与参考 collector 直接通过 |
+| 5 | 长跑与结算验证 | staging 连续运行 ≥ 7 天：负增量 = 0、未知 runtime = 0、`sequence` 重复 = 0、unhealthy 快照全部被拒；§5.3 计划重启流程演练无缺口、无重复 |
+| 6 | 可发布版本 | §8 故障矩阵与性能三组对照报告归档；可复现发布包与签名验签通过；`docs/OPERATIONS.md` 含部署、采集、重启屏障与回滚步骤 |
 
 ## 8. 测试与性能门槛
 
@@ -539,10 +474,12 @@ PoC 前置条件：
 - UDP packet/batch、XUDP/UoT、mux、QUIC stream/datagram，不计 framing（M3）；
 - Vision early data、padding/unpadding、buffered → direct 切换（**不含 splice**，见 §4.2）（M3）；
 - 多 tracker 叠加时 counter unwrap 仍生效（M3）；
+- 配置校验：未知字段、非白名单 inbound、空用户集、重名、缺 build tag、非 Unix 平台（M3）；
 - 热删、同名重加、凭据轮换、旧连接继续计数、tombstone 保留（M3）；
-- 快照响应中断、collector 重试、重复/乱序/倒退 `exporter_sequence`、累计溢出（M4）；
+- 快照响应中断、collector 重试、重复/乱序/倒退 `sequence`、累计溢出（M4）；
 - UDS 权限、symlink/inode 替换、慢连接、超大请求和并发上限（M4）；
-- 进程重启前后长连接、Box 启动失败、连续部署、屏障 ack 丢失与重放、崩溃（M5）；
+- exporter 异常退出、连续 accept 失败、systemd 重启后的新 runtime 处理（M4/M5）；
+- 计划重启流程、超时强切、崩溃后的未闭合窗口标记（M5）；
 - `-race`、fuzz、端到端字节 oracle、Linux 真实 splice 和发布目标集成测试（M3/M6）。
 
 性能验收比较三组：未启用、编译但未配置、启用四向统计。记录吞吐、p50/p99 延迟、CPU、分配、
@@ -559,12 +496,12 @@ goroutine、内存随用户数/并发数增长，以及 exporter 被慢客户端
 
 | 项 | 值 |
 | --- | --- |
-| Go 工具链 | 钉具体版本并设 `GOTOOLCHAIN=local`；1.13.19 的 `go.mod` 为 `go 1.24.7`，`v1.14.0` 升到 `go 1.25.5` |
+| Go 工具链 | 钉具体版本并设 `GOTOOLCHAIN=local`；`v1.14.0` 的 `go.mod` 为 `go 1.25.5` |
 | CGO | `CGO_ENABLED=0` |
 | 可复现参数 | `-trimpath -buildvcs=false -ldflags "-s -w -buildid= $(cat release/LDFLAGS)"`；`release/LDFLAGS` 内容在 1.14 已改写（`-X runtime.godebugDefault=…`），必须读取文件而非硬编码 |
 | 生产 tag 集 | `with_utls,badlinkname,tfogo_checklinkname0`（按需加 `with_quic`）+ 自有 `with_user_stats` |
 | PoC tag 集 | 生产集再加 `with_v2ray_api` |
-| 被裁剪的默认 tag | `with_gvisor`、`with_wireguard`、`with_tailscale`、`with_dhcp`、`with_acme`、`with_ccm`、`with_ocm`、`with_clash_api`、`with_naive_outbound` 等；最终清单见 §11 D6 |
+| 被裁剪的默认 tag | `with_gvisor`、`with_wireguard`、`with_tailscale`、`with_dhcp`、`with_acme`、`with_ccm`、`with_ocm`、`with_clash_api`、`with_naive_outbound` 等；最终清单见 §11 D4 |
 
 编译验证记录：2026-09-05，darwin/arm64、go1.26.5，在 `v1.14.0`（`0b899587`）上执行
 
@@ -588,9 +525,8 @@ exit = 0。三个包均通过编译，但上游对它们显示 `[no test files]`
 7. 1.14.x 依赖 `sing`、`sing-tun`、`sing-quic` 的 beta 模块，须用 `go.sum` 或 `go mod vendor` 固定。
 
 轨道状态（2026-09-05 核对）：`origin/oldstable` = `v1.13.21-2`，`origin/stable` = `v1.14.0-16`，
-`origin/testing` 已进入 `v1.15.0-alpha.1`。1.13.20/21 相对 1.13.19 在本计划涉及的文件上零差异
-（另含 mux/websocket early-data 修复），可作 1.13 线的冻结点；但 1.13 已是 oldstable，
-按上游历史节奏很快停更，不在其上开发 overlay。
+`origin/testing` 已进入 `v1.15.0-alpha.1`。1.13 已是 oldstable，按上游历史节奏很快停更，
+不在其上开发 overlay。
 
 ## 10. 许可与命名
 
@@ -605,25 +541,26 @@ sing-box 的 LICENSE 是 GPL v3-or-later 的授权声明段，并附带“衍生
    这一触发点早于二进制发布。
 2. **仅在自有主机部署、不向第三方交付二进制**不产生额外源码义务；GPLv3 没有 AGPL 式的网络使用条款。
 3. **向第三方交付二进制**时须随附对应完整源码或书面要约。
-4. `sing-box-manager`（MIT）必须保持进程边界，不得 import 本项目的任何 Go 代码，也不分发数据面
-   二进制，以维持其许可证独立。
+4. 通过快照接口消费本项目的下游系统是独立进程，不因该接口而受 GPL 传染；但不得链接或内嵌本项目的
+   Go 代码。
 
 命名：`sing-box-plus` 是内部代号，不作为可发布产品名；对外发布使用中性名称或先取得许可。
-改名时需同步确认 Manager 的 `sing-box version` 解析约定（§4.6 硬约束）。法务评审属日历项，
-在里程碑 5 之前启动。
+法务评审属日历项，在里程碑 6 之前启动。
 
 ## 11. 待决策
 
 | # | 事项 | 选项 | 当前取值 | 决策时点 |
 | --- | --- | --- | --- | --- |
-| D1 | 实施基线轨道 | 1.13.21（与 Manager 同 major，但 oldstable 将停更）/ 1.14.x（stable，依赖 beta 模块、Go 1.25+） | PoC 用 1.13.21，正式 overlay 用 1.14.x | 里程碑 1 |
-| D2 | overlay 形态 | A 零补丁 wrapper / B patch series / A+B | A 为默认 | 里程碑 1 |
+| D1 | overlay 形态 | A 零补丁 wrapper / B patch series / A+B | A 为默认 | 里程碑 1 |
+| D2 | 首期协议范围 | 只做 VLESS / 同时纳入 VMess、Trojan、Hysteria2、TUIC | 只做 VLESS，其余按 §2.4 逐个验证后追加 | 里程碑 1 |
 | D3 | 快照 schema | 复用 `shadowsocks-rust-plus` v1 形状 / 另立 v2 | 复用 v1 | 里程碑 4 之前 |
-| D4 | Shadowsocks 是否迁到统一 exporter | 首期只做 VLESS / 一并迁移 | 首期只做 VLESS | 里程碑 5 |
-| D5 | VLESS 配额执行 | (a) 热用户增删写接口 / (b) 超额即重新部署 | (b) | 里程碑 6 |
-| D6 | 构建 tag 裁剪清单 | 见 §9.1 | 待定 | 里程碑 1 |
-| D7 | 是否需要四方向账单展示 | 两方向求和 / 扩展 raw usage schema | 先两方向 | 里程碑 5 |
-| D8 | 是否接受“进程崩溃丢尾账” | 接受（同 `shadowsocks-rust-plus`）/ 引入 WAL | 接受 | 里程碑 5 |
+| D4 | 构建 tag 裁剪清单 | 见 §9.1 | 待定 | 里程碑 1 |
+| D5 | 是否提供热用户增删接口 | 不提供（v1 只读，用户变更走受控重启）/ 另开受控写入端点 | 不提供 | 里程碑 6 之后评估 |
+| D6 | 是否接受“进程崩溃丢尾账” | 接受（同 `shadowsocks-rust-plus`）/ 引入 WAL | 接受 | 里程碑 5 |
+| D7 | 是否支持 Shadowsocks inbound | 支持并与 SSM 互斥 / 不支持 | 暂不支持，避免双口径 | 里程碑 5 |
+
+D5 若改为“提供”，必须另开独立端点：不得复用只读快照 socket，需要单独授权、幂等 command id
+与失败关闭；底层能力已存在（`sing-vmess vless/service.go:40 UpdateUsers`）。
 
 ## 12. 已知差额与风险
 
@@ -634,10 +571,10 @@ sing-box 的 LICENSE 是 GPL v3-or-later 的授权声明段，并附带“衍生
 | --- | --- | --- |
 | REALITY 握手校验失败的伪装中继 | 在 utls 内部完成，任何 tracker 不可见；未设 `LimitFallback`，不限速 | 声明不支持；对 Dest 与带宽单独设告警阈值 |
 | ShadowTLS 握手/校验失败中继 | 不经 router | 声明不支持 |
-| 进程崩溃前未采集的尾账 | 内存 registry 无法恢复 | 按未闭合窗口审计（D8） |
-| 重载期间被强杀的连接 | 已计字节不丢，但连接中断 | 部署合批，减少翻转频率（§5.3） |
-| 计费 inbound 误配 `hijack-dns` / `reject` | 字节不经 tracker | 配置校验失败关闭 |
+| 进程崩溃前未采集的尾账 | 内存 registry 无法恢复 | 按未闭合窗口审计（D6） |
+| 重启期间被强杀的连接 | 已计字节不丢，但连接中断 | 走 §5.3 计划重启流程，合并变更以降低频次 |
+| 计费 inbound 误配 `hijack-dns` / `reject` | 字节不经 tracker | 配置校验失败关闭（§4.6） |
+| 协议 header、隧道封装与 TCP 重传 | 不在应用 payload 口径内 | 在计费说明中声明，与网卡计费天然有差 |
 
 主要执行风险：上游 1.14 的接口与生命周期改动较大，每次 minor 升级需预留 rebase 与全量对账
-（§6、§9.2）；Manager 侧改动跨 Agent 与 Controller 两端，须与数据面升级同批发布，
-否则会出现“新二进制 + 旧采集逻辑”的静默漏计。
+（§6、§9.2）；1.14.x 目前依赖若干 beta 模块，需锁定并跟踪其转正节奏。
