@@ -490,18 +490,40 @@ Manager 只验证过数据面 sing-box `1.13.14`（`src/manifest/mod.rs:476`、�
 由 `(user_id, route_id)` 确定性派生的 `identity_name`；Agent 在回环读取累计 uplink/downlink。
 这一层无需改变 usage bucket 结构，但 SIGHUP、静态白名单和响应丢失边界仍在，不能解除硬配额限制。
 
-该路线在 `sing-box-manager/_legacy/` 中已经在 1.13.14 上实现过一次并被 SSM 取代
+该路线在 `sing-box-manager/_legacy/` 中已经在 1.13.14 上实现过一次
 （`_legacy/grpc.rs` 的 StatsService gRPC 只读客户端、`_legacy/backend/reload.rs`、
 `_legacy/singbox.rs:205-217` 生成 `experimental.v2ray_api` 白名单），其中已记录 ServiceName 覆写的坑。
-PoC 应复用这些代码而非从零重做，前置条件：
 
-1. 复活 `_legacy/grpc.rs` 与 `_legacy/backend/reload.rs` 并在新基线上回归（重点验证 ServiceName
-   覆写、静态白名单、SIGHUP 丢数）；
+**当时它为什么被 SSM 取代**（结论来自 `_legacy` 的代码与注释，公开 git 历史从 0.1.0 squash 开始、
+不含该决策的提交信息）：被放弃的不是 gRPC 统计客户端，而是与它绑定的**身份下发方式**。
+`_legacy` 有两个并存 backend，由 `backend.mode` 选择，且 `_legacy/config.rs:247-253` 强制
+`vless-reality` 入站必须用 `reload`（“VLESS 无 SSM API”）：
+
+| | `ssm` | `reload`（VLESS 唯一可选） |
+| --- | --- | --- |
+| 改用户 | 内存 usersMap，不重建入站、不清零他人计数（注释标注已实测） | 重写配置 `inbounds[].users` + `reload_cmd` |
+| 代价 | 无 | “reload 会重建实例、断连、清零内存计数”（`_legacy/backend/reload.rs:4`） |
+| 统计源故障时 | 仍可下发身份 | **必须整轮跳过下发**（`_legacy/meter.rs:142-144, 228-231`），否则会在统计未读取时重载并永久丢数 |
+| 统计维度 | 按入站 scope | `scope="*"` 全局每身份（v2ray key 不含 inbound tag） |
+| 增量算法 | — | `cu >= lu ? cu-lu : cu`（`_legacy/meter.rs:157-158`）——把任何回退当复位并整值计入 |
+
+即：每次配额翻转/加删用户都会断开全部连接并清零计数；统计源一挂，配额执行随之停摆；而那个
+“回退即复位”的增量启发式正是清零逼出来的，也正是现版本改成 `max(0, …)`（F1 回归）要消除的
+重复计费风险。因此 0.1.0 只保留 SSM，VLESS 随之失去计量，`quotaBytes = 0` 由此而来。
+
+两条推论直接影响本项目：
+
+- **复用范围**：PoC 可以复用 `_legacy/grpc.rs`（统计客户端本身没有问题），但**不要复用
+  `ReloadBackend` 的身份下发方式**；身份变更仍走 Manager 现有的 revision + 屏障部署路径。
+- **本项目为什么不会重蹈覆辙**：`_legacy` 的“先 read_stats 再 apply”只是一条时序约定，失败时只能
+  整轮放弃；现在 Manager 已有两阶段结算屏障（抓取最终统计 → 等 Manager ack → 才停旧进程），
+  是有回执、可重放、按 `(entry, boot_id, sequence)` 去重的协议。这也是 §7.3 敢选方案 (b) 的前提。
+
+PoC 前置条件：
+
+1. 复活 `_legacy/grpc.rs` 并在新基线上回归（重点验证 ServiceName 覆写、静态白名单、SIGHUP 丢数）；
 2. `src/compiler/entry.rs` 为 VLESS Entry 输出 `experimental.v2ray_api` 块，`stats.users` 等于身份投影；
 3. Controller 与所有 Agent 使用同一 `with_v2ray_api` 构建（否则两侧 `check` 都会拒绝该配置）。
-
-> 待确认：`_legacy` 路线当年被 SSM 取代的原因在 CHANGELOG / ROADMAP / docs 中无记载，
-> 复用前需向 Manager 维护者确认，避免重蹈当时的问题。
 
 **第 2 层：正式计费。** Agent 改读 `sing-box-plus` 的 UDS 快照。现有两方向账单可先把 TCP+UDP
 各自求和；若产品要展示四方向，再扩展 raw usage schema。
@@ -537,6 +559,11 @@ Manager 侧的验收前提**不是现成的**，必须区分已具备与需新�
   需要单独授权、幂等 command id 与失败关闭，攻击面明显扩大，**不得复用只读快照 socket**。
 - **(b) 超额即重新部署**：首版接受这一成本，把配额翻转改为触发 Entry 重编译 + 屏障部署，并给出
   翻转合批与最小间隔策略。周期性配额（月/年）下翻转频率低，可接受。
+
+选 (b) 的前提是屏障必须真正生效：`_legacy` 的 reload 路线正是死在“改用户即清零计数”上（§7.2），
+其缓解手段只是一条时序约定；现在停旧进程前有带回执、可重放的两阶段屏障，才使“重新部署”从
+丢数风险变成可接受的成本。因此 §7.2 表中“VLESS 进入计量与屏障”一项是 (b) 的硬前置，
+不得先放开配额、后补屏障。
 
 所选方案计入 §8.2 工作量与里程碑 6，并把“配额执行路径验证通过”加入解除条件。
 
@@ -722,6 +749,9 @@ StatsService 当作 `shadowsocks-rust-plus` 等价物。若产品确实需要多
 
 ## 13. 变更记录
 
+- **2026-09-05（补）**：补回 `_legacy` 的 v2ray_api 路线当年被 SSM 取代的原因（结论来自
+  `_legacy` 代码与注释：被放弃的是 reload 式身份下发，不是 gRPC 统计客户端），并据此限定 PoC 的
+  复用范围、说明本项目为何不会重蹈覆辙、以及 §7.3 选方案 (b) 的硬前置。
 - **2026-09-05**：按多维度复核结果修订。更新基线元数据（1.14.0 已成为 stable，1.13 降为 oldstable，
   原 testing 引用作废）；纠正 §5.3 重载模型（上游先关旧 Box、强制关闭全部连接，无排空语义；
   Manager 从不发 SIGHUP，屏障为主路径、进程级 registry 改为可选）；lineage 语义改为与
