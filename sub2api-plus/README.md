@@ -10,11 +10,31 @@
 |---|---|
 | 上游仓库 | `https://github.com/Wei-Shaw/sub2api.git` |
 | Ref | `main` |
+| 应用版本 | `0.2.1.kim` |
 | 源码 Commit | 见 `upstream.lock` 的 `commit` 字段 |
 | 上游许可证 | LGPL-3.0 |
 
 机器可读值以 [`upstream.lock`](upstream.lock) 为准。构建必须使用其中的固定提交，
 不能直接构建浮动的 `main`。
+
+### 0.2.1 升级记录（2026-09-05）
+
+上游基线从 `b1748c4e` 更新到 `ab99d56e`，保留 `.kim` 定制版本后缀和现有
+Overlay。用量日志同时保存新增的 `upstream_request_id` 与六个定制流量统计字段，
+单条和批量写入、查询字段顺序保持一致。
+
+本次上游新增四个数据库迁移文件，未修改历史迁移：
+
+- `232_add_usage_log_upstream_request_id.sql`：新增可空的上游请求标识。
+- `233_add_usage_log_upstream_request_id_index_notx.sql`：并发创建非空请求标识索引。
+- `234_channel_max_reasoning_effort_multiplier.sql`：新增 max 推理强度计费倍率及正值约束。
+- `234_group_codex_models_manifest_config.sql`：新增分组固定账号模型清单配置。
+
+迁移器以完整文件名记录执行状态，因此两个 `234_` 文件分别执行；`_notx.sql` 索引迁移
+在事务外运行。发布前仍需按下文流程备份数据库并验证备份。
+
+本次未增加必填配置。新增可选环境变量 `SUB2API_CLAUDE_CLI_VERSION`，未配置时沿用
+内置版本。定价 fallback/override 文件现在会在哈希检查周期内自动重新加载。
 
 ## 目录
 

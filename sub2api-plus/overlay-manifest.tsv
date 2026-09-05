@@ -1,7 +1,7 @@
 # schema_version=1
 # upstream_commit=ab99d56e9626e6cd731592dae8553c9758a0efa2
-# source_commit=7ab58ea2710689706d54cbfef5cc0a2ddd7baabd
-# source_tree=d478c580f57c35acf414d1affdc7eeca0afe097a
+# source_commit=d6880c9f0bd6cb903962e7b0e03f362eb3264582
+# source_tree=1e6c43e2324a86251bdd6bb7b73fb58533d692fd
 # columns=status<TAB>mode<TAB>object<TAB>path
 M	100644	095a1f2b848d4b773b6cff7732f69576b73777d6	.gitattributes
 M	100644	83308befc36f6f2295d39ce2f90507fbe11291e0	.gitignore
@@ -40,7 +40,7 @@ A	100644	a31e0503fc2693dbeb2ffd0d405d0c7002398c8e	backend/internal/repository/ht
 M	100644	78a5734ffaf91f92308ae08ee7b4eb858b73682d	backend/internal/repository/usage_log_repo_dashboard.go
 M	100644	782d8dfb5952784e451c83463b99228eda661c7e	backend/internal/repository/usage_log_repo_insert.go
 M	100644	6c8d1e4d2ab0808c2e0656d73dd0e7e5971ddcb1	backend/internal/repository/usage_log_repo_query.go
-M	100644	9e8a062d9037e17933b6c6dc01869795e143fcb4	backend/internal/repository/usage_log_repo_request_type_test.go
+M	100644	82dfef558a0d6f354db7633244bf4b3e032de137	backend/internal/repository/usage_log_repo_request_type_test.go
 M	100644	ed9ed790a109d5d136684aa78fdcce8454c007e0	backend/internal/repository/usage_log_repo_trend.go
 M	100644	c94ef31d742910565d3fc70302a21e94d1fcc51b	backend/internal/repository/usage_log_session_id_unit_test.go
 M	100644	467f7eaf0acb70d8c411ac7ba7048aee1c0a90a2	backend/internal/server/api_contract_test.go
