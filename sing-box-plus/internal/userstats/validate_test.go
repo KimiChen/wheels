@@ -242,6 +242,14 @@ func TestScanRawConfig(t *testing.T) {
 	if err := ScanRawConfig(ssm, true); err == nil {
 		t.Fatal("含 ssm-api 的配置应在预扫描期被拒")
 	}
+	api := []byte(`{"services":[{"type":"api","tag":"a"}]}`)
+	if err := ScanRawConfig(api, true); err == nil {
+		t.Fatal("含 api service 的配置应在预扫描期被拒")
+	} else if !strings.Contains(err.Error(), "AppendTracker") {
+		// 上游对未注册 service 类型的文案是 "unknown inbound type: api"——
+		// 把 service 说成 inbound，运维会去 inbounds[] 里找一个不存在的东西。
+		t.Fatalf("错误信息应说明为何互斥，而不是让上游那句 unknown inbound type 透出来：%v", err)
+	}
 	stats := []byte(`{"services":[{"type":"user_stats","tag":"a"}]}`)
 	if err := ScanRawConfig(stats, false); err == nil {
 		t.Fatal("未编译 with_user_stats 时应给出可读错误")

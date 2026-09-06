@@ -51,6 +51,19 @@
    非 `os.ErrInvalid` 的错误并被直接抛出；Go 工具链升级若改动 `crypto/tls` 内部字段名，
    会表现为 TLS 连接硬失败而不是静默降级。
 
+## 受限网络下的构建主机
+
+实测的一台 Debian 13 构建机上，`curl https://github.com/` 返回 200，但 **git-over-HTTPS 被完全阻断**
+（`git ls-remote` 静默失败），`proxy.golang.org` 只解析到 IPv6 且不可达。这类主机上：
+
+- `GOPROXY` 换成可达镜像（实测 `https://goproxy.cn` 可用），`GOSUMDB=sum.golang.google.cn`；
+- 上游取源与漂移检查用一个自包含的浅镜像：
+  `git clone --bare --depth 1 --branch <tag> <upstream> /path/mirror.git`（v1.14.0 只有 2.3 MB），
+  然后 `export UPSTREAM_REPOSITORY=/path/mirror.git`；
+- 此时 `scripts/verify.sh` 的结论会自动改写为「上游漂移检查仅对镜像」——它**不证明**上游未漂移，
+  规范地址的核对必须在另一台能访问 GitHub 的机器上做。完全无镜像可用时，
+  显式置 `SING_BOX_PLUS_SKIP_UPSTREAM_DRIFT=1`，结论会进一步弱化为「本次完全没有核对上游」。
+
 ## 已知的上游缺陷
 
 ### `route.NetworkManager` 的数据竞争
@@ -58,7 +71,9 @@
 `Start()`（`route/network.go:220`）写入 interface 快照字段，而 `notifyInterfaceUpdate` 起的
 goroutine 在 `updateInterface()`（`:574`）并发读同一字段，两侧无锁。
 
-- 触发条件：同进程内并发启动多个 Box 且宿主发生网络接口变更通知（macOS 上很常见）。
+- 触发条件：同进程内并发启动多个 Box 且宿主发生网络接口变更通知。
+  **macOS 与 Linux 都能复现**（Debian 13 / kernel 6.12 上实测，读写两端的栈帧全在上游，
+  本项目的帧只出现在 `Box.Start()` 的调用侧）。
 - 与本项目的关系：本项目不触碰 `NetworkManager`，零补丁形态也无法修复。
 - 处置：`tests/race-suppressions.txt` 只抑制这三个符号。为了让该文件无法掩盖本项目自身的竞争，
   `scripts/verify.sh` 在带抑制跑完 `-race` 全量之后，会**再跑一遍不带抑制**的纯单元用例
@@ -98,3 +113,13 @@ v1.14.0 实测：`ssm-api` 的 `servers` 键缺前导 `/` 时 panic 退出（exi
 | 2026-09-06 | `go test -race` 全量（含上游竞争抑制）与无抑制的纯单元用例（darwin/arm64） | 通过 |
 | 2026-09-06 | **Linux 实跑**：linux/arm64 交叉编译的测试二进制在 Ubuntu（kernel 7.0）上跑全量 46 个用例，含真实 splice 路径的字节 oracle 与 splice 上的配额闸断 | 全部通过 |
 | 2026-09-06 | Linux 数据面三组基准（真实 splice）：A 1630 / B 1621 / C 1641 MB/s，组内极差 0.6–2.8% | 开销在 1% 量级 |
+| 2026-09-06 | **裸机 Debian 13 / x86_64（Intel N100）实跑**：native 构建、`go vet`、零 tag 与生产 tag 两种构建、全量测试、`-race` 全量（本机此前无法覆盖的一项）、Python 47 例、`scripts/verify.sh` 端到端 | 全部通过 |
+| 2026-09-06 | 不带抑制的 `-race`：确认报告的读写两端全在上游 `route/network.go:220` 与 `:574`，抑制文件未掩盖本项目的竞争 | 结论成立 |
+| 2026-09-06 | 可复现发布构建：linux/amd64 与 linux/arm64 各两次独立构建逐字节一致，产出 manifest + SHA256SUMS | 通过 |
+| 2026-09-06 | 跨机签名与验签演练：在 git 工作树内签名 → 送到构建机验签通过；篡改一个字节后验签失败 | 通过（用一次性密钥，正式发布仍需离线私钥） |
+| 2026-09-06 | 真实部署：systemd + sysusers + tmpfiles 按 `docs/OPERATIONS.md` 安装，专用用户运行，socket 权限 0600 | 通过 |
+| 2026-09-06 | 真实流量计量：VLESS 4/4 与 1 MiB 双向 1048576、SS-2022 4/4，未使用身份恒为 0 | 误差 0 |
+| 2026-09-06 | 真实部署上的配额闸断：u1 在途连接被切、新连接被拒，u2 全程不受影响；`active` 与 `health` 未变 | 通过 |
+| 2026-09-06 | `systemctl reload`：`runtime_id` 与 `started_at_unix_ms` 逐字节不变、`sequence` 递增、计数不清零；改 `node_id` 的重载被拒且旧实例继续服务 | 通过 |
+| 2026-09-06 | `systemctl stop` 触发排空：日志出现「开始排空 → 排空完成」，停止耗时 5.2 s（等待在途连接） | 通过 |
+| 2026-09-06 | packaging 中原样的 systemd 单元（`-D … -C …` 目录形式）可直接启动 | 通过 |

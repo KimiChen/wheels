@@ -92,6 +92,9 @@ def collect_once(socket_path: str, ledger: Ledger, collector: Collector, timeout
                 "sequence": snapshot["sequence"],
             }
         )
+        # 即使本轮没入账也要落状态：ingest 可能已经登记了新的 runtime（例如
+        # started_at 变化那一支），丢掉它会让下一轮又从头开始。
+        ledger.save_state(collector.export_state())
         return 0
     total = {name: 0 for name in COUNTER_FIELDS}
     entries = []
@@ -112,14 +115,7 @@ def collect_once(socket_path: str, ledger: Ledger, collector: Collector, timeout
             "entries": entries,
         }
     )
-    ledger.save_state(
-        {
-            "node_id": snapshot["node_id"],
-            "runtime_id": snapshot["runtime_id"],
-            "last_sequence": snapshot["sequence"],
-            "stats": collector.stats,
-        }
-    )
+    ledger.save_state(collector.export_state())
     return 0
 
 
@@ -181,6 +177,13 @@ def main(argv: list[str]) -> int:
     if not args.socket:
         parser.error("采集模式需要 --socket")
     collector = Collector(first_snapshot=args.first_snapshot)
+    # 必须先恢复上一轮的基线，否则「每次采集起一个进程」的用法会把每一轮都当成首快照，
+    # 于是永远只建基线、永不入账——而四项判据依然全绿。
+    try:
+        collector.restore_state(ledger.load_state())
+    except SnapshotRejected as error:
+        print(f"错误：无法沿用已有采集状态：{error}", file=sys.stderr)
+        return 2
     return collect_once(args.socket, ledger, collector, args.timeout)
 
 

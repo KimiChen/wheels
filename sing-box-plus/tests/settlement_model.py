@@ -263,6 +263,63 @@ class Collector:
             "duplicate_batch": 0,
         }
 
+    # 跨进程持久化。
+    #
+    # 采集器常常被做成「每次采集起一个进程」（scripts/soak.sh 就是），
+    # 如果基线只活在内存里，每一轮都会被当成该 runtime 的首快照：
+    # baseline 策略下永远只建基线、永不入账，而四项判据依然全是 0——
+    # 一个看起来完全正常的、彻底不工作的采集器。
+    MAX_REMEMBERED_BATCHES = 4096
+
+    def export_state(self) -> dict[str, Any]:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "first_snapshot": self.first_snapshot,
+            "runtimes": [
+                {
+                    "node_id": state.node_id,
+                    "runtime_id": state.runtime_id,
+                    "started_at_unix_ms": state.started_at_unix_ms,
+                    "last_sequence": state.last_sequence,
+                    "baselines": [
+                        {"key": list(key), "counters": counters}
+                        for key, counters in sorted(state.baselines.items())
+                    ],
+                }
+                for state in self.runtimes.values()
+            ],
+            # 幂等集合有界：只记最近若干批次。重投一个很旧的批次不会被挡住，
+            # 但那已经不是「重试」而是「重放历史」，应由下游账本的唯一约束兜底。
+            "applied_batches": sorted(self.applied_batches)[-self.MAX_REMEMBERED_BATCHES :],
+            "stats": self.stats,
+        }
+
+    def restore_state(self, payload: dict[str, Any]) -> None:
+        if not payload:
+            return
+        if payload.get("schema_version") != SCHEMA_VERSION:
+            raise SnapshotRejected("采集状态的 schema_version 与本实现不符，拒绝按旧状态继续入账")
+        if payload.get("first_snapshot") != self.first_snapshot:
+            # 中途换策略会同时改变「首快照记不记账」与基线含义，必须显式重来。
+            raise SnapshotRejected(
+                f"采集状态记录的 first_snapshot 是 {payload.get('first_snapshot')}，"
+                f"与本次的 {self.first_snapshot} 不一致"
+            )
+        for item in payload.get("runtimes", []):
+            state = RuntimeState(
+                node_id=item["node_id"],
+                runtime_id=item["runtime_id"],
+                started_at_unix_ms=item["started_at_unix_ms"],
+                last_sequence=item["last_sequence"],
+            )
+            for entry in item.get("baselines", []):
+                state.baselines[tuple(entry["key"])] = dict(entry["counters"])
+            self.runtimes[(state.node_id, state.runtime_id)] = state
+        self.applied_batches.update(payload.get("applied_batches", []))
+        for key, value in payload.get("stats", {}).items():
+            if key in self.stats:
+                self.stats[key] = value
+
     def ingest(self, snapshot: dict[str, Any]) -> Settlement:
         key = (snapshot["node_id"], snapshot["runtime_id"])
         state = self.runtimes.get(key)

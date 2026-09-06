@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from fixtures import encode, snapshot  # noqa: E402
 from reference_collector import Ledger, collect_once, report  # noqa: E402
-from settlement_model import Collector  # noqa: E402
+from settlement_model import Collector, SnapshotRejected  # noqa: E402
 
 
 class SnapshotServer:
@@ -127,6 +127,41 @@ class ReferenceCollectorTest(unittest.TestCase):
         ledger = Ledger(self.ledger_dir)
         self.assertEqual(collect_once(server.path, ledger, Collector(), 5.0), 0)
         self.assertEqual(self._records()[0]["result"], "retryable")
+
+    def test_state_survives_process_boundary(self):
+        """每次采集起一个新进程时，基线必须能从账本恢复。
+
+        这是 scripts/soak.sh 的用法。不恢复的话，每一轮都会被当成该 runtime 的首快照：
+        baseline 策略下永远只建基线、永不入账，而 --report 的四项判据依然全是 0——
+        一个看起来完全正常、实际一个字节都没记的采集器。
+        """
+        first = snapshot(sequence=1)
+        second = snapshot(sequence=2)
+        second["inbounds"][1]["users"][0]["tcp_uplink_bytes"] = 150
+        third = snapshot(sequence=3)
+        third["inbounds"][1]["users"][0]["tcp_uplink_bytes"] = 275
+        server = SnapshotServer([http_ok(encode(first)), http_ok(encode(second)), http_ok(encode(third))])
+        self.addCleanup(server.close)
+
+        for _ in range(3):
+            # 每一轮都新建 Ledger 与 Collector，模拟独立进程。
+            ledger = Ledger(self.ledger_dir)
+            collector = Collector(first_snapshot="baseline")
+            collector.restore_state(ledger.load_state())
+            self.assertEqual(collect_once(server.path, ledger, collector, 5.0), 0)
+
+        records = self._records()
+        self.assertEqual([record["result"] for record in records], ["accepted"] * 3)
+        self.assertEqual(sum(records[0]["total"].values()), 0, "首快照按 baseline 只建基线")
+        self.assertEqual(records[1]["total"]["tcp_uplink_bytes"], 50)
+        self.assertEqual(records[2]["total"]["tcp_uplink_bytes"], 125)
+
+    def test_state_refuses_strategy_switch(self):
+        # 中途换 first_snapshot 会同时改变「首快照记不记账」与基线含义，必须显式重来。
+        ledger = Ledger(self.ledger_dir)
+        ledger.save_state(Collector(first_snapshot="baseline").export_state())
+        with self.assertRaises(SnapshotRejected):
+            Collector(first_snapshot="include").restore_state(ledger.load_state())
 
     def test_report_on_clean_run(self):
         first = snapshot(sequence=1)

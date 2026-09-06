@@ -322,6 +322,12 @@ func ScanRawConfig(content []byte, statsRegistered bool) error {
 		switch item.Type {
 		case "ssm-api":
 			return E.New("services[", index, "] 是 ssm-api：本项目的 service registry 不注册该类型，与 user_stats 互斥（README §4.6 第 8 条）")
+		case "api":
+			// 与 ssm-api 同理：自建 registry 不注册它，解码期就会失败，
+			// 而上游对未注册 service 类型的文案是 "unknown inbound type: api"——
+			// 把 service 说成 inbound，运维会去 inbounds[] 里找一个不存在的东西。
+			return E.New("services[", index, "] 是 api：它会让上游在 box.New 内部 AppendTracker，",
+				"与本项目的 tracker 叠加，两者互斥（README §4.6 第 7 条）")
 		case TypeUserStats:
 			if !statsRegistered {
 				return E.New("配置中出现 services[", index, "].type=user_stats，但本二进制未启用 with_user_stats 构建 tag")

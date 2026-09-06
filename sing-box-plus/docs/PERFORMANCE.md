@@ -55,16 +55,28 @@ go tool pprof -top cpu.out
 
 ### 微基准（已测）
 
-darwin/arm64、go1.26.5、`with_utls,badlinkname,with_user_stats`，2026-09-06：
+`with_utls,badlinkname,with_user_stats`，go1.26.5，2026-09-06：
 
-| 基准 | ns/op | B/op | allocs/op |
-| --- | --- | --- | --- |
-| `BenchmarkCountUplinkNoQuota` | 4.01（Linux 4.05） | 0 | 0 |
-| `BenchmarkCountUplinkWithQuota` | 4.09（Linux 4.13） | 0 | 0 |
-| `BenchmarkSnapshot`（512 个身份） | 50 209 | 85 608 | 17 |
+| 基准 | arm64 (M 系列) | arm64 (lima Linux) | **x86_64 (Intel N100)** | B/op | allocs/op |
+| --- | --- | --- | --- | --- | --- |
+| `BenchmarkCountUplinkNoQuota` | 4.01 ns | 4.05 ns | **8.16 ns** | 0 | 0 |
+| `BenchmarkCountUplinkWithQuota` | 4.09 ns | 4.13 ns | **13.7–14.7 ns** | 0 | 0 |
+| `BenchmarkSnapshot`（512 个身份） | 50 209 ns | — | 138 000 ns | 85 608 | 17 |
 
-两条结论：热路径**零分配**，这是纪律的直接证据；配额闸断多出来的两次原子操作在这台机器上
-落在噪声内（约 2%），不构成单独的性能决策项。
+**热路径零分配**，三个平台一致——这是「禁止在回调里做任何分配」这条纪律的直接证据。
+
+**配额扣减的代价强烈依赖架构，不能用一个数字概括。** arm64 上多出来的两次原子操作约 +2%
+（落在噪声内），x86_64 上却是 **+68%**（8.16 → 13.7 ns），而且三次采样高度一致，不是噪声。
+原因是这一步多了一次 `atomic.Int64.Add`：x86 上编译成 `LOCK XADD`（全屏障、代价高），
+arm64 有 LSE 的 `LDADD` 则便宜得多。
+
+两点必须一起读，否则会把这个数字用错：
+
+- **它只落在真正带额度的 lineage 上**。`consume` 的第一步是 `state.Load()`，无限额度的身份
+  在这里就返回了，只付一次宽松读——上表的 NoQuota 一列已经包含了这次读。
+- **在 64 KiB 分块的转发里它看不见**。回调每 64 KiB 跑一次，5 ns 相对一次约 100 µs 的往返是
+  0.005%，下面的端到端对照也确实测不出差别。只有当写入变得非常碎（大量小包）导致回调频率
+  上升几个数量级时，它才会浮出水面——那种场景需要单独测。
 
 回归阈值：`CountUplink*` 的 `allocs/op` 必须恒为 0——它一旦非 0，说明有人在回调里做了分配，
 无论 ns/op 看起来多好都要退回。
@@ -74,7 +86,7 @@ darwin/arm64、go1.26.5、`with_utls,badlinkname,with_user_stats`，2026-09-06�
 `BenchmarkDataPath{A,B,C}`，64 KiB 分块的 VLESS 往返。**以 Linux 那组为准**：
 darwin 上的组内极差有 10–15%，组间差被噪声完全淹没；Linux 走真实 splice、噪声低一个量级。
 
-Linux（Ubuntu、kernel 7.0、aarch64/lima、4 vCPU、go1.26.5 交叉编译）、`-benchtime 4000x -count=3`：
+Linux/arm64（Ubuntu、kernel 7.0、lima、4 vCPU）、`-benchtime 4000x -count=3`：
 
 | 组 | 中位 ns/op | 中位吞吐 | 三次极差 | 相对 A |
 | --- | --- | --- | --- | --- |
@@ -82,12 +94,16 @@ Linux（Ubuntu、kernel 7.0、aarch64/lima、4 vCPU、go1.26.5 交叉编译）�
 | B 启用四向统计 | 40 437 | 1 621 MB/s | 39 522 – 40 627（2.8%） | +0.6% |
 | C 统计 + 配额闸断 | 39 937 | 1 641 MB/s | 39 750 – 40 001（0.6%） | −0.7% |
 
-darwin/arm64、`-count=5` 的同一组（供对照，噪声大得多）：A 67 540 ns / 970 MB/s（极差 10%）、
+Linux/x86_64（Debian 13、kernel 6.12、Intel N100、4 核裸机）、`-benchtime 6000x -count=5`，取中位数：
+A 100 579 ns / 652 MB/s（极差 16%）、B 99 089 ns / 661 MB/s（11%）、C 98 656 ns / 665 MB/s（2%）。
+
+darwin/arm64、`-count=5`（供对照，噪声最大）：A 67 540 ns / 970 MB/s（10%）、
 B 69 209 ns / 947 MB/s（12%）、C 63 942 ns / 1 025 MB/s（15%）。
 
-**能说的**：在 64 KiB 分块的 splice 路径上，四向统计与配额闸断的开销在 1% 量级、
-落在组内噪声（0.6–2.8%）之内；C 组「比 A 略快」正是噪声的证据，不是闸断加速了转发。
-**不能说的**：「开销恰为 0.6%」——三次采样撑不起这个精度。
+**能说的**：在 64 KiB 分块的 splice 路径上，三个平台都测不出统计与闸断的开销——
+arm64 上组间中位差 0.6–0.7%（组内噪声 0.6–2.8%），x86_64 上 B/C 甚至略快于 A
+（组内噪声 2–16%）。开销确实存在（见上面的微基准），只是被 64 KiB 的往返成本淹没了。
+**不能说的**：「开销恰为 0.6%」——这个精度三次采样撑不起来，跨平台也不成立。
 
 这条测量**不能替代**三组端到端验收：环回没有真实 RTT、没有并发爬坡、没有 p99，
 也没有 CPU 与 goroutine 随用户数增长的曲线。下表仍然是空的，首个正式发布必须填满它，

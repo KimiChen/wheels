@@ -1099,7 +1099,7 @@ shadowsocks-2022 + dns + `hijack-dns` 路由规则的配置全部解析通过，
 | 5 | 长跑与结算验证 | staging 连续运行 ≥ 7 天：负增量 = 0、未知 runtime = 0、`sequence` 重复 = 0、unhealthy 快照全部被拒；§5.3 计划重启流程演练无缺口、无重复 |
 | 6 | 可发布版本 | §8 故障矩阵与性能三组对照报告归档；可复现发布包与签名验签通过；`docs/OPERATIONS.md` 含部署、采集、重启屏障与回滚步骤 |
 
-### 7.1 实施状态（2026-09-06）
+### 7.1 实施状态（2026-09-06，含一台 Debian 13 / x86_64 裸机上的实跑）
 
 正文是规范，本节只记录「规范里的哪些条已经有可执行证据」。带 ✅ 的都能由
 `bash scripts/verify.sh` 或表中点名的用例重放；带 ⬜ 的是**还没做**，不是做了没写。
@@ -1108,10 +1108,10 @@ shadowsocks-2022 + dns + `hijack-dns` 路由规则的配置全部解析通过，
 | --- | --- | --- |
 | 1 冻结基线与骨架 | ✅ | `upstream.lock` 记录 tag/commit/`prepared_tree_sha256`；verify 重新准备源码树后复算一致；`version` 输出四行且显示 `v1.14.0 (0b8995879f29)`；生产 tag 集写入 `.env.example` |
 | 2 观测 PoC | ✅（部分） | VLESS 与 SS-2022 EIH 多用户 TCP+UDP 四向 oracle 误差 = 0（`integration_test.go`）；Vision 链路小往返 4/4 与 100×64KiB 精确相等（`vision_test.go`）。**未做**：`with_v2ray_api` 的 PoC 集构建，以及 ServiceName 覆写与静态白名单两项边界的复现记录 |
-| 3 四向 tracker / registry | ✅ | `go test -race` 全绿；含「`Start()` 后追加必被 -race 报出竞争」的负向用例（子进程执行）；多 tracker 叠加 unwrap 断言通过；§4.6 校验路径 23 例；**Linux 实跑**：交叉编译的测试二进制在 Ubuntu（kernel 7.0、aarch64）上全量通过，含真实 splice 的字节 oracle 与 splice 上的配额闸断 |
+| 3 四向 tracker / registry | ✅ | `go test -race` 全绿（darwin/arm64 **与 Debian 13 / x86_64 native**）；含「`Start()` 后追加必被 -race 报出竞争」的负向用例（子进程执行）；多 tracker 叠加 unwrap 断言通过；§4.6 校验路径 23 例；真实 splice 的字节 oracle 与 splice 上的配额闸断在 Linux 实跑通过 |
 | 4 UDS exporter | ✅ | 权限 / 符号链接 / 旧 socket / 超限 / 版本 / 方法 / query 故障用例通过；v2 契约逐字段断言；参考 collector 在故障矩阵下无漏计、无重复入账 |
-| 5 长跑与结算验证 | ⬜ | `scripts/soak.sh` 与 `reference_collector.py --report` 的四项判据已就绪，**7 天 staging 长跑本身未执行** |
-| 6 可发布版本 | ⬜（部分） | 可复现构建脚本（两次独立构建逐字节一致）、manifest、签名与验签脚本已就绪；**未做**：真实离线私钥签名、§8 的三组性能对照、法务评审 |
+| 5 长跑与结算验证 | ⬜（部分） | 在裸机上做了一轮带持续流量的短长跑：`soak.sh` 定期采集、`reference_collector.py --report` 输出四项判据，全部为 0。**7 天 staging 长跑本身仍未执行** |
+| 6 可发布版本 | ⬜（部分） | 可复现构建已在裸机上实跑：linux/amd64 与 linux/arm64 各两次独立构建逐字节一致，产出 manifest + SHA256SUMS；跨机签名→验签演练通过，篡改一个字节即验签失败；三组性能对照见 `docs/PERFORMANCE.md`。**未做**：用真实离线私钥签名、带负载机的端到端性能验收、法务评审 |
 
 三项可选能力**均已实现且默认关闭**：§4.8 访问审计、§4.9 配额闸断，以及 §4.4 的重载对账与
 排空（`drain_timeout` 缺省为 0 即保持上游「收到信号即关」的语义）。不配置对应字段时，
@@ -1119,14 +1119,16 @@ shadowsocks-2022 + dns + `hijack-dns` 路由规则的配置全部解析通过，
 
 已知未覆盖项，按需要补齐的优先级排列：
 
-1. **Linux 上未跑 `-race`**：功能全量已在 Linux 实跑（含真实 splice），但 race detector 需要 CGO、
-   无法交叉编译，VM 内也没装 Go 工具链。`-race` 目前只在 darwin/arm64 覆盖；
-   两边共用同一份代码，Linux 特有的只有 splice 路径本身（在 sing 内部，不在本项目代码里）。
-2. **三组性能对照只做了环回版**：热路径微基准（计数回调 4.0 ns/op、0 allocs）与
-   `BenchmarkDataPath{A,B,C}` 都已有数据。Linux 上（真实 splice、组内极差 0.6–2.8%）
-   统计与闸断的开销在 **1% 量级**；darwin 上噪声太大得不出结论。这仍**不能替代**带真实 RTT、
-   并发爬坡与 p99 的端到端验收（需要独立负载机）。见 `docs/PERFORMANCE.md`。
-3. **REALITY 链路未对账**：Vision 已覆盖（`vision_test.go`：TLS + `xtls-rprx-vision`，
+1. **7 天 staging 长跑未做**：短长跑已跑通且四项判据全 0，但那只是定金——
+   README §7 M5 要的是连续 ≥ 7 天，只能由你在真实节点上跑，`scripts/soak.sh` 就是为此准备的。
+2. **三组性能对照只做了环回版**：三个平台的微基准与 `BenchmarkDataPath{A,B,C}` 都有数据，
+   64 KiB 分块下测不出统计与闸断的开销。但微基准暴露了一件必须知道的事：
+   **配额扣减的代价强烈依赖架构**——arm64 上 +2%，x86_64 上 **+68%**（8.16 → 13.7 ns，
+   `LOCK XADD` vs LSE `LDADD`），且只落在真正带额度的 lineage 上。环回测量**不能替代**
+   带真实 RTT、并发爬坡与 p99 的端到端验收。见 `docs/PERFORMANCE.md`。
+3. **正式发布签名用的是一次性密钥**：跨机签名→验签的完整流程已演练通过（含篡改必失败），
+   但真实的离线私钥在你手里，正式出包时须用它重签，并把公钥指纹写进 `docs/OPERATIONS.md`。
+4. **REALITY 链路未对账**：Vision 已覆盖（`vision_test.go`：TLS + `xtls-rprx-vision`，
    小往返 4/4 证明 padding 不计入，100×64KiB 精确相等证明 buffered→direct 切换后口径不退化），
    但 REALITY 需要一个外部握手目标，会把用例变成依赖网络的用例，因此仍未覆盖；
    §12 已声明 REALITY 握手校验失败的伪装中继本就不可见于任何 tracker。
