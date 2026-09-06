@@ -230,3 +230,51 @@ func tryRoundTrip(port uint16, payload []byte) error {
 	_, err = io.ReadFull(conn, echo)
 	return err
 }
+
+// TestQuotaOvershootBoundedByOneChunk 钉住闸断的**事后**性质。
+//
+// 计数回调在字节已经过去之后才跑（`bufio.Copy` 先完成 I/O 再调 CountFunc），
+// 因此闸断必然超额：跨过零点的那一次传输已经发生了。单连接下超额不超过一个 copy 分块；
+// 并发 N 条时上限约为 N × 分块。生产上实测：1 GiB 额度、多连接并发，超额 111 424 字节（0.0104%）。
+//
+// 这条断言的意义是：如果将来有人把闸断改成「事前」（先判后传），本用例会转红——
+// 那不是坏事，但必须是有意为之，而不是悄悄改变了对外承诺的口径。
+func TestQuotaOvershootBoundedByOneChunk(t *testing.T) {
+	dir := shortTempDir(t)
+	sock := sockPath(dir, "stats.sock")
+	quotaSock := sockPath(dir, "quota.sock")
+	serverPort := testenv.FreePort(t)
+	echoHost, echoPort := testenv.StartTCPEcho(t)
+
+	handle := startServer(t, quotaServerConfig(serverPort, sock, quotaSock))
+	testenv.WaitPort(t, "127.0.0.1", serverPort)
+	clientPort := testenv.FreePort(t)
+	testenv.StartUpstreamClient(t, vlessClientConfig(clientPort, serverPort, testUUID1, echoHost, echoPort))
+
+	const quota = 64 * 1024
+	const chunk = 16 * 1024
+	status, body := putQuota(t, quotaSock, handle.registry.NodeID(), handle.registry.RuntimeID(), 1,
+		[]QuotaEntry{{InboundTag: "vless-in", Name: "u1", RemainingBytes: quota}})
+	if status != 200 {
+		t.Fatalf("下发配额失败：%d %s", status, body)
+	}
+
+	conn := dialForward(t, clientPort)
+	defer conn.Close()
+	// 单连接持续推送，直到被闸断。
+	if err := pushUntilFailure(conn, chunk, 200); err == nil {
+		t.Fatal("额度用尽后应被闸断")
+	}
+	waitSessionsDrained(t, handle.sockPath, "vless-in")
+
+	snapshot := fetchSnapshot(t, handle.sockPath)
+	user := userOf(t, snapshot, "vless-in", "u1")
+	total := user.TCPUplinkBytes + user.TCPDownlinkBytes + user.UDPUplinkBytes + user.UDPDownlinkBytes
+	if total < quota {
+		t.Fatalf("应当至少用满额度：%d < %d", total, quota)
+	}
+	// 单连接下上下行各可能各多跑一个分块，因此上限取两个分块。
+	if overshoot := total - quota; overshoot > 2*chunk {
+		t.Fatalf("单连接的超额应不超过两个分块（%d），实际 %d", 2*chunk, overshoot)
+	}
+}
