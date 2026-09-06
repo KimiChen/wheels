@@ -274,22 +274,34 @@ func (s *udsServer) writeResponse(conn net.Conn, status int, body []byte) {
 	_, _ = conn.Write(body)
 }
 
+// readLimitedLine 读一行 CRLF 结尾的文本，长度有界。
+//
+// 刻意不用 bufio.Reader.ReadLine：它在已经读到部分数据时会把底层错误**置为 nil**
+// （src/bufio/bufio.go 的 ReadLine：len(line) != 0 时 err = nil）。
+// 于是「客户端写了半个请求行就挂住」会被读成一次成功的完整行——超时被误报成 400，
+// 而截断的请求行还会被当作合法输入继续解析。
 func readLimitedLine(reader *bufio.Reader, limit int) (string, int) {
 	var builder strings.Builder
 	for {
-		chunk, isPrefix, err := reader.ReadLine()
-		if err != nil {
-			if isTimeout(err) {
-				return "", statusRequestTimeout
+		chunk, err := reader.ReadSlice('\n')
+		if len(chunk) > 0 {
+			if builder.Len()+len(chunk) > limit {
+				return "", statusPayloadTooLarge
 			}
+			builder.Write(chunk)
+		}
+		switch {
+		case err == nil:
+			line := strings.TrimSuffix(builder.String(), "\n")
+			return strings.TrimSuffix(line, "\r"), statusOK
+		case errors.Is(err, bufio.ErrBufferFull):
+			// 行还没读完，继续；长度上限已在上面逐段核过。
+			continue
+		case isTimeout(err):
+			return "", statusRequestTimeout
+		default:
+			// 包括 EOF：没有 CRLF 就不是一个完整的行，不得当作合法输入。
 			return "", statusBadRequest
-		}
-		if builder.Len()+len(chunk) > limit {
-			return "", statusPayloadTooLarge
-		}
-		builder.Write(chunk)
-		if !isPrefix {
-			return builder.String(), statusOK
 		}
 	}
 }

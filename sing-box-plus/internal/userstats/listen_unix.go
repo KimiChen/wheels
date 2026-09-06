@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	E "github.com/sagernet/sing/common/exceptions"
 )
@@ -27,6 +28,21 @@ func listenUnix(path string, mode os.FileMode) (net.Listener, error) {
 	if err := checkParentDirectory(path); err != nil {
 		return nil, err
 	}
+	// lockfile 先于一切检查取得，并在进程存活期间一直持有。
+	//
+	// 没有它的话，「探测旧 socket → 删除 → bind」三步之间存在 TOCTOU 窗口：
+	// 两个进程可以同时判定对方的 socket 是遗留物，然后互相删掉、各自 bind，
+	// 结果是采集端随机连到其中一个，另一个的计数永远无人采集。
+	lockFile, err := acquireLock(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if lockFile != nil {
+			lockFile.Close()
+		}
+	}()
+
 	info, err := os.Lstat(path)
 	switch {
 	case err == nil:
@@ -36,7 +52,14 @@ func listenUnix(path string, mode os.FileMode) (net.Listener, error) {
 		if info.Mode()&os.ModeSocket == 0 {
 			return nil, E.New("路径已存在且不是 socket，拒绝覆盖：", path)
 		}
-		// 只有确认是旧 socket 才删除。
+		// 是 socket 还不够——必须确认它没有人在监听。
+		// 直接删掉一个活着的 socket 等于静默劫持另一个进程的端点：
+		// 它会继续跑、继续计数，而采集端从此连到我们这里，两边的账都不完整。
+		if probeConn, probeErr := net.DialTimeout("unix", path, 500*time.Millisecond); probeErr == nil {
+			probeConn.Close()
+			return nil, E.New("socket 上已有进程在监听，拒绝覆盖：", path,
+				"（同一 listen_path 只能有一个进程）")
+		}
 		if err = os.Remove(path); err != nil {
 			return nil, E.Cause(err, "删除遗留 socket ", path)
 		}
@@ -67,7 +90,47 @@ func listenUnix(path string, mode os.FileMode) (net.Listener, error) {
 		// 由本进程负责在 Close 时删除 socket 文件。
 		unixListener.SetUnlinkOnClose(true)
 	}
-	return listener, nil
+	// 绑定成功，锁必须继续持有到 listener 关闭为止。
+	held := lockFile
+	lockFile = nil
+	return &lockedListener{Listener: listener, lock: held}, nil
+}
+
+// lockedListener 把 lockfile 的生命周期绑到 listener 上。
+type lockedListener struct {
+	net.Listener
+	lock *os.File
+}
+
+func (l *lockedListener) Close() error {
+	err := l.Listener.Close()
+	if l.lock != nil {
+		_ = syscall.Flock(int(l.lock.Fd()), syscall.LOCK_UN)
+		_ = l.lock.Close()
+		l.lock = nil
+	}
+	return err
+}
+
+// acquireLock 以非阻塞方式取得 <path>.lock 的排他锁。
+//
+// 故意不删除 lock 文件：删除会让「持有锁的进程」与「文件」解绑，另一个进程可以创建同名新文件
+// 并成功加锁，锁就失去意义了。留下一个 0 字节文件是这类锁的正常形态。
+func acquireLock(path string) (*os.File, error) {
+	lockPath := path + ".lock"
+	if len(lockPath) > maxUnixPathBytes+16 {
+		return nil, E.New("socket 锁文件路径过长：", lockPath)
+	}
+	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, E.Cause(err, "打开 socket 锁文件 ", lockPath)
+	}
+	if err = syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		file.Close()
+		return nil, E.New("socket 锁文件已被占用：", lockPath,
+			"（同一 listen_path 上已有另一个 sing-box-plus 进程）")
+	}
+	return file, nil
 }
 
 // checkParentDirectory 要求父目录存在、是目录、且不是符号链接。
