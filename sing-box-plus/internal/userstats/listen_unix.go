@@ -12,9 +12,18 @@ import (
 	E "github.com/sagernet/sing/common/exceptions"
 )
 
+// maxUnixPathBytes 取两个平台里更严格的那个，使同一份配置在 Linux 与 darwin 上行为一致。
+const maxUnixPathBytes = 103
+
 // listenUnix 绑定一个本机 UDS，并在绑定前后做 README §4.5 要求的全部检查：
 // 父目录、符号链接、旧 socket 与 inode 替换。
 func listenUnix(path string, mode os.FileMode) (net.Listener, error) {
+	// AF_UNIX 的 sun_path 有硬上限（Linux 107、darwin 103 可用字节）。超限时内核只回
+	// EINVAL，运维看到的是 "bind: invalid argument"，完全无法归因到路径长度上。
+	if len(path) > maxUnixPathBytes {
+		return nil, E.New("socket 路径超过 ", maxUnixPathBytes, " 字节上限（实际 ", len(path),
+			"）：AF_UNIX 的 sun_path 放不下，请改用更短的路径，例如 /run/sing-box-plus/")
+	}
 	if err := checkParentDirectory(path); err != nil {
 		return nil, err
 	}

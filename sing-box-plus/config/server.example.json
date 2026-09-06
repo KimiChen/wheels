@@ -1,0 +1,74 @@
+{
+  "log": {
+    "level": "warn",
+    "timestamp": true
+  },
+  "inbounds": [
+    {
+      "type": "vless",
+      "tag": "vless-entry-01",
+      "listen": "0.0.0.0",
+      "listen_port": 8443,
+      "users": [
+        { "name": "u_example_01", "uuid": "00000000-0000-4000-8000-000000000001", "flow": "xtls-rprx-vision" },
+        { "name": "u_example_02", "uuid": "00000000-0000-4000-8000-000000000002", "flow": "xtls-rprx-vision" }
+      ],
+      "tls": {
+        "enabled": true,
+        "server_name": "example.invalid",
+        "reality": {
+          "enabled": true,
+          "handshake": { "server": "example.invalid", "server_port": 443 },
+          "private_key": "REPLACE_WITH_YOUR_REALITY_PRIVATE_KEY",
+          "short_id": ["0123456789abcdef"]
+        }
+      }
+    },
+    {
+      "type": "shadowsocks",
+      "tag": "ss-entry-01",
+      "listen": "0.0.0.0",
+      "listen_port": 8388,
+      "method": "2022-blake3-aes-128-gcm",
+      "password": "REPLACE_WITH_BASE64_16_BYTE_IPSK",
+      "users": [
+        { "name": "s_example_01", "password": "REPLACE_WITH_BASE64_16_BYTE_UPSK_1" },
+        { "name": "s_example_02", "password": "REPLACE_WITH_BASE64_16_BYTE_UPSK_2" }
+      ]
+    }
+  ],
+  "outbounds": [
+    { "type": "direct", "tag": "direct" },
+    { "type": "block", "tag": "block" }
+  ],
+  "services": [
+    {
+      "type": "user_stats",
+      "tag": "stats",
+      "node_id": "node-example-01",
+      "listen_path": "/run/sing-box-plus/user-stats.sock",
+      "socket_mode": "0600",
+      "inbounds": ["vless-entry-01", "ss-entry-01"],
+      "max_identities": 4096,
+      "read_timeout": "5s",
+      "write_timeout": "5s",
+      "max_concurrency": 8,
+      "max_request_bytes": 65536,
+      "quota_control": {
+        "listen_path": "/run/sing-box-plus/quota.sock",
+        "startup_action": "allow",
+        "stale_after": "10m",
+        "stale_action": "allow",
+        "reconnect_throttle": "5s",
+        "max_request_bytes": 4194304
+      },
+      "access_log": {
+        "path": "/var/lib/sing-box-plus/access.jsonl",
+        "max_bytes": 268435456,
+        "max_total_bytes": 1073741824,
+        "flush_interval_ms": 1000,
+        "queue_size": 8192
+      }
+    }
+  ]
+}

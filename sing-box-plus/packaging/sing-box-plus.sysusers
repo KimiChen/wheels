@@ -1,0 +1,2 @@
+# 取自上游 release/config/sing-box.sysusers 并改名。
+u sing-box-plus - "sing-box-plus service"

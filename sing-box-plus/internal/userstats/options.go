@@ -1,6 +1,7 @@
 package userstats
 
 import (
+	"strings"
 	"time"
 
 	E "github.com/sagernet/sing/common/exceptions"
@@ -73,8 +74,8 @@ func (o *Options) normalize() error {
 	if err := validateToken("node_id", o.NodeID); err != nil {
 		return err
 	}
-	if o.ListenPath == "" {
-		return E.New("user_stats.listen_path 不能为空")
+	if err := validateSocketPath("user_stats.listen_path", o.ListenPath); err != nil {
+		return err
 	}
 	if len(o.Inbounds) == 0 {
 		return E.New("user_stats.inbounds 不能为空：统计是硬依赖，不接受零归属模式")
@@ -163,8 +164,8 @@ func (o *AccessLogOptions) normalize() error {
 }
 
 func (o *QuotaControlOptions) normalize() error {
-	if o.ListenPath == "" {
-		return E.New("user_stats.quota_control.listen_path 不能为空")
+	if err := validateSocketPath("user_stats.quota_control.listen_path", o.ListenPath); err != nil {
+		return err
 	}
 	if o.StartupAction == "" {
 		o.StartupAction = string(QuotaActionAllow)
@@ -208,6 +209,24 @@ func validateToken(field string, value string) error {
 		if char <= 0x20 || char >= 0x7f {
 			return E.New(field, " 含非 ASCII 可显示字符（偏移 ", index, "）")
 		}
+	}
+	return nil
+}
+
+// validateSocketPath 在配置校验期就挡住超长 UDS 路径。
+//
+// 等到 Start 才失败也算失败关闭，但那时内核只回 EINVAL，运维看到的是
+// "bind: invalid argument"，归因成本高得离谱。
+func validateSocketPath(field string, path string) error {
+	if path == "" {
+		return E.New(field, " 不能为空")
+	}
+	if !strings.HasPrefix(path, "/") {
+		return E.New(field, " 必须是绝对路径：", path)
+	}
+	if len(path) > maxUnixPathBytes {
+		return E.New(field, " 超过 ", maxUnixPathBytes, " 字节上限（实际 ", len(path),
+			"）：AF_UNIX 的 sun_path 放不下")
 	}
 	return nil
 }
