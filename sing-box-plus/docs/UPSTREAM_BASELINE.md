@@ -123,3 +123,5 @@ v1.14.0 实测：`ssm-api` 的 `servers` 键缺前导 `/` 时 panic 退出（exi
 | 2026-09-06 | `systemctl reload`：`runtime_id` 与 `started_at_unix_ms` 逐字节不变、`sequence` 递增、计数不清零；改 `node_id` 的重载被拒且旧实例继续服务 | 通过 |
 | 2026-09-06 | `systemctl stop` 触发排空：日志出现「开始排空 → 排空完成」，停止耗时 5.2 s（等待在途连接） | 通过 |
 | 2026-09-06 | packaging 中原样的 systemd 单元（`-D … -C …` 目录形式）可直接启动 | 通过 |
+| 2026-09-06 | 带持续流量的短长跑：73 个批次、跨 2 个 runtime（中途做了一次 §5.3 计划重启）、实际入账 193 MiB | 四项判据（负增量 / 未知 runtime / 重复 sequence / unhealthy 入账）全为 0 |
+| 2026-09-06 | §5.3 计划重启演练：停流量 → 轮询会话归零 → 采集最终快照 → 重启 → 新 runtime 按首快照策略处理 | 通过 |

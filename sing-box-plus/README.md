@@ -1110,7 +1110,7 @@ shadowsocks-2022 + dns + `hijack-dns` 路由规则的配置全部解析通过，
 | 2 观测 PoC | ✅（部分） | VLESS 与 SS-2022 EIH 多用户 TCP+UDP 四向 oracle 误差 = 0（`integration_test.go`）；Vision 链路小往返 4/4 与 100×64KiB 精确相等（`vision_test.go`）。**未做**：`with_v2ray_api` 的 PoC 集构建，以及 ServiceName 覆写与静态白名单两项边界的复现记录 |
 | 3 四向 tracker / registry | ✅ | `go test -race` 全绿（darwin/arm64 **与 Debian 13 / x86_64 native**）；含「`Start()` 后追加必被 -race 报出竞争」的负向用例（子进程执行）；多 tracker 叠加 unwrap 断言通过；§4.6 校验路径 23 例；真实 splice 的字节 oracle 与 splice 上的配额闸断在 Linux 实跑通过 |
 | 4 UDS exporter | ✅ | 权限 / 符号链接 / 旧 socket / 超限 / 版本 / 方法 / query 故障用例通过；v2 契约逐字段断言；参考 collector 在故障矩阵下无漏计、无重复入账 |
-| 5 长跑与结算验证 | ⬜（部分） | 在裸机上做了一轮带持续流量的短长跑：`soak.sh` 定期采集、`reference_collector.py --report` 输出四项判据，全部为 0。**7 天 staging 长跑本身仍未执行** |
+| 5 长跑与结算验证 | ⬜（部分） | 裸机上跑了一轮带持续流量的短长跑：73 个批次、跨 2 个 runtime（中途做了一次 §5.3 计划重启）、实际入账 193 MiB，四项判据全为 0。这一轮同时暴露并修掉了参考 collector 的一个真缺陷（基线不跨进程，导致长跑永不入账而判据仍全绿）。**7 天 staging 长跑本身仍未执行** |
 | 6 可发布版本 | ⬜（部分） | 可复现构建已在裸机上实跑：linux/amd64 与 linux/arm64 各两次独立构建逐字节一致，产出 manifest + SHA256SUMS；跨机签名→验签演练通过，篡改一个字节即验签失败；三组性能对照见 `docs/PERFORMANCE.md`。**未做**：用真实离线私钥签名、带负载机的端到端性能验收、法务评审 |
 
 三项可选能力**均已实现且默认关闭**：§4.8 访问审计、§4.9 配额闸断，以及 §4.4 的重载对账与
