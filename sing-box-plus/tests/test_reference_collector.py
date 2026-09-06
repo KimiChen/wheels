@@ -163,6 +163,93 @@ class ReferenceCollectorTest(unittest.TestCase):
         with self.assertRaises(SnapshotRejected):
             Collector(first_snapshot="include").restore_state(ledger.load_state())
 
+    def test_quota_push_uses_period_usage_not_snapshot_absolute(self):
+        """§5.4 第 1 条：剩余额度必须按采集端自己累计的用量算。
+
+        拿快照绝对值去减是错的——进程重启后快照从零开始，额度会被凭空补满。
+        这里用两个 runtime 覆盖这一点：第二个 runtime 的快照绝对值很小，
+        但本周期已用应当把第一个 runtime 的量也算进去。
+        """
+        first = snapshot(sequence=1)
+        second = snapshot(sequence=2)
+        second["inbounds"][1]["users"][0]["tcp_uplink_bytes"] = 1000
+        # 新 runtime：绝对值回到很小，但已用不该因此清零。
+        third = snapshot(sequence=1, runtime_id="ffffffffffffffffffffffffffffffff")
+        third["inbounds"][1]["users"][0]["tcp_uplink_bytes"] = 7
+        third["inbounds"][1]["users"][0]["tcp_downlink_bytes"] = 0
+
+        server = SnapshotServer([http_ok(encode(first)), http_ok(encode(second)), http_ok(encode(third))])
+        self.addCleanup(server.close)
+        quota = SnapshotServer([http_ok(b'{"schema_version":2,"epoch":1,"applied":2}\n')] * 3)
+        self.addCleanup(quota.close)
+
+        ledger = Ledger(self.ledger_dir)
+        collector = Collector(first_snapshot="include")
+        for _ in range(3):
+            collect_once(server.path, ledger, collector, 5.0, quota.path, 10_000)
+
+        pushes = [r for r in self._records() if r["result"] == "quota_pushed"]
+        self.assertEqual(len(pushes), 3)
+        # epoch 必须单调递增，否则服务端会以 409 拒绝后续下发。
+        self.assertEqual([p["epoch"] for p in pushes], [1, 2, 3])
+
+        used = collector.usage[("node-example-01", "vless-entry-01", "u_example_01")]
+        # include 策略下第一份记满 300（tcp 100 上 / 200 下）；第二份上行涨到 1000，+900；
+        # 第三份是新 runtime 的首份，绝对值 7/0 全记，+7。跨 runtime 累加正是这条断言的重点。
+        self.assertEqual(used, 300 + 900 + 7)
+        self.assertEqual(
+            collector.remaining_for("node-example-01", "vless-entry-01", "u_example_01", 10_000),
+            10_000 - used,
+        )
+
+    def test_quota_remaining_floors_at_zero(self):
+        used_key = ("node-example-01", "vless-entry-01", "u_example_01")
+        collector = Collector(first_snapshot="include")
+        collector.usage[used_key] = 5_000
+        self.assertEqual(collector.remaining_for(*used_key, 1_000), 0)
+
+    def test_quota_epoch_survives_process_boundary(self):
+        # 每次采集起一个新进程时 epoch 若从 1 重来，服务端会以 409 拒绝，
+        # 配额就永远停在第一次下发的值上。
+        ledger = Ledger(self.ledger_dir)
+        first = Collector(first_snapshot="baseline")
+        first.next_quota_epoch()
+        first.next_quota_epoch()
+        ledger.save_state(first.export_state())
+        second = Collector(first_snapshot="baseline")
+        second.restore_state(ledger.load_state())
+        self.assertEqual(second.next_quota_epoch(), 3)
+
+    def test_reset_period_clears_usage_but_keeps_baselines(self):
+        """开新计费周期只清已用量。
+
+        基线一并清掉的话，下一次采集会把快照里的全部历史累计值当成一次巨额增量重新入账。
+        """
+        first = snapshot(sequence=1)
+        second = snapshot(sequence=2)
+        second["inbounds"][1]["users"][0]["tcp_uplink_bytes"] = 1000
+        server = SnapshotServer([http_ok(encode(first)), http_ok(encode(second))])
+        self.addCleanup(server.close)
+        ledger = Ledger(self.ledger_dir)
+        collector = Collector(first_snapshot="include")
+        collect_once(server.path, ledger, collector, 5.0)
+
+        saved = ledger.load_state()
+        self.assertTrue(any(entry["bytes"] > 0 for entry in saved["usage"]))
+        baseline_count = sum(len(item["baselines"]) for item in saved["runtimes"])
+
+        collector.usage.clear()
+        ledger.save_state(collector.export_state())
+        after = ledger.load_state()
+        self.assertEqual(after["usage"], [])
+        self.assertEqual(sum(len(item["baselines"]) for item in after["runtimes"]), baseline_count)
+
+        # 清零之后继续采集，入账的仍然只是增量而不是历史总量。
+        fresh = Collector(first_snapshot="include")
+        fresh.restore_state(after)
+        collect_once(server.path, ledger, fresh, 5.0)
+        self.assertEqual(self._records()[-1]["total"]["tcp_uplink_bytes"], 900)
+
     def test_report_on_clean_run(self):
         first = snapshot(sequence=1)
         server = SnapshotServer([http_ok(encode(first))])

@@ -254,6 +254,11 @@ class Collector:
         self.first_snapshot = first_snapshot
         self.runtimes: dict[tuple[str, str], RuntimeState] = {}
         self.applied_batches: set[str] = set()
+        # 计费周期内的累计用量，键**不含 runtime_id**：配额跨进程重启有效，
+        # 而快照的四向计数每次重启都从零开始。这是 §5.4 第 1 条的落点——
+        # 「本周期已用」只能由采集端自己累计，不能拿快照绝对值去比。
+        self.usage: dict[tuple[str, str, str], int] = {}
+        self.quota_epoch = 0
         self.stats = {
             "accepted": 0,
             "rejected_health": 0,
@@ -291,6 +296,8 @@ class Collector:
             # 幂等集合有界：只记最近若干批次。重投一个很旧的批次不会被挡住，
             # 但那已经不是「重试」而是「重放历史」，应由下游账本的唯一约束兜底。
             "applied_batches": sorted(self.applied_batches)[-self.MAX_REMEMBERED_BATCHES :],
+            "usage": [{"key": list(key), "bytes": value} for key, value in sorted(self.usage.items())],
+            "quota_epoch": self.quota_epoch,
             "stats": self.stats,
         }
 
@@ -316,6 +323,9 @@ class Collector:
                 state.baselines[tuple(entry["key"])] = dict(entry["counters"])
             self.runtimes[(state.node_id, state.runtime_id)] = state
         self.applied_batches.update(payload.get("applied_batches", []))
+        for entry in payload.get("usage", []):
+            self.usage[tuple(entry["key"])] = entry["bytes"]
+        self.quota_epoch = max(self.quota_epoch, payload.get("quota_epoch", 0))
         for key, value in payload.get("stats", {}).items():
             if key in self.stats:
                 self.stats[key] = value
@@ -376,8 +386,28 @@ class Collector:
 
         # active=false 的已观察 lineage 仍会出现在后续快照中，采集端必须继续保留其基线，
         # 因此这里是 update 而不是整表替换。
+        for key3, delta in deltas.items():
+            # key3 = (node_id, tag, inbound_gen, name, user_gen, runtime_id)，
+            # 用量键去掉 runtime_id 与两个 generation。
+            usage_key = (key3[0], key3[1], key3[3])
+            self.usage[usage_key] = self.usage.get(usage_key, 0) + sum(delta.values())
+
         state.baselines.update(pending)
         state.last_sequence = snapshot["sequence"]
         self.applied_batches.add(batch)
         self.stats["accepted"] += 1
         return Settlement(True, batch=batch, deltas=deltas, first_snapshot=first)
+
+    def next_quota_epoch(self) -> int:
+        """配额下发的 epoch 必须单调递增，且要跨进程持久化。
+
+        每次采集起一个新进程时若从 1 开始，服务端会以 409 拒绝——那是正确的失败关闭，
+        但会让配额永远停在第一次下发的值上。
+        """
+        self.quota_epoch += 1
+        return self.quota_epoch
+
+    def remaining_for(self, node_id: str, inbound_tag: str, name: str, quota_bytes: int) -> int:
+        """按本周期已用算出剩余额度。四向之和，与服务端口径一致。"""
+        used = self.usage.get((node_id, inbound_tag, name), 0)
+        return max(0, quota_bytes - used)

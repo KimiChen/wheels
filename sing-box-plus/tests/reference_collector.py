@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """参考 collector：取快照 → v2 校验 → 差分 → 幂等落地本地账本。
 
-范围**不含** outbox、mTLS 与重试——那些属于下游控制面。这里只把 §5.1 的契约跑通，
-并且让「本次采集失败」与「本次没有流量」在账本里可区分。
+带 --quota-socket 时另外承担 §5.4 的下发职责：按自己累计的「本周期已用」算出剩余额度，
+每轮重推一份全量表。
+
+范围**不含** outbox、mTLS 与重试——那些属于下游控制面。
+这里只把 §5.1 与 §5.4 的契约跑通，并且让「本次采集失败」与「本次没有流量」在账本里可区分。
 """
 
 from __future__ import annotations
@@ -58,7 +61,76 @@ class Ledger:
         temporary.replace(self.state_path)
 
 
-def collect_once(socket_path: str, ledger: Ledger, collector: Collector, timeout: float) -> int:
+def push_quota(
+    quota_socket: str,
+    snapshot: dict,
+    ledger: Ledger,
+    collector: Collector,
+    quota_bytes: int,
+    timeout: float,
+) -> int:
+    """按 §5.4 重算并下发一份**全量**剩余额度表。
+
+    三条义务在这里落地：
+      1. 「本周期已用」取自采集端自己的累计（`collector.usage`），不是快照绝对值；
+      2. 每次采集后都重推——进程侧的额度是纯内存的，重启即消失；
+      3. 顺序是先入账、再算额度、再推送，因此本函数只在 ingest 成功之后被调用。
+
+    未出现在表中的身份会被服务端视为**无限额度**，所以这里必须列出快照里的每一个身份。
+    """
+    entries = []
+    for inbound in snapshot["inbounds"]:
+        for user in inbound["users"]:
+            entries.append(
+                {
+                    "inbound_tag": inbound["tag"],
+                    "name": user["name"],
+                    "remaining_bytes": collector.remaining_for(
+                        snapshot["node_id"], inbound["tag"], user["name"], quota_bytes
+                    ),
+                }
+            )
+    epoch = collector.next_quota_epoch()
+    body = json.dumps(
+        {
+            "schema_version": 2,
+            "node_id": snapshot["node_id"],
+            "runtime_id": snapshot["runtime_id"],
+            "epoch": epoch,
+            "entries": entries,
+        },
+        ensure_ascii=False,
+    ).encode("utf-8")
+    now = int(time.time() * 1000)
+    try:
+        response = http_unix.request(quota_socket, "PUT", "/v2/quota", body=body, timeout=timeout)
+    except http_unix.HTTPUnixError as error:
+        ledger.append({"ts": now, "result": "quota_transport_error", "detail": str(error)})
+        return 1
+    exhausted = [entry["name"] for entry in entries if entry["remaining_bytes"] == 0]
+    record = {
+        "ts": now,
+        "result": "quota_pushed" if response.status == 200 else "quota_rejected",
+        "status": response.status,
+        "epoch": epoch,
+        "entries": len(entries),
+        "exhausted": exhausted,
+    }
+    if response.status != 200:
+        record["detail"] = response.body.decode("utf-8", "replace").strip()
+    ledger.append(record)
+    ledger.save_state(collector.export_state())
+    return 0 if response.status == 200 else 1
+
+
+def collect_once(
+    socket_path: str,
+    ledger: Ledger,
+    collector: Collector,
+    timeout: float,
+    quota_socket: str | None = None,
+    quota_bytes: int = 0,
+) -> int:
     now = int(time.time() * 1000)
     try:
         response = http_unix.request(socket_path, "GET", "/v2/snapshot", timeout=timeout)
@@ -116,6 +188,9 @@ def collect_once(socket_path: str, ledger: Ledger, collector: Collector, timeout
         }
     )
     ledger.save_state(collector.export_state())
+    if quota_socket and quota_bytes > 0:
+        # §5.4 第 3 条：先持久化入账，再算额度，再推送。
+        return push_quota(quota_socket, snapshot, ledger, collector, quota_bytes, timeout)
     return 0
 
 
@@ -167,13 +242,36 @@ def main(argv: list[str]) -> int:
         default="baseline",
         help="首次看到新 runtime_id 时的策略，必须显式选择",
     )
+    parser.add_argument("--quota-socket", help="启用 §5.4 的额度下发：每次采集后重推全量表")
+    parser.add_argument(
+        "--quota-bytes",
+        type=int,
+        default=0,
+        help="每个计费身份在本周期内的额度（四向之和，字节）",
+    )
     parser.add_argument("--timeout", type=float, default=10.0)
     parser.add_argument("--report", action="store_true", help="只输出长跑判据，不采集")
+    parser.add_argument(
+        "--reset-period",
+        action="store_true",
+        help="开一个新的计费周期：清零本周期已用，保留基线与 runtime 状态",
+    )
     args = parser.parse_args(argv)
 
     ledger = Ledger(args.ledger)
     if args.report:
         return report(ledger)
+    if args.reset_period:
+        # 只清「本周期已用」，**不动基线**：基线清掉的话，下一次采集会把快照里的
+        # 全部历史累计值当成一次巨额增量重新入账。
+        collector = Collector(first_snapshot=args.first_snapshot)
+        collector.restore_state(ledger.load_state())
+        cleared = sum(collector.usage.values())
+        collector.usage.clear()
+        ledger.save_state(collector.export_state())
+        ledger.append({"ts": int(time.time() * 1000), "result": "period_reset", "cleared_bytes": cleared})
+        print(f"已开始新计费周期：清零 {cleared:,} 字节的已用量（基线与 runtime 状态保留）")
+        return 0
     if not args.socket:
         parser.error("采集模式需要 --socket")
     collector = Collector(first_snapshot=args.first_snapshot)
@@ -184,7 +282,11 @@ def main(argv: list[str]) -> int:
     except SnapshotRejected as error:
         print(f"错误：无法沿用已有采集状态：{error}", file=sys.stderr)
         return 2
-    return collect_once(args.socket, ledger, collector, args.timeout)
+    if bool(args.quota_socket) != (args.quota_bytes > 0):
+        parser.error("--quota-socket 与 --quota-bytes 必须同时给出")
+    return collect_once(
+        args.socket, ledger, collector, args.timeout, args.quota_socket, args.quota_bytes
+    )
 
 
 if __name__ == "__main__":

@@ -105,6 +105,34 @@ UDS 不得直接映射为公网监听。
 
 选哪个都要写进对外的服务说明，不要留给默认值替你做决定。
 
+### 让限额真的生效：collector 必须周期性重推
+
+进程侧的额度是**纯内存**的。只推一次相当于没有限额：进程一重启就全部解封。
+参考 collector 带上 `--quota-socket` 与 `--quota-bytes` 后承担 §5.4 的三项义务——
+按自己累计的「本周期已用」算剩余额度、每轮重推、先入账再算再推：
+
+```bash
+tests/reference_collector.py   --socket /run/sing-box-plus/user-stats.sock   --ledger /var/lib/sing-box-plus-collector   --first-snapshot baseline   --quota-socket /run/sing-box-plus/quota.sock   --quota-bytes 107374182400          # 每身份 100 GiB，四向之和
+```
+
+生产上用 systemd timer 每分钟触发一次即可，不要用 `nohup` 循环——后者不扛重启。
+
+开新计费周期（清零已用、保留基线）：
+
+```bash
+tests/reference_collector.py --ledger /var/lib/sing-box-plus-collector --reset-period
+```
+
+**不要**为了「重置额度」去删账本目录：基线一并没了之后，下一次采集会把快照里的全部历史
+累计值当成一次巨额增量重新入账。`--reset-period` 只清已用量。
+
+查看当前剩余与是否有身份已耗尽：
+
+```bash
+python3 -c "import json;d=json.load(open('/var/lib/sing-box-plus-collector/state.json'));print(d['usage'])"
+grep quota_pushed /var/lib/sing-box-plus-collector/ledger.jsonl | tail -1
+```
+
 ### 闸断的两点已知表现
 
 - 客户端看到的是**连接建立后被重置**，不是协议层认证失败——tracker 位于握手之后。
