@@ -300,6 +300,70 @@ class ReferenceCollectorTest(unittest.TestCase):
             collector.remaining_for("node-example-01", "ss-in", "s1", 1000), 1000
         )
 
+    def test_state_is_saved_before_ledger_append(self):
+        """写序：先原子落状态，再追加账本。宁可漏记一批，不可重复计费。
+
+        反过来的话，两步之间崩溃会让下游看到已计费的一批，而采集端的基线还停在上一个
+        sequence——重启后下一次采集把这段范围重新算成一批发出去，同一批字节被计费两次。
+        batch id 挡不住它：重放出来的批次 sequence 与增量都不同，batch id 自然也不同。
+        """
+        first = snapshot(sequence=1)
+        second = snapshot(sequence=2)
+        second["inbounds"][1]["users"][0]["tcp_uplink_bytes"] = 1000
+        server = SnapshotServer([http_ok(encode(first)), http_ok(encode(second))])
+        self.addCleanup(server.close)
+
+        class CrashOnAccepted(Ledger):
+            def append(self, record):
+                if record.get("result") == "accepted":
+                    raise RuntimeError("模拟：状态已落盘、账本行还没写出去时崩溃")
+                super().append(record)
+
+        crashing = CrashOnAccepted(self.ledger_dir)
+        collector = Collector(first_snapshot="include")
+        with self.assertRaises(RuntimeError):
+            collect_once(server.path, crashing, collector, 5.0)
+
+        # 状态必须已经推进——这正是「状态在前」要保证的。
+        saved = Ledger(self.ledger_dir).load_state()
+        used = {tuple(u["key"]): u["bytes"] for u in saved["usage"]}
+        self.assertEqual(used[("node-example-01", "vless-entry-01", "u_example_01")], 300)
+        # 账本里没有这一批的记录：这是被换来的那种失败——漏一条轨迹，不是重复计费。
+        self.assertEqual([r for r in self._records() if r["result"] == "accepted"], [])
+
+        # 重启后继续采集：只入账新增的 900，而不是把 1200 重新算一遍。
+        ledger = Ledger(self.ledger_dir)
+        restarted = Collector(first_snapshot="include")
+        restarted.restore_state(ledger.load_state())
+        self.assertEqual(collect_once(server.path, ledger, restarted, 5.0), 0)
+        accepted = [r for r in self._records() if r["result"] == "accepted"]
+        self.assertEqual(len(accepted), 1)
+        self.assertEqual(accepted[0]["total"]["tcp_uplink_bytes"], 900)
+        self.assertEqual(
+            restarted.usage[("node-example-01", "vless-entry-01", "u_example_01")], 1200
+        )
+
+    def test_quota_epoch_is_persisted_before_push(self):
+        """epoch 在推送之前落盘。
+
+        反过来的话，推送成功但存盘前崩溃会让 epoch 回退，下一轮复用同一个 epoch
+        被服务端以 409 拒绝，白白浪费一个下发周期。
+        epoch 只要求单调递增、不要求连续，所以「崩在推送前、白跳一个号」是无害的。
+        """
+        first = snapshot(sequence=1)
+        server = SnapshotServer([http_ok(encode(first))])
+        self.addCleanup(server.close)
+
+        class CrashOnPush(Ledger):
+            pass
+
+        ledger = CrashOnPush(self.ledger_dir)
+        collector = Collector(first_snapshot="baseline")
+        # 配额 socket 指向一个不存在的路径：推送必然失败，模拟「推送这一步没成」。
+        collect_once(server.path, ledger, collector, 2.0, "/tmp/sbp-nonexistent.sock", QuotaPlan(1000))
+        # 即便推送失败，epoch 也必须已经落盘，下一轮不会复用它。
+        self.assertEqual(Ledger(self.ledger_dir).load_state()["quota_epoch"], 1)
+
     def test_report_on_clean_run(self):
         first = snapshot(sequence=1)
         server = SnapshotServer([http_ok(encode(first))])

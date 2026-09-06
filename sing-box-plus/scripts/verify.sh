@@ -27,6 +27,10 @@ done
 for script_path in scripts/*.sh; do
   bash -n "$script_path"
 done
+# 先清字节码缓存再编译与测试。
+# py_compile 本身会写出 __pycache__，而 Python 的 mtime 失效在快速编辑循环里并不总能命中：
+# 实测出现过「源码已改、门禁仍在测旧代码」的假绿。门禁不能有这种失效方式。
+find . -name '__pycache__' -type d -not -path './.upstream/*' -exec rm -rf {} + 2>/dev/null || true
 python3 -m py_compile scripts/*.py tests/*.py
 python3 -m json.tool config/server.example.json >/dev/null
 

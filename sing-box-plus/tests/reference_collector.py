@@ -137,6 +137,10 @@ def push_quota(
                 }
             )
     epoch = collector.next_quota_epoch()
+    # epoch 在推送**之前**落盘。反过来的话，推送成功但存盘前崩溃会让 epoch 回退，
+    # 下一轮复用同一个 epoch 被服务端以 409 拒绝，白白浪费一个下发周期。
+    # epoch 只要求单调递增、不要求连续，因此「崩在推送前、白跳一个号」是无害的。
+    ledger.save_state(collector.export_state())
     body = json.dumps(
         {
             "schema_version": 2,
@@ -165,7 +169,6 @@ def push_quota(
     if response.status != 200:
         record["detail"] = response.body.decode("utf-8", "replace").strip()
     ledger.append(record)
-    ledger.save_state(collector.export_state())
     return 0 if response.status == 200 else 1
 
 
@@ -202,6 +205,9 @@ def collect_once(
         ledger.append({"ts": now, "result": "failed_closed", "detail": str(error)})
         return 2
     if not settlement.accepted:
+        # 即使本轮没入账也要落状态：ingest 可能已经登记了新的 runtime（例如
+        # started_at 变化那一支），丢掉它会让下一轮又从头开始。同样是状态在前。
+        ledger.save_state(collector.export_state())
         ledger.append(
             {
                 "ts": now,
@@ -210,9 +216,6 @@ def collect_once(
                 "sequence": snapshot["sequence"],
             }
         )
-        # 即使本轮没入账也要落状态：ingest 可能已经登记了新的 runtime（例如
-        # started_at 变化那一支），丢掉它会让下一轮又从头开始。
-        ledger.save_state(collector.export_state())
         return 0
     total = {name: 0 for name in COUNTER_FIELDS}
     entries = []
@@ -220,6 +223,17 @@ def collect_once(
         for name in COUNTER_FIELDS:
             total[name] += delta[name]
         entries.append({"key": list(key), "delta": delta})
+    # 写序是「先原子落状态，再追加账本」，不能反过来。
+    #
+    # 反过来（先写账本、再存状态）时，两步之间崩溃会让下游看到已计费的一批，
+    # 而采集端的基线还停在上一个 sequence——重启后下一次采集会把这段范围重新算成一批发出去，
+    # 同一批字节被计费两次。batch id 挡不住它：重放出来的批次 sequence 与增量都不同，
+    # batch id 自然也不同。
+    #
+    # 现在这个顺序把失败窗口换成了另一种：状态已推进但账本少一行，
+    # 即那一批的字节已计入基线与用量，下游却拿不到对应的批次记录——**漏记一批，不是重复计费**。
+    # 这是与 §5.1 的 baseline / include 同一性质的显式取舍：宁可漏记，不可重复。
+    ledger.save_state(collector.export_state())
     ledger.append(
         {
             "ts": now,
@@ -233,7 +247,6 @@ def collect_once(
             "entries": entries,
         }
     )
-    ledger.save_state(collector.export_state())
     if quota_socket and plan is not None:
         # §5.4 第 3 条：先持久化入账，再算额度，再推送。
         return push_quota(quota_socket, snapshot, ledger, collector, plan, timeout)
