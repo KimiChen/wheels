@@ -1,0 +1,12 @@
+schema_version=1
+repository=https://github.com/SagerNet/sing-box.git
+tag=v1.14.0
+tag_object=none
+commit=0b8995879f29a9b98ee027bc17b75e101445b238
+prepared_tree_sha256=6342b9aeefec6eb9dcdf2a93b6d7b897bbc0724eccda1c0c4d09589d1051c9db
+commit_date=2026-08-31T11:28:31+08:00
+fetched_at=2026-09-06
+license=GPL-3.0-or-later
+go_minimum=1.25.5
+go_verified=1.26.5
+track=stable
