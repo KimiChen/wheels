@@ -117,6 +117,27 @@ tests/reference_collector.py   --socket /run/sing-box-plus/user-stats.sock   --l
 
 生产上用 systemd timer 每分钟触发一次即可，不要用 `nohup` 循环——后者不扛重启。
 
+不同身份套餐不同时改用额度计划文件（与 `--quota-bytes` 互斥）：
+
+```json
+{
+  "schema_version": 1,
+  "default_bytes": 107374182400,
+  "overrides": { "vless-entry-01/kimi-vless": 1073741824 }
+}
+```
+
+```bash
+tests/reference_collector.py … --quota-plan /etc/sing-box-plus/quota-plan.json
+```
+
+计划文件每轮重新读取，**改额度只改这个文件即可**，不需要编辑 systemd 单元、也不需要
+`daemon-reload`。未知字段一律硬失败——写错一个键名就静默按默认额度跑，
+正是「看起来生效了、实际没生效」的典型。
+
+额度调低后**不需要等下一轮采集才生效**：进程侧拿到的是剩余字节数并实时扣减，
+用尽的那一刻就切断在途连接。反过来，调高额度要等下一次推送（默认 ≤ 1 分钟）才放行。
+
 开新计费周期（清零已用、保留基线）：
 
 ```bash

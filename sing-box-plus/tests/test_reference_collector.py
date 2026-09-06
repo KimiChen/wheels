@@ -14,7 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from fixtures import encode, snapshot  # noqa: E402
-from reference_collector import Ledger, collect_once, report  # noqa: E402
+from reference_collector import Ledger, QuotaPlan, collect_once, report  # noqa: E402
 from settlement_model import Collector, SnapshotRejected  # noqa: E402
 
 
@@ -186,7 +186,7 @@ class ReferenceCollectorTest(unittest.TestCase):
         ledger = Ledger(self.ledger_dir)
         collector = Collector(first_snapshot="include")
         for _ in range(3):
-            collect_once(server.path, ledger, collector, 5.0, quota.path, 10_000)
+            collect_once(server.path, ledger, collector, 5.0, quota.path, QuotaPlan(10_000))
 
         pushes = [r for r in self._records() if r["result"] == "quota_pushed"]
         self.assertEqual(len(pushes), 3)
@@ -249,6 +249,56 @@ class ReferenceCollectorTest(unittest.TestCase):
         fresh.restore_state(after)
         collect_once(server.path, ledger, fresh, 5.0)
         self.assertEqual(self._records()[-1]["total"]["tcp_uplink_bytes"], 900)
+
+    def test_quota_plan_overrides_are_per_identity(self):
+        """改一个人的额度不应该动到别人。
+
+        真实部署里不同用户的套餐不同；只有一个全局数字时，把某个身份降到 1 GiB
+        会连带把所有人一起降下去。
+        """
+        plan = QuotaPlan(100 * 2**30, {"vless-entry-01/u_example_01": 2**30})
+        self.assertEqual(plan.quota_for("vless-entry-01", "u_example_01"), 2**30)
+        self.assertEqual(plan.quota_for("vless-entry-01", "u_example_02"), 100 * 2**30)
+        self.assertEqual(plan.quota_for("ss-in", "s1"), 100 * 2**30)
+
+    def test_quota_plan_file_fails_closed(self):
+        directory = Path(tempfile.mkdtemp(prefix="sbp", dir="/tmp"))
+        path = directory / "plan.json"
+
+        good = {"schema_version": 1, "default_bytes": 10, "overrides": {"a/b": 5}}
+        path.write_text(json.dumps(good), encoding="utf-8")
+        self.assertEqual(QuotaPlan.load(path).quota_for("a", "b"), 5)
+
+        for name, payload in {
+            "未知字段": {"schema_version": 1, "default_bytes": 10, "typo_overrides": {}},
+            "版本不符": {"schema_version": 2, "default_bytes": 10},
+            "默认额度为负": {"schema_version": 1, "default_bytes": -1},
+            "覆盖键缺分隔符": {"schema_version": 1, "default_bytes": 10, "overrides": {"ab": 5}},
+            "覆盖值是布尔": {"schema_version": 1, "default_bytes": 10, "overrides": {"a/b": True}},
+        }.items():
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaises(ValueError, msg=name):
+                QuotaPlan.load(path)
+
+    def test_quota_plan_pushes_different_remaining_per_identity(self):
+        first = snapshot(sequence=1)
+        server = SnapshotServer([http_ok(encode(first))])
+        self.addCleanup(server.close)
+        quota = SnapshotServer([http_ok(b'{"schema_version":2,"epoch":1,"applied":3}\n')])
+        self.addCleanup(quota.close)
+        ledger = Ledger(self.ledger_dir)
+        collector = Collector(first_snapshot="include")
+        plan = QuotaPlan(1000, {"vless-entry-01/u_example_01": 350})
+        collect_once(server.path, ledger, collector, 5.0, quota.path, plan)
+
+        # u_example_01 首份就记满 300（tcp 100/200），额度 350 → 剩 50；
+        # 其余身份走默认 1000。
+        self.assertEqual(
+            collector.remaining_for("node-example-01", "vless-entry-01", "u_example_01", 350), 50
+        )
+        self.assertEqual(
+            collector.remaining_for("node-example-01", "ss-in", "s1", 1000), 1000
+        )
 
     def test_report_on_clean_run(self):
         first = snapshot(sequence=1)

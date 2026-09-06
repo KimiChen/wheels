@@ -61,12 +61,55 @@ class Ledger:
         temporary.replace(self.state_path)
 
 
+class QuotaPlan:
+    """每个计费身份的额度。
+
+    一个全局数字撑不起真实部署：不同用户的套餐不同，而改某一个人的额度不应该动到别人。
+    计划文件与 systemd 单元解耦——改额度不需要编辑 unit、不需要 daemon-reload。
+    """
+
+    def __init__(self, default_bytes: int, overrides: dict[str, int] | None = None) -> None:
+        if default_bytes < 0:
+            raise ValueError("default_bytes 不能为负")
+        self.default_bytes = default_bytes
+        self.overrides = dict(overrides or {})
+
+    @classmethod
+    def load(cls, path: Path) -> "QuotaPlan":
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("额度计划顶层必须是对象")
+        allowed = {"schema_version", "default_bytes", "overrides"}
+        unknown = set(payload) - allowed
+        if unknown:
+            # 与配置面同一纪律：未知字段硬失败。写错一个键名就静默按默认额度跑，
+            # 是「看起来生效了、实际没生效」的典型。
+            raise ValueError(f"额度计划含未知字段：{sorted(unknown)}")
+        if payload.get("schema_version") != 1:
+            raise ValueError("额度计划 schema_version 必须是 1")
+        default_bytes = payload.get("default_bytes", 0)
+        if type(default_bytes) is not int or isinstance(default_bytes, bool) or default_bytes < 0:
+            raise ValueError("default_bytes 必须是非负整数")
+        overrides = payload.get("overrides", {})
+        if not isinstance(overrides, dict):
+            raise ValueError("overrides 必须是对象")
+        for key, value in overrides.items():
+            if "/" not in key:
+                raise ValueError(f"overrides 的键必须是 <inbound_tag>/<name>：{key}")
+            if type(value) is not int or isinstance(value, bool) or value < 0:
+                raise ValueError(f"overrides[{key}] 必须是非负整数")
+        return cls(default_bytes, overrides)
+
+    def quota_for(self, inbound_tag: str, name: str) -> int:
+        return self.overrides.get(f"{inbound_tag}/{name}", self.default_bytes)
+
+
 def push_quota(
     quota_socket: str,
     snapshot: dict,
     ledger: Ledger,
     collector: Collector,
-    quota_bytes: int,
+    plan: QuotaPlan,
     timeout: float,
 ) -> int:
     """按 §5.4 重算并下发一份**全量**剩余额度表。
@@ -86,7 +129,10 @@ def push_quota(
                     "inbound_tag": inbound["tag"],
                     "name": user["name"],
                     "remaining_bytes": collector.remaining_for(
-                        snapshot["node_id"], inbound["tag"], user["name"], quota_bytes
+                        snapshot["node_id"],
+                        inbound["tag"],
+                        user["name"],
+                        plan.quota_for(inbound["tag"], user["name"]),
                     ),
                 }
             )
@@ -129,7 +175,7 @@ def collect_once(
     collector: Collector,
     timeout: float,
     quota_socket: str | None = None,
-    quota_bytes: int = 0,
+    plan: QuotaPlan | None = None,
 ) -> int:
     now = int(time.time() * 1000)
     try:
@@ -188,9 +234,9 @@ def collect_once(
         }
     )
     ledger.save_state(collector.export_state())
-    if quota_socket and quota_bytes > 0:
+    if quota_socket and plan is not None:
         # §5.4 第 3 条：先持久化入账，再算额度，再推送。
-        return push_quota(quota_socket, snapshot, ledger, collector, quota_bytes, timeout)
+        return push_quota(quota_socket, snapshot, ledger, collector, plan, timeout)
     return 0
 
 
@@ -247,7 +293,12 @@ def main(argv: list[str]) -> int:
         "--quota-bytes",
         type=int,
         default=0,
-        help="每个计费身份在本周期内的额度（四向之和，字节）",
+        help="所有身份统一的周期额度（四向之和，字节）；与 --quota-plan 二选一",
+    )
+    parser.add_argument(
+        "--quota-plan",
+        type=Path,
+        help="额度计划 JSON：{schema_version:1, default_bytes, overrides:{\"tag/name\": bytes}}",
     )
     parser.add_argument("--timeout", type=float, default=10.0)
     parser.add_argument("--report", action="store_true", help="只输出长跑判据，不采集")
@@ -282,11 +333,20 @@ def main(argv: list[str]) -> int:
     except SnapshotRejected as error:
         print(f"错误：无法沿用已有采集状态：{error}", file=sys.stderr)
         return 2
-    if bool(args.quota_socket) != (args.quota_bytes > 0):
-        parser.error("--quota-socket 与 --quota-bytes 必须同时给出")
-    return collect_once(
-        args.socket, ledger, collector, args.timeout, args.quota_socket, args.quota_bytes
-    )
+    plan = None
+    if args.quota_plan is not None and args.quota_bytes > 0:
+        parser.error("--quota-plan 与 --quota-bytes 互斥")
+    if args.quota_plan is not None:
+        try:
+            plan = QuotaPlan.load(args.quota_plan)
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            print(f"错误：额度计划不可用：{error}", file=sys.stderr)
+            return 2
+    elif args.quota_bytes > 0:
+        plan = QuotaPlan(args.quota_bytes)
+    if bool(args.quota_socket) != (plan is not None):
+        parser.error("--quota-socket 必须与 --quota-bytes 或 --quota-plan 同时给出")
+    return collect_once(args.socket, ledger, collector, args.timeout, args.quota_socket, plan)
 
 
 if __name__ == "__main__":
