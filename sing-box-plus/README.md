@@ -22,8 +22,10 @@ TCP/UDP × 上下行四个累计值、明确的重启边界、可幂等采集，
 首期计费协议为 **VLESS** 与 **Shadowsocks**（仅 `2022-blake3-aes-128-gcm` / `-aes-256-gcm`
 的 `users[]` 具名多用户形态）两类 inbound，范围与拒绝条件见 §2.4。
 
-**明确不做**：订阅生成、用户与套餐管理、账单存储、管理后台、配置分发、硬配额、限速、
-实时断开。这些属于下游集成方，本项目只提供 §5 的采集与结算契约以及一份参考 collector。
+**明确不做**：订阅生成、用户与套餐管理、账单存储、管理后台、配置分发、限速。
+这些属于下游集成方，本项目只提供 §5 的采集与结算契约以及一份参考 collector。
+配额的**判定**同样在下游：本项目只提供 §4.9 的执行面（可选能力、默认关闭）——接收下游下发的
+剩余额度、用尽时停止为该计费身份转发，而计费周期语义与持久账本仍由 collector 承担。
 也不承诺“进程崩溃也不丢一个字节”——尾账按未闭合窗口审计，与 `shadowsocks-rust-plus` 一致。
 宿主形态只覆盖 `run` 子命令，不支持 `daemon`、libbox 与 1.14 的 `boxdd`。
 
@@ -532,6 +534,8 @@ sing-box 侧唯一身份来源是 `metadata.User`，写入点只有 `users[].nam
    (a) 客户端看到的是“连接建立后被重置”而非协议层认证失败——tracker 位于握手之后；
    (b) TCP 仍会向目的地拨号（§2.3 末条）。因此与 `shadowsocks-rust-plus`“UDP 首包未取得计数器即
    失败关闭”的等价性**仅限计量口径**（0 字节、不入账），不等价于“不建立到目的地的连接”。
+启用 §4.9 配额闸断时，本条的判据扩展为“`metadata.User` 为空**或**该 lineage 的剩余额度已耗尽”，
+实施位置与上述两点已知差异均不变。
 10. **不得把上游 `sing-box check` 当作配置门禁的唯一实现。** 实测 v1.14.0 在 `ssm-api` 的
     `servers` 键缺前导 `/` 时会 panic 退出（exit=2，`panic: chi: routing pattern must begin with '/'`），
     而非返回可读配置错误。本项目的全部校验必须在 `box.New()` 之前独立完成，并对 `check` 的
@@ -542,7 +546,8 @@ sing-box 侧唯一身份来源是 `metadata.User`，写入点只有 `users[].nam
     此时尚未 `cancel()` 与 `Close()`；改成退出反而会丢掉未采集的尾账。理由：采集端以
     `(node_id, runtime_id)` 为 runtime 键，同一 `runtime_id` 内换 `node_id` 会一次性重置全部采集守卫，
     并按首快照策略产生两种错账（`include` 全量重复入账、`baseline` 丢一个采集区间）；换 `listen_path`
-    则使采集端直接失联。需要更换这两项必须走 §5.3 的完整计划重启。
+    则使采集端直接失联。需要更换这两项必须走 §5.3 的完整计划重启。启用 §4.9 时，
+    `quota_control.listen_path` 同受本条约束——控制面失联的后果与换 `listen_path` 同型。
 
 被统计的 inbound tag 名单写在 `user_stats` 服务配置里。另一条可行但**不采用**的路径是覆盖
 inbound 注册表给单个 inbound 加自有字段（`adapter/inbound/registry.go` 的 register 是纯 map 赋值，
@@ -774,6 +779,162 @@ splice/direct 快路径。`Close()` 只向有界 channel 投递，由单个 writ
 对纪律 1、2、4、5、9、10、12 各做一次变异检验（注释掉或取反），确认对应用例转红——
 参考实现实测删掉修复的三行后 32 个用例仍全绿，加无条件 panic 也全绿。
 
+### 4.9 配额闸断（可选能力，默认关闭）
+
+回答“某个计费身份用满本周期额度之后，如何在不影响同节点其他用户的前提下停止为它转发”。
+**不**回答额度从哪来、计费周期怎么划、超额之后怎么补账——判定始终在下游 collector，本节只定义
+进程侧的执行面与下发协议。未配置时不创建控制端点、不加任何包装，数据面与 §4.1 完全一致。
+
+**判定必须留在 collector，这是结构结论而非分工偏好。** 三条已定事实叠加，使进程无法自行知道
+“本计费周期已用多少”：(1) 快照是**进程生命周期内**的累计，不是计费周期内的累计（§4.4）；
+(2) §4.3 第 2 条规定同名重建复用原 lineage 与原计数器，下个周期把用户加回来时累计值不归零；
+(3) D6 定了纯内存 registry、不引入 WAL，进程重启即全部清零——判定若在进程内，重启就等于给所有
+超额用户解封。因此进程侧只持有**相对量**，绝对账本在 collector（下发职责见 §5.4）。
+
+**执行手段不用 SIGHUP。** 最省事的做法是“collector 发现超额 → 从配置删掉该 `users[]` 项 → SIGHUP”，
+但 §2.3 与 §4.4 已写明重载会强杀全节点在途连接：为封一个用户打断所有人，且生效延迟等于一整个
+采集周期。本节的执行面不碰配置、不重载、不动 inbound。
+
+**下发剩余额度，而不是布尔标记。** collector 每次采集后按自己的持久账本算出
+`remaining = 本周期配额 − 本周期起点基线以来的累计`，把**全量**剩余额度表推给进程；
+进程从收到时刻起在计数回调里扣减，扣到 ≤ 0 即闸断。
+
+与下发 blocked 布尔相比多出来的只是一个 int64 字段，换到的是把超额窗口从**峰值带宽 × 采集周期**
+压到只剩下发延迟：布尔方案下 100 Mbps 的用户在 60 秒采集周期里能多跑约 750 MB。持久化责任仍
+全部在 collector，进程侧不写任何文件，D6 不受影响。
+
+额度口径固定为**四向之和**（`tcp_uplink + tcp_downlink + udp_uplink + udp_downlink`），不设选项：
+计量口径已由 §5.2 声明为应用 payload，再给配额单开一套方向选择只会制造两套口径的对账问题。
+需要按方向计费时，在 collector 侧算 `remaining` 时自行折算。
+
+**控制端点契约。** 独立 UDS，**不复用只读快照 socket**——这是 §11 D5 已经写下的纪律：
+需要单独授权、幂等与失败关闭。两个 socket 的权限档次不同：快照是只读旁观者，本端点能改变转发行为。
+
+传输层同 §4.5：HTTP/1.1-over-Unix-stream、每连接单请求单响应、禁 keep-alive 与 query；区别是本端点
+**允许且只允许**请求体（`Content-Type: application/json`，大小上限与快照响应同档）。
+单一路由 `PUT /v2/quota`，全量覆盖语义。**不提供增量的 block / unblock**：增量事件丢一条即永久错位，
+全量覆盖天然幂等，也天然处理进程重启后的状态清零。
+
+```json
+{
+  "schema_version": 2,
+  "node_id": "node-example-01",
+  "runtime_id": "0123456789abcdef0123456789abcdef",
+  "epoch": 137,
+  "entries": [
+    { "inbound_tag": "vless-entry-01", "name": "u_example_01", "remaining_bytes": 5368709120 }
+  ]
+}
+```
+
+- `node_id` 与 `runtime_id` 必须与当前进程逐字节相同，否则 **409** 并整份丢弃。这条同时是
+  “重启即解封”的自动纠正机制：进程重启后 collector 拿旧 `runtime_id` 推送会立刻拿到 409，
+  据此知道必须按新 runtime 重推，而不必等到下一次采集才发现。
+- `epoch` 单调递增，`≤` 已接受值即整份丢弃并返回 **409**，用于抵抗乱序重投。
+- `entries[]` 出现当前配置中不存在的 `(inbound_tag, name)` 时**整份拒绝**（400）并在错误信息里列出
+  前若干条：全量表本应与进程读的是同一份配置真相，对不上说明控制面与数据面已经不一致，
+  静默忽略会让运维误以为额度已生效。collector 应在下一轮快照看到新 lineage 后重推。
+- 未出现在 `entries[]` 中的 lineage 视为**无限额度**——全量表是“限额清单”而非“用户清单”。
+- 成功返回 200 与 `{"schema_version": 2, "epoch": …, "applied": …}`；错误码复用 §4.5 的取值表，
+  另加 409。响应体与快照、`/healthz` 共用同一个 schema 版本常量。
+- socket 默认 `0600`，绑定前的父目录、符号链接、旧 socket 与 inode 替换检查与 §4.5 同款；
+  同样不得直接映射为公网监听。
+
+**控制面失联与首次推送前的语义。** 两个显式配置项，都必须在 `docs/OPERATIONS.md` 里写清商业
+含义，不设“聪明”的默认：
+
+- `startup_action`：进程启动后、收到第一份全量表之前的处置，`allow`（默认）或 `deny`。
+  选 `deny` 意味着 collector 没起来时全节点不可用；选 `allow` 意味着重启窗口内超额用户可继续跑。
+- `stale_after` / `stale_action`：距上次成功接受全量表超过 `stale_after` 后的处置，默认
+  `stale_action: allow`。设成 `deny` 可以防止“collector 挂掉后所有人无限用”，代价是把 collector
+  变成转发链路上的单点。
+
+两项都**不影响已经扣减到 0 的 lineage**——它们只决定“没有额度信息时怎么办”。
+
+**五条实现纪律。** 前两条是“只封一个人、不拖累其他人”的充要条件，后三条各封住一类会静默失效
+或静默外溢的实现方式：
+
+1. **剩余额度是逐 lineage 的无锁原子量。** 计数回调是全进程最热的路径，每次 copy 迭代与每次 splice
+   循环都要跑。闸断检查只允许对挂在 lineage record 上的 `atomic.Int64` 做一次 `Add(-n)` 并判断返回值，
+   **禁止在回调里查 map、取全局锁或做任何分配**——否则功能上只封一个人，吞吐上拖累所有人。
+   数据结构层级与既有四向饱和计数器相同。
+2. **全量表原子换页。** 应用新表时用 `atomic.Pointer` 一次性换掉整张表，**不得“先清空再逐条写入”**：
+   那个窗口里其他用户会被按 `startup_action` 整体误判。逐 lineage diff 亦可，但不得出现中间态。
+3. **闸断状态不得写进快照的 `active`。** `active` 在 §4.3 第 1 条里的语义是“配置中是否还存在该身份”，
+   由每次重载后的配置对账切换；把闸断复用到该字段，采集端会把“超额被封”读成“用户已删除”。
+   首期闸断状态**完全不进快照**——名单是 collector 自己下发的，它本就知道。这样 v2 schema 一个字节
+   不动，D3 不受影响。将来若要暴露，按 §4.5 的纪律新加字段并提升 `schema_version`，
+   不得塞进 `health` 的三键闭集。
+4. **闸断只能实施在 CountFunc 内，不能写在包装层的 `Read` / `Write` 里。** 三条上游事实决定了这一点
+   （sing `v0.9.0-beta.4`，即 `sing-box v1.14.0` 的 `go.mod:48` 所钉版本）：
+   - `N.CountFunc` 的签名是 `func(n int64)`，**没有 error 返回**（`common/network/counter.go:10`），
+     无法靠回调返回错误来中止 copy；
+   - `bufio.Copy` 会用 `UnwrapCountReader` / `UnwrapCountWriter` 一路解包到底层 conn、**只把 CountFunc
+     摘走**（`common/bufio/copy.go:36-37`，UDP 侧对称地在 `:265-266`），而 §4.1 又硬性要求本项目的
+     tracker 实现 `Upstream()` 与 `Reader/WriterReplaceable()`（否则计数口径静默退化）；两者叠加的
+     结果是**包装层的 I/O 方法在快路径上根本不执行**；
+   - splice 路径同样只调 CountFunc（`common/bufio/splice_linux.go:88-92`）。
+
+   因此唯一同时覆盖普通 copy、Vision direct 与 splice 的钩子就是回调本身：在回调内判负后 `Close()`
+   包装层持有的那条 conn 引用，让正在跑的 copy 在下一次 I/O 上自然出错退出。好处是**计数点即执行点**，
+   registry 不需要额外维护活跃连接集合。§8 为此设了变异检验：把闸断挪进 `Read`/`Write` 后，
+   splice 与 Vision direct 用例必须转红。
+5. **连锁范围以 lineage 为界，已核实无跨用户外溢。** mux 侧，tracker 拿到的是 `mux.serverConn` 包住的
+   **单条 stream**（`sing-mux@v0.3.5 server.go:126`、`server_conn.go:16`），不是底层 session conn，
+   关掉一条不影响同 session 的兄弟子流；退一步说，即便实现退化成关掉整个 session，一条 session 上的
+   全部子流也都来自同一份凭据、即同一个计费身份。首期白名单内不存在跨用户共享传输层连接的形态：
+   VLESS 与 SS-2022 都是每客户端独立 TCP；而“同一源端口的后续用户全部记到第一个用户名下”的 UDP
+   NAT 表串号只存在于 legacy AEAD，已由 §2.4 在配置校验期拒绝。
+
+**新连接阻断与唯一的外溢路径。** 新连接的阻断**复用 §4.6 第 9 条已有的失败关闭点**，判据从
+“`metadata.User` 为空”扩为“为空**或**该 lineage 剩余额度 ≤ 0”，位置、实现与两点已知差异全部
+不变：(a) 客户端看到的是连接建立后被重置而非协议层认证失败；(b) TCP 仍会向目的地拨号。
+
+由此产生本能力唯一真正会外溢到其他用户的路径：**被闸断用户的重连风暴**。客户端通常立即重连，
+每次重连都要走完握手与认证才在 tracker 处被拒，消耗的是公共的 accept 队列与握手 CPU
+（REALITY/TLS 握手不便宜），并且每次都会向目的地产生一次完成握手、0 字节的真实拨号。
+缓解与根治两条路：
+
+- **首期必做**：逐 lineage 的重连节流——冷却窗口内该 lineage 的新连接直接拒绝，不进入拨号路径。
+  节流状态与额度同表，同样是无锁原子量。
+- **根治需要摘凭据**：把超额用户从 inbound 的认证表里摘掉，客户端拿到的是干净的协议层认证失败，
+  既不握手成功也不拨号。VLESS 侧能力现成（`sing-vmess vless/service.go:40 UpdateUsers`），
+  但 §11.2 D5 已经算过账：Shadowsocks 侧 `MultiInbound.UpdateUsers` 与数据面读取之间没有锁
+  （写 `inbound_multi.go:132` / 读 `:170`），且索引即计费身份，走这条路必须自行加锁并保证索引稳定。
+  留作 D5 改判后的第二步，不在本节范围内。
+
+**配置**（承载在 §4.6 第 1 条的自有 service 类型内，同样对未知字段失败关闭）：
+
+```json
+{
+  "services": [
+    {
+      "type": "user_stats",
+      "tag": "stats",
+      "node_id": "node-example-01",
+      "listen_path": "/run/sing-box-plus/stats.sock",
+      "quota_control": {
+        "listen_path": "/run/sing-box-plus/quota.sock",
+        "startup_action": "allow",
+        "stale_after": "10m",
+        "stale_action": "allow",
+        "reconnect_throttle": "5s"
+      }
+    }
+  ]
+}
+```
+
+`quota_control` 缺省即整个能力关闭。两个 `listen_path` 必须非空且互不相同，相同即启动失败；
+`quota_control.listen_path` 与 `node_id`、`listen_path` 一样进入 §4.6 第 11 条的**重载不变量**——
+重载期变更即拒绝本次重载、保留旧 Box 继续服务并告警。**不新增 build tag**：闸断依赖四向计数，
+与统计共用 `with_user_stats`，D4 的生产 tag 集不变。
+
+**验收先行**，与 §4.8 同一纪律：先写会失败的门禁，再写功能。最小门禁——两个用户同时跑流量，
+只给其中一个下发小于其在途增量的 `remaining_bytes`，断言 (a) 该用户的在途连接在下一次 I/O 上断开、
+新连接被拒；(b) 另一用户的连接不中断、四向计数继续增长；(c) 快照中两者的 `active` 均不变；
+(d) 同一用例在 Linux 真实 splice 路径下再跑一遍。全量门禁见 §8。
+
 ## 5. 采集与结算契约
 
 exporter 只输出当前进程生命周期内的累计值，不持久化账单，也不决定新运行周期的首快照是否入账。
@@ -829,6 +990,20 @@ node_id + inbounds[].tag + inbounds[].generation + users[].name + users[].genera
 标记该窗口为未排空以便审计。异常退出（崩溃、OOM、断电）留下的未闭合窗口必须单独审计，
 不得当作正常周期切换。`node_id` 与 `listen_path` 不得随重载改变，重载期校验见 §4.6 第 11 条。
 
+### 5.4 配额闸断的下发职责（启用 §4.9 时）
+
+启用 §4.9 后，collector 在差分入账之外另担三项义务，缺一即出现“封不住”或“误封”：
+
+1. **周期基线自持。** “本周期已用”只能由 collector 按 §5.1 的六元组基线自行累计，**不得**拿快照里的
+   四向绝对值直接与配额相比——同名重建复用原计数器（§4.3 第 2 条），绝对值跨计费周期不归零。
+2. **每次采集后重推，识别到新 `runtime_id` 时立即重推。** 进程侧的额度是纯内存的，重启即消失；
+   `PUT /v2/quota` 返回的 409 是这条义务的兜底信号，不是可忽略的噪声。
+3. **顺序是先入账、再算额度、再推送。** 反过来会在 collector 自身崩溃时下发一个基于未落库增量的
+   额度，恢复后重复扣减。
+
+配额闸断**不改变 §5.2 的计量口径**，也不改变快照内容：被闸断身份的四向累计值停止增长，但 lineage、
+`active` 与基线全部照旧，§5.1 的差分与幂等规则一个字节都不用改。
+
 ## 6. 工作分解、交付物与工期
 
 按一名熟悉 Go、sing-box 和异步代理数据面的工程师估算，不含灰度等待与法务日历时间。
@@ -848,9 +1023,10 @@ node_id + inbounds[].tag + inbounds[].generation + users[].name + users[].genera
 | 文档与运维手册 | `docs/` 六件套 | 是 | 1–2 人周 |
 | 重载对账与排空 | 每次重载按新配置对账 `active`/tombstone、drain 阶段、看门狗接管、排空超时策略（§4.4） | 否 | 1–2 人周 |
 | 基础访问审计 | §4.8 的 13 条实现纪律、JSONL writer 与自轮转、验收门禁与 7 项变异检验（约 320 行 Go + 60 行测试脚本） | 否 | 0.5–1 人周 |
+| 配额闸断 | §4.9 的控制端点与全量表原子换页、CountFunc 内闸断、重连节流，以及 §5.4 在参考 collector 侧的下发逻辑（约 350 行 Go + 参考 collector 增量） | 否 | 1–1.5 人周 |
 | 上游 rebase 储备 | 每次 minor 升级 | 周期性 | 1–2 人周/次 |
 
-必需项合计约 **14.5–25.5 人周**，另加 15–25% 的复核返工缓冲；两项可选全做为 16–28.5 人周。
+必需项合计约 **14.5–25.5 人周**，另加 15–25% 的复核返工缓冲；三项可选全做为 17–30 人周。
 “能看每用户上下行”的 PoC 不等于完整功能，不得据此宣告阶段完成。
 
 **registry 裁剪比裁 tag 更能瘦身。** `include.InboundRegistry()` / `OutboundRegistry()` 无条件注册
@@ -883,6 +1059,7 @@ shadowsocks-2022 + dns + `hijack-dns` 路由规则的配置全部解析通过，
 | `scripts/sign-release.sh` / `verify-release.sh` | detached 签名与验签，私钥离线保管 |
 | `scripts/user-stats-client.py` | 带 v2 schema 与健康校验的快照读取客户端；自 `shadowsocks-rust-plus` 同名脚本适配，HTTP 解析与响应头断言原样保留，替换字段校验、默认 socket 路径与 request-line。注意该 HTTP 解析器与 `tests/http_unix.py` 是同一份代码的两处副本，v2 下两处必须同步改，`scripts/verify.sh` 应加一条一致性门禁 |
 | `tests/reference_collector.py` | 参考 collector：取快照 → v2 校验 → 差分 → 幂等落地本地账本；范围**不含** outbox、mTLS 与重试（属下游控制面）。`shadowsocks-rust-plus` 无对应物可搬，须从零实现 |
+| `scripts/quota-client.py` | 配额下发客户端：读取一份 `remaining_bytes` 清单后 `PUT /v2/quota`，含 `epoch` 维护与 409 重推。与 `scripts/user-stats-client.py` 共用同一份 HTTP/UDS 解析代码，受同一条一致性门禁约束 |
 | `packaging/` | 复用上游 `release/config/sing-box.service`、`sing-box.sysusers`，追加 `RuntimeDirectory=` 承载 UDS 与 `Restart=on-failure`；上游无 tmpfiles 模板，需自建 |
 | `config/server.example.json` | 脱敏的最小可用配置，含 `user_stats` 全字段与默认值 |
 | `docs/` | `API.md`、`ARCHITECTURE.md`、`OPERATIONS.md`、`UPSTREAM_BASELINE.md`、`PERFORMANCE.md` |
@@ -959,6 +1136,26 @@ Shadowsocks 与 wrapper 形态的特化补充：
 - `GET /v1/snapshot` 返回 404，且 body 的 `schema_version` 为 `2`（M4）；
 - 共存回归：`shadowsocks-rust-plus` 的校验器对本项目快照整份拒绝且不入账，钉死并存窗口内旧
   collector 误指到本项目节点时必然失败（M4）。
+
+启用 §4.9 配额闸断时的补充（同样必须是会失败的门禁，不得静默放行）：
+
+- **隔离性主用例**：两个用户同时跑流量，只给其一下发小于其在途增量的 `remaining_bytes`，断言该用户
+  在途连接于下一次 I/O 上断开、新连接被拒，另一用户连接不中断且四向计数继续增长（M3）；
+- 同一用例在 Linux 真实 splice 路径与 Vision direct 路径下各再跑一遍（M3）；
+- 变异检验：把闸断逻辑从 CountFunc 挪进包装层的 `Read` / `Write`，splice 与 Vision direct 用例必须
+  转红（纪律 4）（M3）；
+- 全量表换页无中间态：推送与转发并发进行时，未出现在 `entries[]` 中的 lineage 全程不被闸断
+  （纪律 2）（M3）；
+- 热路径无回归：闸断开启与关闭两组对照，回调内无额外分配、无锁竞争（纪律 1）（M6）；
+- 快照不受污染：闸断前后两个用户的 `active` 均不变、`health` 三位不变、`schema_version` 仍为 `2`
+  （纪律 3）（M4）；
+- 控制端点失败关闭：`node_id` / `runtime_id` 不符、`epoch` 回退或持平、`entries[]` 含未知 lineage、
+  超大请求体、非 `PUT` 方法、带 query，逐项返回对应错误码，且**不改变**任何已生效额度（M4）；
+- 进程重启后旧 `runtime_id` 的推送返回 409；重启窗口内该用户按 `startup_action` 处置（M4）；
+- `stale_after` 超时后按 `stale_action` 切换，且已扣减到 0 的 lineage 不因超时而解封（M4）；
+- 两个 `listen_path` 相同时启动失败；SIGHUP 中变更 `quota_control.listen_path` 时拒绝本次重载、
+  旧实例继续服务、`runtime_id` 与四向累计值均不变（M3）；
+- 重连节流：被闸断用户在冷却窗口内的新连接不产生目的地拨号（M3）。
 
 启用 §4.8 基础访问审计时的补充（全部归 M4，且必须是会失败的门禁，不得用 `|| true` / `-f` 静默放行）：
 
@@ -1114,9 +1311,10 @@ sing-box 的 LICENSE 是 GPL v3-or-later 的授权声明段，并附带“衍生
 | D2 | 首期协议范围 | **VLESS + Shadowsocks**（仅 `2022-blake3-aes-128-gcm` / `-aes-256-gcm` 的 `users[]` 具名多用户）；拒绝单用户、legacy AEAD、relay、`managed: true`，并与 SSM API 互斥。其余协议按 §2.4 逐个验证后追加 | §1、§2.4、§4.6 |
 | D3 | 快照 schema | **自有 v2**：`schema_version = 2`、路由 `GET /v2/snapshot`，容器与标识按 sing-box 命名（`inbounds[]`/`tag`/`type`，`listen` + `listen_port`），不设 `identity_kind`，`health` 三位。结算语义与 `shadowsocks-rust-plus` 同构，其参考校验器须分叉重写 | §1、§4.5、§5.1、§6 |
 | D4 | 构建 tag 裁剪 | **生产集 = `with_utls` + `badlinkname` + 自有 `with_user_stats`**；上游默认集其余 15 项全砍（含 `with_quic`、`tfogo_checklinkname0`）。裁 tag 不等于隔离上游账本 | §9.1、§4.6 第 7/8 条 |
-| D5 | 热用户增删接口 | **不提供**：快照 socket 只读，用户变更走受控重启或 SIGHUP 重载 | §4.3、§5.3 |
+| D5 | 热用户增删接口 | **不提供**：快照 socket 只读，用户变更走受控重启或 SIGHUP 重载。§4.9 的配额控制端点是另一个只写 socket，只改额度、不改用户集，不构成对本条的改判 | §4.3、§5.3、§4.9 |
 | D6 | 进程崩溃丢尾账 | **接受**（与 `shadowsocks-rust-plus` 一致）：纯内存 registry，尾账按未闭合窗口审计，不引入 WAL | §1、§4.4、§5.3、§12 |
 | D7 | 访问审计形态 | **同进程 JSONL 旁路，默认关闭**：不建独立进程、不做 ingest/spool/ACK/HMAC，不保证事件不丢；计费仍只走快照。放弃的是“丢失的可判定性”，换来约 320 行对 28519 行 | §4.8、§5.2 |
+| D8 | 配额闸断形态 | **collector 判定 + 进程执行，下发剩余额度而非布尔标记**：独立只写 UDS、`PUT /v2/quota` 全量覆盖、闸断实施在 CountFunc 内、状态不进快照、共用 `with_user_stats`；可选能力，默认关闭 | §4.9、§5.4 |
 
 D1 的实证覆盖：独立 module 构建（含最小 tag 集与 linux/amd64 交叉）、`Router().AppendTracker`
 注入、真实转发 TCP 四向计数、SIGHUP 跨 Box 计数延续、匿名连接失败关闭（0 字节应用负载外发）、
@@ -1134,6 +1332,7 @@ D1 的实证覆盖：独立 module 构建（含最小 tag 集与 linux/amd64 交
 | D5 | 不提供热用户增删接口 | 里程碑 6 之后 | 运维反馈“每次改用户都要重载”不可接受，或 §2.4 追加的协议缺少等价的受控重启路径 |
 | D6 | 接受进程崩溃丢尾账 | 里程碑 5 长跑结束 | staging ≥ 7 天实测的未闭合窗口频次与字节量超出业务容忍。改判即引入 WAL 或持久计量数据面 |
 | D7 | 同进程 JSONL 旁路 | 首次因审计数据被追责或被要求举证时 | 出现“需要证明某条记录未被事后改写”的场景。同 uid 写入决定了数据面被攻破即可就地改写历史，这一点**没有廉价缓解**，改判意味着独立 uid 与独立进程，即参考实现那条路 |
+| D8 | tracker 层闸断 + 重连节流 | 首个按量计费套餐上线后 | 重连风暴的实测成本超出节流可缓解的范围，或出现“必须让客户端看到协议层认证失败”的体验/合规要求。改判即走 §4.9 末段的摘凭据路线，与 D5 改判绑定，不可单独实施 |
 
 D5 若改判为“提供”，必须另开独立端点：不得复用只读快照 socket，需要单独授权、幂等 command id
 与失败关闭。VLESS 侧底层能力已存在（`sing-vmess vless/service.go:40 UpdateUsers`）；
@@ -1169,6 +1368,16 @@ D5 若改判为“提供”，必须另开独立端点：不得复用只读快�
 | 未启用 sniff 或客户端直接给 IP | 只能记 IP，无域名 | 正常降级，`host_src` 为 `ip` |
 | UDP 只到 association 粒度 | 记首包目标，一条 QUIC session 内的多目标不可见 | 记录中标注；需要逐包目标即需另立设计 |
 | 不经 router 的伪装中继（REALITY / ShadowTLS） | 同上表，tracker 不可见 | 审计侧同样声明不支持 |
+
+启用 §4.9 配额闸断时，另有一组缺口——它们不影响计量与账单的准确性，只影响“超额之后多久能停下来”
+与“停下来的代价”，同样须在运维文档中声明：
+
+| 来源 | 性质 | 处置 |
+| --- | --- | --- |
+| 下发延迟内的超额 | 进程按最近一次全量表实时扣减，误差已从“峰值带宽 × 采集周期”压到只剩下发延迟，但 collector 自身的采集与推送周期内，额度仍基于上一轮基线 | 按 §5.4 的顺序推送；窗口大小与 `stale_after` 一并定值并写进计费说明 |
+| 控制面失联期间的额度失效 | `stale_after` 超时后按 `stale_action` 处置：`allow` 意味着超额可继续跑，`deny` 意味着 collector 成为转发链路的单点 | 二选一是商业决策，须在 `docs/OPERATIONS.md` 显式声明，不设“聪明”默认（§4.9） |
+| 被闸断用户的重连风暴与空拨号 | 每次重连消耗公共的 accept 队列与握手 CPU，并向目的地产生一次完成握手、0 字节的拨号（与本节首表“匿名/无身份连接的失败关闭仍会向目的地拨号”同一机制） | 逐 lineage 重连节流为首期必做；根治需摘凭据，见 §4.9 末段与 §11.2 D8 |
+| 进程重启后的额度清零 | 纯内存，重启即全部解封，直到 collector 重推 | `PUT /v2/quota` 的 409 使 collector 立即察觉；重推前按 `startup_action` 处置（§4.9） |
 
 主要执行风险：上游 1.14 的接口与生命周期改动较大，每次 minor 升级需预留 rebase 与全量对账
 （§6、§9.2）；1.14.x 目前依赖若干 beta 模块，需锁定并跟踪其转正节奏；复制自上游的 9 个 CLI 文件
