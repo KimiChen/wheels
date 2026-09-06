@@ -40,11 +40,34 @@ go build -tags "$tags" ./...
 go build ./...
 
 # 2. 上游锁定：远端 tag 不得漂移。
+#
+# 三种结局必须可区分，因为它们对「验证通过」这句话的支撑力度完全不同：
+#   canonical —— 对着 upstream.lock 里的规范地址查，这是唯一能真正证明「上游没漂移」的一种；
+#   mirror    —— 对着 UPSTREAM_REPOSITORY 指定的镜像查，只能证明镜像与 lock 一致；
+#   skipped   —— 显式跳过，什么都没证明。
+# 受限网络下的构建主机常常只能走后两种，脚本必须把这件事说出来，而不是让最后那句
+# 「验证完成」照旧打印。
 upstream_tag="$(lock_value tag)"
 upstream_commit="$(lock_value commit)"
-remote_commit="$(git ls-remote --tags "$(lock_value repository)" "refs/tags/$upstream_tag" | awk 'NR == 1 { print $1 }')"
-[[ "$remote_commit" == "$upstream_commit" ]] || \
-  die "远端 tag 已漂移或不可用：期望 $upstream_commit，实际 ${remote_commit:-<empty>}"
+canonical_repository="$(lock_value repository)"
+drift_repository="${UPSTREAM_REPOSITORY:-$canonical_repository}"
+skip_drift="$(require_bool_env SING_BOX_PLUS_SKIP_UPSTREAM_DRIFT 0)"
+
+if [[ "$skip_drift" == 1 ]]; then
+  drift_scope="skipped"
+  printf '警告：已跳过上游漂移检查（SING_BOX_PLUS_SKIP_UPSTREAM_DRIFT=1）。本次验证不证明上游未漂移。\n' >&2
+else
+  remote_commit="$(git ls-remote --tags "$drift_repository" "refs/tags/$upstream_tag" | awk 'NR == 1 { print $1 }')"
+  [[ "$remote_commit" == "$upstream_commit" ]] || \
+    die "远端 tag 已漂移或不可用（$drift_repository）：期望 $upstream_commit，实际 ${remote_commit:-<empty>}"
+  if [[ "$drift_repository" == "$canonical_repository" ]]; then
+    drift_scope="canonical"
+  else
+    drift_scope="mirror"
+    printf '警告：漂移检查走的是镜像 %s，只证明镜像与 upstream.lock 一致，不证明上游未漂移。\n' \
+      "$drift_repository" >&2
+  fi
+fi
 
 # 3. 新准备一棵源码树，复算规范哈希与复制文件漂移。
 temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/sing-box-plus.XXXXXX")"
@@ -88,4 +111,15 @@ python3 -m unittest discover -s tests -p 'test_*.py' -v
 # 6. 敏感信息扫描。
 bash scripts/check-sensitive.sh
 
-printf '验证完成：锁定版本、复制文件漂移门禁、上游注入点普查、构建、-race 测试与敏感信息扫描均通过。\n'
+case "$drift_scope" in
+  canonical)
+    printf '验证完成：上游漂移检查（规范地址）、复制文件漂移门禁、上游注入点普查、构建、-race 测试与敏感信息扫描均通过。\n'
+    ;;
+  mirror)
+    printf '验证完成（上游漂移检查仅对镜像 %s）：复制文件漂移门禁、上游注入点普查、构建、-race 测试与敏感信息扫描均通过；本次未对规范地址核对上游是否漂移。\n' \
+      "$drift_repository"
+    ;;
+  skipped)
+    printf '验证完成（未做上游漂移检查）：复制文件漂移门禁、上游注入点普查、构建、-race 测试与敏感信息扫描均通过；本次完全没有核对上游是否漂移。\n'
+    ;;
+esac

@@ -100,6 +100,13 @@ safe_remove_temp_dir() {
 
 require_clean_worktree() {
   local status
+  # 先单独判断「是不是 git 工作树」：直接跑 status 的话，非 git 目录下拿到的是 git 自己的
+  # "not a repository" 文案，而且失败发生在命令替换里，调用方看不出这是一条前置条件没满足。
+  if ! git -C "$SING_BOX_PLUS_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    die "发布签名要求在 git 工作树内执行（当前：$SING_BOX_PLUS_ROOT）。
+签名的意义是把产物绑定到一个可追溯的源码状态；在一份 rsync 过来的副本上签名，
+签出来的东西无法回答「它对应哪次提交」。请在源码仓库里构建并签名，再把产物分发出去。"
+  fi
   status="$(git -C "$SING_BOX_PLUS_ROOT" status --porcelain --untracked-files=normal -- .)"
   [[ -z "$status" ]] || die "发布签名与验签要求 overlay 工作树干净"
 }
