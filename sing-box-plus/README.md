@@ -655,6 +655,125 @@ stock sing-box 会拒绝解析（实测 exit=1），`format` 同样失败。因�
 阻断匿名连接（§4.6 第 9 条的已知差异）；(2) 需要改 vless/vision 或 splice 内部的计数点以修正口径；
 (3) 上游把 `AppendTracker`、`Box.Router()` 或 `box.Context` 从导出面移除。
 
+### 4.8 基础访问审计（可选能力，默认关闭）
+
+回答“哪个计费身份在什么时候访问了哪个域名或 IP 的哪个端口”。**不**回答 URL、Header、证书链，
+**不**提供抗篡改与抗抵赖，**不**保证事件不丢。未配置时不创建任何 goroutine、文件或包装，
+数据面与 §4.1 完全一致。
+
+**为什么不做完整审计子系统。** `shadowsocks-rust-plus` 的同名能力是 28519 行、48 文件、
+独立 auditd 进程 + ingest 协议 + spool + ACK + HMAC，其中 spool 单文件 9588 行。按新增行数拆账，
+约 13–14% 是“因为拆了两个进程才需要”（wire 消息、ingest 服务端、重连帧 I/O、手写严格 HTTP/1.1、
+批目录与 ACK），而**真正的提交路径只有 270 行**；UDP per-target 去重窗口 750 行只买到“同 association
+同目标 60 秒不重复记”一条语义，却在历次审计中贡献 5 条缺陷、内存三轮返工。它买到的不是“不丢”，
+而是“丢了能被证明、能被定位、能被去重”。本项目不需要这一层保证：审计是运营辅助而非计费依据，
+计费仍走 §4.5 的快照。同时该参考实现自述“没有任何一次验证证明过『真实用户流量 → access event →
+写入 spool → 被 collector 取走』这条完整链路”，其 producer 侧唯一的链路测试跑在内存管道上——
+**规模不等于置信度**，本节因此把验收前置为硬门禁（见末段）。
+
+**记录形态。** 每条成功访问一行 JSONL，追加写入独立文件；不进快照、不走 UDS：
+
+```json
+{"seq":10241,"ts":1787587200123,"node":"node-example-01","run":"0123456789abcdef0123456789abcdef","user":"u_example_01","in":"vless-entry-01","net":"tcp","host":"example.com","host_src":"sniff","port":443,"up":5120,"down":81920,"ms":2317}
+```
+
+| 字段 | 含义 |
+| --- | --- |
+| `seq` | writer 侧单调递增序号，进程内唯一；与 §4.5 的快照 `sequence` 是两个独立命名空间 |
+| `ts` | 连接关闭时刻，Unix 毫秒，**墙钟**（见纪律 11） |
+| `node` / `run` | 取 §4.4 的 `node_id` 与进程级 `runtime_id`，与快照同源 |
+| `user` / `in` | 计费身份名与 inbound tag，语义同 §3 |
+| `net` | `tcp` / `udp` |
+| `host` | `metadata.Domain` → `Destination.Fqdn` → `Destination.Addr` 三级降级 |
+| `host_src` | `sniff` / `fqdn` / `ip`，标明 `host` 的来源与可信度 |
+| `port` | 恒取 `metadata.Destination.Port` |
+| `up` / `down` | 该连接四向计数中对应方向的字节数，**原样落盘**，成功判据交由读取方复核 |
+| `ms` | 连接时长 |
+
+缺口用同一条流表达，不另开通道：`{"seq":10242,"ev":"gap","after":10241,"n":37,"reason":"queue_full"}`。
+边界不确定时 `n` 写 `null`，**不得合成一个不存在的区间**。
+
+**配置**（承载在 §4.6 第 1 条的自有 service 类型内，同样对未知字段失败关闭）：
+
+```json
+{
+  "services": [
+    {
+      "type": "user_stats",
+      "node_id": "node-example-01",
+      "listen_path": "/run/sing-box-plus/user-stats.sock",
+      "access_log": {
+        "path": "/var/lib/sing-box-plus/access.jsonl",
+        "max_bytes": 268435456,
+        "max_total_bytes": 1073741824,
+        "flush_interval_ms": 1000,
+        "queue_size": 8192
+      }
+    }
+  ]
+}
+```
+
+域名维度需要在计费 inbound 上配 `action: "sniff"`；未配置时 `host_src` 恒为 `fqdn` 或 `ip`，
+这是正常降级而非故障。
+
+**挂点与写入路径。** 复用 §4.1 的 tracker wrapper：内层保持 `bufio.NewCounterConn`（字节不另行统计），
+wrapper 自身只实现 `Close()` + `Upstream()` + `Reader/WriterReplaceable() = true`，以免挡住
+splice/direct 快路径。`Close()` 只向有界 channel 投递，由单个 writer goroutine 序列化落盘。
+
+**必须遵守的实现纪律。** 以下每一条都对应参考实现历次审计中的实际缺陷，或本项目已实测的上游行为：
+
+1. **`Close()` 会重入。** `route/conn.go:376-380` 的 `common.Close(source, destination)` 在
+   `if !done.Swap(true)` 守卫**之外**，UDP 上下行两个 goroutine 各调用一次；TCP 异常终止路径也可能
+   多次。wrapper 必须用 `sync.Once` 包住投递。上游 `trafficcontrol/tracker.go` 敢裸写 `Close()` 是因为
+   `manager.leave` 用 `LoadAndDelete` 幂等——**只抄 wrapper 形状不抄这道闸门，UDP 每次访问写两行**。
+   清洁 TCP 路径只关一次，仅测正常关闭发现不了。
+2. **成功判据是 AND 不是 OR。** TCP 要求 `up > 0 && down > 0`，UDP 只要求 `up > 0`。用
+   `up + down > 0` 会把端口扫描（每个 accept 成功的端口写一次探测就断）和被 RST 的 ClientHello
+   逐条渲染成“成功访问”，正是审计要排除的情形。`up`/`down` 仍原样落盘，供下游复核。
+3. **写失败后必须复位。** `bufio.Writer` 一旦 `Flush` 出错即置粘滞 `b.err`，此后 `Write` 零系统调用
+   返回、channel 永不满、丢弃计数结构性恒为 0——磁盘腾空也不自愈。失败路径必须
+   `w.Reset(f)` 并累加 `dropped_write`。参考实现同型缺陷的结案方式是让 auditd 进程退出交给 systemd，
+   本项目单进程且审计 fail-open，**没有这条退路**。
+4. **一条记录一次写出。** `bufio` 在缓冲将满时按字节边界拆分，不是记录边界；这不是罕见竞态而是
+   分片写的常态。写入前检查 `if len(line) > w.Available() { w.Flush() }`，flush 只切在 LF 上。
+5. **启动先补残行。** 读文件末字节，非 `\n` 即补一个，防止崩溃留下的半行与重启后第一条粘连——
+   否则两条记录会被下游一起丢弃。
+6. **`host` 是攻击者可控字节串。** sniff 出的 SNI 无上限，实测 16KB SNI 经 `json.Marshal` 展开成
+   96103 字节单行（非法 UTF-8 转 U+FFFD，6× 放大），16KB 上行换 96KB 写入。落盘前截 255 字节并
+   `strings.ToValidUTF8`。
+7. **归一化到此为止。** `host_norm` 只做小写 + 去掉一个尾点。**不要引入 `idna.Lookup`**——参考实现
+   两轮栽在 UTS #46 分支上。
+8. **哨兵地址不是目标。** `sp.mux.sing-box.arpa`（`sing-mux protocol.go:34`）、
+   `sp.v2.udp-over-tcp.arpa` 与 `sp.udp-over-tcp.arpa`（`sing common/uot/protocol.go:15-16`）、
+   `sp.packet-addr.v2fly.arpa`（`sing-vmess packetaddr.go:8`）都是载体标记，真实目标在子流上。
+   命中即跳过，不写记录。
+9. **检测轮转与删除。** 每次 flush tick 用 `os.SameFile` 比对当前 fd 与路径上的 inode，不同则重开，
+   否则轮转后写进已删除 inode 的黑洞。`docs/OPERATIONS.md` 须写明**不要给该目录配 logrotate**，
+   由本进程按 `max_bytes` 自轮转。
+10. **总量封顶且清理不得自指。** 超过 `max_total_bytes` 时删最老的已轮转文件并写一条 gap；
+    但**无对象可删时只累加计数、不写 gap**——参考实现实测 20 条真事件被放大成 78 条自指 gap 记录。
+11. **`ts` 是墙钟且非单调，不要在写入侧强行单调化。** 时钟回拨时 `seq` 仍严格递增，由下游按 `seq`
+    排序；写入侧篡改时间戳会让记录与其他日志无法对齐。
+12. **启动 fail-hard，运行 fail-open。** 启动期以最终 euid 实际 `OpenFile(0600)` 一次并
+    `Chmod` + `Stat` 复核属主与权限，任一不符即**启动失败**（与 §4.6 同档）；进入运行期后，
+    审计的任何写入错误、队列满或 panic 都**不得**阻断转发或触发进程退出——这与 §4.6 第 5 条
+    exporter 的 fail-hard 监督相反，两者必须在代码里显式隔离，审计不得加入 exporter 的监督组。
+    writer goroutine 与投递侧各设一个 `defer recover()`。
+13. **关闭序不能丢缓冲。** `instance.Close()` 之后对 writer 做有界等待（1–2 秒）→ 排空 channel →
+    `Flush` + `Sync` → 写一条 stop 行。**数据 channel 永不 `close`**，否则在途的 `Close()` 投递会
+    panic 并打掉进程。
+
+**不做 `fsync`。** 每条记录 fsync 会把吞吐钉死在千级/秒，而本能力的定位不要求崩溃零丢失；
+取舍必须在 `docs/OPERATIONS.md` 写准确：**崩溃会丢缓冲区内未落盘的记录，且该丢失不产生 gap 行**。
+
+**验收先行。** 与参考实现的顺序相反：先写门禁，再写功能。最小门禁——启动进程 → 发起一次
+`curl` 与一次 `dig` → **停止进程后**断言 JSONL 恰好各一行且 `user`/`host`/`port`/`up`/`down` 正确；
+再补三个反例（只完成握手、只上行、只收 banner）断言零记录；轮转一次后重复断言。
+该门禁**必须是会失败的**：不得用 `|| true`、`-f` 或跳过分支把缺失依赖静默放行。功能写完后，
+对纪律 1、2、4、5、9、10、12 各做一次变异检验（注释掉或取反），确认对应用例转红——
+参考实现实测删掉修复的三行后 32 个用例仍全绿，加无条件 panic 也全绿。
+
 ## 5. 采集与结算契约
 
 exporter 只输出当前进程生命周期内的累计值，不持久化账单，也不决定新运行周期的首快照是否入账。
@@ -687,9 +806,13 @@ node_id + inbounds[].tag + inbounds[].generation + users[].name + users[].genera
 
 ### 5.2 计量口径的对外声明
 
-账单口径是认证并解码后、成功进入转发边界的应用负载，不包括协议 header、隧道封装与重传，
-也不记录目标地址、客户端地址或连接明细。该口径不能替代云厂商或 VPS 的网卡计费；
-两者之间的固有差额见 §12。
+账单口径是认证并解码后、成功进入转发边界的应用负载，不包括协议 header、隧道封装与重传。
+该口径不能替代云厂商或 VPS 的网卡计费；两者之间的固有差额见 §12。
+
+**快照不含目标地址、客户端地址或连接明细**，采集与结算链路上不出现任何访问目标。§4.8 的基础访问
+审计是一条完全独立、默认关闭的旁路：它写本机文件、不进快照、不走 UDS，也不参与差分与结算。
+两条链路的保留期、访问控制与对外声明必须分别制定——启用 §4.8 即意味着节点上存在“用户→域名”
+明细，这是产品与合规决策，不因计量已上线而自动成立。
 
 ### 5.3 计划重启与最终结算
 
@@ -724,9 +847,10 @@ node_id + inbounds[].tag + inbounds[].generation + users[].name + users[].genera
 | 可复现发布与签名 | 两次独立构建、manifest、detached 签名与验签 | 是 | 1–2 人周 |
 | 文档与运维手册 | `docs/` 六件套 | 是 | 1–2 人周 |
 | 重载对账与排空 | 每次重载按新配置对账 `active`/tombstone、drain 阶段、看门狗接管、排空超时策略（§4.4） | 否 | 1–2 人周 |
+| 基础访问审计 | §4.8 的 13 条实现纪律、JSONL writer 与自轮转、验收门禁与 7 项变异检验（约 320 行 Go + 60 行测试脚本） | 否 | 0.5–1 人周 |
 | 上游 rebase 储备 | 每次 minor 升级 | 周期性 | 1–2 人周/次 |
 
-必需项合计约 **14.5–25.5 人周**，另加 15–25% 的复核返工缓冲；含可选的重载对账与排空为 15.5–27.5 人周。
+必需项合计约 **14.5–25.5 人周**，另加 15–25% 的复核返工缓冲；两项可选全做为 16–28.5 人周。
 “能看每用户上下行”的 PoC 不等于完整功能，不得据此宣告阶段完成。
 
 **registry 裁剪比裁 tag 更能瘦身。** `include.InboundRegistry()` / `OutboundRegistry()` 无条件注册
@@ -835,6 +959,25 @@ Shadowsocks 与 wrapper 形态的特化补充：
 - `GET /v1/snapshot` 返回 404，且 body 的 `schema_version` 为 `2`（M4）；
 - 共存回归：`shadowsocks-rust-plus` 的校验器对本项目快照整份拒绝且不入账，钉死并存窗口内旧
   collector 误指到本项目节点时必然失败（M4）。
+
+启用 §4.8 基础访问审计时的补充（全部归 M4，且必须是会失败的门禁，不得用 `|| true` / `-f` 静默放行）：
+
+- 正例：一次 `curl` 与一次 `dig` 之后**停止进程**，断言 JSONL 恰好各一行，`user`/`host`/`host_src`/
+  `port`/`up`/`down` 均正确；
+- 反例零记录：只完成 TCP 握手、只上行无下行、只收到 banner 无上行，三种情形均不产生记录；
+- UDP association 关闭后**恰好一行**（覆盖 `route/conn.go:376-380` 的双 `Close`，纪律 1）；
+- 哨兵地址 `sp.mux.sing-box.arpa` / `sp.v2.udp-over-tcp.arpa` / `sp.udp-over-tcp.arpa` /
+  `sp.packet-addr.v2fly.arpa` 不产生记录，其子流各自产生记录（纪律 8）；
+- 16KB SNI 的连接：落盘行 `host` 截断至 255 字节且为合法 UTF-8，整行长度有界（纪律 6）；
+- 注入 `ENOSPC` 后腾空磁盘：writer 自行恢复写入，期间的丢弃计入 `dropped_write` 且非 0（纪律 3）；
+- 断电式 kill 后重启：不出现半行与首条粘连，末行可被 `json.Unmarshal` 解析（纪律 4、5）；
+- 外部 `mv` + `rm` 日志文件后：writer 在下一个 flush tick 重开新文件，不再写入已删除 inode（纪律 9）；
+- `max_total_bytes` 触顶且无可删对象时：只累加计数、**不写 gap 行**，不出现自指 gap 放大（纪律 10）；
+- 审计写入失败、队列满与注入 panic 三种情形下，转发不中断、进程不退出、快照接口不受影响
+  （纪律 12，与 §4.6 第 5 条的 fail-hard 形成对照用例）；
+- 关闭序：`instance.Close()` 后在途记录全部落盘、stop 行存在、进程不因向已关闭 channel 投递而
+  panic（纪律 13）；
+- 变异检验：对纪律 1、2、4、5、9、10、12 各取反或注释一次，确认对应用例转红。
 
 性能验收比较三组：未启用、编译但未配置、启用四向统计。记录吞吐、p50/p99 延迟、CPU、分配、
 goroutine、内存随用户数/并发数增长，以及 exporter 被慢客户端占满时代理数据面的隔离。
@@ -973,6 +1116,7 @@ sing-box 的 LICENSE 是 GPL v3-or-later 的授权声明段，并附带“衍生
 | D4 | 构建 tag 裁剪 | **生产集 = `with_utls` + `badlinkname` + 自有 `with_user_stats`**；上游默认集其余 15 项全砍（含 `with_quic`、`tfogo_checklinkname0`）。裁 tag 不等于隔离上游账本 | §9.1、§4.6 第 7/8 条 |
 | D5 | 热用户增删接口 | **不提供**：快照 socket 只读，用户变更走受控重启或 SIGHUP 重载 | §4.3、§5.3 |
 | D6 | 进程崩溃丢尾账 | **接受**（与 `shadowsocks-rust-plus` 一致）：纯内存 registry，尾账按未闭合窗口审计，不引入 WAL | §1、§4.4、§5.3、§12 |
+| D7 | 访问审计形态 | **同进程 JSONL 旁路，默认关闭**：不建独立进程、不做 ingest/spool/ACK/HMAC，不保证事件不丢；计费仍只走快照。放弃的是“丢失的可判定性”，换来约 320 行对 28519 行 | §4.8、§5.2 |
 
 D1 的实证覆盖：独立 module 构建（含最小 tag 集与 linux/amd64 交叉）、`Router().AppendTracker`
 注入、真实转发 TCP 四向计数、SIGHUP 跨 Box 计数延续、匿名连接失败关闭（0 字节应用负载外发）、
@@ -989,6 +1133,7 @@ D1 的实证覆盖：独立 module 构建（含最小 tag 集与 linux/amd64 交
 | D3 | 自有 v2 schema | 首个下游接入方上线后 | 出现现有字段无法表达的计量维度；届时按 §4.5 的命名纪律追加字段并提升 `schema_version` |
 | D5 | 不提供热用户增删接口 | 里程碑 6 之后 | 运维反馈“每次改用户都要重载”不可接受，或 §2.4 追加的协议缺少等价的受控重启路径 |
 | D6 | 接受进程崩溃丢尾账 | 里程碑 5 长跑结束 | staging ≥ 7 天实测的未闭合窗口频次与字节量超出业务容忍。改判即引入 WAL 或持久计量数据面 |
+| D7 | 同进程 JSONL 旁路 | 首次因审计数据被追责或被要求举证时 | 出现“需要证明某条记录未被事后改写”的场景。同 uid 写入决定了数据面被攻破即可就地改写历史，这一点**没有廉价缓解**，改判意味着独立 uid 与独立进程，即参考实现那条路 |
 
 D5 若改判为“提供”，必须另开独立端点：不得复用只读快照 socket，需要单独授权、幂等 command id
 与失败关闭。VLESS 侧底层能力已存在（`sing-vmess vless/service.go:40 UpdateUsers`）；
@@ -1013,6 +1158,20 @@ D5 若改判为“提供”，必须另开独立端点：不得复用只读快�
 | 计费 inbound 误配 `hijack-dns` / `reject` | 字节不经 tracker | 配置校验失败关闭（§4.6） |
 | 协议 header、隧道封装与 TCP 重传 | 不在应用 payload 口径内 | 在计费说明中声明，与网卡计费天然有差 |
 
+启用 §4.8 基础访问审计时，另有一组性质不同的已知缺口——它们不影响账单，只影响审计记录的完整性
+与可信度，同样须在运维文档中声明：
+
+| 来源 | 性质 | 处置 |
+| --- | --- | --- |
+| 崩溃丢失缓冲区内的记录 | 不做 `fsync`，且该丢失**不产生 gap 行**，事后无法与“本就没有访问”区分 | 在 `docs/OPERATIONS.md` 如实声明；需要不丢即需另建 spool（D7） |
+| 审计文件与数据面同 uid | 数据面被非 root 攻破即可就地改写或删除自己的历史 | `0600` 可挡本机其他非 root 账号，**同 uid 改写无廉价缓解**；需要抗篡改即需独立 uid 与独立进程（D7） |
+| `host` 来自 sniff 时可能是伪装外层 | 启用 ECH 的客户端给出的是伪装 SNI，属**错误记录**而非缺失 | `host_src` 字段标明来源，下游按可信度分级处理 |
+| 未启用 sniff 或客户端直接给 IP | 只能记 IP，无域名 | 正常降级，`host_src` 为 `ip` |
+| UDP 只到 association 粒度 | 记首包目标，一条 QUIC session 内的多目标不可见 | 记录中标注；需要逐包目标即需另立设计 |
+| 不经 router 的伪装中继（REALITY / ShadowTLS） | 同上表，tracker 不可见 | 审计侧同样声明不支持 |
+
 主要执行风险：上游 1.14 的接口与生命周期改动较大，每次 minor 升级需预留 rebase 与全量对账
 （§6、§9.2）；1.14.x 目前依赖若干 beta 模块，需锁定并跟踪其转正节奏；复制自上游的 9 个 CLI 文件
-是持续的漂移面，须靠 `scripts/verify.sh` 的门禁而非人工记忆维护。
+是持续的漂移面，须靠 `scripts/verify.sh` 的门禁而非人工记忆维护。启用 §4.8 后还须防一类特有的
+自欺：审计的失败路径大多以“看起来一切正常”呈现（粘滞写错误、双写、半行、写进已删除 inode），
+因此纪律 1/3/4/5/9/10/12 的变异检验是发布门禁的一部分，不是可选的加分项。
