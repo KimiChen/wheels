@@ -747,8 +747,9 @@ splice/direct 快路径。`Close()` 只向有界 channel 投递，由单个 writ
 6. **`host` 是攻击者可控字节串。** sniff 出的 SNI 无上限，实测 16KB SNI 经 `json.Marshal` 展开成
    96103 字节单行（非法 UTF-8 转 U+FFFD，6× 放大），16KB 上行换 96KB 写入。落盘前截 255 字节并
    `strings.ToValidUTF8`。
-7. **归一化到此为止。** `host_norm` 只做小写 + 去掉一个尾点。**不要引入 `idna.Lookup`**——参考实现
-   两轮栽在 UTS #46 分支上。
+7. **归一化到此为止。** 归一化只做小写 + 去掉一个尾点，结果直接写进 `host` 字段，**不另开
+   `host_norm` 键**——记录形态以本节的示例为准。**不要引入 `idna.Lookup`**——参考实现两轮栽在
+   UTS #46 分支上。
 8. **哨兵地址不是目标。** `sp.mux.sing-box.arpa`（`sing-mux protocol.go:34`）、
    `sp.v2.udp-over-tcp.arpa` 与 `sp.udp-over-tcp.arpa`（`sing common/uot/protocol.go:15-16`）、
    `sp.packet-addr.v2fly.arpa`（`sing-vmess packetaddr.go:8`）都是载体标记，真实目标在子流上。
@@ -895,8 +896,12 @@ splice/direct 快路径。`Close()` 只向有界 channel 投递，由单个 writ
 （REALITY/TLS 握手不便宜），并且每次都会向目的地产生一次完成握手、0 字节的真实拨号。
 缓解与根治两条路：
 
-- **首期必做**：逐 lineage 的重连节流——冷却窗口内该 lineage 的新连接直接拒绝，不进入拨号路径。
-  节流状态与额度同表，同样是无锁原子量。
+- **首期必做**：逐 lineage 的重连节流——冷却窗口内该 lineage 的新连接在 tracker 处立即拒绝，
+  省掉计数器包装、审计投递与日志。节流状态与额度同表，同样是无锁原子量。
+  **它省不掉拨号**：`ConnectionManager.NewConnection` 先拨号后 copy（`route/conn.go:95-105`），
+  而 tracker 只能决定交给它的是哪个 conn，无法阻止路由调用它。因此节流压低的是本机侧的
+  握手后成本，不是目的地侧的连接数。这条已由 §8 的固定断言钉住（拒绝一次 = 目的地 accept 一次），
+  改判必须同步改本节与 §12。
 - **根治需要摘凭据**：把超额用户从 inbound 的认证表里摘掉，客户端拿到的是干净的协议层认证失败，
   既不握手成功也不拨号。VLESS 侧能力现成（`sing-vmess vless/service.go:40 UpdateUsers`），
   但 §11.2 D5 已经算过账：Shadowsocks 侧 `MultiInbound.UpdateUsers` 与数据面读取之间没有锁
@@ -1376,7 +1381,7 @@ D5 若改判为“提供”，必须另开独立端点：不得复用只读快�
 | --- | --- | --- |
 | 下发延迟内的超额 | 进程按最近一次全量表实时扣减，误差已从“峰值带宽 × 采集周期”压到只剩下发延迟，但 collector 自身的采集与推送周期内，额度仍基于上一轮基线 | 按 §5.4 的顺序推送；窗口大小与 `stale_after` 一并定值并写进计费说明 |
 | 控制面失联期间的额度失效 | `stale_after` 超时后按 `stale_action` 处置：`allow` 意味着超额可继续跑，`deny` 意味着 collector 成为转发链路的单点 | 二选一是商业决策，须在 `docs/OPERATIONS.md` 显式声明，不设“聪明”默认（§4.9） |
-| 被闸断用户的重连风暴与空拨号 | 每次重连消耗公共的 accept 队列与握手 CPU，并向目的地产生一次完成握手、0 字节的拨号（与本节首表“匿名/无身份连接的失败关闭仍会向目的地拨号”同一机制） | 逐 lineage 重连节流为首期必做；根治需摘凭据，见 §4.9 末段与 §11.2 D8 |
+| 被闸断用户的重连风暴与空拨号 | 每次重连消耗公共的 accept 队列与握手 CPU，并向目的地产生一次完成握手、0 字节的拨号（与本节首表“匿名/无身份连接的失败关闭仍会向目的地拨号”同一机制） | 逐 lineage 重连节流为首期必做，但它只压低本机侧的握手后成本，**拨号仍然发生**——tracker 在拨号之前拿不到否决权；根治需摘凭据，见 §4.9 末段与 §11.2 D8 |
 | 进程重启后的额度清零 | 纯内存，重启即全部解封，直到 collector 重推 | `PUT /v2/quota` 的 409 使 collector 立即察觉；重推前按 `startup_action` 处置（§4.9） |
 
 主要执行风险：上游 1.14 的接口与生命周期改动较大，每次 minor 升级需预留 rebase 与全量对账

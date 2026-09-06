@@ -119,9 +119,9 @@ func httpUnix(t *testing.T, sockPath string, method string, target string, body 
 		t.Fatalf("写请求失败：%v", err)
 	}
 	if len(body) > 0 {
-		if _, err = conn.Write(body); err != nil {
-			t.Fatalf("写请求体失败：%v", err)
-		}
+		// 写失败不是测试失败：服务端对超限请求会先回 413 再关连接，
+		// 此时剩余请求体必然写不完，正确的做法是继续读它已经写回的响应。
+		_, _ = conn.Write(body)
 	}
 	raw, err := io.ReadAll(conn)
 	if err != nil {
