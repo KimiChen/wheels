@@ -70,8 +70,13 @@ box_sites="$(grep -c "AppendTracker" "$source_dir/box.go" || true)"
 [[ "$box_sites" == "2" ]] || \
   die "上游 box.go 的 AppendTracker 调用点不再是 2 处（实际 $box_sites）：§4.1 的最外层前提需重新验证"
 
-# 5. 测试。带抑制跑 -race 全量；再不带抑制跑一遍不启 Box 的纯单元用例，
-#    使 tests/race-suppressions.txt 无法掩盖本项目自身的竞争。
+# 5. 测试。三轮，缺一轮就会有一批断言从来没被执行过：
+#    (a) 不带 -race 的全量——Vision 用例只能在这一轮跑（-race 会打开 checkptr，
+#        而上游 sing-vmess 的 Vision 实现用 uintptr 运算读 crypto/tls 私有字段，
+#        会被 checkptr 判为 fatal，见 docs/UPSTREAM_BASELINE.md）；
+#    (b) 带抑制的 -race 全量；
+#    (c) 不带抑制的纯单元用例，使 tests/race-suppressions.txt 无法掩盖本项目自身的竞争。
+go test -count=1 -tags "$tags" ./...
 GORACE="suppressions=$SING_BOX_PLUS_ROOT/tests/race-suppressions.txt" \
   go test -race -count=1 -tags "$tags" ./...
 go test -race -count=1 -tags "$tags" \

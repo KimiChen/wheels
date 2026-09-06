@@ -1107,7 +1107,7 @@ shadowsocks-2022 + dns + `hijack-dns` 路由规则的配置全部解析通过，
 | 里程碑 | 状态 | 证据 |
 | --- | --- | --- |
 | 1 冻结基线与骨架 | ✅ | `upstream.lock` 记录 tag/commit/`prepared_tree_sha256`；verify 重新准备源码树后复算一致；`version` 输出四行且显示 `v1.14.0 (0b8995879f29)`；生产 tag 集写入 `.env.example` |
-| 2 观测 PoC | ✅（部分） | VLESS 与 SS-2022 EIH 多用户 TCP+UDP 四向 oracle 误差 = 0（`integration_test.go`）。**未做**：`with_v2ray_api` 的 PoC 集构建，以及 ServiceName 覆写与静态白名单两项边界的复现记录 |
+| 2 观测 PoC | ✅（部分） | VLESS 与 SS-2022 EIH 多用户 TCP+UDP 四向 oracle 误差 = 0（`integration_test.go`）；Vision 链路小往返 4/4 与 100×64KiB 精确相等（`vision_test.go`）。**未做**：`with_v2ray_api` 的 PoC 集构建，以及 ServiceName 覆写与静态白名单两项边界的复现记录 |
 | 3 四向 tracker / registry | ✅ | `go test -race` 全绿；含「`Start()` 后追加必被 -race 报出竞争」的负向用例（子进程执行）；多 tracker 叠加 unwrap 断言通过；§4.6 校验路径 22 例。**未做**：Linux 真实 splice 用例只交叉编译通过，本机无 Linux 环境可实跑 |
 | 4 UDS exporter | ✅ | 权限 / 符号链接 / 旧 socket / 超限 / 版本 / 方法 / query 故障用例通过；v2 契约逐字段断言；参考 collector 在故障矩阵下无漏计、无重复入账 |
 | 5 长跑与结算验证 | ⬜ | `scripts/soak.sh` 与 `reference_collector.py --report` 的四项判据已就绪，**7 天 staging 长跑本身未执行** |
@@ -1125,8 +1125,10 @@ shadowsocks-2022 + dns + `hijack-dns` 路由规则的配置全部解析通过，
    `BenchmarkDataPath{A,B,C}` 的环回吞吐都已有数据，结论是三组在本机不可区分——
    组内极差 10–15%，组间中位差不到 3%。这只能证明没有数量级开销，
    **不能替代**带真实 RTT、并发爬坡与 p99 的端到端验收（需要独立负载机）。见 `docs/PERFORMANCE.md`。
-3. **Vision / REALITY 链路的对账矩阵**：现有 oracle 覆盖裸 TCP 与 XUDP，
-   Vision buffered→direct 切换与 early data 尚未逐项对账。
+3. **REALITY 链路未对账**：Vision 已覆盖（`vision_test.go`：TLS + `xtls-rprx-vision`，
+   小往返 4/4 证明 padding 不计入，100×64KiB 精确相等证明 buffered→direct 切换后口径不退化），
+   但 REALITY 需要一个外部握手目标，会把用例变成依赖网络的用例，因此仍未覆盖；
+   §12 已声明 REALITY 握手校验失败的伪装中继本就不可见于任何 tracker。
 
 ## 8. 测试与性能门槛
 

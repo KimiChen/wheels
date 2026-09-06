@@ -64,6 +64,20 @@ goroutine 在 `updateInterface()`（`:574`）并发读同一字段，两侧无�
   `scripts/verify.sh` 在带抑制跑完 `-race` 全量之后，会**再跑一遍不带抑制**的纯单元用例
   （那批用例不启动 Box）。
 
+### sing-vmess 的 Vision 实现与 `checkptr` 不兼容
+
+`NewVisionConn` 用 `unsafe.Pointer(reflectPointer + field.Offset)` 直接读取 `crypto/tls.Conn`
+的私有 `input` / `rawInput` 字段（`sing-vmess@v0.2.8-0.20250909125414 vless/vision.go:87`）。
+这类 uintptr 运算被 Go 的 `checkptr` 判为「指向无效分配」，而 `-race` 会一并打开 `checkptr`，
+于是整个测试进程 fatal 退出——不是竞争，`GORACE=suppressions` 也压不住（那只作用于 TSan 报告）。
+
+- 与本项目的关系：本项目不触碰该路径，零补丁形态无法规避。
+- 处置：`TestVisionByteOracle` 在 `-race` 轮次跳过并说明原因；`scripts/verify.sh` 因此专门跑一轮
+  **不带 `-race`** 的全量测试，使 Vision 的字节对账真的被执行过，而不是被 skip 掉之后无人再问。
+- 生产影响：`badlinkname` 生产构建不启用 `checkptr`，运行期不受影响。但这条依赖
+  `crypto/tls` 的内部字段名，Go 工具链升级若改名会表现为**运行期硬失败**——
+  这正是升级门禁里那次真实 TLS 握手冒烟存在的理由。
+
 ### `sing-box check` 在畸形 `ssm-api` 配置上 panic
 
 v1.14.0 实测：`ssm-api` 的 `servers` 键缺前导 `/` 时 panic 退出（exit=2，
@@ -79,4 +93,6 @@ v1.14.0 实测：`ssm-api` 的 `servers` 键缺前导 `/` 时 panic 退出（exi
 | 2026-09-06 | darwin/arm64 构建、`linux/amd64` 与 `linux/arm64` `CGO_ENABLED=0` 交叉编译 | 通过 |
 | 2026-09-06 | 零 tag 与生产 tag 集两种构建 | 均通过 |
 | 2026-09-06 | 四向字节 oracle：VLESS TCP 4/4、100×64KiB 双向 6553600、XUDP 归入 UDP、SS-2022 EIH 身份分离 | 误差 0 |
+| 2026-09-06 | Vision 对账：TLS + `xtls-rprx-vision`，小往返 4/4（padding 不计入）、100×64KiB 精确相等（buffered→direct 切换后不退化） | 误差 0 |
+| 2026-09-06 | 排空阶段：排空期拒绝新的计费连接且 0 字节不入账，会话归零后立即返回 | 通过 |
 | 2026-09-06 | `go test -race` 全量（含上游竞争抑制）与无抑制的纯单元用例 | 通过 |
