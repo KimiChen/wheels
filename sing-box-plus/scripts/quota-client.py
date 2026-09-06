@@ -101,6 +101,13 @@ def main(argv: list[str]) -> int:
                 )
     except (http_unix.HTTPUnixError, RuntimeError) as error:
         print(f"错误：{error}", file=sys.stderr)
+        if "reset" in str(error).lower() or "断开" in str(error):
+            # 服务端在我们写完之前就判定超限并关闭，RST 会把它已写回的 413 一起丢掉。
+            print(
+                f"提示：清单共 {len(entries)} 项，可能超过服务端的 max_request_bytes；"
+                "连接被重置与 413 是同一种拒绝，请拆分后重试。",
+                file=sys.stderr,
+            )
         return 2
 
     print(response.body.decode("utf-8", "replace").rstrip())

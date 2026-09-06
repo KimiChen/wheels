@@ -95,4 +95,6 @@ v1.14.0 实测：`ssm-api` 的 `servers` 键缺前导 `/` 时 panic 退出（exi
 | 2026-09-06 | 四向字节 oracle：VLESS TCP 4/4、100×64KiB 双向 6553600、XUDP 归入 UDP、SS-2022 EIH 身份分离 | 误差 0 |
 | 2026-09-06 | Vision 对账：TLS + `xtls-rprx-vision`，小往返 4/4（padding 不计入）、100×64KiB 精确相等（buffered→direct 切换后不退化） | 误差 0 |
 | 2026-09-06 | 排空阶段：排空期拒绝新的计费连接且 0 字节不入账，会话归零后立即返回 | 通过 |
-| 2026-09-06 | `go test -race` 全量（含上游竞争抑制）与无抑制的纯单元用例 | 通过 |
+| 2026-09-06 | `go test -race` 全量（含上游竞争抑制）与无抑制的纯单元用例（darwin/arm64） | 通过 |
+| 2026-09-06 | **Linux 实跑**：linux/arm64 交叉编译的测试二进制在 Ubuntu（kernel 7.0）上跑全量 46 个用例，含真实 splice 路径的字节 oracle 与 splice 上的配额闸断 | 全部通过 |
+| 2026-09-06 | Linux 数据面三组基准（真实 splice）：A 1630 / B 1621 / C 1641 MB/s，组内极差 0.6–2.8% | 开销在 1% 量级 |

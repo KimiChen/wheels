@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -234,13 +235,18 @@ func TestQuotaEndpointFailClosed(t *testing.T) {
 		t.Fatalf("未知字段应返回 400，实际 %d", status)
 	}
 
-	// 超大请求体 → 413。
+	// 超大请求体 → 413 或连接被重置。
+	//
+	// 两者都算「被拒绝」：服务端在客户端还没写完时就判定超限并关闭，
+	// 而关闭一个接收队列里还有数据的 socket 在 Linux 上会发 RST，把已写回的 413 一起丢掉。
+	// 服务端已经做了有界的 lingering 排空来缩小这个窗口，但消不掉它——
+	// 为一个已判定超限的请求无限读下去正是限额要防的事。
 	oversized := make([]byte, 5*1024*1024)
 	for index := range oversized {
 		oversized[index] = ' '
 	}
-	if status, _ = httpUnix(t, quotaSock, "PUT", "/v2/quota", oversized); status != 413 {
-		t.Fatalf("超大请求体应返回 413，实际 %d", status)
+	if status = putOversized(t, quotaSock, oversized); status != 413 && status != 0 {
+		t.Fatalf("超大请求体应返回 413 或连接重置，实际 %d", status)
 	}
 }
 
@@ -261,4 +267,35 @@ func firstLine(input string) string {
 		return input[:index]
 	}
 	return input
+}
+
+// putOversized 发一个超限请求体，返回状态码；连接被重置时返回 0。
+func putOversized(t *testing.T, sockPath string, body []byte) int {
+	t.Helper()
+	conn, err := net.DialTimeout("unix", sockPath, 3*time.Second)
+	if err != nil {
+		t.Fatalf("连接失败：%v", err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	head := "PUT /v2/quota HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n" +
+		"Content-Length: " + strconv.Itoa(len(body)) + "\r\n\r\n"
+	if _, err = conn.Write([]byte(head)); err != nil {
+		t.Fatalf("写请求头失败：%v", err)
+	}
+	_, _ = conn.Write(body)
+	buffer := make([]byte, 256)
+	n, readErr := conn.Read(buffer)
+	if readErr != nil || n == 0 {
+		return 0
+	}
+	fields := splitSpace(strings.TrimSuffix(string(buffer[:n]), "\r\n"))
+	if len(fields) < 2 {
+		return 0
+	}
+	status, convErr := strconv.Atoi(fields[1])
+	if convErr != nil {
+		return 0
+	}
+	return status
 }

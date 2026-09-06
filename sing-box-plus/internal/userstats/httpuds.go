@@ -176,6 +176,7 @@ func (s *udsServer) handleConn(conn net.Conn) {
 	req, status := s.readRequest(reader)
 	if status != statusOK {
 		s.writeResponse(conn, status, mustJSON(newErrorBody(status)))
+		s.lingeringDrain(conn)
 		return
 	}
 	respStatus, body := s.handler(req)
@@ -280,6 +281,29 @@ func (s *udsServer) writeResponse(conn net.Conn, status int, body []byte) {
 // （src/bufio/bufio.go 的 ReadLine：len(line) != 0 时 err = nil）。
 // 于是「客户端写了半个请求行就挂住」会被读成一次成功的完整行——超时被误报成 400，
 // 而截断的请求行还会被当作合法输入继续解析。
+// lingeringDrain 在错误响应之后有界地丢弃客户端仍在发送的数据。
+//
+// 关闭一个接收队列里还有数据的 socket 会发 RST，客户端的接收缓冲连同我们刚写回的错误响应
+// 一起被丢掉——运维看到的是 "connection reset by peer" 而不是 413。
+// 这里读掉一小段再关，能让「略微超限」的请求正常收到响应。
+//
+// 它**消不掉**这个窗口：真正超出很多的请求体在有界预算内排不完，关闭时仍会 RST。
+// 因此 docs/API.md 明确要求客户端把「连接被重置」与错误码同等对待。
+// 预算刻意很小——为一个已经被判定超限的请求无限读下去，正是限额要防的事。
+func (s *udsServer) lingeringDrain(conn net.Conn) {
+	const budget = 256 * 1024
+	_ = conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+	discard := make([]byte, 32*1024)
+	var total int
+	for total < budget {
+		n, err := conn.Read(discard)
+		total += n
+		if err != nil {
+			return
+		}
+	}
+}
+
 func readLimitedLine(reader *bufio.Reader, limit int) (string, int) {
 	var builder strings.Builder
 	for {
