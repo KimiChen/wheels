@@ -201,3 +201,63 @@ func TestShadowsocksByteOracle(t *testing.T) {
 		t.Fatalf("EIH 身份分离失败：s2 不应有计数，实际 %d", other.TCPUplinkBytes)
 	}
 }
+
+// TestShadowsocksUDPCounted 是 SS-2022 的 UDP 四向断言。
+//
+// 补这条用例的直接原因：生产上观察到某个 SS 身份的 81 条 UDP 审计记录**下行全是 0**，
+// 而同机的 VLESS 身份有下行。样例是 QUIC（:443）被丢回程包，看起来能解释；
+// 但「看起来能解释」不是证据——此前的测试套只覆盖了 VLESS 的 UDP，
+// SS 的 UDP 下行到底会不会计数，从来没有人验证过。
+func TestShadowsocksUDPCounted(t *testing.T) {
+	dir := shortTempDir(t)
+	sock := sockPath(dir, "stats.sock")
+	serverPort := testenv.FreePort(t)
+	echoHost, echoPort := testenv.StartUDPEcho(t)
+
+	handle := startServer(t, ssServerConfig(serverPort, sock))
+	testenv.WaitPort(t, "127.0.0.1", serverPort)
+	clientPort := testenv.FreePort(t)
+	testenv.StartUpstreamClient(t, ssClientConfig(clientPort, serverPort, testPSKUser1, echoHost, echoPort))
+
+	roundTripUDP(t, clientPort, []byte("ping"))
+
+	snapshot := fetchSnapshot(t, handle.sockPath)
+	user := userOf(t, snapshot, "ss-in", "s1")
+	if user.UDPUplinkBytes != 4 || user.UDPDownlinkBytes != 4 {
+		t.Fatalf("SS-2022 的 UDP 四向计数不符：udp_up=%d udp_down=%d，期望 4/4",
+			user.UDPUplinkBytes, user.UDPDownlinkBytes)
+	}
+	if user.TCPUplinkBytes != 0 || user.TCPDownlinkBytes != 0 {
+		t.Fatalf("逻辑 UDP 不得归入 TCP：tcp=%d/%d", user.TCPUplinkBytes, user.TCPDownlinkBytes)
+	}
+}
+
+// TestShadowsocksUDPLargePayload 用大数据报排除「只有小包才对」的可能。
+func TestShadowsocksUDPLargePayload(t *testing.T) {
+	dir := shortTempDir(t)
+	sock := sockPath(dir, "stats.sock")
+	serverPort := testenv.FreePort(t)
+	echoHost, echoPort := testenv.StartUDPEcho(t)
+
+	handle := startServer(t, ssServerConfig(serverPort, sock))
+	testenv.WaitPort(t, "127.0.0.1", serverPort)
+	clientPort := testenv.FreePort(t)
+	testenv.StartUpstreamClient(t, ssClientConfig(clientPort, serverPort, testPSKUser1, echoHost, echoPort))
+
+	payload := make([]byte, 1200)
+	for index := range payload {
+		payload[index] = byte(index)
+	}
+	const rounds = 10
+	for index := 0; index < rounds; index++ {
+		roundTripUDP(t, clientPort, payload)
+	}
+
+	expected := uint64(rounds * len(payload))
+	snapshot := fetchSnapshot(t, handle.sockPath)
+	user := userOf(t, snapshot, "ss-in", "s1")
+	if user.UDPUplinkBytes != expected || user.UDPDownlinkBytes != expected {
+		t.Fatalf("SS-2022 UDP 大数据报计数不符：%d/%d，期望 %d",
+			user.UDPUplinkBytes, user.UDPDownlinkBytes, expected)
+	}
+}
