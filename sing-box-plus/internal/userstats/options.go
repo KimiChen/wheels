@@ -41,6 +41,9 @@ type Options struct {
 	// 名单为空即整个统计不成立，因此 normalize 要求至少一项。
 	Inbounds []string `json:"inbounds"`
 
+	// DrainTimeout 为 0 表示不排空，保持上游的「收到信号即关」语义。
+	DrainTimeout badoption.Duration `json:"drain_timeout,omitempty"`
+
 	ReadTimeout     badoption.Duration `json:"read_timeout,omitempty"`
 	WriteTimeout    badoption.Duration `json:"write_timeout,omitempty"`
 	MaxConcurrency  int                `json:"max_concurrency,omitempty"`
@@ -95,6 +98,9 @@ func (o *Options) normalize() error {
 	}
 	if o.MaxIdentities < 0 {
 		return E.New("user_stats.max_identities 必须为正数")
+	}
+	if time.Duration(o.DrainTimeout) < 0 {
+		return E.New("user_stats.drain_timeout 不能为负")
 	}
 	if time.Duration(o.ReadTimeout) == 0 {
 		o.ReadTimeout = badoption.Duration(defaultReadTimeout)

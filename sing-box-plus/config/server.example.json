@@ -50,6 +50,7 @@
       "socket_mode": "0600",
       "inbounds": ["vless-entry-01", "ss-entry-01"],
       "max_identities": 4096,
+      "drain_timeout": "30s",
       "read_timeout": "5s",
       "write_timeout": "5s",
       "max_concurrency": 8,

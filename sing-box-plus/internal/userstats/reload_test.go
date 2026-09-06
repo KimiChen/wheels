@@ -5,6 +5,7 @@ import (
 	"net"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	box "github.com/sagernet/sing-box"
 	"github.com/sagernet/sing-box/adapter"
@@ -182,5 +183,59 @@ func TestCounterUnwrapWithStackedTrackers(t *testing.T) {
 	}
 	if innerUp.Load() != 4 || innerDown.Load() != 4 {
 		t.Fatalf("内层 counter 未被 unwrap 收集：%d/%d", innerUp.Load(), innerDown.Load())
+	}
+}
+
+// TestDrainRejectsNewConnectionsAndWaits 覆盖 §4.4 第 3 条的排空阶段。
+//
+// 排空态下：新的计费连接被拒（0 字节、不入账），已有连接不受影响，
+// 会话归零后 WaitDrained 立即返回。
+func TestDrainRejectsNewConnectionsAndWaits(t *testing.T) {
+	dir := shortTempDir(t)
+	sock := sockPath(dir, "stats.sock")
+	serverPort := testenv.FreePort(t)
+	echoHost, echoPort := testenv.StartTCPEcho(t)
+
+	handle := startServer(t, vlessServerConfig(serverPort, sock))
+	testenv.WaitPort(t, "127.0.0.1", serverPort)
+	clientPort := testenv.FreePort(t)
+	testenv.StartUpstreamClient(t, vlessClientConfig(clientPort, serverPort, testUUID1, echoHost, echoPort))
+
+	live := dialForward(t, clientPort)
+	defer live.Close()
+	echoOnce(t, live, []byte("hello"))
+	if handle.registry.ActiveSessions() == 0 {
+		t.Fatal("在途连接应计入活跃会话")
+	}
+
+	handle.registry.BeginDrain()
+	if !handle.registry.Draining() {
+		t.Fatal("BeginDrain 之后 Draining 必须为真")
+	}
+	// 已有连接继续跑完。
+	echoOnce(t, live, []byte("still-alive"))
+	// 新连接被拒。
+	if err := tryRoundTrip(clientPort, []byte("ping")); err == nil {
+		t.Fatal("排空期间不应接受新的计费连接")
+	}
+	// 被拒的连接不产生任何计数。
+	before := userOf(t, fetchSnapshot(t, handle.sockPath), "vless-in", "u1")
+	if err := tryRoundTrip(clientPort, []byte("ping")); err == nil {
+		t.Fatal("排空期间不应接受新的计费连接")
+	}
+	after := userOf(t, fetchSnapshot(t, handle.sockPath), "vless-in", "u1")
+	if after.TCPUplinkBytes != before.TCPUplinkBytes || after.TCPDownlinkBytes != before.TCPDownlinkBytes {
+		t.Fatalf("被拒连接不得入账：%d/%d -> %d/%d",
+			before.TCPUplinkBytes, before.TCPDownlinkBytes,
+			after.TCPUplinkBytes, after.TCPDownlinkBytes)
+	}
+
+	// 未排空时 WaitDrained 必须超时返回 false，而不是提前谎报成功。
+	if handle.registry.WaitDrained(200 * time.Millisecond) {
+		t.Fatal("仍有活跃会话时 WaitDrained 不应返回 true")
+	}
+	live.Close()
+	if !handle.registry.WaitDrained(5 * time.Second) {
+		t.Fatalf("连接关闭后应排空，实际仍有 %d 个会话", handle.registry.ActiveSessions())
 	}
 }

@@ -125,6 +125,7 @@ const (
 	admitDenyThrottled
 	admitDenyNoTable
 	admitDenyStale
+	admitDenyDraining
 )
 
 func (v admitVerdict) reason() string {
@@ -137,6 +138,8 @@ func (v admitVerdict) reason() string {
 		return "尚未收到配额全量表且 startup_action=deny"
 	case admitDenyStale:
 		return "配额全量表已过期且 stale_action=deny"
+	case admitDenyDraining:
+		return "进程正在排空，不再接受新的计费连接"
 	default:
 		return ""
 	}
@@ -144,6 +147,10 @@ func (v admitVerdict) reason() string {
 
 // admit 判断一条新连接是否放行。未启用配额控制时恒放行。
 func (r *Registry) admit(user *userRecord, nowNanos int64) admitVerdict {
+	// 排空态与配额是否启用无关：进入排空后一律拒绝新的计费连接。
+	if r.draining.Load() {
+		return admitDenyDraining
+	}
 	if !r.quota.enabled {
 		return admitAllow
 	}

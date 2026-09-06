@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"net/netip"
+	"time"
 
 	"github.com/sagernet/sing-box/option"
 	E "github.com/sagernet/sing/common/exceptions"
@@ -35,6 +36,7 @@ type Config struct {
 	ListenPath       string
 	QuotaListenPath  string
 	MaxIdentities    int
+	DrainTimeout     time.Duration
 	Inbounds         []InboundSpec
 	ServiceTag       string
 	AccessLogEnabled bool
@@ -82,6 +84,7 @@ func Validate(options option.Options) (*Config, error) {
 		NodeID:           statsOptions.NodeID,
 		ListenPath:       statsOptions.ListenPath,
 		MaxIdentities:    statsOptions.MaxIdentities,
+		DrainTimeout:     time.Duration(statsOptions.DrainTimeout),
 		ServiceTag:       serviceTag,
 		AccessLogEnabled: statsOptions.AccessLog != nil,
 	}

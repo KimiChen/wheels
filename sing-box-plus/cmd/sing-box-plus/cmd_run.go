@@ -13,7 +13,8 @@
 //   3. 新增 reconcileStats：每次（重）建 Box 之前按新配置校验、比对重载不变量并对账
 //      active / tombstone（§4.3、§4.4 第 2 条、§4.6 第 11 条）；
 //   4. create() 在 box.New() 之后、Start() 之前 AppendTracker——注入点时序是硬约束，
-//      Start() 之后追加已实测触发数据竞争（§4.7）。
+//      Start() 之后追加已实测触发数据竞争（§4.7）；
+//   5. 收到非 SIGHUP 信号时先走 drainBeforeClose() 再 cancel()（§4.4 第 3 条）。
 //
 // 本文件是 GPLv3 衍生物，义务见本子目录的 LICENSE 与 THIRD_PARTY_NOTICES.md。
 
@@ -305,6 +306,9 @@ func run() error {
 					continue
 				}
 			}
+			if osSignal != syscall.SIGHUP {
+				drainBeforeClose()
+			}
 			cancel()
 			closeCtx, closed := context.WithCancel(context.Background())
 			go closeMonitor(closeCtx)
@@ -323,6 +327,30 @@ func run() error {
 			return err
 		}
 	}
+}
+
+// drainBeforeClose 是 §4.4 第 3 条的排空阶段。
+//
+// 顺序是「先排空、再 cancel()、最后 Close()」：cancel() 之后连接已经在被拆，
+// 那时再等排空只是空转。排空自带超时，不依赖也不干扰 C.FatalStopTimeout 看门狗
+// ——后者只在 Close() 期间生效。
+//
+// 零补丁形态下拿不到 listener，因此「停止接入新连接」只能在 tracker 处拒绝新的计费连接：
+// 被拒的连接 0 字节、不入账，但仍会完成握手并向目的地拨号。运维流程里的下线或防火墙
+// 仍应先行执行，本机制是兜底而非替代（见 docs/OPERATIONS.md）。
+func drainBeforeClose() {
+	if statsRegistry == nil || statsConfig == nil || statsConfig.DrainTimeout <= 0 {
+		return
+	}
+	statsRegistry.BeginDrain()
+	log.Info("开始排空：拒绝新的计费连接，等待在途连接结束（上限 ", statsConfig.DrainTimeout, "）")
+	if statsRegistry.WaitDrained(statsConfig.DrainTimeout) {
+		log.Info("排空完成：活跃会话已归零，可以安全采集最终快照")
+		return
+	}
+	// 超时强切是允许的——已计字节不会丢失——但必须让运维知道这个窗口需要单独审计。
+	log.Warn("排空超时：仍有 ", statsRegistry.ActiveSessions(),
+		" 个活跃会话被强制关闭，采集端须把该窗口标记为未排空")
 }
 
 func closeMonitor(ctx context.Context) {

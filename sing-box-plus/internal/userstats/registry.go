@@ -78,6 +78,7 @@ type Registry struct {
 
 	audit        atomic.Pointer[auditWriter]
 	fatalHandler atomic.Pointer[func(error)]
+	draining     atomic.Bool
 }
 
 // NewRegistry 创建进程级 registry 并就地捕获信封字段。
@@ -304,4 +305,47 @@ func (r *Registry) fatal(err error) {
 // unhealthy 是 /healthz 的判据：health 三位任一为真即 503。
 func (r *Registry) unhealthy() bool {
 	return r.counterOverflow.Load() || r.sequenceOverflow.Load() || r.identityLimitReached.Load()
+}
+
+// BeginDrain 进入排空状态：拒绝新的计费连接，已有连接继续跑完。
+//
+// 这是 §4.4 第 3 条在**零补丁形态下能做到的那一半**。真正的「停止 accept」需要拿到 listener，
+// 而上游没有导出路径；因此这里只能在 tracker 处拒绝新连接——被拒的连接 0 字节、不入账，
+// 但它仍然会完成协议握手并向目的地拨号（与 §4.6 第 9 条同一条已知差异）。
+// 运维流程里的「停止接入新连接」仍应由下线或防火墙先行完成，本机制是兜底而非替代。
+func (r *Registry) BeginDrain() {
+	r.draining.Store(true)
+}
+
+// Draining 供 tracker 与运维查询。
+func (r *Registry) Draining() bool {
+	return r.draining.Load()
+}
+
+// ActiveSessions 返回当前活跃的 TCP 与 UDP 会话总数。
+//
+// 与快照里的 tcp_sessions / udp_sessions 同源，是 §5.3 第 2 步的排空判据。
+func (r *Registry) ActiveSessions() int64 {
+	var total int64
+	for _, record := range r.sortedInbounds() {
+		total += record.tcpSessions.Load()
+		total += record.udpSessions.Load()
+	}
+	return total
+}
+
+// WaitDrained 轮询至会话归零或超时，返回是否已排空。
+//
+// 超时强切是允许的——已计字节不会丢失——但调用方必须把该窗口标记为未排空以便审计。
+func (r *Registry) WaitDrained(timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if r.ActiveSessions() == 0 {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }

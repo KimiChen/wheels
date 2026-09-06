@@ -344,7 +344,10 @@ registry 由自有 main 持有（§4.7），因此它的生命周期是**进程�
    不一致即拒绝本次重载（§4.6 第 11 条）；
 2. **重载对账**：每次重载后按新配置切换 `active` 与 tombstone（§4.3 第 1、5 条）；
 3. **排空阶段**：若要在重启前排空，必须在 run 循环与 `Box.Close()` 之间插入 drain
-   （停止 accept → 等待或超时 → 再 Close）并接管 `C.FatalStopTimeout` 看门狗；
+   （停止 accept → 等待或超时 → 再 Close）。**零补丁形态只能做到其中一半**：拿不到 listener，
+   「停止 accept」只能降级为在 tracker 处拒绝新的计费连接（0 字节、不入账，但仍会握手并拨号），
+   因此 §5.3 第 1 步的下线/防火墙仍须先行。drain 自带超时、发生在 `cancel()` 之前，
+   不依赖也不干扰只在 `Close()` 期间生效的 `C.FatalStopTimeout` 看门狗；
 4. **端口不中断**：仍需 SO_REUSEPORT 或 listener fd 传递，作为独立工作项，不在首期范围内。
 
 纯内存 registry 无法恢复进程崩溃前尚未采集的尾账。若业务要求“崩溃也不丢一个字节”，
@@ -1035,7 +1038,7 @@ node_id + inbounds[].tag + inbounds[].generation + users[].name + users[].genera
 | 参考 collector 与契约测试 | 复用 `http_unix.py` 的 HTTP/UDS 传输层与 `settlement_model.py` 的周期/幂等算法骨架（两者的核心逻辑与 schema 正交），按 v2 重写字段校验与 fixture（合计约 300 行）；**参考 collector 从零实现**——`shadowsocks-rust-plus` 的 `mock_collector.py` 是审计导出协议的采集器，与快照接口无关 | 是 | 1.5–2.5 人周 |
 | 可复现发布与签名 | 两次独立构建、manifest、detached 签名与验签 | 是 | 1–2 人周 |
 | 文档与运维手册 | `docs/` 六件套 | 是 | 1–2 人周 |
-| 重载对账与排空 | 每次重载按新配置对账 `active`/tombstone、drain 阶段、看门狗接管、排空超时策略（§4.4） | 否 | 1–2 人周 |
+| 重载对账与排空 | 每次重载按新配置对账 `active`/tombstone、drain 阶段与排空超时策略（§4.4） | 否 | 1–2 人周 |
 | 基础访问审计 | §4.8 的 13 条实现纪律、JSONL writer 与自轮转、验收门禁与 7 项变异检验（约 320 行 Go + 60 行测试脚本） | 否 | 0.5–1 人周 |
 | 配额闸断 | §4.9 的控制端点与全量表原子换页、CountFunc 内闸断、重连节流，以及 §5.4 在参考 collector 侧的下发逻辑（约 350 行 Go + 参考 collector 增量） | 否 | 1–1.5 人周 |
 | 上游 rebase 储备 | 每次 minor 升级 | 周期性 | 1–2 人周/次 |
@@ -1110,7 +1113,8 @@ shadowsocks-2022 + dns + `hijack-dns` 路由规则的配置全部解析通过，
 | 5 长跑与结算验证 | ⬜ | `scripts/soak.sh` 与 `reference_collector.py --report` 的四项判据已就绪，**7 天 staging 长跑本身未执行** |
 | 6 可发布版本 | ⬜（部分） | 可复现构建脚本（两次独立构建逐字节一致）、manifest、签名与验签脚本已就绪；**未做**：真实离线私钥签名、§8 的三组性能对照、法务评审 |
 
-两项可选能力（§4.8 访问审计、§4.9 配额闸断）**均已实现且默认关闭**：不配置对应字段时
+三项可选能力**均已实现且默认关闭**：§4.8 访问审计、§4.9 配额闸断，以及 §4.4 的重载对账与
+排空（`drain_timeout` 缺省为 0 即保持上游「收到信号即关」的语义）。不配置对应字段时，
 不创建任何 goroutine、文件、socket 或额外包装。
 
 已知未覆盖项，按需要补齐的优先级排列：
