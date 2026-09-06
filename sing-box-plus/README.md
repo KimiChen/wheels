@@ -1121,11 +1121,11 @@ shadowsocks-2022 + dns + `hijack-dns` 路由规则的配置全部解析通过，
 
 1. **7 天 staging 长跑未做**：短长跑已跑通且四项判据全 0，但那只是定金——
    README §7 M5 要的是连续 ≥ 7 天，只能由你在真实节点上跑，`scripts/soak.sh` 就是为此准备的。
-2. **三组性能对照只做了环回版**：三个平台的微基准与 `BenchmarkDataPath{A,B,C}` 都有数据，
-   64 KiB 分块下测不出统计与闸断的开销。但微基准暴露了一件必须知道的事：
-   **配额扣减的代价强烈依赖架构**——arm64 上 +2%，x86_64 上 **+68%**（8.16 → 13.7 ns，
-   `LOCK XADD` vs LSE `LDADD`），且只落在真正带额度的 lineage 上。环回测量**不能替代**
-   带真实 RTT、并发爬坡与 p99 的端到端验收。见 `docs/PERFORMANCE.md`。
+2. **三组性能对照只做了环回版**：四个平台的微基准与 `BenchmarkDataPath{A,B,C}` 都有数据，
+   64 KiB 分块下组间差 ≤ 2% 且不超出组内噪声。微基准里配额扣减的**绝对**增量是
+   arm64 约 0.08 ns、现代 x86 核约 1.7 ns、低功耗 x86 核约 5.5 ns（一次 `LOCK XADD`
+   vs LSE `LDADD`），且只落在真正带额度的 lineage 上。环回测量**不能替代**带真实 RTT、
+   并发爬坡与 p99 的端到端验收。见 `docs/PERFORMANCE.md`。
 3. **正式发布签名用的是一次性密钥**：跨机签名→验签的完整流程已演练通过（含篡改必失败），
    但真实的离线私钥在你手里，正式出包时须用它重签，并把公钥指纹写进 `docs/OPERATIONS.md`。
 4. **REALITY 链路未对账**：Vision 已覆盖（`vision_test.go`：TLS + `xtls-rprx-vision`，
