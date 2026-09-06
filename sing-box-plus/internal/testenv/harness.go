@@ -53,7 +53,7 @@ func ClientContext(ctx context.Context) context.Context {
 }
 
 // FreePort 返回一个当前空闲的本机端口。
-func FreePort(t *testing.T) uint16 {
+func FreePort(t testing.TB) uint16 {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -65,7 +65,7 @@ func FreePort(t *testing.T) uint16 {
 }
 
 // StartTCPEcho 启动一个回声 TCP 服务，作为「目标」。
-func StartTCPEcho(t *testing.T) (addr string, port uint16) {
+func StartTCPEcho(t testing.TB) (addr string, port uint16) {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -100,7 +100,7 @@ func StartTCPEcho(t *testing.T) (addr string, port uint16) {
 }
 
 // StartUDPEcho 启动一个回声 UDP 服务。
-func StartUDPEcho(t *testing.T) (addr string, port uint16) {
+func StartUDPEcho(t testing.TB) (addr string, port uint16) {
 	t.Helper()
 	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
@@ -125,7 +125,7 @@ func StartUDPEcho(t *testing.T) (addr string, port uint16) {
 //
 // 客户端用 direct inbound 做端口转发：任何到该端口的 TCP/UDP 都经指定 outbound 转到目标，
 // 测试侧因此不需要实现任何代理协议客户端。
-func StartUpstreamClient(t *testing.T, config string) {
+func StartUpstreamClient(t testing.TB, config string) {
 	t.Helper()
 	ctx := ClientContext(context.Background())
 	options, err := json.UnmarshalExtendedContext[option.Options](ctx, []byte(config))
@@ -159,7 +159,7 @@ func clientListenPort(options option.Options) uint16 {
 }
 
 // WaitPort 等待端口可连接，避免用固定 sleep 制造 flaky 测试。
-func WaitPort(t *testing.T, host string, port uint16) {
+func WaitPort(t testing.TB, host string, port uint16) {
 	t.Helper()
 	if port == 0 {
 		return

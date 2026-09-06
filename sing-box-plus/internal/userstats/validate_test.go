@@ -184,6 +184,11 @@ func TestValidateRejections(t *testing.T) {
 			"clash_api",
 		},
 		{
+			"experimental.v2ray_api.listen 非空",
+			configWith(vlessOK, statsService(""), `"experimental": {"v2ray_api": {"listen": "127.0.0.1:8080"}}`),
+			"v2ray_api",
+		},
+		{
 			"route.rules 含 reject",
 			configWith(vlessOK, statsService(""), `"route": {"rules": [{"action": "reject"}]}`),
 			"reject",

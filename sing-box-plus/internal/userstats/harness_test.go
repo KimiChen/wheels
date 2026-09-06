@@ -43,7 +43,7 @@ type serverHandle struct {
 
 // startServer 按 main 的顺序拉起被测服务端：
 // 解码 → 校验 → 建进程级 registry → 对账 → box.New → AppendTracker → Start。
-func startServer(t *testing.T, configJSON string) *serverHandle {
+func startServer(t testing.TB, configJSON string) *serverHandle {
 	t.Helper()
 	ctx := serverContext(context.Background())
 	options, err := singjson.UnmarshalExtendedContext[option.Options](ctx, []byte(configJSON))
@@ -87,7 +87,7 @@ func startServer(t *testing.T, configJSON string) *serverHandle {
 //
 // macOS 的 TMPDIR 在 /var/folders 下很长，而 UDS 路径有 104 字节硬上限，
 // 用默认 TempDir 会让测试在 bind 时随机失败。
-func shortTempDir(t *testing.T) string {
+func shortTempDir(t testing.TB) string {
 	t.Helper()
 	base := ""
 	if runtime.GOOS == "darwin" {
@@ -102,7 +102,7 @@ func shortTempDir(t *testing.T) string {
 }
 
 // httpUnix 向本机 UDS 发一个 HTTP/1.1 请求并返回状态码与响应体。
-func httpUnix(t *testing.T, sockPath string, method string, target string, body []byte) (int, []byte) {
+func httpUnix(t testing.TB, sockPath string, method string, target string, body []byte) (int, []byte) {
 	t.Helper()
 	conn, err := net.DialTimeout("unix", sockPath, 3*time.Second)
 	if err != nil {
@@ -130,7 +130,7 @@ func httpUnix(t *testing.T, sockPath string, method string, target string, body 
 	return parseHTTPResponse(t, raw)
 }
 
-func parseHTTPResponse(t *testing.T, raw []byte) (int, []byte) {
+func parseHTTPResponse(t testing.TB, raw []byte) (int, []byte) {
 	t.Helper()
 	text := string(raw)
 	headerEnd := indexOf(text, "\r\n\r\n")
@@ -177,7 +177,7 @@ func splitSpace(input string) []string {
 }
 
 // fetchSnapshot 取一次快照并解析。
-func fetchSnapshot(t *testing.T, sockPath string) *Snapshot {
+func fetchSnapshot(t testing.TB, sockPath string) *Snapshot {
 	t.Helper()
 	status, body := httpUnix(t, sockPath, "GET", "/v2/snapshot", nil)
 	if status != 200 {
@@ -190,7 +190,7 @@ func fetchSnapshot(t *testing.T, sockPath string) *Snapshot {
 	return &snapshot
 }
 
-func userOf(t *testing.T, snapshot *Snapshot, tag string, name string) SnapshotUser {
+func userOf(t testing.TB, snapshot *Snapshot, tag string, name string) SnapshotUser {
 	t.Helper()
 	for _, inbound := range snapshot.Inbounds {
 		if inbound.Tag != tag {
@@ -207,7 +207,7 @@ func userOf(t *testing.T, snapshot *Snapshot, tag string, name string) SnapshotU
 }
 
 // roundTripTCP 通过客户端转发端口做一次 TCP 往返。
-func roundTripTCP(t *testing.T, port uint16, payload []byte, repeat int) {
+func roundTripTCP(t testing.TB, port uint16, payload []byte, repeat int) {
 	t.Helper()
 	conn, err := net.DialTimeout("tcp", "127.0.0.1:"+strconv.Itoa(int(port)), 5*time.Second)
 	if err != nil {
@@ -227,7 +227,7 @@ func roundTripTCP(t *testing.T, port uint16, payload []byte, repeat int) {
 }
 
 // roundTripUDP 通过客户端转发端口做一次 UDP 往返。
-func roundTripUDP(t *testing.T, port uint16, payload []byte) {
+func roundTripUDP(t testing.TB, port uint16, payload []byte) {
 	t.Helper()
 	conn, err := net.Dial("udp", "127.0.0.1:"+strconv.Itoa(int(port)))
 	if err != nil {

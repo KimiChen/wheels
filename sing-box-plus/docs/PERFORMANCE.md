@@ -35,6 +35,10 @@ exporter 或任何附加包装，B 与 A 的差应当落在噪声内；真正的
 ## 运行
 
 ```bash
+# 数据面三组对照（A 未启用 / B 启用统计 / C 统计+配额闸断）
+go test -tags "with_utls,badlinkname,with_user_stats" -run '^$' \
+  -bench BenchmarkDataPath -benchtime 4000x -count=5 ./internal/userstats/
+
 # 微基准：回调本身、配额扣减与快照序列化
 go test -tags "with_utls,badlinkname,with_user_stats" -run '^$' -bench . -benchmem ./internal/userstats/
 
@@ -65,10 +69,23 @@ darwin/arm64、go1.26.5、`with_utls,badlinkname,with_user_stats`，2026-09-06�
 回归阈值：`CountUplink*` 的 `allocs/op` 必须恒为 0——它一旦非 0，说明有人在回调里做了分配，
 无论 ns/op 看起来多好都要退回。
 
-### 三组端到端对照（未测）
+### 环回吞吐三组对照（已测，但只能得出一个弱结论）
 
-A/B/C 三组与 C′ 需要一台独立的负载发生机和一段稳定的观察窗口，本机不具备条件，
-因此**下表仍然是空的**。空表不等于没有回归，只等于没有测过；首个正式发布必须填满它，
+`BenchmarkDataPath{A,B,C}`，64 KiB 分块的 VLESS 往返，darwin/arm64、go1.26.5、
+`-benchtime 4000x -count=5`，2026-09-06。取五次的中位数：
+
+| 组 | 中位 ns/op | 中位吞吐 | 五次极差 |
+| --- | --- | --- | --- |
+| A 未启用统计 | 67 540 | 970 MB/s | 61 897 – 68 191（10%） |
+| B 启用四向统计 | 69 209 | 947 MB/s | 65 918 – 73 679（12%） |
+| C 统计 + 配额闸断 | 63 942 | 1 025 MB/s | 62 086 – 71 107（15%） |
+
+**结论只能写成这样：三组在这台机器上不可区分。** 组内极差 10–15%，
+而组间中位数差不到 3%——C 组「比 A 还快」正是这一点的证据，不是配额闸断加速了转发。
+可以说的是：统计与闸断没有引入数量级的开销；不能说的是「开销为 X%」。
+
+这条测量**不能替代**三组端到端验收：环回没有真实 RTT、没有并发爬坡、没有 p99，
+也没有 CPU 与 goroutine 随用户数增长的曲线。下表仍然是空的，首个正式发布必须填满它，
 并在 `docs/UPSTREAM_BASELINE.md` 的验证记录里留一行指向本表。
 
 | 日期 | 版本 | 组 | 吞吐 | p50 / p99 | CPU | B/op | allocs/op | 备注 |

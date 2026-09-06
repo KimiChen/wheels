@@ -45,21 +45,30 @@ TCP/UDP × 上下行四个累计值、明确的重启边界、可幂等采集，
 四向字节 oracle 误差为 0；快照接口通过 §8 的故障矩阵；下游按 §5 差分入账时不出现漏计、
 重复计费或静默降级。
 
-本目录当前只有本计划书。第一步（里程碑 1）产出的骨架为：
+当前目录结构（实施状态见 §7 末段）：
 
 ```text
 sing-box-plus/
-├── README.md
-├── upstream.lock                 # 钉死 repository / tag / commit / tree sha256 / go 最低版本
-├── .env.example                  # UPSTREAM_REPOSITORY、GOMODCACHE、SING_BOX_BUILD_TAGS 占位
-├── cmd/sing-box-plus/            # 自有 main：复制的 CLI 骨架 + 最小 registry + tracker 注入
-├── scripts/prepare-source.sh     # 按精确 commit 取源码并校验
-├── scripts/verify.sh             # go vet / go test -race / lint / 敏感信息扫描 / 复制文件漂移门禁
-└── docs/UPSTREAM_BASELINE.md     # 基线、编译验证记录与升级规则
+├── README.md                     # 本计划书，正文即规范
+├── upstream.lock                 # 钉死 repository / tag / commit / tree sha256 / go 版本
+├── LICENSE                       # GPL-3.0 全文 + 上游附加条款原文（§10）
+├── THIRD_PARTY_NOTICES.md        # 9 个复制文件逐个登记修改内容与日期
+├── .env.example / .gitignore / .gitattributes
+├── go.mod / go.sum               # require sing-box v1.14.0，与 upstream.lock 双重固定
+├── cmd/sing-box-plus/            # 自有 main：9 个复制的 CLI 文件 + 最小 registry + tracker 注入
+│   └── copied-files.lock         # 复制文件的上游侧与 overlay 侧双向 sha256
+├── internal/minreg/              # 最小 registry：只注册白名单类型，不注册 ssmapi
+├── internal/userstats/           # 计量、快照导出、配额闸断、访问审计、配置校验
+├── internal/testenv/             # 集成测试拓扑（与生产 registry 严格分开）
+├── scripts/                      # prepare-source / verify / build / release / sign / soak / 客户端
+├── tests/                        # 结算模型、参考 collector、HTTP-UDS 传输层与 Python 用例
+├── config/server.example.json    # 脱敏的最小可用配置
+├── packaging/                    # systemd service / sysusers / tmpfiles
+└── docs/                         # 六件套
 ```
 
-在骨架落地并冻结基线之前不写 tracker 代码——§9.2 的升级规则要求所有实现都绑定到一个已记录的
-上游提交。
+纪律不变：所有实现都绑定到一个已记录的上游提交，`scripts/verify.sh` 会重新准备源码树并复算
+规范哈希与复制文件的双向漂移。
 
 ## 2. 前提与约束
 
@@ -1062,12 +1071,15 @@ shadowsocks-2022 + dns + `hijack-dns` 路由规则的配置全部解析通过，
 | `scripts/verify.sh` | `go vet`、`go test -race ./...`、lint、敏感信息扫描，以及复制文件与钉定版本的 diff 漂移门禁（§4.7） |
 | `scripts/build-linux-release.sh` | 两次独立路径构建逐字节一致才产出 manifest + SHA-256 |
 | `scripts/sign-release.sh` / `verify-release.sh` | detached 签名与验签，私钥离线保管 |
-| `scripts/user-stats-client.py` | 带 v2 schema 与健康校验的快照读取客户端；自 `shadowsocks-rust-plus` 同名脚本适配，HTTP 解析与响应头断言原样保留，替换字段校验、默认 socket 路径与 request-line。注意该 HTTP 解析器与 `tests/http_unix.py` 是同一份代码的两处副本，v2 下两处必须同步改，`scripts/verify.sh` 应加一条一致性门禁 |
+| `scripts/user-stats-client.py` | 带 v2 schema 与健康校验的快照读取客户端。**HTTP/UDS 传输层不复制第二份**：唯一实现在 `scripts/http_unix.py`，`tests/http_unix.py` 是按文件路径装载的再导出 shim。参考实现那两份副本靠门禁维持一致，本项目从结构上消除漂移，`tests/test_http_unix.py` 断言 `request` 的定义位置落在唯一实现里 |
+| `scripts/quota-client.py` | 配额下发客户端：读取一份 `remaining_bytes` 清单后 `PUT /v2/quota`，含 `epoch` 维护与 409 重推 |
+| `scripts/soak.sh` | 里程碑 5 的长跑采集循环；结束后用 `reference_collector.py --report` 输出四项判据 |
+| `tests/race-suppressions.txt` | 只抑制上游 `route.NetworkManager` 的已知竞争；`verify.sh` 另跑一遍不带抑制的纯单元用例，使它无法掩盖本项目自身的竞争 |
 | `tests/reference_collector.py` | 参考 collector：取快照 → v2 校验 → 差分 → 幂等落地本地账本；范围**不含** outbox、mTLS 与重试（属下游控制面）。`shadowsocks-rust-plus` 无对应物可搬，须从零实现 |
 | `scripts/quota-client.py` | 配额下发客户端：读取一份 `remaining_bytes` 清单后 `PUT /v2/quota`，含 `epoch` 维护与 409 重推。与 `scripts/user-stats-client.py` 共用同一份 HTTP/UDS 解析代码，受同一条一致性门禁约束 |
 | `packaging/` | 复用上游 `release/config/sing-box.service`、`sing-box.sysusers`，追加 `RuntimeDirectory=` 承载 UDS 与 `Restart=on-failure`；上游无 tmpfiles 模板，需自建 |
 | `config/server.example.json` | 脱敏的最小可用配置，含 `user_stats` 全字段与默认值 |
-| `docs/` | `API.md`、`ARCHITECTURE.md`、`OPERATIONS.md`、`UPSTREAM_BASELINE.md`、`PERFORMANCE.md` |
+| `docs/` | `API.md`、`ARCHITECTURE.md`、`OPERATIONS.md`、`UPSTREAM_BASELINE.md`、`PERFORMANCE.md`、`ACCESS_AUDIT.md` |
 | `tests/` | 契约测试、字节 oracle、故障注入与 benchmark |
 | `THIRD_PARTY_NOTICES.md` | 见 §10 |
 | `.env.example` | `UPSTREAM_REPOSITORY`、`GOMODCACHE`、`SING_BOX_BUILD_TAGS` 等占位 |
@@ -1083,6 +1095,34 @@ shadowsocks-2022 + dns + `hijack-dns` 路由规则的配置全部解析通过，
 | 4 | UDS exporter | 权限 / 符号链接 / inode 替换 / 超限 / 慢客户端故障用例通过；exporter 异常退出导致进程失败退出；v2 契约测试全绿（对 §4.5 的快照与映射表逐字段断言），参考 collector 在 §8 故障矩阵下无漏计、无重复入账 |
 | 5 | 长跑与结算验证 | staging 连续运行 ≥ 7 天：负增量 = 0、未知 runtime = 0、`sequence` 重复 = 0、unhealthy 快照全部被拒；§5.3 计划重启流程演练无缺口、无重复 |
 | 6 | 可发布版本 | §8 故障矩阵与性能三组对照报告归档；可复现发布包与签名验签通过；`docs/OPERATIONS.md` 含部署、采集、重启屏障与回滚步骤 |
+
+### 7.1 实施状态（2026-09-06）
+
+正文是规范，本节只记录「规范里的哪些条已经有可执行证据」。带 ✅ 的都能由
+`bash scripts/verify.sh` 或表中点名的用例重放；带 ⬜ 的是**还没做**，不是做了没写。
+
+| 里程碑 | 状态 | 证据 |
+| --- | --- | --- |
+| 1 冻结基线与骨架 | ✅ | `upstream.lock` 记录 tag/commit/`prepared_tree_sha256`；verify 重新准备源码树后复算一致；`version` 输出四行且显示 `v1.14.0 (0b8995879f29)`；生产 tag 集写入 `.env.example` |
+| 2 观测 PoC | ✅（部分） | VLESS 与 SS-2022 EIH 多用户 TCP+UDP 四向 oracle 误差 = 0（`integration_test.go`）。**未做**：`with_v2ray_api` 的 PoC 集构建，以及 ServiceName 覆写与静态白名单两项边界的复现记录 |
+| 3 四向 tracker / registry | ✅ | `go test -race` 全绿；含「`Start()` 后追加必被 -race 报出竞争」的负向用例（子进程执行）；多 tracker 叠加 unwrap 断言通过；§4.6 校验路径 22 例。**未做**：Linux 真实 splice 用例只交叉编译通过，本机无 Linux 环境可实跑 |
+| 4 UDS exporter | ✅ | 权限 / 符号链接 / 旧 socket / 超限 / 版本 / 方法 / query 故障用例通过；v2 契约逐字段断言；参考 collector 在故障矩阵下无漏计、无重复入账 |
+| 5 长跑与结算验证 | ⬜ | `scripts/soak.sh` 与 `reference_collector.py --report` 的四项判据已就绪，**7 天 staging 长跑本身未执行** |
+| 6 可发布版本 | ⬜（部分） | 可复现构建脚本（两次独立构建逐字节一致）、manifest、签名与验签脚本已就绪；**未做**：真实离线私钥签名、§8 的三组性能对照、法务评审 |
+
+两项可选能力（§4.8 访问审计、§4.9 配额闸断）**均已实现且默认关闭**：不配置对应字段时
+不创建任何 goroutine、文件、socket 或额外包装。
+
+已知未覆盖项，按需要补齐的优先级排列：
+
+1. **Linux 专属路径只做了交叉编译**：真实 splice 与 `badtls` read-wait 路径的字节对账矩阵
+   需要一台 Linux 主机；用例已就位（`splice_linux_test.go`），缺的是执行环境。
+2. **三组性能对照只做了环回版**：热路径微基准（计数回调 4.0 ns/op、0 allocs）与
+   `BenchmarkDataPath{A,B,C}` 的环回吞吐都已有数据，结论是三组在本机不可区分——
+   组内极差 10–15%，组间中位差不到 3%。这只能证明没有数量级开销，
+   **不能替代**带真实 RTT、并发爬坡与 p99 的端到端验收（需要独立负载机）。见 `docs/PERFORMANCE.md`。
+3. **Vision / REALITY 链路的对账矩阵**：现有 oracle 覆盖裸 TCP 与 XUDP，
+   Vision buffered→direct 切换与 early data 尚未逐项对账。
 
 ## 8. 测试与性能门槛
 
