@@ -12,6 +12,19 @@ install -d -m 0750 /etc/sing-box-plus
 install -m 0640 config/server.example.json /etc/sing-box-plus/config.json   # 改完再启
 ```
 
+### `-C` 是配置**目录**，别往里放别的 JSON
+
+packaging 里的单元用 `-C /etc/sing-box-plus`：那是配置目录模式，进程会读取该目录下**所有**
+`.json` 并合并。往里放任何非 sing-box 配置的 JSON（例如额度计划文件），
+进程下次启动就会把它当配置解析并 FATAL 退出。
+
+危险在于**它不会立刻炸**：目录只在启动时读一次，所以放进去之后服务照常跑，
+直到下一次重启——可能是计划内的，也可能是半夜掉电之后。实测就是这么踩的，
+服务因此空转了 98 秒才被发现。
+
+额度计划、采集器配置这类文件放在别处，例如 `/etc/sing-box-plus-collector/`。
+只有 sing-box-plus 自己的配置能进 `-C` 指向的目录。
+
 ### 配置门禁必须用本项目的二进制
 
 产出的二进制保持 `run` / `check` / `format` / `version` 的 argv 与退出码与上游兼容，
@@ -128,7 +141,7 @@ tests/reference_collector.py   --socket /run/sing-box-plus/user-stats.sock   --l
 ```
 
 ```bash
-tests/reference_collector.py … --quota-plan /etc/sing-box-plus/quota-plan.json
+tests/reference_collector.py … --quota-plan /etc/sing-box-plus-collector/quota-plan.json
 ```
 
 计划文件每轮重新读取，**改额度只改这个文件即可**，不需要编辑 systemd 单元、也不需要
