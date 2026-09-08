@@ -2,6 +2,7 @@ package userstats
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -31,7 +32,7 @@ func waitSessionsDrained(t *testing.T, sock string, tag string) {
 	t.Fatal("等待会话排空超时")
 }
 
-func auditServerConfig(port uint16, sock string, logPath string) string {
+func auditServerConfig(port uint16, sock string, logDir string) string {
 	return fmt.Sprintf(`{
   "log": {"level": "error"},
   "inbounds": [{
@@ -44,9 +45,9 @@ func auditServerConfig(port uint16, sock string, logPath string) string {
     "type": "user_stats", "tag": "stats",
     "node_id": "node-test-01", "listen_path": %q,
     "inbounds": ["vless-in"],
-    "access_log": {"path": %q, "flush_interval_ms": 20}
+    "access_log": {"directory": %q, "flush_interval_ms": 20}
   }]
-}`, port, testUUID1, testUUID2, sock, logPath)
+}`, port, testUUID1, testUUID2, sock, logDir)
 }
 
 // TestAuditMinimalGate 是 §4.8「验收先行」的最小门禁：
@@ -57,11 +58,14 @@ func auditServerConfig(port uint16, sock string, logPath string) string {
 func TestAuditMinimalGate(t *testing.T) {
 	dir := shortTempDir(t)
 	sock := sockPath(dir, "stats.sock")
-	logPath := filepath.Join(dir, "access.jsonl")
+	logDir := filepath.Join(dir, "access")
+	if err := os.Mkdir(logDir, 0o750); err != nil {
+		t.Fatalf("创建审计目录失败：%v", err)
+	}
 	serverPort := testenv.FreePort(t)
 	echoHost, echoPort := testenv.StartTCPEcho(t)
 
-	handle := startServer(t, auditServerConfig(serverPort, sock, logPath))
+	handle := startServer(t, auditServerConfig(serverPort, sock, logDir))
 	testenv.WaitPort(t, "127.0.0.1", serverPort)
 	clientPort := testenv.FreePort(t)
 	testenv.StartUpstreamClient(t, vlessClientConfig(clientPort, serverPort, testUUID1, echoHost, echoPort))
@@ -70,7 +74,7 @@ func TestAuditMinimalGate(t *testing.T) {
 	waitSessionsDrained(t, handle.sockPath, "vless-in")
 	handle.instance.Close()
 
-	records := readLines(t, logPath)
+	records := readLines(t, filepath.Join(logDir, auditFileName("u1")))
 	var access []map[string]any
 	for _, record := range records {
 		if record["ev"] == nil {
@@ -105,11 +109,14 @@ func TestAuditMinimalGate(t *testing.T) {
 func TestAuditNoRecordForHandshakeOnly(t *testing.T) {
 	dir := shortTempDir(t)
 	sock := sockPath(dir, "stats.sock")
-	logPath := filepath.Join(dir, "access.jsonl")
+	logDir := filepath.Join(dir, "access")
+	if err := os.Mkdir(logDir, 0o750); err != nil {
+		t.Fatalf("创建审计目录失败：%v", err)
+	}
 	serverPort := testenv.FreePort(t)
 	echoHost, echoPort := testenv.StartTCPEcho(t)
 
-	handle := startServer(t, auditServerConfig(serverPort, sock, logPath))
+	handle := startServer(t, auditServerConfig(serverPort, sock, logDir))
 	testenv.WaitPort(t, "127.0.0.1", serverPort)
 	clientPort := testenv.FreePort(t)
 	testenv.StartUpstreamClient(t, vlessClientConfig(clientPort, serverPort, testUUID1, echoHost, echoPort))
@@ -120,9 +127,16 @@ func TestAuditNoRecordForHandshakeOnly(t *testing.T) {
 	waitSessionsDrained(t, handle.sockPath, "vless-in")
 	handle.instance.Close()
 
-	for _, record := range readLines(t, logPath) {
-		if record["ev"] == nil {
-			t.Fatalf("只完成握手不应产生记录：%v", record)
+	// 逐用户分文件之后，从未产生过成功访问的身份**连文件都不该有**——
+	// 惰性创建比创建一个空文件更诚实：目录里出现某人的文件本身就是一条信息。
+	path := filepath.Join(logDir, auditFileName("u1"))
+	if _, err := os.Stat(path); err == nil {
+		for _, record := range readLines(t, path) {
+			if record["ev"] == nil {
+				t.Fatalf("只完成握手不应产生记录：%v", record)
+			}
 		}
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("检查审计文件失败：%v", err)
 	}
 }

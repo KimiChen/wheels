@@ -688,7 +688,27 @@ stock sing-box 会拒绝解析（实测 exit=1），`format` 同样失败。因�
 写入 spool → 被 collector 取走』这条完整链路”，其 producer 侧唯一的链路测试跑在内存管道上——
 **规模不等于置信度**，本节因此把验收前置为硬门禁（见末段）。
 
-**记录形态。** 每条成功访问一行 JSONL，追加写入独立文件；不进快照、不走 UDS：
+**逐计费身份一个文件。** 文件名是 `access-<base64url(身份名)>.jsonl`，落在 `directory` 下。
+
+分文件的理由是**数据主体分离**——按人删除、按人交付、按人设保留期——而**不是**抗篡改：
+文件仍与数据面同 uid，被攻破的数据面可以改写其中任意一个，分成多少个文件都一样。
+抗篡改属于 §11.2 D7 的重新评估范围，不因分文件而被满足。
+
+文件名**不能直接用身份名**：§3 只要求「每字节为 ASCII 可显示非空白字符」，
+于是 `../../tmp/x` 是一个合法的计费身份名，直接拼进路径就是路径穿越。
+收紧 §3 会波及计费身份本身（那是结算的键），因此映射放在审计侧。
+选 base64url（RFC 4648 §5）而不是标准 base64：标准表里有 `/`。base64url 的字母表
+`A-Za-z0-9-_` 既穿越不了也拼不出 `..`，而且是双射——文件名可直接解回身份名，
+按人交付与按人删除都不需要额外的映射表。
+
+三条随之而来的纪律：`seq` 与队列丢弃的 gap 行都**逐文件**计（每个文件要能被独立阅读与查缺）；
+打开文件数有上限、超出按 LRU 关闭（身份数上限是 `max_identities`，默认 4096，
+没有上限时 fd 与写缓冲会同时失控）；从未产生过成功访问的身份**不创建文件**——
+目录里出现某人的文件本身就是一条信息。
+启动期还会做一次大小写折叠的文件名碰撞检查：生产用 ext4 不会撞，
+但开发与测试跑在不区分大小写的 APFS 上，撞了就是两个人的记录混进一份。
+
+**记录形态。** 每条成功访问一行 JSONL；不进快照、不走 UDS：
 
 ```json
 {"seq":10241,"ts":1787587200123,"node":"node-example-01","run":"0123456789abcdef0123456789abcdef","user":"u_example_01","in":"vless-entry-01","net":"tcp","host":"example.com","host_src":"sniff","port":443,"up":5120,"down":81920,"ms":2317}
@@ -720,11 +740,12 @@ stock sing-box 会拒绝解析（实测 exit=1），`format` 同样失败。因�
       "node_id": "node-example-01",
       "listen_path": "/run/sing-box-plus/user-stats.sock",
       "access_log": {
-        "path": "/var/lib/sing-box-plus/access.jsonl",
-        "max_bytes": 268435456,
-        "max_total_bytes": 1073741824,
+        "directory": "/var/lib/sing-box-plus/access",
+        "max_bytes": 16777216,
+        "max_total_bytes": 2147483648,
         "flush_interval_ms": 1000,
-        "queue_size": 8192
+        "queue_size": 8192,
+        "max_open_files": 256
       }
     }
   ]

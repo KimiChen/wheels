@@ -26,7 +26,10 @@ const (
 	defaultQuotaRequestBytes = 4 * 1024 * 1024
 	defaultAuditQueueSize    = 8192
 	defaultAuditFlushMs      = 1000
-	defaultAuditMaxBytes     = 256 * 1024 * 1024
+	// 逐用户分文件之后单个文件小得多：实测每个身份约 1.4 MB/天。
+	// 沿用 256 MiB 会让一个身份半年才轮转一次，等于纪律 9/10 在生产上从不触发。
+	defaultAuditMaxBytes     = 16 * 1024 * 1024
+	defaultAuditMaxOpenFiles = 256
 )
 
 // Options 是 user_stats 服务的配置。
@@ -54,12 +57,16 @@ type Options struct {
 }
 
 // AccessLogOptions 是 §4.8 基础访问审计的配置，缺省即整条旁路不存在。
+//
+// 逐计费身份一个文件（数据主体分离）：文件名是 access-<base64url(身份名)>.jsonl，
+// 落在 directory 下。目录必须已存在——属主与权限是部署决策，由 tmpfiles/StateDirectory 负责。
 type AccessLogOptions struct {
-	Path            string `json:"path"`
+	Directory       string `json:"directory"`
 	MaxBytes        int64  `json:"max_bytes,omitempty"`
 	MaxTotalBytes   int64  `json:"max_total_bytes,omitempty"`
 	FlushIntervalMs int    `json:"flush_interval_ms,omitempty"`
 	QueueSize       int    `json:"queue_size,omitempty"`
+	MaxOpenFiles    int    `json:"max_open_files,omitempty"`
 }
 
 // QuotaControlOptions 是 §4.9 配额闸断的配置，缺省即整个能力关闭。
@@ -142,11 +149,20 @@ func (o *Options) normalize() error {
 }
 
 func (o *AccessLogOptions) normalize() error {
-	if o.Path == "" {
-		return E.New("user_stats.access_log.path 不能为空")
+	if o.Directory == "" {
+		return E.New("user_stats.access_log.directory 不能为空")
+	}
+	if !strings.HasPrefix(o.Directory, "/") {
+		return E.New("user_stats.access_log.directory 必须是绝对路径：", o.Directory)
 	}
 	if o.MaxBytes == 0 {
 		o.MaxBytes = defaultAuditMaxBytes
+	}
+	if o.MaxOpenFiles == 0 {
+		o.MaxOpenFiles = defaultAuditMaxOpenFiles
+	}
+	if o.MaxOpenFiles < 1 {
+		return E.New("user_stats.access_log.max_open_files 必须为正数")
 	}
 	if o.MaxBytes < 64*1024 {
 		return E.New("user_stats.access_log.max_bytes 过小")

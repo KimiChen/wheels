@@ -349,3 +349,17 @@ func (r *Registry) WaitDrained(timeout time.Duration) bool {
 		time.Sleep(50 * time.Millisecond)
 	}
 }
+
+// Identities 返回当前已注册的全部计费身份名。
+//
+// 供审计的启动期文件名碰撞检查使用：那类检查必须在 Start 期一次性做完并失败关闭，
+// 等到运行期第一次写文件才发现两个人共用一个文件就晚了。
+func (r *Registry) Identities() []string {
+	var names []string
+	for _, record := range r.sortedInbounds() {
+		for _, user := range record.sortedUsers() {
+			names = append(names, user.name)
+		}
+	}
+	return names
+}
