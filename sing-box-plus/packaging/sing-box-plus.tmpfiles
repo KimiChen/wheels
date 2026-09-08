@@ -5,3 +5,6 @@
 # 注意 socket 自身的权限由进程按 socket_mode 设定（默认 0600），目录权限不能替代它。
 d /run/sing-box-plus 0750 sing-box-plus sing-box-plus -
 d /var/lib/sing-box-plus 0750 sing-box-plus sing-box-plus -
+# 访问审计逐计费身份一个文件，目录必须预先存在：属主与权限是部署决策，
+# 进程不会自己 mkdir——那会掩盖「部署漏配了」。
+d /var/lib/sing-box-plus/access 0750 sing-box-plus sing-box-plus -

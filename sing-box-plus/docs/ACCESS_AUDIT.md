@@ -20,11 +20,12 @@
       "listen_path": "/run/sing-box-plus/user-stats.sock",
       "inbounds": ["vless-entry-01"],
       "access_log": {
-        "path": "/var/lib/sing-box-plus/access.jsonl",
-        "max_bytes": 268435456,
-        "max_total_bytes": 1073741824,
+        "directory": "/var/lib/sing-box-plus/access",
+        "max_bytes": 16777216,
+        "max_total_bytes": 2147483648,
         "flush_interval_ms": 1000,
-        "queue_size": 8192
+        "queue_size": 8192,
+        "max_open_files": 256
       }
     }
   ]
@@ -33,6 +34,47 @@
 
 域名维度需要在计费 inbound 上配 `action: "sniff"`；未配置时 `host_src` 恒为 `fqdn` 或 `ip`，
 这是正常降级而非故障。
+
+## 逐计费身份一个文件
+
+文件名是 `access-<base64url(身份名)>.jsonl`，落在 `directory` 下。目录必须**预先存在**——
+属主与权限是部署决策，交给 tmpfiles / `StateDirectory=`，进程不会自己 `mkdir`，
+否则会掩盖「部署漏配了」。
+
+分文件的理由是**数据主体分离**,不是抗篡改。文件仍与数据面同 uid，
+被攻破的数据面可以改写其中任意一个——分成多少个文件都一样。
+
+### 按人交付 / 按人删除
+
+```bash
+# 某个人的文件是哪一个
+python3 -c "import base64,sys;print('access-'+base64.urlsafe_b64encode(sys.argv[1].encode()).rstrip(b'=').decode()+'.jsonl')" '<身份名>'
+
+# 反过来：目录里这个文件是谁的
+python3 -c "import base64,sys;n=sys.argv[1][len('access-'):].split('.jsonl')[0];print(base64.urlsafe_b64decode(n+'='*(-len(n)%4)).decode())" 'access-dTE.jsonl'
+
+# 交付某人的全部记录（含已轮转）
+tar czf /tmp/<身份名>.tar.gz -C /var/lib/sing-box-plus/access "$(...)"*
+
+# 删除某人的全部记录
+rm -f /var/lib/sing-box-plus/access/access-<b64>.jsonl*
+```
+
+删除正在被写入的文件是安全的：writer 每个 flush tick 会用 `os.SameFile` 检测 inode 变化
+并重开新文件（纪律 9）。但**删除之后该身份的新访问会重新建文件**——
+如果目的是停止记录某个人，删文件不够，要把他从 `user_stats.inbounds` 覆盖的 inbound 里移走，
+或整体关掉 `access_log`。
+
+### 几条与单文件时不同的地方
+
+- `seq` 与队列丢弃的 gap 行都**逐文件**计，每个文件能被独立阅读与查缺
+- 打开文件数有上限（`max_open_files`，默认 256），超出按 LRU 关闭。身份数上限是
+  `max_identities`（默认 4096），没有这个上限时 fd 与写缓冲会同时失控
+- **从未产生过成功访问的身份不创建文件**——目录里出现某人的文件本身就是一条信息
+- `max_bytes` 是**逐文件**的。实测每个身份约 1.4 MB/天，所以默认从 256 MiB 降到 16 MiB；
+  沿用 256 MiB 会让一个身份半年才轮转一次，等于纪律 9/10 在生产上从不触发
+- `max_total_bytes` 仍是**全局**上限：它保护的是磁盘，而磁盘是共享的。
+  逐身份的保留期属于数据主体策略，做法是删掉那个人的文件，不走这条路径
 
 ## 记录形态
 

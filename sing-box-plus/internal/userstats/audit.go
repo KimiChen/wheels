@@ -1,7 +1,6 @@
 package userstats
 
 import (
-	"bufio"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -25,7 +24,10 @@ var auditSentinelHosts = map[string]struct{}{
 	"sp.packet-addr.v2fly.arpa": {},
 }
 
-const auditMaxHostBytes = 255
+const (
+	auditMaxHostBytes  = 255
+	auditFileBufferMax = 8 * 1024
+)
 
 // auditRecord 是一条待落盘的访问记录。
 type auditRecord struct {
@@ -40,10 +42,14 @@ type auditRecord struct {
 	durationMs int64
 }
 
-// auditWriter 是 §4.8 的同进程 JSONL 旁路。
+// auditWriter 是 §4.8 的同进程 JSONL 旁路，**逐计费身份一个文件**。
 //
-// 定位是运营辅助而非计费依据：不进快照、不走 UDS、不做 fsync，崩溃会丢缓冲区内未落盘的记录，
-// 且该丢失不产生 gap 行。启动 fail-hard，运行 fail-open（纪律 12）。
+// 逐用户分文件的理由是「数据主体分离」——按人删除、按人交付、按人设保留期——
+// 而**不是**抗篡改：文件仍与数据面同 uid，被攻破的数据面可以改写其中任意一个，
+// 分成多少个文件都一样。抗篡改属于 D7 的重新评估范围，见 §11.2。
+//
+// 定位仍是运营辅助而非计费依据：不进快照、不走 UDS、不做 fsync，崩溃会丢缓冲区内未落盘的
+// 记录，且该丢失不产生 gap 行。启动 fail-hard，运行 fail-open（纪律 12）。
 type auditWriter struct {
 	nodeID    string
 	runtimeID string
@@ -52,14 +58,21 @@ type auditWriter struct {
 
 	records chan auditRecord
 
-	seq          atomic.Uint64
-	droppedQueue atomic.Uint64
 	droppedWrite atomic.Uint64
-	lastGapAfter atomic.Uint64
 
-	file   *os.File
-	writer *bufio.Writer
-	size   int64
+	// 队列满时我们**知道**是谁的记录被丢了，因此丢弃数按身份计，
+	// gap 行落进那个人的文件而不是笼统记在一处。
+	dropMutex sync.Mutex
+	dropped   map[string]uint64
+
+	// files / order 只由 writer goroutine 访问，不需要锁。
+	files map[string]*auditFile
+	order []string // LRU：最近使用排在末尾
+
+	// inspect 让测试能在 writer goroutine 上同步观察上面这些状态。
+	// 没有它的话，用例只能从外部直接读 files，那本身就是一次数据竞争；
+	// 而为了让测试能观察就给写入热路径加一把锁，是让被测代码迁就测试。
+	inspect chan func()
 
 	done     chan struct{}
 	stopOnce sync.Once
@@ -67,45 +80,16 @@ type auditWriter struct {
 	closed   atomic.Bool
 }
 
-// newAuditWriter 打开审计文件并做启动期硬校验。
+// newAuditWriter 校验目录并启动 writer。
 //
-// 以最终 euid 实际 OpenFile(0600) 一次并 Chmod + Stat 复核属主与权限，任一不符即启动失败
-// （纪律 12 的前半，与 §4.6 同档）。
-func newAuditWriter(nodeID string, runtimeID string, options AccessLogOptions, logger log.ContextLogger) (*auditWriter, error) {
-	if err := checkParentDirectory(options.Path); err != nil {
+// identities 是配置里已知的全部计费身份，只用于启动期的文件名碰撞检查；
+// 文件本身按需惰性创建——从未产生过成功访问的身份不该凭空多出一个空文件。
+func newAuditWriter(nodeID string, runtimeID string, options AccessLogOptions, identities []string, logger log.ContextLogger) (*auditWriter, error) {
+	if err := checkAuditDirectory(options.Directory); err != nil {
 		return nil, err
 	}
-	file, err := os.OpenFile(options.Path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o600)
-	if err != nil {
-		return nil, E.Cause(err, "打开访问审计文件 ", options.Path)
-	}
-	if err = file.Chmod(0o600); err != nil {
-		file.Close()
-		return nil, E.Cause(err, "设置访问审计文件权限")
-	}
-	info, err := file.Stat()
-	if err != nil {
-		file.Close()
-		return nil, E.Cause(err, "读取访问审计文件属性")
-	}
-	if info.Mode().Perm() != 0o600 {
-		file.Close()
-		return nil, E.New("访问审计文件权限不是 0600：", info.Mode().Perm().String())
-	}
-	if err = checkFileOwner(info); err != nil {
-		file.Close()
+	if err := checkAuditNameCollisions(identities); err != nil {
 		return nil, err
-	}
-	// 启动先补残行：崩溃留下的半行若不补 LF，会与重启后第一条粘连，两条记录被下游一起丢弃
-	// （纪律 5）。
-	if err = repairTrailingNewline(file, info.Size()); err != nil {
-		file.Close()
-		return nil, err
-	}
-	info, err = file.Stat()
-	if err != nil {
-		file.Close()
-		return nil, E.Cause(err, "复核访问审计文件大小")
 	}
 	writer := &auditWriter{
 		nodeID:    nodeID,
@@ -113,14 +97,32 @@ func newAuditWriter(nodeID string, runtimeID string, options AccessLogOptions, l
 		options:   options,
 		logger:    logger,
 		records:   make(chan auditRecord, options.QueueSize),
-		file:      file,
-		writer:    bufio.NewWriterSize(file, 64*1024),
-		size:      info.Size(),
+		dropped:   make(map[string]uint64),
+		files:     make(map[string]*auditFile),
+		inspect:   make(chan func()),
 		done:      make(chan struct{}),
 		stopped:   make(chan struct{}),
 	}
 	go writer.loop()
 	return writer, nil
+}
+
+// checkAuditDirectory 要求目录已存在、是目录、且不是符号链接。
+//
+// 不自动创建：审计目录的属主与权限是部署决策，由 tmpfiles/StateDirectory 负责，
+// 让进程顺手 mkdir 会掩盖「部署漏配了」这件事。
+func checkAuditDirectory(directory string) error {
+	info, err := os.Lstat(directory)
+	if err != nil {
+		return E.Cause(err, "检查访问审计目录 ", directory)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return E.New("访问审计目录是符号链接，拒绝使用：", directory)
+	}
+	if !info.IsDir() {
+		return E.New("访问审计目录不是目录：", directory)
+	}
+	return checkFileOwner(info)
 }
 
 // submit 只向有界 channel 投递，由单个 writer goroutine 序列化落盘。
@@ -152,7 +154,9 @@ func (w *auditWriter) submit(record auditRecord) {
 	select {
 	case w.records <- record:
 	default:
-		w.droppedQueue.Add(1)
+		w.dropMutex.Lock()
+		w.dropped[record.user]++
+		w.dropMutex.Unlock()
 	}
 }
 
@@ -163,25 +167,27 @@ func (w *auditWriter) loop() {
 			w.logger.Error("访问审计 writer panic：", recovered)
 		}
 	}()
-	interval := time.Duration(w.options.FlushIntervalMs) * time.Millisecond
-	ticker := time.NewTicker(interval)
+	ticker := time.NewTicker(time.Duration(w.options.FlushIntervalMs) * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		select {
 		case record := <-w.records:
-			w.write(w.encode(record))
+			w.writeRecord(record)
+		case fn := <-w.inspect:
+			fn()
 		case <-ticker.C:
-			w.flushGap()
-			w.flush()
-			w.checkRotation()
+			w.flushGaps()
+			w.flushAll()
+			w.checkRotationAll()
+			w.enforceTotalCap()
 		case <-w.done:
 			return
 		}
 	}
 }
 
-// Close 的关闭序：有界等待 → 排空 channel → Flush + Sync → 写一条 stop 行。
-// 数据 channel 永不 close，否则在途的 Close() 投递会 panic 并打掉进程（纪律 13）。
+// Close 的关闭序：有界等待 → 排空 channel → 逐文件 Flush + Sync → 每个打开的文件各写一条
+// stop 行。数据 channel 永不 close，否则在途的 Close() 投递会 panic 并打掉进程（纪律 13）。
 func (w *auditWriter) Close() error {
 	w.stopOnce.Do(func() {
 		w.closed.Store(true)
@@ -192,25 +198,93 @@ func (w *auditWriter) Close() error {
 		for {
 			select {
 			case record := <-w.records:
-				w.write(w.encode(record))
+				w.writeRecord(record)
 			case <-deadline:
 				break drain
 			default:
 				break drain
 			}
 		}
-		w.flushGap()
-		w.write(w.encodeEvent("stop", 0, nil, ""))
-		w.flush()
-		_ = w.file.Sync()
-		_ = w.file.Close()
+		w.flushGaps()
+		for _, file := range w.files {
+			w.write(file, w.encodeEvent(file, "stop", 0, nil, ""))
+			w.flush(file)
+			_ = file.file.Sync()
+			_ = file.file.Close()
+		}
+		w.files = make(map[string]*auditFile)
+		w.order = nil
 	})
 	return nil
 }
 
-func (w *auditWriter) encode(record auditRecord) []byte {
+// fileFor 取得某身份的文件，必要时打开；打开数超过上限时按 LRU 关掉最久未用的一个。
+//
+// 上限存在的理由：200 个身份就是 200 个 fd 与 200 份写缓冲，而身份数上限是 max_identities
+// （默认 4096）。没有上限时，一个身份多的节点会在 fd 与内存两头同时失控。
+func (w *auditWriter) fileFor(identity string) *auditFile {
+	if file, exists := w.files[identity]; exists {
+		w.touch(identity)
+		return file
+	}
+	if len(w.files) >= w.options.MaxOpenFiles && len(w.order) > 0 {
+		evicted := w.order[0]
+		w.order = w.order[1:]
+		if victim, exists := w.files[evicted]; exists {
+			w.flush(victim)
+			_ = victim.file.Close()
+			delete(w.files, evicted)
+		}
+	}
+	path := filepath.Join(w.options.Directory, auditFileName(identity))
+	file, err := openAuditFile(path, identity, auditFileBufferMax)
+	if err != nil {
+		w.droppedWrite.Add(1)
+		if w.logger != nil {
+			w.logger.Error("打开访问审计文件失败：", err)
+		}
+		return nil
+	}
+	w.files[identity] = file
+	w.order = append(w.order, identity)
+	return file
+}
+
+func (w *auditWriter) touch(identity string) {
+	for index, item := range w.order {
+		if item == identity {
+			w.order = append(append(w.order[:index:index], w.order[index+1:]...), identity)
+			return
+		}
+	}
+	w.order = append(w.order, identity)
+}
+
+// onWriterGoroutine 在 writer goroutine 上同步执行 fn，供测试观察内部状态。
+// writer 已停止时直接返回 false，避免用例在关闭后死等。
+func (w *auditWriter) onWriterGoroutine(fn func()) bool {
+	done := make(chan struct{})
+	select {
+	case w.inspect <- func() { fn(); close(done) }:
+		<-done
+		return true
+	case <-w.stopped:
+		return false
+	}
+}
+
+func (w *auditWriter) writeRecord(record auditRecord) {
+	file := w.fileFor(record.user)
+	if file == nil {
+		return
+	}
+	w.write(file, w.encode(file, record))
+}
+
+func (w *auditWriter) encode(file *auditFile, record auditRecord) []byte {
+	file.seq++
 	payload := map[string]any{
-		"seq":      w.seq.Add(1),
+		"seq":      file.seq,
 		"ts":       time.Now().UnixMilli(),
 		"node":     w.nodeID,
 		"run":      w.runtimeID,
@@ -234,9 +308,10 @@ func (w *auditWriter) encode(record auditRecord) []byte {
 // encodeEvent 编码 gap 与 stop 两类事件行。
 //
 // 边界不确定时 n 写 null，不得合成一个不存在的区间。
-func (w *auditWriter) encodeEvent(event string, after uint64, count *uint64, reason string) []byte {
+func (w *auditWriter) encodeEvent(file *auditFile, event string, after uint64, count *uint64, reason string) []byte {
+	file.seq++
 	payload := map[string]any{
-		"seq": w.seq.Add(1),
+		"seq": file.seq,
 		"ev":  event,
 	}
 	if event == "gap" {
@@ -255,36 +330,52 @@ func (w *auditWriter) encodeEvent(event string, after uint64, count *uint64, rea
 	return append(line, '\n')
 }
 
-func (w *auditWriter) flushGap() {
-	dropped := w.droppedQueue.Swap(0)
-	if dropped == 0 {
+// flushGaps 把每个身份的队列丢弃数写成该身份文件里的一条 gap 行。
+func (w *auditWriter) flushGaps() {
+	w.dropMutex.Lock()
+	pending := w.dropped
+	if len(pending) == 0 {
+		w.dropMutex.Unlock()
 		return
 	}
-	after := w.seq.Load()
-	w.write(w.encodeEvent("gap", after, &dropped, "queue_full"))
-	w.lastGapAfter.Store(after)
+	w.dropped = make(map[string]uint64)
+	w.dropMutex.Unlock()
+
+	identities := make([]string, 0, len(pending))
+	for identity := range pending {
+		identities = append(identities, identity)
+	}
+	sort.Strings(identities)
+	for _, identity := range identities {
+		file := w.fileFor(identity)
+		if file == nil {
+			continue
+		}
+		count := pending[identity]
+		w.write(file, w.encodeEvent(file, "gap", file.seq, &count, "queue_full"))
+	}
 }
 
 // write 落盘一行。
 //
 // 一条记录一次写出：bufio 在缓冲将满时按字节边界拆分，不是记录边界，这是分片写的常态而非
 // 罕见竞态（纪律 4）。
-func (w *auditWriter) write(line []byte) {
+func (w *auditWriter) write(file *auditFile, line []byte) {
 	if len(line) == 0 {
 		return
 	}
-	if len(line) > w.writer.Available() {
-		w.flush()
+	if len(line) > file.writer.Available() {
+		w.flush(file)
 	}
-	n, err := w.writer.Write(line)
-	w.size += int64(n)
+	n, err := file.writer.Write(line)
+	file.size += int64(n)
 	if err != nil {
-		w.resetWriter()
+		w.resetWriter(file)
 		return
 	}
-	if w.size >= w.options.MaxBytes {
-		w.flush()
-		w.rotate()
+	if file.size >= w.options.MaxBytes {
+		w.flush(file)
+		w.rotate(file)
 	}
 }
 
@@ -292,38 +383,47 @@ func (w *auditWriter) write(line []byte) {
 //
 // bufio.Writer 一旦 Flush 出错即置粘滞 b.err，此后 Write 零系统调用返回、channel 永不满、
 // 丢弃计数结构性恒为 0——磁盘腾空也不自愈。失败路径必须 Reset 并累加 dropped_write（纪律 3）。
-func (w *auditWriter) flush() {
-	if err := w.writer.Flush(); err != nil {
-		w.resetWriter()
+func (w *auditWriter) flush(file *auditFile) {
+	if err := file.writer.Flush(); err != nil {
+		w.resetWriter(file)
 	}
 }
 
-func (w *auditWriter) resetWriter() {
+func (w *auditWriter) flushAll() {
+	for _, file := range w.files {
+		w.flush(file)
+	}
+}
+
+func (w *auditWriter) resetWriter(file *auditFile) {
 	w.droppedWrite.Add(1)
-	w.writer.Reset(w.file)
+	file.writer.Reset(file.file)
 	if w.logger != nil {
-		w.logger.Warn("访问审计写入失败，已复位 writer；累计丢弃 ", w.droppedWrite.Load(), " 次")
+		w.logger.Warn("访问审计写入失败，已复位 writer：", file.path,
+			"；累计丢弃 ", w.droppedWrite.Load(), " 次")
 	}
 }
 
-// checkRotation 用 os.SameFile 比对当前 fd 与路径上的 inode，不同则重开。
+// checkRotationAll 用 os.SameFile 比对每个打开文件的 fd 与路径上的 inode，不同则重开。
 //
 // 否则轮转或外部删除之后，写入会落进已删除 inode 的黑洞（纪律 9）。
-func (w *auditWriter) checkRotation() {
-	pathInfo, err := os.Stat(w.options.Path)
-	if err == nil {
-		fileInfo, statErr := w.file.Stat()
-		if statErr == nil && os.SameFile(pathInfo, fileInfo) {
-			return
+func (w *auditWriter) checkRotationAll() {
+	for _, file := range w.files {
+		pathInfo, err := os.Stat(file.path)
+		if err == nil {
+			fileInfo, statErr := file.file.Stat()
+			if statErr == nil && os.SameFile(pathInfo, fileInfo) {
+				continue
+			}
 		}
+		w.reopen(file)
 	}
-	w.reopen()
 }
 
-func (w *auditWriter) reopen() {
-	w.flush()
-	_ = w.file.Close()
-	file, err := os.OpenFile(w.options.Path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o600)
+func (w *auditWriter) reopen(file *auditFile) {
+	w.flush(file)
+	_ = file.file.Close()
+	opened, err := os.OpenFile(file.path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o600)
 	if err != nil {
 		w.droppedWrite.Add(1)
 		if w.logger != nil {
@@ -331,33 +431,36 @@ func (w *auditWriter) reopen() {
 		}
 		return
 	}
-	w.file = file
-	w.writer.Reset(file)
-	if info, statErr := file.Stat(); statErr == nil {
-		w.size = info.Size()
+	file.file = opened
+	file.writer.Reset(opened)
+	if info, statErr := opened.Stat(); statErr == nil {
+		file.size = info.Size()
 	} else {
-		w.size = 0
+		file.size = 0
 	}
 }
 
-func (w *auditWriter) rotate() {
-	rotated := w.options.Path + "." + time.Now().UTC().Format("20060102T150405.000000000Z")
-	if err := os.Rename(w.options.Path, rotated); err != nil {
+func (w *auditWriter) rotate(file *auditFile) {
+	rotated := file.path + "." + time.Now().UTC().Format("20060102T150405.000000000Z")
+	if err := os.Rename(file.path, rotated); err != nil {
 		w.droppedWrite.Add(1)
 		return
 	}
-	w.reopen()
-	w.enforceTotalCap()
+	w.reopen(file)
 }
 
-// enforceTotalCap 超过 max_total_bytes 时删最老的已轮转文件并写一条 gap；
-// 无对象可删时只累加计数、不写 gap——否则自指 gap 会把真事件放大（纪律 10）。
+// enforceTotalCap 是**全局**上限：超过 max_total_bytes 时跨全部身份挑最老的已轮转文件删除，
+// 并把 gap 写进它所属身份的文件；无对象可删时只累加计数、不写 gap——
+// 否则自指 gap 会把真事件放大（纪律 10）。
+//
+// 上限之所以是全局而非逐身份：它保护的是磁盘，而磁盘是共享的。
+// 逐身份的保留期属于数据主体策略，做法是删掉那个人的文件，不走这条路径。
 func (w *auditWriter) enforceTotalCap() {
 	if w.options.MaxTotalBytes <= 0 {
 		return
 	}
 	for {
-		total, oldest, err := auditTotalSize(w.options.Path)
+		total, oldest, err := auditDirectorySize(w.options.Directory)
 		if err != nil || total <= w.options.MaxTotalBytes {
 			return
 		}
@@ -365,18 +468,22 @@ func (w *auditWriter) enforceTotalCap() {
 			w.droppedWrite.Add(1)
 			return
 		}
+		identity, known := auditIdentityFromFileName(filepath.Base(oldest))
 		if err = os.Remove(oldest); err != nil {
 			w.droppedWrite.Add(1)
 			return
 		}
-		after := w.seq.Load()
-		w.write(w.encodeEvent("gap", after, nil, "total_cap"))
+		if !known {
+			continue
+		}
+		if file := w.fileFor(identity); file != nil {
+			w.write(file, w.encodeEvent(file, "gap", file.seq, nil, "total_cap"))
+		}
 	}
 }
 
-func auditTotalSize(path string) (total int64, oldest string, err error) {
-	directory := filepath.Dir(path)
-	base := filepath.Base(path)
+// auditDirectorySize 统计目录里全部审计文件的总大小，并返回最老的已轮转文件。
+func auditDirectorySize(directory string) (total int64, oldest string, err error) {
 	entries, err := os.ReadDir(directory)
 	if err != nil {
 		return 0, "", err
@@ -384,7 +491,7 @@ func auditTotalSize(path string) (total int64, oldest string, err error) {
 	var rotated []string
 	for _, entry := range entries {
 		name := entry.Name()
-		if name != base && !strings.HasPrefix(name, base+".") {
+		if !strings.HasPrefix(name, auditFilePrefix) {
 			continue
 		}
 		info, statErr := entry.Info()
@@ -392,15 +499,27 @@ func auditTotalSize(path string) (total int64, oldest string, err error) {
 			continue
 		}
 		total += info.Size()
-		if name != base {
+		// 已轮转文件形如 access-<b64>.jsonl.<时间戳>，时间戳可直接按字典序比较。
+		if strings.Contains(name, auditFileSuffix+".") {
 			rotated = append(rotated, filepath.Join(directory, name))
 		}
 	}
-	sort.Strings(rotated)
+	sort.Slice(rotated, func(i, j int) bool {
+		return rotatedTimestamp(rotated[i]) < rotatedTimestamp(rotated[j])
+	})
 	if len(rotated) > 0 {
 		oldest = rotated[0]
 	}
 	return total, oldest, nil
+}
+
+func rotatedTimestamp(path string) string {
+	name := filepath.Base(path)
+	index := strings.Index(name, auditFileSuffix+".")
+	if index < 0 {
+		return name
+	}
+	return name[index+len(auditFileSuffix)+1:]
 }
 
 // normalizeAuditHost 归一化到此为止：只做小写与去掉一个尾点，不引入 idna.Lookup（纪律 7）；
@@ -438,7 +557,7 @@ func repairTrailingNewline(file *os.File, size int64) error {
 	}
 	var tail [1]byte
 	if _, err := file.ReadAt(tail[:], size-1); err != nil {
-		// 以 O_WRONLY 打开时无法回读，退化为保守补一个 LF：多一个空行下游会跳过，
+		// 回读失败时退化为保守补一个 LF：多一个空行下游会跳过，
 		// 半行粘连则会连累两条记录。
 		if _, writeErr := file.Write([]byte("\n")); writeErr != nil {
 			return E.Cause(writeErr, "补齐访问审计残行")

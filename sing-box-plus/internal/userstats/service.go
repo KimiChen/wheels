@@ -70,7 +70,8 @@ func (s *Service) Start(stage adapter.StartStage) error {
 		return nil
 	}
 	if s.options.AccessLog != nil {
-		audit, err := newAuditWriter(s.registry.NodeID(), s.registry.RuntimeID(), *s.options.AccessLog, s.logger)
+		audit, err := newAuditWriter(s.registry.NodeID(), s.registry.RuntimeID(),
+			*s.options.AccessLog, s.registry.Identities(), s.logger)
 		if err != nil {
 			return err
 		}
