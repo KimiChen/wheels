@@ -100,6 +100,7 @@ func TestSettingService_GetPublicSettingsForInjection_IncludesClientEndpointFiel
 	require.NotContains(t, out, "custom_menu_items")
 	require.NotContains(t, out, "custom_endpoints")
 	require.NotContains(t, out, "channel_monitor_enabled")
+	require.NotContains(t, out, "channel_monitor_hide_user_ranking")
 	require.NotContains(t, out, "available_channels_enabled")
 	require.NotContains(t, out, "plugin_management_enabled")
 	require.NotContains(t, out, "affiliate_enabled")
@@ -117,6 +118,7 @@ func TestSettingService_GetPublicSettingsForInjection_IncludesEnabledNavigationF
 			SettingKeyChannelMonitorDefaultIntervalSeconds: "120",
 			SettingKeyChannelMonitorHideThroughput:         "true",
 			SettingKeyChannelMonitorShowQuota:              "true",
+			SettingKeyChannelMonitorHideUserRanking:        "true",
 			SettingKeyAvailableChannelsEnabled:             "true",
 			SettingKeyModelPlazaEnabled:                    "true",
 			SettingKeyModelPlazaRequireAuth:                "true",
@@ -141,6 +143,7 @@ func TestSettingService_GetPublicSettingsForInjection_IncludesEnabledNavigationF
 	require.Equal(t, float64(120), out["channel_monitor_default_interval_seconds"])
 	require.Equal(t, true, out["channel_monitor_hide_throughput"])
 	require.Equal(t, true, out["channel_monitor_show_quota"])
+	require.Equal(t, true, out["channel_monitor_hide_user_ranking"])
 	require.Equal(t, true, out["available_channels_enabled"])
 	require.Equal(t, true, out["model_plaza_enabled"])
 	require.Equal(t, true, out["model_plaza_require_auth"])
@@ -285,6 +288,21 @@ func TestSettingService_ChannelMonitorShowQuotaFailsClosed(t *testing.T) {
 			SettingKeyChannelMonitorShowQuota: value,
 		}}, &config.Config{}).GetChannelMonitorRuntime(context.Background())
 		require.False(t, rt.ShowQuota, "value=%q", value)
+	}
+}
+
+func TestSettingService_ChannelMonitorHideUserRankingDefaultsToVisible(t *testing.T) {
+	missing := NewSettingService(&settingPublicRepoStub{values: map[string]string{}}, &config.Config{}).GetChannelMonitorRuntime(context.Background())
+	require.False(t, missing.HideUserRanking)
+	public, err := NewSettingService(&settingPublicRepoStub{values: map[string]string{}}, &config.Config{}).GetPublicSettings(context.Background())
+	require.NoError(t, err)
+	require.False(t, public.ChannelMonitorHideUserRanking)
+
+	for _, value := range []string{"true", "1", "on", "enabled"} {
+		runtime := NewSettingService(&settingPublicRepoStub{values: map[string]string{
+			SettingKeyChannelMonitorHideUserRanking: value,
+		}}, &config.Config{}).GetChannelMonitorRuntime(context.Background())
+		require.True(t, runtime.HideUserRanking, "value=%q", value)
 	}
 }
 
