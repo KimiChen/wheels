@@ -1,0 +1,14 @@
+# Go race detector（TSan）抑制清单。
+#
+# 只允许出现**上游**的竞争，且必须逐条写明来源与判断依据。本项目自身包内的竞争
+# 一律不得进入本文件——scripts/verify.sh 会在跑完带抑制的 -race 之后，另跑一遍
+# 不带抑制的纯单元测试，使本文件无法掩盖 internal/ 下的问题。
+#
+# 1) route.NetworkManager：Start() 写入 interface 快照字段，而 notifyInterfaceUpdate
+#    起的 goroutine 在 updateInterface() 里并发读同一字段，两侧无锁。
+#    位置：sing-box@v1.14.0 route/network.go:220（写）与 :574（读）。
+#    触发条件：同进程内并发启动多个 Box 且宿主发生网络接口变更通知（macOS 上很常见）。
+#    与本项目无关：本项目不触碰 NetworkManager，零补丁形态也无法修复它。
+race:sing-box/route.(*NetworkManager).Start
+race:sing-box/route.(*NetworkManager).updateInterface
+race:sing-box/route.(*NetworkManager).notifyInterfaceUpdate

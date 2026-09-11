@@ -1,0 +1,26 @@
+# 上游源码工作副本与准备目录（由 scripts/prepare-source.sh 生成）
+/.upstream/
+/build/
+/dist/
+
+# 构建产物
+/bin/
+# 只忽略仓库根下的同名二进制，不能写成 sing-box-plus——
+# 那会连 cmd/sing-box-plus/ 整个源码目录一起忽略掉。
+/sing-box-plus
+*.test
+*.out
+coverage.html
+
+# 本地配置与密钥
+.env
+*.pem
+*.key
+*.asc
+*.sig
+*.minisig
+
+# 运行期产物
+*.sock
+/run/
+__pycache__/

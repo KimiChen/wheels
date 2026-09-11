@@ -1,0 +1,7 @@
+# 上游没有 tmpfiles 模板，本文件为自建。
+#
+# RuntimeDirectory= 已经会创建 /run/sing-box-plus，这里的作用是给不经 systemd 启动的场景
+# （容器、手工调试）一个一致的目录语义：0750 属主可读写，同组只读，其他账号不可进入。
+# 注意 socket 自身的权限由进程按 socket_mode 设定（默认 0600），目录权限不能替代它。
+d /run/sing-box-plus 0750 sing-box-plus sing-box-plus -
+d /var/lib/sing-box-plus 0750 sing-box-plus sing-box-plus -
