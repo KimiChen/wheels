@@ -48,7 +48,7 @@ tooling_dir="$build_root/tooling"
 npm install --prefix "$tooling_dir" --no-save --ignore-scripts pnpm@9.15.9
 pnpm_bin="$tooling_dir/node_modules/.bin/pnpm"
 "$pnpm_bin" --dir "$source_dir/frontend" install --frozen-lockfile
-"$pnpm_bin" --dir "$source_dir/frontend" build
+PATH="$(dirname "$pnpm_bin"):$PATH" "$pnpm_bin" --dir "$source_dir/frontend" build
 
 version="$(
   tr -d '\r\n' < "$source_dir/backend/cmd/server/VERSION"

@@ -1,5 +1,5 @@
 schema_version = 1
 repository = "https://github.com/Wei-Shaw/sub2api.git"
 ref = "main"
-commit = "ab99d56e9626e6cd731592dae8553c9758a0efa2"
+commit = "0116c5a1e126c6578ba8a3d47018c1cafb4e7afa"
 license = "LGPL-3.0"
