@@ -6,7 +6,7 @@ import copy
 import json
 
 BASE_SNAPSHOT = {
-    "schema_version": 2,
+    "schema_version": 3,
     "node_id": "node-example-01",
     "runtime_id": "0123456789abcdef0123456789abcdef",
     "started_at_unix_ms": 1787587200000,
@@ -15,6 +15,7 @@ BASE_SNAPSHOT = {
         "counter_overflow": False,
         "sequence_overflow": False,
         "identity_limit_reached": False,
+        "audit_dropped": False,
     },
     "inbounds": [
         {

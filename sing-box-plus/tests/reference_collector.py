@@ -143,7 +143,7 @@ def push_quota(
     ledger.save_state(collector.export_state())
     body = json.dumps(
         {
-            "schema_version": 2,
+            "schema_version": 3,
             "node_id": snapshot["node_id"],
             "runtime_id": snapshot["runtime_id"],
             "epoch": epoch,
@@ -153,7 +153,7 @@ def push_quota(
     ).encode("utf-8")
     now = int(time.time() * 1000)
     try:
-        response = http_unix.request(quota_socket, "PUT", "/v2/quota", body=body, timeout=timeout)
+        response = http_unix.request(quota_socket, "PUT", "/v3/quota", body=body, timeout=timeout)
     except http_unix.HTTPUnixError as error:
         ledger.append({"ts": now, "result": "quota_transport_error", "detail": str(error)})
         return 1
@@ -182,7 +182,7 @@ def collect_once(
 ) -> int:
     now = int(time.time() * 1000)
     try:
-        response = http_unix.request(socket_path, "GET", "/v2/snapshot", timeout=timeout)
+        response = http_unix.request(socket_path, "GET", "/v3/snapshot", timeout=timeout)
     except http_unix.HTTPUnixError as error:
         ledger.append({"ts": now, "result": "transport_error", "detail": str(error)})
         return 1

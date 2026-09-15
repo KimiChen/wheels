@@ -73,6 +73,9 @@ type auditWriter struct {
 	files map[string]*auditFile
 	order []string // LRU：最近使用排在末尾
 
+	// exclude 为 nil 表示不排除任何东西。它只挡审计，挡不住计数与配额。
+	exclude *excludeFilter
+
 	// inspect 让测试能在 writer goroutine 上同步观察上面这些状态。
 	// 没有它的话，用例只能从外部直接读 files，那本身就是一次数据竞争；
 	// 而为了让测试能观察就给写入热路径加一把锁，是让被测代码迁就测试。
@@ -95,10 +98,15 @@ func newAuditWriter(nodeID string, runtimeID string, options AccessLogOptions, i
 	if err := checkAuditNameCollisions(identities); err != nil {
 		return nil, err
 	}
+	exclude, err := newExcludeFilter(options.ExcludeHosts, options.ExcludeIPs)
+	if err != nil {
+		return nil, err
+	}
 	writer := &auditWriter{
 		nodeID:    nodeID,
 		runtimeID: runtimeID,
 		options:   options,
+		exclude:   exclude,
 		logger:    logger,
 		records:   make(chan auditRecord, options.QueueSize),
 		dropped:   make(map[string]uint64),
@@ -109,6 +117,14 @@ func newAuditWriter(nodeID string, runtimeID string, options AccessLogOptions, i
 	}
 	go writer.loop()
 	return writer, nil
+}
+
+// excluded 判断一条连接是否被排除规则挡在审计之外。
+//
+// 调用点在 newConnState，即**连接建立时**：命中的连接根本不挂 audit，
+// 于是连每个数据块两次 connUp/connDown 原子加都省掉了。计费不经过这里。
+func (w *auditWriter) excluded(host string, source string) bool {
+	return w.exclude.match(host, source)
 }
 
 // checkAuditDirectory 要求目录已存在、是目录、且不是符号链接。
@@ -243,15 +259,25 @@ func (w *auditWriter) fileFor(identity string) *auditFile {
 	path := filepath.Join(w.options.Directory, auditFileName(identity))
 	file, err := openAuditFile(path, identity, auditFileBufferMax)
 	if err != nil {
-		w.droppedWrite.Add(1)
-		if w.logger != nil {
-			w.logger.Error("打开访问审计文件失败：", err)
-		}
+		w.noteDropped("打开审计文件失败", err)
 		return nil
 	}
 	w.files[identity] = file
 	w.order = append(w.order, identity)
+	w.stampFilter(file)
 	return file
+}
+
+// stampFilter 在每次打开物理文件后写一行 filter 事件，把当时生效的排除规则钉在文件里。
+//
+// 排除是**静默**的：被挡掉的连接不留任何痕迹，光看文件无法区分「没人访问过」与
+// 「访问过但被规则挡了」。配置在另一台机器的另一个文件里，日志交付出去之后更是无从对照。
+// 因此规则必须跟着数据走——轮转后的新文件、重启后续写的文件，各自带一份。
+func (w *auditWriter) stampFilter(file *auditFile) {
+	if w.exclude.empty() || file == nil {
+		return
+	}
+	w.write(file, w.encodeFilterEvent(file))
 }
 
 func (w *auditWriter) touch(identity string) {
@@ -301,6 +327,26 @@ func (w *auditWriter) encode(file *auditFile, record auditRecord) []byte {
 		"up":       record.up,
 		"down":     record.down,
 		"ms":       record.durationMs,
+	}
+	line, err := json.Marshal(payload)
+	if err != nil {
+		return nil
+	}
+	return append(line, '\n')
+}
+
+// encodeFilterEvent 编码文件头的排除规则留痕。
+//
+// 它与 gap 行共用 seq 空间：seq 的语义是「这个文件里写出的第 n 行」，
+// 跳过它会让下游的连续性校验失效。
+func (w *auditWriter) encodeFilterEvent(file *auditFile) []byte {
+	hosts, ips := w.exclude.describe()
+	file.seq++
+	payload := map[string]any{
+		"seq":   file.seq,
+		"ev":    "filter",
+		"hosts": hosts,
+		"ips":   ips,
 	}
 	line, err := json.Marshal(payload)
 	if err != nil {
@@ -462,12 +508,13 @@ func (w *auditWriter) reopen(file *auditFile) {
 	} else {
 		file.size = 0
 	}
+	w.stampFilter(file)
 }
 
 func (w *auditWriter) rotate(file *auditFile) {
 	rotated := file.path + "." + time.Now().UTC().Format("20060102T150405.000000000Z")
 	if err := os.Rename(file.path, rotated); err != nil {
-		w.droppedWrite.Add(1)
+		w.noteDropped("轮转重命名失败，文件将继续超限增长", err)
 		return
 	}
 	w.reopen(file)
@@ -568,17 +615,25 @@ func normalizeAuditHost(host string) string {
 }
 
 // auditHost 按 metadata.Domain → Destination.Fqdn → Destination.Addr 三级降级取值。
+// host_src 的三种取值。ip 之所以要有名字，是因为排除规则按它分流：
+// 只有 host_src=ip 的记录才拿 exclude_ips 去比，其余一律走 exclude_hosts。
+const (
+	auditHostSourceSniff = "sniff"
+	auditHostSourceFqdn  = "fqdn"
+	auditHostSourceIP    = "ip"
+)
+
 func auditHost(metadata adapter.InboundContext) (host string, source string) {
 	if metadata.Domain != "" {
-		return metadata.Domain, "sniff"
+		return metadata.Domain, auditHostSourceSniff
 	}
 	if metadata.Destination.Fqdn != "" {
-		return metadata.Destination.Fqdn, "fqdn"
+		return metadata.Destination.Fqdn, auditHostSourceFqdn
 	}
 	if metadata.Destination.Addr.IsValid() {
-		return metadata.Destination.Addr.String(), "ip"
+		return metadata.Destination.Addr.String(), auditHostSourceIP
 	}
-	return "", "ip"
+	return "", auditHostSourceIP
 }
 
 func repairTrailingNewline(file *os.File, size int64) error {

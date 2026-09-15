@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""配额下发客户端：读取一份剩余额度清单后 PUT /v2/quota。
+"""配额下发客户端：读取一份剩余额度清单后 PUT /v3/quota。
 
 全量覆盖语义：清单里没有的计费身份被视为**无限额度**。这不是「保持不变」，
 下发前请确认清单是完整的限额清单，而不是一次增量。
@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import http_unix  # noqa: E402
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 DEFAULT_QUOTA_SOCKET = "/run/sing-box-plus/quota.sock"
 DEFAULT_STATS_SOCKET = "/run/sing-box-plus/user-stats.sock"
 
@@ -41,7 +41,7 @@ def load_entries(path: Path | None) -> list[dict]:
 
 
 def read_identity(stats_socket: str, timeout: float) -> tuple[str, str]:
-    response = http_unix.request(stats_socket, "GET", "/v2/snapshot", timeout=timeout)
+    response = http_unix.request(stats_socket, "GET", "/v3/snapshot", timeout=timeout)
     if response.status != 200:
         raise RuntimeError(f"读取快照失败：HTTP {response.status}")
     snapshot = response.json()
@@ -59,7 +59,7 @@ def put_quota(quota_socket: str, node_id: str, runtime_id: str, epoch: int, entr
         },
         ensure_ascii=False,
     ).encode("utf-8")
-    return http_unix.request(quota_socket, "PUT", "/v2/quota", body=body, timeout=timeout)
+    return http_unix.request(quota_socket, "PUT", "/v3/quota", body=body, timeout=timeout)
 
 
 def main(argv: list[str]) -> int:

@@ -4,8 +4,8 @@
 
 | 端点 | socket | 方法与路径 | 作用 |
 | --- | --- | --- | --- |
-| 快照导出 | `user_stats.listen_path` | `GET /v2/snapshot`、`GET /healthz` | 只读，采集与结算的唯一数据源 |
-| 配额控制 | `user_stats.quota_control.listen_path` | `PUT /v2/quota` | 只写，下发全量剩余额度表 |
+| 快照导出 | `user_stats.listen_path` | `GET /v3/snapshot`、`GET /healthz` | 只读，采集与结算的唯一数据源 |
+| 配额控制 | `user_stats.quota_control.listen_path` | `PUT /v3/quota` | 只写，下发全量剩余额度表 |
 
 两者的权限档次不同：快照是只读旁观者，配额端点能改变转发行为。**不要把它们放在同一个 socket 上**
 （配置校验会直接拒绝），也不要把任何一个直接映射为公网监听——远程读取须经节点上的独立反向代理
@@ -25,7 +25,7 @@ HTTP/1.1-over-Unix-stream，每连接单请求单响应，禁 keep-alive 与 que
 | code | 触发条件 |
 | --- | --- |
 | 400 | 畸形请求、带 query、只读 socket 上带请求体、请求体 JSON 不合法或含未知字段、`entries[]` 含未知计费身份 |
-| 404 | 未知路径。**`GET /v1/snapshot` 恒为 404**——路径版本号与 `schema_version` 同步推进，误配的采集器必须立即失败而不是读到半兼容的 body |
+| 404 | 未知路径。**`GET /v1/snapshot` 与 `GET /v2/snapshot` 恒为 404**——路径版本号与 `schema_version` 同步推进，未同步升级的采集器必须立即失败而不是读到半兼容的 body |
 | 405 | 方法不符（快照只接受 GET，配额只接受 PUT） |
 | 408 | 读取请求超时 |
 | 409 | `node_id` / `runtime_id` 与当前进程不符，或 `epoch` 未前进 |
@@ -35,7 +35,7 @@ HTTP/1.1-over-Unix-stream，每连接单请求单响应，禁 keep-alive 与 que
 | 500 | 服务端内部错误 |
 | 505 | 非 `HTTP/1.1` |
 
-## `GET /v2/snapshot`
+## `GET /v3/snapshot`
 
 被接受时推进 `sequence`。响应体以 LF 结尾。
 
@@ -49,7 +49,8 @@ HTTP/1.1-over-Unix-stream，每连接单请求单响应，禁 keep-alive 与 que
   "health": {
     "counter_overflow": false,
     "sequence_overflow": false,
-    "identity_limit_reached": false
+    "identity_limit_reached": false,
+    "audit_dropped": false
   },
   "inbounds": [
     {
@@ -81,7 +82,11 @@ HTTP/1.1-over-Unix-stream，每连接单请求单响应，禁 keep-alive 与 que
 
 1. **u64 字段禁止经 IEEE754 double 解析**（四向计数、`sequence`、`started_at_unix_ms`、两个
    `generation`）。以 64 位整数或十进制字符串解析并做整数运算。
-2. **`health` 是闭集**：恰好三个 bool 键，出现额外键即整份拒绝；任一为真即不可入账。
+2. **`health` 是闭集**：恰好四个 bool 键，出现额外键即整份拒绝。四位分两类：
+   `counter_overflow` / `sequence_overflow` / `identity_limit_reached` 任一为真即**这份快照不可入账**；
+   `audit_dropped` 只说明 §4.8 的访问审计旁路丢过记录（证据链有缺口，应告警），
+   计费计数器仍然准确，**照常入账**。`/healthz` 也只看前三位。
+   把审计丢弃算进入账判据等于让磁盘写满连带停掉计费，这是刻意不做的。
 3. **`listen` 是配置值而非实际绑定结果**，且是纯 host——端口在独立的 `listen_port` 里。
    配置省略 `listen` 时输出 `127.0.0.1`（上游默认），不是 `0.0.0.0`。
 4. **`tcp_sessions` / `udp_sessions` 是瞬时 gauge**，可减少，不参与结算、不进基线、
@@ -98,7 +103,7 @@ HTTP/1.1-over-Unix-stream，每连接单请求单响应，禁 keep-alive 与 que
 {"schema_version": 2, "status": "ok"}
 ```
 
-## `PUT /v2/quota`
+## `PUT /v3/quota`
 
 全量覆盖语义：**未出现在 `entries[]` 中的计费身份视为无限额度**。这不是「保持不变」——
 下发的是一份完整的限额清单，不是增量。

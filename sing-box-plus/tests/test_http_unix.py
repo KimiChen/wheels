@@ -58,7 +58,7 @@ class HTTPUnixTest(unittest.TestCase):
     def _run(self, payload: bytes, close_early: bool = False):
         server = RawServer(payload, close_early)
         self.addCleanup(server.close)
-        return http_unix.request(server.path, "GET", "/v2/snapshot")
+        return http_unix.request(server.path, "GET", "/v3/snapshot")
 
     def test_normal_response(self):
         body = b'{"schema_version":2}\n'
@@ -104,11 +104,11 @@ class HTTPUnixTest(unittest.TestCase):
         server = RawServer(b"")
         self.addCleanup(server.close)
         with self.assertRaises(http_unix.HTTPUnixError):
-            http_unix.request(server.path, "GET", "/v2/snapshot?a=1")
+            http_unix.request(server.path, "GET", "/v3/snapshot?a=1")
 
     def test_missing_socket(self):
         with self.assertRaises(http_unix.HTTPUnixError):
-            http_unix.request("/tmp/sbp-nonexistent.sock", "GET", "/v2/snapshot")
+            http_unix.request("/tmp/sbp-nonexistent.sock", "GET", "/v3/snapshot")
 
 
 class ShimTest(unittest.TestCase):

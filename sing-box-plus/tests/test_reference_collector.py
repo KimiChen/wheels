@@ -180,7 +180,7 @@ class ReferenceCollectorTest(unittest.TestCase):
 
         server = SnapshotServer([http_ok(encode(first)), http_ok(encode(second)), http_ok(encode(third))])
         self.addCleanup(server.close)
-        quota = SnapshotServer([http_ok(b'{"schema_version":2,"epoch":1,"applied":2}\n')] * 3)
+        quota = SnapshotServer([http_ok(b'{"schema_version":3,"epoch":1,"applied":2}\n')] * 3)
         self.addCleanup(quota.close)
 
         ledger = Ledger(self.ledger_dir)
@@ -271,7 +271,7 @@ class ReferenceCollectorTest(unittest.TestCase):
 
         for name, payload in {
             "未知字段": {"schema_version": 1, "default_bytes": 10, "typo_overrides": {}},
-            "版本不符": {"schema_version": 2, "default_bytes": 10},
+            "版本不符": {"schema_version": 3, "default_bytes": 10},
             "默认额度为负": {"schema_version": 1, "default_bytes": -1},
             "覆盖键缺分隔符": {"schema_version": 1, "default_bytes": 10, "overrides": {"ab": 5}},
             "覆盖值是布尔": {"schema_version": 1, "default_bytes": 10, "overrides": {"a/b": True}},
@@ -284,7 +284,7 @@ class ReferenceCollectorTest(unittest.TestCase):
         first = snapshot(sequence=1)
         server = SnapshotServer([http_ok(encode(first))])
         self.addCleanup(server.close)
-        quota = SnapshotServer([http_ok(b'{"schema_version":2,"epoch":1,"applied":3}\n')])
+        quota = SnapshotServer([http_ok(b'{"schema_version":3,"epoch":1,"applied":3}\n')])
         self.addCleanup(quota.close)
         ledger = Ledger(self.ledger_dir)
         collector = Collector(first_snapshot="include")

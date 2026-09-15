@@ -141,9 +141,14 @@ func newConnState(tracker *Tracker, record *inboundRecord, user *userRecord, met
 		closer:     closer,
 	}
 	if audit := tracker.registry.auditWriterRef(); audit != nil {
-		state.audit = audit
-		state.host, state.hostSource = auditHost(metadata)
-		state.port = metadata.Destination.Port
+		host, hostSource := auditHost(metadata)
+		// 排除在连接建立时就判掉：命中的连接不挂 audit，于是后面每个数据块
+		// 少两次 connUp/connDown 原子加。计数与配额在下面几行之外，不受影响。
+		if !audit.excluded(host, hostSource) {
+			state.audit = audit
+			state.host, state.hostSource = host, hostSource
+			state.port = metadata.Destination.Port
+		}
 	}
 	return state
 }

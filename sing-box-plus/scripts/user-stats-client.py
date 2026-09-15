@@ -29,7 +29,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--healthz", action="store_true", help="改为请求 /healthz")
     args = parser.parse_args(argv)
 
-    target = "/healthz" if args.healthz else "/v2/snapshot"
+    target = "/healthz" if args.healthz else "/v3/snapshot"
     try:
         response = http_unix.request(args.socket, "GET", target, timeout=args.timeout)
     except http_unix.HTTPUnixError as error:

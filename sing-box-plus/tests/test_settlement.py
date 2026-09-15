@@ -22,7 +22,7 @@ from settlement_model import (  # noqa: E402
 class ParseSnapshotTest(unittest.TestCase):
     def test_accepts_reference_snapshot(self):
         parsed = parse_snapshot(encode(snapshot()))
-        self.assertEqual(parsed["schema_version"], 2)
+        self.assertEqual(parsed["schema_version"], 3)
         self.assertEqual(len(parsed["inbounds"]), 2)
 
     def test_rejects_schema_version_one(self):
@@ -83,7 +83,7 @@ class ParseSnapshotTest(unittest.TestCase):
             parse_snapshot(raw)
 
     def test_rejects_duplicate_keys(self):
-        raw = b'{"schema_version":2,"schema_version":2}'
+        raw = b'{"schema_version":3,"schema_version":3}'
         with self.assertRaises(SnapshotRejected):
             parse_snapshot(raw)
 
