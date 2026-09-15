@@ -50,7 +50,7 @@ func TestSnapshotRoutes(t *testing.T) {
 	}
 	assertSchemaVersion(t, body)
 
-	status, body = httpUnix(t, handle.sockPath, "POST", "/v2/snapshot", nil)
+	status, body = httpUnix(t, handle.sockPath, "POST", "/v3/snapshot", nil)
 	if status != 405 {
 		t.Fatalf("非 GET 应返回 405，实际 %d", status)
 	}
@@ -62,19 +62,19 @@ func TestSnapshotRoutes(t *testing.T) {
 	}
 
 	// 禁 query。
-	status, _ = httpUnix(t, handle.sockPath, "GET", "/v2/snapshot?a=1", nil)
+	status, _ = httpUnix(t, handle.sockPath, "GET", "/v3/snapshot?a=1", nil)
 	if status != 400 {
 		t.Fatalf("带 query 应返回 400，实际 %d", status)
 	}
 
 	// 版本不支持。
-	response := rawUnix(t, handle.sockPath, "GET /v2/snapshot HTTP/1.0\r\nHost: x\r\n\r\n")
+	response := rawUnix(t, handle.sockPath, "GET /v3/snapshot HTTP/1.0\r\nHost: x\r\n\r\n")
 	if !strings.HasPrefix(response, "HTTP/1.1 505") {
 		t.Fatalf("HTTP/1.0 应返回 505，实际：%q", firstLine(response))
 	}
 
 	// 只读 socket 上禁请求体。
-	response = rawUnix(t, handle.sockPath, "GET /v2/snapshot HTTP/1.1\r\nHost: x\r\nContent-Length: 3\r\n\r\nabc")
+	response = rawUnix(t, handle.sockPath, "GET /v3/snapshot HTTP/1.1\r\nHost: x\r\nContent-Length: 3\r\n\r\nabc")
 	if !strings.HasPrefix(response, "HTTP/1.1 400") {
 		t.Fatalf("只读 socket 带 body 应返回 400，实际：%q", firstLine(response))
 	}
@@ -86,7 +86,7 @@ func TestSnapshotRoutes(t *testing.T) {
 	}
 }
 
-// TestHealthzDoesNotAdvanceSequence 断言 /healthz 不推进 sequence，而 /v2/snapshot 严格递增。
+// TestHealthzDoesNotAdvanceSequence 断言 /healthz 不推进 sequence，而 /v3/snapshot 严格递增。
 func TestHealthzDoesNotAdvanceSequence(t *testing.T) {
 	handle := contractServer(t)
 
@@ -109,7 +109,7 @@ func TestHealthzDoesNotAdvanceSequence(t *testing.T) {
 // listen_port 在 1..65535、排序按 ASCII 原始字节。
 func TestSnapshotShape(t *testing.T) {
 	handle := contractServer(t)
-	_, body := httpUnix(t, handle.sockPath, "GET", "/v2/snapshot", nil)
+	_, body := httpUnix(t, handle.sockPath, "GET", "/v3/snapshot", nil)
 
 	var generic map[string]any
 	if err := json.Unmarshal(body, &generic); err != nil {
@@ -128,10 +128,10 @@ func TestSnapshotShape(t *testing.T) {
 		t.Fatalf("快照顶层键数量不符：%d != %d", len(generic), len(expectedKeys))
 	}
 	health, ok := generic["health"].(map[string]any)
-	if !ok || len(health) != 3 {
-		t.Fatalf("health 必须是恰好三键的闭集：%v", generic["health"])
+	if !ok || len(health) != 4 {
+		t.Fatalf("health 必须是恰好四键的闭集：%v", generic["health"])
 	}
-	for _, key := range []string{"counter_overflow", "sequence_overflow", "identity_limit_reached"} {
+	for _, key := range []string{"counter_overflow", "sequence_overflow", "identity_limit_reached", "audit_dropped"} {
 		if _, present := health[key]; !present {
 			t.Fatalf("health 缺少 %s", key)
 		}
@@ -186,10 +186,10 @@ func TestQuotaEndpointFailClosed(t *testing.T) {
 	runtimeID := handle.registry.RuntimeID()
 
 	// 方法与路径。
-	if status, _ := httpUnix(t, quotaSock, "GET", "/v2/quota", nil); status != 405 {
+	if status, _ := httpUnix(t, quotaSock, "GET", "/v3/quota", nil); status != 405 {
 		t.Fatalf("非 PUT 应返回 405，实际 %d", status)
 	}
-	if status, _ := httpUnix(t, quotaSock, "PUT", "/v2/quotas", []byte("{}")); status != 404 {
+	if status, _ := httpUnix(t, quotaSock, "PUT", "/v3/quotas", []byte("{}")); status != 404 {
 		t.Fatalf("未知路径应返回 404，实际 %d", status)
 	}
 
@@ -231,7 +231,7 @@ func TestQuotaEndpointFailClosed(t *testing.T) {
 
 	// 未知字段 → 400（控制面与配置面同一纪律）。
 	unknown := fmt.Sprintf(`{"schema_version":2,"node_id":%q,"runtime_id":%q,"epoch":9,"entries":[],"extra":1}`, nodeID, runtimeID)
-	if status, _ = httpUnix(t, quotaSock, "PUT", "/v2/quota", []byte(unknown)); status != 400 {
+	if status, _ = httpUnix(t, quotaSock, "PUT", "/v3/quota", []byte(unknown)); status != 400 {
 		t.Fatalf("未知字段应返回 400，实际 %d", status)
 	}
 
@@ -278,7 +278,7 @@ func putOversized(t *testing.T, sockPath string, body []byte) int {
 	}
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
-	head := "PUT /v2/quota HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n" +
+	head := "PUT /v3/quota HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n" +
 		"Content-Length: " + strconv.Itoa(len(body)) + "\r\n\r\n"
 	if _, err = conn.Write([]byte(head)); err != nil {
 		t.Fatalf("写请求头失败：%v", err)

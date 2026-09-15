@@ -179,7 +179,7 @@ func splitSpace(input string) []string {
 // fetchSnapshot 取一次快照并解析。
 func fetchSnapshot(t testing.TB, sockPath string) *Snapshot {
 	t.Helper()
-	status, body := httpUnix(t, sockPath, "GET", "/v2/snapshot", nil)
+	status, body := httpUnix(t, sockPath, "GET", "/v3/snapshot", nil)
 	if status != 200 {
 		t.Fatalf("快照返回 %d：%s", status, body)
 	}

@@ -44,7 +44,7 @@ func putQuota(t *testing.T, quotaSock string, nodeID string, runtimeID string, e
 	if err != nil {
 		t.Fatalf("编码配额请求失败：%v", err)
 	}
-	return httpUnix(t, quotaSock, "PUT", "/v2/quota", body)
+	return httpUnix(t, quotaSock, "PUT", "/v3/quota", body)
 }
 
 // TestQuotaIsolation 是 §4.9 的隔离性主用例。

@@ -140,11 +140,12 @@ func (s *Service) closeAudit() {
 
 // handleSnapshotRoute 固定两条路由，且只接受 GET。
 //
-// 路径版本号与 schema_version 同步推进：本项目不提供 /v1/snapshot，请求该路径返回 404，
-// 使误配的采集器立即失败，而不是读到半兼容的 body（README §4.5）。
+// 路径版本号与 schema_version 同步推进：本项目只提供当前版本，历史路径（/v1、/v2）一律 404，
+// 使误配或未同步升级的采集器立即失败，而不是读到半兼容的 body（README §4.5）。
+// health 从三位加到四位（audit_dropped）就是 v2→v3 那次推进的原因。
 func (s *Service) handleSnapshotRoute(req *request) (int, []byte) {
 	switch req.path {
-	case "/v2/snapshot":
+	case "/v3/snapshot":
 		if req.method != "GET" {
 			return statusMethodNotAllowed, mustJSON(newErrorBody(statusMethodNotAllowed))
 		}

@@ -109,7 +109,7 @@ func (q *quotaState) init() {
 	q.staleAction = QuotaActionAllow
 }
 
-// QuotaEntry 是 PUT /v2/quota 请求体中的一项。
+// QuotaEntry 是 PUT /v3/quota 请求体中的一项。
 type QuotaEntry struct {
 	InboundTag     string `json:"inbound_tag"`
 	Name           string `json:"name"`

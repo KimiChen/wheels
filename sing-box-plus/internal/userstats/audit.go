@@ -27,6 +27,9 @@ var auditSentinelHosts = map[string]struct{}{
 const (
 	auditMaxHostBytes  = 255
 	auditFileBufferMax = 8 * 1024
+	// auditDropLogInterval 是丢弃日志的限流间隔。enforceTotalCap 每个 flush tick 都跑，
+	// 触底后若不限流会按 tick 频率刷屏；首次仍然立刻打，之后才进入限流。
+	auditDropLogInterval = time.Minute
 )
 
 // auditRecord 是一条待落盘的访问记录。
@@ -59,6 +62,7 @@ type auditWriter struct {
 	records chan auditRecord
 
 	droppedWrite atomic.Uint64
+	lastDropLog  time.Time // 只由 writer goroutine 访问
 
 	// 队列满时我们**知道**是谁的记录被丢了，因此丢弃数按身份计，
 	// gap 行落进那个人的文件而不是笼统记在一处。
@@ -395,13 +399,36 @@ func (w *auditWriter) flushAll() {
 	}
 }
 
-func (w *auditWriter) resetWriter(file *auditFile) {
-	w.droppedWrite.Add(1)
-	file.writer.Reset(file.file)
-	if w.logger != nil {
-		w.logger.Warn("访问审计写入失败，已复位 writer：", file.path,
-			"；累计丢弃 ", w.droppedWrite.Load(), " 次")
+// noteDropped 是全部丢弃路径的唯一入口：累加粘滞计数，并按限流打一条日志。
+//
+// 两头都要防。完全不打日志，就是 2026-09-15 验证里量到的黑洞：纪律 10 触底、无已轮转文件可删，
+// 于是既没删成也没写 gap，磁盘顶着上限而运维侧一无所知。反过来，enforceTotalCap 每个 flush tick
+// 都跑一遍，不限流的话一次真事件会变成每秒若干行同样的噪声，把日志淹掉。
+//
+// 折中是首次立刻打、之后每 auditDropLogInterval 至多一条，并带上累计次数，让稀疏采样也能看出量级。
+// 计数本身不限流，快照的 health.audit_dropped 只看它是否大于 0。
+//
+// 只在 writer goroutine 上调用，lastDropLog 因此不需要同步。
+func (w *auditWriter) noteDropped(reason string, detail any) {
+	count := w.droppedWrite.Add(1)
+	if w.logger == nil {
+		return
 	}
+	now := time.Now()
+	if count > 1 && now.Sub(w.lastDropLog) < auditDropLogInterval {
+		return
+	}
+	w.lastDropLog = now
+	if detail == nil {
+		w.logger.Warn("访问审计丢弃：", reason, "；累计 ", count, " 次")
+		return
+	}
+	w.logger.Warn("访问审计丢弃：", reason, "：", detail, "；累计 ", count, " 次")
+}
+
+func (w *auditWriter) resetWriter(file *auditFile) {
+	w.noteDropped("写入失败，已复位 writer", file.path)
+	file.writer.Reset(file.file)
 }
 
 // checkRotationAll 用 os.SameFile 比对每个打开文件的 fd 与路径上的 inode，不同则重开。
@@ -425,10 +452,7 @@ func (w *auditWriter) reopen(file *auditFile) {
 	_ = file.file.Close()
 	opened, err := os.OpenFile(file.path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o600)
 	if err != nil {
-		w.droppedWrite.Add(1)
-		if w.logger != nil {
-			w.logger.Error("访问审计文件重开失败：", err)
-		}
+		w.noteDropped("重开审计文件失败", err)
 		return
 	}
 	file.file = opened
@@ -461,16 +485,22 @@ func (w *auditWriter) enforceTotalCap() {
 	}
 	for {
 		total, oldest, err := auditDirectorySize(w.options.Directory)
-		if err != nil || total <= w.options.MaxTotalBytes {
+		if err != nil {
+			// 目录读不出来时上限完全没在执行，且这条路径不丢记录、只是没兜住，
+			// 所以计数，但理由与「丢了记录」区分开。
+			w.noteDropped("无法统计审计目录，总量上限未生效", err)
+			return
+		}
+		if total <= w.options.MaxTotalBytes {
 			return
 		}
 		if oldest == "" {
-			w.droppedWrite.Add(1)
+			w.noteDropped("总量已超上限但没有可删的已轮转文件，上限无法兑现", nil)
 			return
 		}
 		identity, known := auditIdentityFromFileName(filepath.Base(oldest))
 		if err = os.Remove(oldest); err != nil {
-			w.droppedWrite.Add(1)
+			w.noteDropped("删除最老的已轮转文件失败", err)
 			return
 		}
 		if !known {
