@@ -90,8 +90,10 @@
 
 按这个用途，下面两类排掉是合理的：
 
-- **纯 CDN**：`githubusercontent.com`、`twimg.com`、`googlevideo.com`、`cdn-apple.com`、
-  `vscode-cdn.net`。它们只分发静态资源，没有发布入口，记下来也指向不了任何人的言论。
+- **纯 CDN**：`githubusercontent.com`、`googleusercontent.com`、`twimg.com`、`googlevideo.com`、
+  `cdn-apple.com`、`vscode-cdn.net`。它们只分发静态资源，没有发布入口，记下来也指向不了任何人的言论。
+  注意 `googleusercontent.com` 与 `googleapis.com` 都**不在** `google.com` 之下，要单列——
+  漏了它，实测每周仍有约 68 MiB 的 Google CDN 记录留在日志里。
 - **需要登录态才能发言的平台**：`google.com`、`microsoft.com`、`apple.com`、`github.com`、
   `gstatic.com`。在这些站点上发布内容必须先登录，平台自己就持有作者身份；
   代理这一层再记一条「某人连过 github.com」并不增加任何溯源能力。
