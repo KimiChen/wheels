@@ -67,6 +67,14 @@ type AccessLogOptions struct {
 	FlushIntervalMs int    `json:"flush_interval_ms,omitempty"`
 	QueueSize       int    `json:"queue_size,omitempty"`
 	MaxOpenFiles    int    `json:"max_open_files,omitempty"`
+
+	// ExcludeHosts 是域名后缀名单，ExcludeIPs 是网段/地址名单。命中的连接不写审计。
+	//
+	// 这两项**只影响审计**：计数器与配额扣减在 connState 里无条件执行，
+	// 被排掉的流量照样计费、照样扣额度。换来的代价是审计不再是全量，
+	// 出现用量争议时解释不了被排掉的那部分——取舍见 docs/ACCESS_AUDIT.md。
+	ExcludeHosts []string `json:"exclude_hosts,omitempty"`
+	ExcludeIPs   []string `json:"exclude_ips,omitempty"`
 }
 
 // QuotaControlOptions 是 §4.9 配额闸断的配置，缺省即整个能力关闭。
@@ -181,6 +189,10 @@ func (o *AccessLogOptions) normalize() error {
 	}
 	if o.QueueSize < 1 {
 		return E.New("user_stats.access_log.queue_size 必须为正数")
+	}
+	// 在 normalize 阶段就编译一次，让非法规则在启动时硬失败而不是运行到一半才发现。
+	if _, err := newExcludeFilter(o.ExcludeHosts, o.ExcludeIPs); err != nil {
+		return err
 	}
 	return nil
 }

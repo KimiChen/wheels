@@ -57,17 +57,17 @@ class UpstreamLockConsistencyTest(unittest.TestCase):
 
 
 class SchemaConsistencyTest(unittest.TestCase):
-    def test_schema_version_is_two_everywhere(self):
+    def test_schema_version_is_three_everywhere(self):
         source = read("internal/userstats/snapshot.go")
-        self.assertIn("SchemaVersion = 2", source)
+        self.assertIn("SchemaVersion = 3", source)
         model = read("tests/settlement_model.py")
-        self.assertIn("SCHEMA_VERSION = 2", model)
+        self.assertIn("SCHEMA_VERSION = 3", model)
         api = read("docs/API.md")
-        self.assertIn("GET /v2/snapshot", api)
-        self.assertIn("PUT /v2/quota", api)
-        # 本项目不提供 /v1/snapshot：文档必须显式说明它恒为 404，
-        # 否则已对接 shadowsocks-rust-plus 的下游会以为可以直接切过来。
+        self.assertIn("GET /v3/snapshot", api)
+        self.assertIn("PUT /v3/quota", api)
+        # 历史路径必须显式说明恒为 404，否则未同步升级的下游会以为可以直接切过来。
         self.assertIn("/v1/snapshot", api)
+        self.assertIn("/v2/snapshot", api)
 
     def test_snapshot_key_sets_match_between_go_and_python(self):
         source = read("internal/userstats/snapshot.go")

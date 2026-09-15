@@ -35,9 +35,9 @@ TCP/UDP × 上下行四个累计值、明确的重启边界、可幂等采集，
 （§5.1 的基线键以 `node_id` 打头，否则 inbound tag 命名空间会跨实现串号）。两者的 SS 配置
 纪律是同构的：固定 EIH method、要求具名用户、禁止与各自的动态管理面并存。
 
-两者的快照可由三重标志区分，并列生效：本项目是 `GET /v2/snapshot` 与 `schema_version: 2`
+两者的快照可由三重标志区分，并列生效：本项目是 `GET /v3/snapshot` 与 `schema_version: 2`
 （`shadowsocks-rust-plus` 是 `/v1/snapshot` 与 `1`），两者使用不同的 `node_id`，以及不同的 socket 路径。
-误指到本项目的旧采集器会先在路由上拿到 404，即使直接打到 `/v2/snapshot` 也会在版本号处硬失败——
+误指到本项目的旧采集器会先在路由上拿到 404，即使直接打到 `/v3/snapshot` 也会在版本号处硬失败——
 `shadowsocks-rust-plus` 的三个校验器都硬编码要求 `schema_version == 1`。因此下游若已对接该实现，
 其 `schema_version` 约束与触发器须先放开为同时接受 `2`，这是接入本项目的硬前置。
 
@@ -355,7 +355,7 @@ registry 由自有 main 持有（§4.7），因此它的生命周期是**进程�
 
 ### 4.5 快照接口契约
 
-快照 schema 的 `schema_version` 固定为 `2`，路由为 `GET /v2/snapshot`。结算语义——基线键结构、
+快照 schema 的 `schema_version` 固定为 `2`，路由为 `GET /v3/snapshot`。结算语义——基线键结构、
 差分规则、health 闸门、错误码表与资源上限——与 `shadowsocks-rust-plus` 逐条同构，只是字段按
 sing-box 的词汇命名。
 
@@ -380,7 +380,8 @@ sing-box 的词汇命名。
   "health": {
     "counter_overflow": false,
     "sequence_overflow": false,
-    "identity_limit_reached": false
+    "identity_limit_reached": false,
+    "audit_dropped": false
   },
   "inbounds": [
     {
@@ -439,16 +440,27 @@ camelCase 只出现在受外部规范约束的面（SSM 遵 SIP008、Clash API �
 不导出，`adapter.Inbound` 只有 `Lifecycle` + `Type()` + `Tag()`），因此 §4.6 第 2 条要求显式配置非 0 的
 `listen_port`，使配置值与实际绑定恒等。
 
-`health` 是**闭集**：恰好三个 bool 键，出现额外键即整份拒绝；新增 health 键必须同时提升
-`schema_version`。三位都是**粘滞**的——`counter_overflow`（任一 `*_bytes` 饱和加法发生截断）、
-`sequence_overflow`（`sequence` 饱和）、`identity_limit_reached`（曾因 `max_identities` 或逻辑 inbound
-上限拒绝过一次 lineage 注册，把 §4.3 第 5 条已有的“标记 unhealthy”分支变成可机器判定的位）。
+`health` 是**闭集**：恰好四个 bool 键，出现额外键即整份拒绝；新增 health 键必须同时提升
+`schema_version`（`audit_dropped` 就是 v2→v3 那次推进的原因，路径同步改为 `/v3`）。
+四位都是**粘滞**的，但分成语义不同的两类，不要混用：
+
+**前三位 = 这份快照不可入账**，因为数字本身不可信：`counter_overflow`（任一 `*_bytes`
+饱和加法发生截断）、`sequence_overflow`（`sequence` 饱和）、`identity_limit_reached`
+（曾因 `max_identities` 或逻辑 inbound 上限拒绝过一次 lineage 注册，把 §4.3 第 5 条已有的
+"标记 unhealthy"分支变成可机器判定的位）。`/healthz` 的 503 判据只看这三位。
+
+**第四位 `audit_dropped` = 审计有损，但账是准的**：§4.8 的 JSONL 旁路丢过记录
+（打开文件失败、轮转重命名失败、重开失败、写失败复位，或纪律 10 触底而无已轮转文件可删），
+证据链因此有缺口、应当告警，但计费计数器没有出任何问题，采集端**照常入账**。
+把它算进入账判据等于让一次日志写失败停掉整条计费链路——磁盘写满时尤其致命，
+那时你最需要的恰恰是账还在走。队列满导致的丢弃不在这一位里：那种丢弃在文件内就地写成
+`ev=gap` 行，是自描述的，不需要带外信号；这一位专门对付**连 gap 行都写不出去**的路径。
 
 `tcp_sessions` / `udp_sessions` 是当前活跃数的瞬时 gauge，**可减少**，不参与结算、不进基线、
 不触发回退告警，供计划重启时判断是否已排空（§5.3）。
 
 传输层：HTTP/1.1-over-Unix-stream，每连接单请求单响应，禁 keep-alive / query / body；
-固定两条路由——`GET /v2/snapshot`（被接受时即推进 `sequence`）与 `GET /healthz`（不带版本段，
+固定两条路由——`GET /v3/snapshot`（被接受时即推进 `sequence`）与 `GET /healthz`（不带版本段，
 200/503，不推进 `sequence`）。**路径版本号与 `schema_version` 同步推进**：本项目不提供
 `/v1/snapshot`，请求该路径返回 404，使误配的采集器立即失败，而不是读到半兼容的 body。
 错误一律返回固定 `{"schema_version": 2, "error": {"code": …}}` 对象，错误码取值表与 `shadowsocks-rust-plus` 一致
@@ -466,8 +478,8 @@ Unix socket 不得直接映射为公网监听，远程读取须经节点上的�
 sing-box 命名——`servers[]` / `server_id` / `inbound_type` 在此为 `inbounds[]` / `tag` / `type`，
 `listen` 由 `host:port` 合成串拆为 `listen` + `listen_port` 两个平级键；`identity_kind` 不设——
 sing-box 侧唯一身份来源是 `metadata.User`，写入点只有 `users[].name`，relay、单用户与 `managed`
-三种非用户形态已由 §4.6 在配置期拒绝，跨版本的失败关闭由 `schema_version` 承担；`health` 多一位
-`identity_limit_reached`。四向计数、信封字段与错误码表同名同义。
+三种非用户形态已由 §4.6 在配置期拒绝，跨版本的失败关闭由 `schema_version` 承担；`health` 多两位
+`identity_limit_reached` 与 `audit_dropped`。四向计数、信封字段与错误码表同名同义。
 
 迁移成本因此集中在采集端的字段访问路径：下游服务表的列名（`exporter_server_id` 之类）与幂等
 `batch_id` 的配方都不与 wire 字段名字面绑定，无需改列名，也无需重算历史批次；而
@@ -678,6 +690,17 @@ stock sing-box 会拒绝解析（实测 exit=1），`format` 同样失败。因�
 **不**提供抗篡改与抗抵赖，**不**保证事件不丢。未配置时不创建任何 goroutine、文件或包装，
 数据面与 §4.1 完全一致。
 
+**它的用途是言论溯源，不是计费对账。** 计费有自己的链路（§4.5 快照 → §5 账本），两者独立。
+因此可以用 `exclude_hosts` / `exclude_ips` 把纯 CDN 与需要登录态才能发言的平台排掉——
+在那些站点上发布内容必须先登录，平台自己就持有作者身份，代理这一层再记一笔不增加溯源能力。
+不该排的是匿名发布面，那正是这份日志唯一能提供、别处拿不到的信息。
+
+排除**只挡审计、挡不住计费**：`connState.countUplink/countDownlink` 里计数器推进与配额扣减
+无条件执行，审计只是其中 `if s.audit != nil` 的旁路，排除判断发生在 `newConnState`。
+被排掉的流量照样计入快照、照样扣额度。`TestExcludedTrafficStillBilled` 钉住这条分界线。
+排除是静默的（不写 gap 行），代价由文件头的 `ev=filter` 留痕补偿——生效规则随每个物理文件走。
+写法与取舍见 `docs/ACCESS_AUDIT.md`。
+
 **为什么不做完整审计子系统。** `shadowsocks-rust-plus` 的同名能力是 28519 行、48 文件、
 独立 auditd 进程 + ingest 协议 + spool + ACK + HMAC，其中 spool 单文件 9588 行。按新增行数拆账，
 约 13–14% 是“因为拆了两个进程才需要”（wire 消息、ingest 服务端、重连帧 I/O、手写严格 HTTP/1.1、
@@ -790,8 +813,12 @@ splice/direct 快路径。`Close()` 只向有界 channel 投递，由单个 writ
 9. **检测轮转与删除。** 每次 flush tick 用 `os.SameFile` 比对当前 fd 与路径上的 inode，不同则重开，
    否则轮转后写进已删除 inode 的黑洞。`docs/OPERATIONS.md` 须写明**不要给该目录配 logrotate**，
    由本进程按 `max_bytes` 自轮转。
-10. **总量封顶且清理不得自指。** 超过 `max_total_bytes` 时删最老的已轮转文件并写一条 gap；
-    但**无对象可删时只累加计数、不写 gap**——参考实现实测 20 条真事件被放大成 78 条自指 gap 记录。
+10. **总量封顶且清理不得自指，但必须留下带外信号。** 超过 `max_total_bytes` 时删最老的
+    已轮转文件并写一条 gap；但**无对象可删时只累加计数、不写 gap**——参考实现实测 20 条真事件
+    被放大成 78 条自指 gap 记录。只累加计数曾经意味着**运维侧完全看不见**（2026-09-15 实测），
+    因此全部丢弃路径统一走 `noteDropped`：累加粘滞计数、置位快照的 `health.audit_dropped`，
+    并按 `auditDropLogInterval` 限流打一条带累计次数的日志。限流是必需的——`enforceTotalCap`
+    每个 flush tick 都跑，不限流会把一次真事件变成按 tick 频率的刷屏；首次仍然立刻打。
 11. **`ts` 是墙钟且非单调，不要在写入侧强行单调化。** 时钟回拨时 `seq` 仍严格递增，由下游按 `seq`
     排序；写入侧篡改时间戳会让记录与其他日志无法对齐。
 12. **启动 fail-hard，运行 fail-open。** 启动期以最终 euid 实际 `OpenFile(0600)` 一次并
@@ -846,7 +873,7 @@ splice/direct 快路径。`Close()` 只向有界 channel 投递，由单个 writ
 
 传输层同 §4.5：HTTP/1.1-over-Unix-stream、每连接单请求单响应、禁 keep-alive 与 query；区别是本端点
 **允许且只允许**请求体（`Content-Type: application/json`，大小上限与快照响应同档）。
-单一路由 `PUT /v2/quota`，全量覆盖语义。**不提供增量的 block / unblock**：增量事件丢一条即永久错位，
+单一路由 `PUT /v3/quota`，全量覆盖语义。**不提供增量的 block / unblock**：增量事件丢一条即永久错位，
 全量覆盖天然幂等，也天然处理进程重启后的状态清零。
 
 ```json
@@ -1041,7 +1068,7 @@ node_id + inbounds[].tag + inbounds[].generation + users[].name + users[].genera
 1. **周期基线自持。** “本周期已用”只能由 collector 按 §5.1 的六元组基线自行累计，**不得**拿快照里的
    四向绝对值直接与配额相比——同名重建复用原计数器（§4.3 第 2 条），绝对值跨计费周期不归零。
 2. **每次采集后重推，识别到新 `runtime_id` 时立即重推。** 进程侧的额度是纯内存的，重启即消失；
-   `PUT /v2/quota` 返回的 409 是这条义务的兜底信号，不是可忽略的噪声。
+   `PUT /v3/quota` 返回的 409 是这条义务的兜底信号，不是可忽略的噪声。
 3. **顺序是先入账、再算额度、再推送。** 反过来会在 collector 自身崩溃时下发一个基于未落库增量的
    额度，恢复后重复扣减。
 
@@ -1102,11 +1129,11 @@ shadowsocks-2022 + dns + `hijack-dns` 路由规则的配置全部解析通过，
 | `scripts/build-linux-release.sh` | 两次独立路径构建逐字节一致才产出 manifest + SHA-256 |
 | `scripts/sign-release.sh` / `verify-release.sh` | detached 签名与验签，私钥离线保管 |
 | `scripts/user-stats-client.py` | 带 v2 schema 与健康校验的快照读取客户端。**HTTP/UDS 传输层不复制第二份**：唯一实现在 `scripts/http_unix.py`，`tests/http_unix.py` 是按文件路径装载的再导出 shim。参考实现那两份副本靠门禁维持一致，本项目从结构上消除漂移，`tests/test_http_unix.py` 断言 `request` 的定义位置落在唯一实现里 |
-| `scripts/quota-client.py` | 配额下发客户端：读取一份 `remaining_bytes` 清单后 `PUT /v2/quota`，含 `epoch` 维护与 409 重推 |
+| `scripts/quota-client.py` | 配额下发客户端：读取一份 `remaining_bytes` 清单后 `PUT /v3/quota`，含 `epoch` 维护与 409 重推 |
 | `scripts/soak.sh` | 里程碑 5 的长跑采集循环；结束后用 `reference_collector.py --report` 输出四项判据 |
 | `tests/race-suppressions.txt` | 只抑制上游 `route.NetworkManager` 的已知竞争；`verify.sh` 另跑一遍不带抑制的纯单元用例，使它无法掩盖本项目自身的竞争 |
 | `tests/reference_collector.py` | 参考 collector：取快照 → v2 校验 → 差分 → 幂等落地本地账本；范围**不含** outbox、mTLS 与重试（属下游控制面）。`shadowsocks-rust-plus` 无对应物可搬，须从零实现 |
-| `scripts/quota-client.py` | 配额下发客户端：读取一份 `remaining_bytes` 清单后 `PUT /v2/quota`，含 `epoch` 维护与 409 重推。与 `scripts/user-stats-client.py` 共用同一份 HTTP/UDS 解析代码，受同一条一致性门禁约束 |
+| `scripts/quota-client.py` | 配额下发客户端：读取一份 `remaining_bytes` 清单后 `PUT /v3/quota`，含 `epoch` 维护与 409 重推。与 `scripts/user-stats-client.py` 共用同一份 HTTP/UDS 解析代码，受同一条一致性门禁约束 |
 | `packaging/` | 复用上游 `release/config/sing-box.service`、`sing-box.sysusers`，追加 `RuntimeDirectory=` 承载 UDS 与 `Restart=on-failure`；上游无 tmpfiles 模板，需自建 |
 | `config/server.example.json` | 脱敏的最小可用配置，含 `user_stats` 全字段与默认值 |
 | `docs/` | `API.md`、`ARCHITECTURE.md`、`OPERATIONS.md`、`UPSTREAM_BASELINE.md`、`PERFORMANCE.md`、`ACCESS_AUDIT.md` |
@@ -1146,31 +1173,23 @@ shadowsocks-2022 + dns + `hijack-dns` 路由规则的配置全部解析通过，
 
 已知未覆盖项，按需要补齐的优先级排列：
 
-1. **纪律 10 触底时完全没有可观测信号**：`enforceTotalCap` 找不到可删对象时只
-   `droppedWrite.Add(1)` 就返回——不打日志，`/v2/snapshot` 的 `health` 也只有
-   `counter_overflow` / `sequence_overflow` / `identity_limit_reached` 三位，没有审计丢弃位。
-   2026-09-15 的验证里实测到这个场景：目录 73 384 B 超过 65 536 B 上限、两个身份都只有活动文件、
-   无已轮转文件可删，于是既没删成也没写 gap，**运维侧一无所知**。
-   `droppedWrite` 的 5 个累加点里只有写失败那一个（`resetWriter`）会打日志，
-   开文件失败、重开失败、重命名失败、总量触底这 4 个都是静默的。
-   补法是加一个粘滞健康位（如 `audit_dropped`）并在快照里输出。
-2. **三组性能对照只做了环回版**：四个平台的微基准与 `BenchmarkDataPath{A,B,C}` 都有数据，
+1. **三组性能对照只做了环回版**：四个平台的微基准与 `BenchmarkDataPath{A,B,C}` 都有数据，
    64 KiB 分块下组间差 ≤ 2% 且不超出组内噪声。微基准里配额扣减的**绝对**增量是
    arm64 约 0.08 ns、现代 x86 核约 1.7 ns、低功耗 x86 核约 5.5 ns（一次 `LOCK XADD`
    vs LSE `LDADD`），且只落在真正带额度的 lineage 上。环回测量**不能替代**带真实 RTT、
    并发爬坡与 p99 的端到端验收。见 `docs/PERFORMANCE.md`。
-3. **长跑跨了两个构建、流量不均**：09-08 21:27 中途换了二进制（加逐用户审计），
+2. **长跑跨了两个构建、流量不均**：09-08 21:27 中途换了二进制（加逐用户审计），
    因此 7.7 天分成两个 runtime（1.9 天 + 5.8 天），不是单一构建连跑 7 天。
    期间 09-13 全天零流量、09-09 近乎零流量——判据在这两天是空载下取得的，
    证明力集中在 09-07/08/11 三天（单日入账 4.8 / 7.0 / 6.2 GiB）。
-4. **纪律 9 的删除分支必然丢一个 tick**：外部 `mv`（logrotate 的做法）零丢失已实测，
+3. **纪律 9 的删除分支必然丢一个 tick**：外部 `mv`（logrotate 的做法）零丢失已实测，
    但外部 `rm` 之后，检测到 inode 变化之前落在缓冲里的记录，会被 `reopen()` 的
    `flush` 写进已 unlink 的 inode。上界是 `flush_interval_ms` × 出记录速率，
    且**按定义不可计量**（数据已随 inode 销毁）。运维口径因此是：轮转审计文件只许 `mv`，
    不许 `rm`；要删某人的历史，删的是已轮转文件，不是活动文件。
-5. **正式发布签名用的是一次性密钥**：跨机签名→验签的完整流程已演练通过（含篡改必失败），
+4. **正式发布签名用的是一次性密钥**：跨机签名→验签的完整流程已演练通过（含篡改必失败），
    但真实的离线私钥在你手里，正式出包时须用它重签，并把公钥指纹写进 `docs/OPERATIONS.md`。
-6. **REALITY 链路未对账**：Vision 已覆盖（`vision_test.go`：TLS + `xtls-rprx-vision`，
+5. **REALITY 链路未对账**：Vision 已覆盖（`vision_test.go`：TLS + `xtls-rprx-vision`，
    小往返 4/4 证明 padding 不计入，100×64KiB 精确相等证明 buffered→direct 切换后口径不退化），
    但 REALITY 需要一个外部握手目标，会把用例变成依赖网络的用例，因此仍未覆盖；
    §12 已声明 REALITY 握手校验失败的伪装中继本就不可见于任何 tracker。
@@ -1265,7 +1284,8 @@ Shadowsocks 与 wrapper 形态的特化补充：
 - 注入 `ENOSPC` 后腾空磁盘：writer 自行恢复写入，期间的丢弃计入 `dropped_write` 且非 0（纪律 3）；
 - 断电式 kill 后重启：不出现半行与首条粘连，末行可被 `json.Unmarshal` 解析（纪律 4、5）；
 - 外部 `mv` + `rm` 日志文件后：writer 在下一个 flush tick 重开新文件，不再写入已删除 inode（纪律 9）；
-- `max_total_bytes` 触顶且无可删对象时：只累加计数、**不写 gap 行**，不出现自指 gap 放大（纪律 10）；
+- `max_total_bytes` 触顶且无可删对象时：只累加计数、**不写 gap 行**，不出现自指 gap 放大，
+  但快照的 `health.audit_dropped` 必须置位且粘滞，`/healthz` 必须**仍为 200**（纪律 10）；
 - 审计写入失败、队列满与注入 panic 三种情形下，转发不中断、进程不退出、快照接口不受影响
   （纪律 12，与 §4.6 第 5 条的 fail-hard 形成对照用例）；
 - 关闭序：`instance.Close()` 后在途记录全部落盘、stop 行存在、进程不因向已关闭 channel 投递而
@@ -1405,12 +1425,12 @@ sing-box 的 LICENSE 是 GPL v3-or-later 的授权声明段，并附带“衍生
 | --- | --- | --- | --- |
 | D1 | overlay 形态 | **零补丁 wrapper**：独立 module + 自有 main，不改上游源码（2026-09-05 在 v1.14.0 上实证） | §4.7 |
 | D2 | 首期协议范围 | **VLESS + Shadowsocks**（仅 `2022-blake3-aes-128-gcm` / `-aes-256-gcm` 的 `users[]` 具名多用户）；拒绝单用户、legacy AEAD、relay、`managed: true`，并与 SSM API 互斥。其余协议按 §2.4 逐个验证后追加 | §1、§2.4、§4.6 |
-| D3 | 快照 schema | **自有 v2**：`schema_version = 2`、路由 `GET /v2/snapshot`，容器与标识按 sing-box 命名（`inbounds[]`/`tag`/`type`，`listen` + `listen_port`），不设 `identity_kind`，`health` 三位。结算语义与 `shadowsocks-rust-plus` 同构，其参考校验器须分叉重写 | §1、§4.5、§5.1、§6 |
+| D3 | 快照 schema | **自有 v2**：`schema_version = 2`、路由 `GET /v3/snapshot`，容器与标识按 sing-box 命名（`inbounds[]`/`tag`/`type`，`listen` + `listen_port`），不设 `identity_kind`，`health` 三位。结算语义与 `shadowsocks-rust-plus` 同构，其参考校验器须分叉重写 | §1、§4.5、§5.1、§6 |
 | D4 | 构建 tag 裁剪 | **生产集 = `with_utls` + `badlinkname` + 自有 `with_user_stats`**；上游默认集其余 15 项全砍（含 `with_quic`、`tfogo_checklinkname0`）。裁 tag 不等于隔离上游账本 | §9.1、§4.6 第 7/8 条 |
 | D5 | 热用户增删接口 | **不提供**：快照 socket 只读，用户变更走受控重启或 SIGHUP 重载。§4.9 的配额控制端点是另一个只写 socket，只改额度、不改用户集，不构成对本条的改判 | §4.3、§5.3、§4.9 |
 | D6 | 进程崩溃丢尾账 | **接受**（与 `shadowsocks-rust-plus` 一致）：纯内存 registry，尾账按未闭合窗口审计，不引入 WAL | §1、§4.4、§5.3、§12 |
 | D7 | 访问审计形态 | **同进程 JSONL 旁路，默认关闭**：不建独立进程、不做 ingest/spool/ACK/HMAC，不保证事件不丢；计费仍只走快照。放弃的是“丢失的可判定性”，换来约 320 行对 28519 行 | §4.8、§5.2 |
-| D8 | 配额闸断形态 | **collector 判定 + 进程执行，下发剩余额度而非布尔标记**：独立只写 UDS、`PUT /v2/quota` 全量覆盖、闸断实施在 CountFunc 内、状态不进快照、共用 `with_user_stats`；可选能力，默认关闭 | §4.9、§5.4 |
+| D8 | 配额闸断形态 | **collector 判定 + 进程执行，下发剩余额度而非布尔标记**：独立只写 UDS、`PUT /v3/quota` 全量覆盖、闸断实施在 CountFunc 内、状态不进快照、共用 `with_user_stats`；可选能力，默认关闭 | §4.9、§5.4 |
 
 D1 的实证覆盖：独立 module 构建（含最小 tag 集与 linux/amd64 交叉）、`Router().AppendTracker`
 注入、真实转发 TCP 四向计数、SIGHUP 跨 Box 计数延续、匿名连接失败关闭（0 字节应用负载外发）、
@@ -1474,7 +1494,7 @@ D5 若改判为“提供”，必须另开独立端点：不得复用只读快�
 | 闸断是**事后**的，必然超额一小段 | 计数回调在字节已经过去之后才跑，跨过零点的那一次传输已经发生。单连接超额 ≤ 一个 copy 分块；并发 N 条时上限约 N × 分块。生产实测：1 GiB 额度、多连接并发，实际停在 1 073 853 248 字节，超额 111 424 字节（0.0104%） | 写进计费说明，**不要对外承诺“一字节不超”**。要真正的事前阻断只能在协议握手层拒绝，即 §4.9 末段的摘凭据路线 |
 | 控制面失联期间的额度失效 | `stale_after` 超时后按 `stale_action` 处置：`allow` 意味着超额可继续跑，`deny` 意味着 collector 成为转发链路的单点 | 二选一是商业决策，须在 `docs/OPERATIONS.md` 显式声明，不设“聪明”默认（§4.9） |
 | 被闸断用户的重连风暴与空拨号 | 每次重连消耗公共的 accept 队列与握手 CPU，并向目的地产生一次完成握手、0 字节的拨号（与本节首表“匿名/无身份连接的失败关闭仍会向目的地拨号”同一机制） | 逐 lineage 重连节流为首期必做，但它只压低本机侧的握手后成本，**拨号仍然发生**——tracker 在拨号之前拿不到否决权；根治需摘凭据，见 §4.9 末段与 §11.2 D8 |
-| 进程重启后的额度清零 | 纯内存，重启即全部解封，直到 collector 重推 | `PUT /v2/quota` 的 409 使 collector 立即察觉；重推前按 `startup_action` 处置（§4.9） |
+| 进程重启后的额度清零 | 纯内存，重启即全部解封，直到 collector 重推 | `PUT /v3/quota` 的 409 使 collector 立即察觉；重推前按 `startup_action` 处置（§4.9） |
 
 主要执行风险：上游 1.14 的接口与生命周期改动较大，每次 minor 升级需预留 rebase 与全量对账
 （§6、§9.2）；1.14.x 目前依赖若干 beta 模块，需锁定并跟踪其转正节奏；复制自上游的 9 个 CLI 文件

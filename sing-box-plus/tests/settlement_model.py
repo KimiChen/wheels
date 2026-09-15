@@ -13,7 +13,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SNAPSHOT_KEYS = {
     "schema_version",
@@ -24,7 +24,9 @@ SNAPSHOT_KEYS = {
     "health",
     "inbounds",
 }
-HEALTH_KEYS = {"counter_overflow", "sequence_overflow", "identity_limit_reached"}
+# 前三位决定「这份快照能不能入账」；audit_dropped 只说明审计旁路有损，不影响计数器正确性。
+BILLING_HEALTH_KEYS = {"counter_overflow", "sequence_overflow", "identity_limit_reached"}
+HEALTH_KEYS = BILLING_HEALTH_KEYS | {"audit_dropped"}
 INBOUND_KEYS = {
     "tag",
     "type",
@@ -187,7 +189,13 @@ def parse_snapshot(payload: bytes) -> dict[str, Any]:
 
 
 def health_ok(snapshot: dict[str, Any]) -> bool:
-    return not any(snapshot["health"].values())
+    """入账判据只看前三位。
+
+    audit_dropped 为真意味着 §4.8 的 JSONL 旁路丢过记录，证据链有缺口，应当告警；
+    但计费计数器本身没有出问题，拒绝入账等于拿停止计费去惩罚一次日志写失败。
+    两者必须分开，否则磁盘写满会连带把账停掉。
+    """
+    return not any(snapshot["health"][key] for key in BILLING_HEALTH_KEYS)
 
 
 def baseline_key(snapshot: dict[str, Any], inbound: dict[str, Any], user: dict[str, Any]) -> tuple:

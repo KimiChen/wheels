@@ -402,6 +402,69 @@ func TestAuditTotalCapNoSelfReferentialGap(t *testing.T) {
 	writer.Close()
 }
 
+// TestAuditDroppedSurfacesInSnapshot 钉住 2026-09-15 验证里暴露的可观测性缺口：
+// 纪律 10 触底而无对象可删时，运维侧必须能看见。
+//
+// 同时钉住另一半——它不得把计费链路停掉：计数器没有出问题，/healthz 仍须是 200。
+func TestAuditDroppedSurfacesInSnapshot(t *testing.T) {
+	registry := testRegistry(t)
+	writer, dir := newTestAudit(t, []string{"u1"}, func(o *AccessLogOptions) {
+		o.MaxBytes = 64 * 1024
+		o.MaxTotalBytes = 64 * 1024
+	})
+	registry.setAudit(writer)
+	defer writer.Close()
+
+	snapshot, err := registry.Snapshot()
+	if err != nil {
+		t.Fatalf("取快照失败：%v", err)
+	}
+	if snapshot.Health.AuditDropped {
+		t.Fatal("尚未发生丢弃时 audit_dropped 必须为假")
+	}
+
+	writer.submit(access("u1", "tcp", "a.example", 1, 1))
+	time.Sleep(60 * time.Millisecond)
+	if err = os.WriteFile(auditPathOf(dir, "u1"),
+		[]byte(strings.Repeat("{\"seq\":0}\n", 16*1024)), 0o600); err != nil {
+		t.Fatalf("撑大文件失败：%v", err)
+	}
+	writer.onWriterGoroutine(func() { writer.enforceTotalCap() })
+
+	if snapshot, err = registry.Snapshot(); err != nil {
+		t.Fatalf("取快照失败：%v", err)
+	}
+	if !snapshot.Health.AuditDropped {
+		t.Fatal("发生丢弃后 audit_dropped 必须置位，否则运维侧看不见纪律 10 触底")
+	}
+	if registry.unhealthy() {
+		t.Fatal("审计丢弃不得让 /healthz 变 503：计费计数器仍然准确，停掉入账是拿可用性换告警")
+	}
+
+	// 粘滞：后续快照保持为真，不因为「那一下已经过去了」而自愈。
+	if snapshot, err = registry.Snapshot(); err != nil {
+		t.Fatalf("取快照失败：%v", err)
+	}
+	if !snapshot.Health.AuditDropped {
+		t.Fatal("audit_dropped 必须粘滞")
+	}
+}
+
+// TestAuditDropLogThrottled 断言丢弃日志有限流：enforceTotalCap 每个 flush tick 都跑，
+// 不限流会把一次真事件变成按 tick 频率的刷屏。
+func TestAuditDropLogThrottled(t *testing.T) {
+	writer, _ := newTestAudit(t, []string{"u1"}, nil)
+	defer writer.Close()
+	writer.onWriterGoroutine(func() {
+		for i := 0; i < 100; i++ {
+			writer.noteDropped("测试", nil)
+		}
+		if got := writer.droppedWrite.Load(); got != 100 {
+			t.Errorf("计数不得限流：want 100, got %d", got)
+		}
+	})
+}
+
 // TestAuditMaxOpenFilesEviction 断言打开数有上限，超出时按 LRU 关闭且不丢记录。
 func TestAuditMaxOpenFilesEviction(t *testing.T) {
 	identities := []string{"u1", "u2", "u3", "u4"}
