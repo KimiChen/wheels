@@ -218,3 +218,73 @@ func TestExcludedTrafficStillBilled(t *testing.T) {
 		}
 	}
 }
+
+func stampServerConfig(port uint16, sock string, logDir string) string {
+	return fmt.Sprintf(`{
+  "log": {"level": "error"},
+  "inbounds": [{
+    "type": "vless", "tag": "vless-in",
+    "listen": "127.0.0.1", "listen_port": %d,
+    "users": [{"name": "u1", "uuid": "%s"}, {"name": "u2", "uuid": "%s"}]
+  }],
+  "outbounds": [{"type": "direct", "tag": "out"}],
+  "services": [{
+    "type": "user_stats", "tag": "stats",
+    "node_id": "node-test-01", "listen_path": %q,
+    "inbounds": ["vless-in"],
+    "access_log": {
+      "directory": %q, "flush_interval_ms": 20,
+      "exclude_hosts": ["github.com"],
+      "exclude_ips": ["203.0.113.0/24"]
+    }
+  }]
+}`, port, testUUID1, testUUID2, sock, logDir)
+}
+
+// TestFilterStampLandsWithFirstRealRecord 补齐 TestExcludedTrafficStillBilled 的另一半：
+// 那个用例证明命中排除的连接不留记录，这个证明**没命中**的连接照常留记录，
+// 并且文件里带着当时生效的规则。
+//
+// 两半都要有，否则「审计里什么都没有」既可能是规则生效，也可能是写入坏了——
+// 生产上正是这个二义性最难判断（配了排除之后，空文件不再是异常信号）。
+func TestFilterStampLandsWithFirstRealRecord(t *testing.T) {
+	dir := shortTempDir(t)
+	sock := sockPath(dir, "stats.sock")
+	logDir := filepath.Join(dir, "access")
+	if err := os.Mkdir(logDir, 0o750); err != nil {
+		t.Fatalf("创建审计目录失败：%v", err)
+	}
+	serverPort := testenv.FreePort(t)
+	echoHost, echoPort := testenv.StartTCPEcho(t)
+
+	handle := startServer(t, stampServerConfig(serverPort, sock, logDir))
+	testenv.WaitPort(t, "127.0.0.1", serverPort)
+	clientPort := testenv.FreePort(t)
+	testenv.StartUpstreamClient(t, vlessClientConfig(clientPort, serverPort, testUUID1, echoHost, echoPort))
+
+	roundTripTCP(t, clientPort, []byte("ping"), 1)
+	waitSessionsDrained(t, handle.sockPath, "vless-in")
+	handle.instance.Close()
+
+	records := readLines(t, filepath.Join(logDir, auditFileName("u1")))
+	if len(records) == 0 {
+		t.Fatal("未命中排除的连接必须留下记录")
+	}
+	if records[0]["ev"] != "filter" {
+		t.Fatalf("首行应是规则留痕，实际：%v", records[0])
+	}
+	hosts, _ := records[0]["hosts"].([]any)
+	ips, _ := records[0]["ips"].([]any)
+	if len(hosts) != 1 || hosts[0] != "github.com" || len(ips) != 1 || ips[0] != "203.0.113.0/24" {
+		t.Fatalf("留痕内容与配置不符：%v", records[0])
+	}
+	var access []map[string]any
+	for _, record := range records {
+		if record["ev"] == nil {
+			access = append(access, record)
+		}
+	}
+	if len(access) != 1 || access[0]["host"] != echoHost {
+		t.Fatalf("应恰好一条访问记录且 host 为 %q，实际：%v", echoHost, access)
+	}
+}
