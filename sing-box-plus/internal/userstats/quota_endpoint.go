@@ -9,7 +9,7 @@ import (
 
 var errUnknownLineage = E.New("全量表包含当前配置中不存在的计费身份")
 
-// quotaRequest 是 PUT /v2/quota 的请求体。
+// quotaRequest 是 PUT /v3/quota 的请求体。
 //
 // 全量覆盖语义：不提供增量的 block / unblock——增量事件丢一条即永久错位，
 // 全量覆盖天然幂等，也天然处理进程重启后的状态清零（README §4.9）。
@@ -38,7 +38,7 @@ type quotaErrorPayload struct {
 }
 
 func (s *Service) handleQuotaRoute(req *request) (int, []byte) {
-	if req.path != "/v2/quota" {
+	if req.path != "/v3/quota" {
 		return statusNotFound, mustJSON(newErrorBody(statusNotFound))
 	}
 	if req.method != "PUT" {

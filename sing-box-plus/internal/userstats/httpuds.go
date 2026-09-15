@@ -338,7 +338,7 @@ func isTimeout(err error) bool {
 func mustJSON(value any) []byte {
 	body, err := marshalJSONLine(value)
 	if err != nil {
-		return []byte("{\"schema_version\":2,\"error\":{\"code\":500}}\n")
+		return []byte(`{"schema_version":` + strconv.Itoa(SchemaVersion) + `,"error":{"code":500}}` + "\n")
 	}
 	return body
 }

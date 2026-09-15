@@ -131,7 +131,7 @@ func TestExporterConcurrencyLimit(t *testing.T) {
 			}
 			defer conn.Close()
 			_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
-			if _, err = conn.Write([]byte("GET /v2/snapshot HTTP/1.1\r\nHost: x\r\n\r\n")); err != nil {
+			if _, err = conn.Write([]byte("GET /v3/snapshot HTTP/1.1\r\nHost: x\r\n\r\n")); err != nil {
 				return
 			}
 			buffer := make([]byte, 128)
@@ -175,7 +175,7 @@ func TestExporterSlowClientTimesOut(t *testing.T) {
 	}
 	defer conn.Close()
 	// 只写半个请求行，然后什么都不做。
-	if _, err = conn.Write([]byte("GET /v2/sna")); err != nil {
+	if _, err = conn.Write([]byte("GET /v3/sna")); err != nil {
 		t.Fatalf("写入失败：%v", err)
 	}
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))

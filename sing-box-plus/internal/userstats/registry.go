@@ -302,9 +302,21 @@ func (r *Registry) fatal(err error) {
 	}
 }
 
-// unhealthy 是 /healthz 的判据：health 三位任一为真即 503。
+// unhealthy 是 /healthz 的判据：**只看前三位**，audit_dropped 不在内。
+//
+// 审计丢弃不影响计费计数器的正确性。把它算进 503 会让一次写失败停掉整条入账链路，
+// 那是拿可用性去换一个本该只是告警的信号。它只出现在快照的 health.audit_dropped 里。
 func (r *Registry) unhealthy() bool {
 	return r.counterOverflow.Load() || r.sequenceOverflow.Load() || r.identityLimitReached.Load()
+}
+
+// auditDropped 读 §4.8 旁路的粘滞丢弃计数；未启用审计时恒为 false。
+//
+// droppedWrite 只增不减，所以这一位天然粘滞，与另外三位一致：置位后该 runtime 余下时间保持为真，
+// 清除它的唯一方式是重启进程，这样运维不会因为「刚才那一下已经过去了」而漏掉证据链缺口。
+func (r *Registry) auditDropped() bool {
+	writer := r.auditWriterRef()
+	return writer != nil && writer.droppedWrite.Load() > 0
 }
 
 // BeginDrain 进入排空状态：拒绝新的计费连接，已有连接继续跑完。

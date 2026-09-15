@@ -11,13 +11,25 @@ import (
 //
 // /healthz、错误 body 与快照必须共用同一个常量，不得出现 1/2 混用；
 // 路径版本号与它同步推进，本项目不提供 /v1/snapshot。
-const SchemaVersion = 2
+const SchemaVersion = 3
 
-// Health 是闭集：恰好三个 bool 键，出现额外键即整份拒绝；新增键必须同时提升 SchemaVersion。
+// Health 是闭集：恰好四个 bool 键，出现额外键即整份拒绝；新增键必须同时提升 SchemaVersion
+// （audit_dropped 就是这么从 2 推到 3 的，路径同步改为 /v3）。
+//
+// 四位分两类，语义不同，不要混用：
+//   - 前三位是**这份快照不可入账**：计数器截断、sequence 饱和、身份被截断，任一为真都意味着
+//     数字本身不可信，采集端必须拒绝入账（unhealthy() 与 /healthz 只看这三位）。
+//   - audit_dropped 是**审计有损**：计费计数器仍然准确，可以照常入账，但 §4.8 的 JSONL
+//     旁路丢过记录（开文件失败、轮转重命名失败、重开失败、写失败复位，或纪律 10 触底
+//     而无已轮转文件可删）。它不进 unhealthy()，否则一次审计丢弃会把整条计费链路停掉。
+//
+// 队列满导致的丢弃不在这一位里：那种丢弃在文件内就地写成 ev=gap 行，是自描述的，
+// 不需要带外信号；这一位专门对付**连 gap 行都写不出去**的那些路径。
 type Health struct {
 	CounterOverflow      bool `json:"counter_overflow"`
 	SequenceOverflow     bool `json:"sequence_overflow"`
 	IdentityLimitReached bool `json:"identity_limit_reached"`
+	AuditDropped         bool `json:"audit_dropped"`
 }
 
 // SnapshotUser 是一个计费身份的四向累计值。
@@ -47,7 +59,7 @@ type SnapshotInbound struct {
 	Users       []SnapshotUser `json:"users"`
 }
 
-// Snapshot 是 GET /v2/snapshot 的响应体。
+// Snapshot 是 GET /v3/snapshot 的响应体。
 type Snapshot struct {
 	SchemaVersion   int               `json:"schema_version"`
 	NodeID          string            `json:"node_id"`
@@ -75,6 +87,7 @@ func (r *Registry) Snapshot() (*Snapshot, error) {
 			CounterOverflow:      r.counterOverflow.Load(),
 			SequenceOverflow:     r.sequenceOverflow.Load(),
 			IdentityLimitReached: r.identityLimitReached.Load(),
+			AuditDropped:         r.auditDropped(),
 		},
 		Inbounds: []SnapshotInbound{},
 	}
