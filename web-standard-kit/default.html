@@ -6,17 +6,16 @@
     <meta name="color-scheme" content="light dark" />
     <title>Web Standard Kit</title>
     <script>
-      // Apply the theme before first paint to avoid a flash of the wrong theme.
-      let savedTheme = null;
+      // Apply a stored choice before first paint. With no stored choice we
+      // leave [data-theme] off and let the stylesheet's light-dark() tokens
+      // follow the system, so dark also works with JavaScript disabled.
+      document.documentElement.dataset.js = "true";
       try {
-        savedTheme = localStorage.getItem("web-standard-kit-theme");
+        const savedTheme = localStorage.getItem("web-standard-kit-theme");
+        if (savedTheme === "light" || savedTheme === "dark") {
+          document.documentElement.dataset.theme = savedTheme;
+        }
       } catch {}
-      document.documentElement.dataset.theme =
-        savedTheme === "light" || savedTheme === "dark"
-          ? savedTheme
-          : matchMedia("(prefers-color-scheme: dark)").matches
-            ? "dark"
-            : "light";
     </script>
     <link rel="stylesheet" href="style.css" />
     <script src="script.js" defer></script>
@@ -30,6 +29,10 @@
           <path
             d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.66 6.34l1.41-1.41"
           />
+        </symbol>
+        <symbol id="system" viewBox="0 0 24 24">
+          <rect x="2" y="3" width="20" height="14" rx="2" />
+          <path d="M8 21h8M12 17v4" />
         </symbol>
         <symbol id="moon" viewBox="0 0 24 24">
           <path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8Z" />
@@ -92,6 +95,54 @@
         <symbol id="folder" viewBox="0 0 24 24">
           <path d="M3 6h6l2 2h10v10H3z" />
         </symbol>
+        <symbol id="message" viewBox="0 0 24 24">
+          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2Z" />
+        </symbol>
+        <symbol id="thumbs-up" viewBox="0 0 24 24">
+          <path d="M7 22V11" />
+          <path
+            d="M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2a3.13 3.13 0 0 1 3 3.88Z"
+          />
+        </symbol>
+        <symbol id="pin" viewBox="0 0 24 24">
+          <path d="M12 17v5" />
+          <path
+            d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1Z"
+          />
+        </symbol>
+        <symbol id="lock" viewBox="0 0 24 24">
+          <rect x="3" y="11" width="18" height="11" rx="2" />
+          <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+        </symbol>
+        <symbol id="user" viewBox="0 0 24 24">
+          <path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2" />
+          <circle cx="12" cy="7" r="4" />
+        </symbol>
+        <symbol id="clock" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="10" />
+          <path d="M12 6v6l4 2" />
+        </symbol>
+        <symbol id="tag" viewBox="0 0 24 24">
+          <path
+            d="M12.59 2.59A2 2 0 0 0 11.17 2H4a2 2 0 0 0-2 2v7.17a2 2 0 0 0 .59 1.41l8.7 8.71a2.43 2.43 0 0 0 3.42 0l6.58-6.59a2.43 2.43 0 0 0 0-3.42Z"
+          />
+          <path d="M7.5 7.5h.01" />
+        </symbol>
+        <symbol id="search" viewBox="0 0 24 24">
+          <circle cx="11" cy="11" r="8" />
+          <path d="m21 21-4.3-4.3" />
+        </symbol>
+        <symbol id="bookmark" viewBox="0 0 24 24">
+          <path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2Z" />
+        </symbol>
+        <symbol id="arrow-up" viewBox="0 0 24 24">
+          <path d="M12 19V5" />
+          <path d="m5 12 7-7 7 7" />
+        </symbol>
+        <symbol id="arrow-down" viewBox="0 0 24 24">
+          <path d="M12 5v14" />
+          <path d="m19 12-7 7-7-7" />
+        </symbol>
         <symbol id="x" viewBox="0 0 24 24">
           <path d="M18 6 6 18M6 6l12 12" />
         </symbol>
@@ -104,7 +155,7 @@
         <span class="wsk-brand-copy"><strong>Web Standard Kit</strong></span>
       </div>
 
-      <nav class="wsk-view-switch" aria-label="页面视图">
+      <nav class="wsk-view-switch" aria-label="页面视图" data-js-only>
         <button
           class="wsk-is-active"
           type="button"
@@ -117,10 +168,20 @@
         <button
           type="button"
           data-view-target="reference"
+          data-view-anchor="reference-overview"
           aria-controls="reference-view"
           aria-pressed="false"
         >
           数据中台参考
+        </button>
+        <button
+          type="button"
+          data-view-target="forum"
+          data-view-anchor="forum-overview"
+          aria-controls="forum-view"
+          aria-pressed="false"
+        >
+          社区论坛参考
         </button>
       </nav>
 
@@ -128,9 +189,13 @@
         class="wsk-icon-button"
         type="button"
         data-theme-toggle
-        aria-label="切换主题"
-        title="切换主题"
+        data-js-only
+        aria-label="主题：跟随系统，切换到浅色"
+        title="主题：跟随系统，切换到浅色"
       >
+        <svg class="wsk-icon wsk-theme-system" aria-hidden="true">
+          <use href="#system"></use>
+        </svg>
         <svg class="wsk-icon wsk-theme-sun" aria-hidden="true">
           <use href="#sun"></use>
         </svg>
@@ -159,6 +224,8 @@
             <a href="#feedback-title">反馈</a>
             <a href="#states-title">系统状态</a>
             <a href="#table-title">数据表格</a>
+            <a href="#community-title">社区</a>
+            <a href="#prose-title">正文排版</a>
           </div>
         </nav>
 
@@ -193,7 +260,7 @@
             <div class="wsk-panel">
               <p class="wsk-panel-title">菜单与加载</p>
               <div class="wsk-button-row">
-                <div class="wsk-menu-wrap">
+                <div class="wsk-menu-wrap" data-js-only>
                   <button
                     class="wsk-button wsk-secondary"
                     type="button"
@@ -211,6 +278,7 @@
                       type="button"
                       role="menuitem"
                       data-toast="已复制当前配置。"
+                      data-js-only
                     >
                       复制配置
                     </button>
@@ -218,6 +286,7 @@
                       type="button"
                       role="menuitem"
                       data-toast="已导出当前记录。"
+                      data-js-only
                     >
                       导出记录
                     </button>
@@ -226,6 +295,7 @@
                       type="button"
                       role="menuitem"
                       data-toast="删除操作已取消。"
+                      data-js-only
                       data-toast-variant="info"
                     >
                       删除记录
@@ -250,7 +320,11 @@
             <h2 id="form-title">表单</h2>
             <span class="wsk-badge">Forms</span>
           </div>
-          <form class="wsk-panel" id="sample-form">
+          <form
+            class="wsk-panel"
+            id="sample-form"
+            data-demo-submit="表单校验通过，示例数据未提交。"
+          >
             <div class="wsk-form-grid">
               <div class="wsk-field">
                 <label class="wsk-label" for="email"
@@ -299,6 +373,7 @@
                     class="wsk-icon-button"
                     type="button"
                     data-password
+                    data-js-only
                     aria-label="显示密码"
                     aria-controls="password"
                     aria-pressed="false"
@@ -319,6 +394,7 @@
                 <input
                   class="wsk-control"
                   id="code"
+                  data-code-input
                   name="code"
                   value="WSK2026"
                   pattern=".{6,}"
@@ -327,10 +403,10 @@
                   aria-invalid="false"
                   aria-describedby="code-success code-error"
                 />
-                <p class="wsk-success-text" id="code-success">
+                <p class="wsk-success-text" id="code-success" data-code-success>
                   校验码格式正确。
                 </p>
-                <p class="wsk-error" id="code-error" hidden>
+                <p class="wsk-error" id="code-error" data-code-error hidden>
                   校验码至少需要 6 个字符。
                 </p>
               </div>
@@ -486,6 +562,7 @@
                 class="wsk-pagination wsk-mt-5"
                 aria-label="示例分页"
                 data-demo-pagination
+                data-js-only
               >
                 <button
                   type="button"
@@ -631,13 +708,19 @@
             <div class="wsk-panel">
               <p class="wsk-panel-title">浮层反馈</p>
               <div class="wsk-button-row">
-                <button class="wsk-button" type="button" data-dialog-open>
+                <button
+                  class="wsk-button"
+                  type="button"
+                  data-dialog-open="confirm-dialog"
+                  data-js-only
+                >
                   确认框
                 </button>
                 <button
                   class="wsk-button wsk-secondary"
                   type="button"
                   data-toast="操作已保存，可继续编辑。"
+                  data-js-only
                 >
                   轻量消息
                 </button>
@@ -688,6 +771,7 @@
                 class="wsk-button wsk-secondary"
                 type="button"
                 data-toast="列表已刷新。"
+                data-js-only
               >
                 刷新列表
               </button>
@@ -695,17 +779,22 @@
           </div>
         </section>
 
-        <section class="wsk-section" aria-labelledby="table-title">
+        <section
+          class="wsk-section"
+          aria-labelledby="table-title"
+          data-table-scope
+        >
           <div class="wsk-section-head">
             <h2 id="table-title">数据表格</h2>
             <span class="wsk-badge">Data</span>
           </div>
-          <div class="wsk-toolbar wsk-mb-3">
+          <div class="wsk-toolbar wsk-mb-3" data-js-only>
             <div class="wsk-filter">
               <label class="wsk-sr-only" for="asset-filter">筛选数据资产</label
               ><input
                 class="wsk-control"
                 id="asset-filter"
+                data-table-filter
                 type="search"
                 placeholder="筛选数据资产"
               />
@@ -714,12 +803,14 @@
               <span
                 class="wsk-filter-meta"
                 id="selection-result"
+                data-table-selection
                 aria-live="polite"
                 >已选择 0 项</span
               >
               <span
                 class="wsk-filter-meta"
                 id="filter-result"
+                data-table-result
                 aria-live="polite"
                 >4 条记录 · 第 1/2 页</span
               >
@@ -741,7 +832,12 @@
             </div>
           </div>
           <div class="wsk-table-wrap">
-            <table class="wsk-table" id="asset-table" data-density="default">
+            <table
+              class="wsk-table"
+              id="asset-table"
+              data-table
+              data-density="default"
+            >
               <caption class="wsk-sr-only">
                 数据资产登记状态
               </caption>
@@ -750,29 +846,37 @@
                   <th class="wsk-select-cell" scope="col">
                     <label class="wsk-sr-only" for="select-all"
                       >选择全部当前页记录</label
-                    ><input id="select-all" type="checkbox" />
+                    ><input
+                        id="select-all"
+                        type="checkbox"
+                        data-table-select-all
+                      />
                   </th>
                   <th scope="col" aria-sort="none">
                     <button
                       class="wsk-sort-button"
                       type="button"
                       data-sort="name"
+                      data-js-only
                     >
                       资产名称<svg class="wsk-icon" aria-hidden="true">
                         <use href="#sort"></use>
                       </svg>
                     </button>
+                    <span data-no-js>资产名称</span>
                   </th>
                   <th scope="col" aria-sort="none">
                     <button
                       class="wsk-sort-button"
                       type="button"
                       data-sort="domain"
+                      data-js-only
                     >
                       主题域<svg class="wsk-icon" aria-hidden="true">
                         <use href="#sort"></use>
                       </svg>
                     </button>
+                    <span data-no-js>主题域</span>
                   </th>
                   <th scope="col">更新策略</th>
                   <th scope="col" aria-sort="none">
@@ -780,11 +884,13 @@
                       class="wsk-sort-button"
                       type="button"
                       data-sort="owner"
+                      data-js-only
                     >
                       负责人<svg class="wsk-icon" aria-hidden="true">
                         <use href="#sort"></use>
                       </svg>
                     </button>
+                    <span data-no-js>负责人</span>
                   </th>
                   <th scope="col">状态</th>
                 </tr>
@@ -882,7 +988,7 @@
                   <td>方程</td>
                   <td><span class="wsk-badge wsk-warning">待处理</span></td>
                 </tr>
-                <tr id="table-empty" hidden>
+                <tr id="table-empty" data-table-empty hidden>
                   <td class="wsk-table-empty" colspan="6">
                     没有符合条件的数据资产。
                   </td>
@@ -893,18 +999,404 @@
           <nav
             class="wsk-pagination wsk-table-pagination"
             aria-label="数据表格分页"
+            data-js-only
           >
-            <button id="page-prev" type="button" aria-label="上一页">
+            <button
+              id="page-prev"
+              type="button"
+              data-table-page-action="previous"
+              aria-label="上一页"
+            >
               <svg class="wsk-icon" aria-hidden="true">
                 <use href="#chevron-left"></use>
               </svg></button
-            ><span id="page-numbers"></span
-            ><button id="page-next" type="button" aria-label="下一页">
+            ><span id="page-numbers" data-table-page-numbers></span
+            ><button
+              id="page-next"
+              type="button"
+              data-table-page-action="next"
+              aria-label="下一页"
+            >
               <svg class="wsk-icon" aria-hidden="true">
                 <use href="#chevron-right"></use>
               </svg>
             </button>
           </nav>
+        </section>
+
+        <section class="wsk-section" aria-labelledby="community-title">
+          <div class="wsk-section-head">
+            <h2 id="community-title">社区</h2>
+            <span class="wsk-badge">Community</span>
+          </div>
+
+          <div class="wsk-demo-grid">
+            <div class="wsk-panel">
+              <p class="wsk-panel-title">头像</p>
+              <p class="wsk-help wsk-mb-3">
+                纯 CSS 缩写块，四色取自 <code>--cat-*</code>，不引入图片资产。
+              </p>
+              <div class="wsk-cat-row">
+                <span class="wsk-avatar wsk-avatar-sm" aria-hidden="true">SM</span>
+                <span class="wsk-avatar wsk-avatar-2" aria-hidden="true">MD</span>
+                <span class="wsk-avatar wsk-avatar-lg wsk-avatar-3" aria-hidden="true"
+                  >LG</span
+                >
+                <span class="wsk-avatar-stack" aria-label="4 位参与者">
+                  <span class="wsk-avatar wsk-avatar-sm" aria-hidden="true">A</span>
+                  <span class="wsk-avatar wsk-avatar-sm wsk-avatar-2" aria-hidden="true"
+                    >B</span
+                  >
+                  <span class="wsk-avatar wsk-avatar-sm wsk-avatar-3" aria-hidden="true"
+                    >C</span
+                  >
+                  <span class="wsk-avatar wsk-avatar-sm wsk-avatar-4" aria-hidden="true"
+                    >D</span
+                  >
+                </span>
+              </div>
+
+              <p class="wsk-panel-title wsk-mt-5">用户行</p>
+              <div class="wsk-user-list">
+                <div>
+                  <span class="wsk-user-row">
+                    <span class="wsk-avatar wsk-avatar-sm wsk-avatar-4" aria-hidden="true"
+                      >CM</span
+                    >
+                    <div><strong>陈默</strong><small>分享 · 42 主题</small></div>
+                  </span>
+                  <strong>97</strong>
+                </div>
+                <div>
+                  <span class="wsk-user-row">
+                    <span class="wsk-avatar wsk-avatar-sm wsk-avatar-2" aria-hidden="true"
+                      >LH</span
+                    >
+                    <div><strong>林海</strong><small>问答 · 31 主题</small></div>
+                  </span>
+                  <strong>73</strong>
+                </div>
+              </div>
+            </div>
+
+            <div class="wsk-panel">
+              <p class="wsk-panel-title">投票控件</p>
+              <div class="wsk-cat-row wsk-mb-3">
+                <div class="wsk-vote" role="group" aria-label="投票（未投）">
+                  <button type="button" aria-label="赞同" aria-pressed="false">
+                    <svg class="wsk-icon" aria-hidden="true">
+                      <use href="#arrow-up"></use>
+                    </svg>
+                  </button>
+                  <span class="wsk-vote-count">12</span>
+                  <button type="button" aria-label="反对" aria-pressed="false">
+                    <svg class="wsk-icon" aria-hidden="true">
+                      <use href="#arrow-down"></use>
+                    </svg>
+                  </button>
+                </div>
+                <div class="wsk-vote wsk-is-voted" role="group" aria-label="投票（已赞同）">
+                  <button type="button" aria-label="赞同" aria-pressed="true">
+                    <svg class="wsk-icon" aria-hidden="true">
+                      <use href="#arrow-up"></use>
+                    </svg>
+                  </button>
+                  <span class="wsk-vote-count">36</span>
+                  <button type="button" aria-label="反对" aria-pressed="false">
+                    <svg class="wsk-icon" aria-hidden="true">
+                      <use href="#arrow-down"></use>
+                    </svg>
+                  </button>
+                </div>
+              </div>
+
+              <p class="wsk-panel-title wsk-mt-5">标签与板块</p>
+              <p class="wsk-help wsk-mb-3">
+                板块 <code>.wsk-cat</code> 是固定集合、固定配色；标签
+                <code>.wsk-tag</code> 是开放集合，保持中性。
+              </p>
+              <div class="wsk-cat-row wsk-mb-3">
+                <span class="wsk-cat wsk-cat-1">公告</span>
+                <span class="wsk-cat wsk-cat-2">分享</span>
+                <span class="wsk-cat wsk-cat-3">问答</span>
+                <span class="wsk-cat wsk-cat-4">讨论</span>
+              </div>
+              <div class="wsk-capability-list">
+                <a class="wsk-tag" href="#community-title"
+                  ><svg class="wsk-icon" aria-hidden="true">
+                    <use href="#tag"></use></svg
+                  >设计令牌<span class="wsk-tag-count">128</span></a
+                ><a class="wsk-tag" href="#community-title"
+                  ><svg class="wsk-icon" aria-hidden="true">
+                    <use href="#tag"></use></svg
+                  >无障碍<span class="wsk-tag-count">64</span></a
+                ><span class="wsk-tag"
+                  ><svg class="wsk-icon" aria-hidden="true">
+                    <use href="#tag"></use></svg
+                  >只读标签</span
+                >
+              </div>
+            </div>
+          </div>
+
+          <div class="wsk-panel wsk-mt-5">
+            <p class="wsk-panel-title">帖子行</p>
+            <div class="wsk-thread-list">
+              <article class="wsk-thread">
+                <span class="wsk-avatar" aria-hidden="true">ZW</span>
+                <div class="wsk-thread-main">
+                  <div class="wsk-thread-tags">
+                    <span class="wsk-cat wsk-cat-1">公告</span>
+                    <span class="wsk-badge wsk-accent">
+                      <svg class="wsk-icon" aria-hidden="true">
+                        <use href="#pin"></use>
+                      </svg>
+                      置顶
+                    </span>
+                  </div>
+                  <a class="wsk-thread-title" href="#community-title">置顶状态</a>
+                  <p class="wsk-thread-excerpt">
+                    状态用既有的 <code>.wsk-badge</code> 语义变体表达，不新增颜色。
+                  </p>
+                  <div class="wsk-thread-byline">
+                    <span>
+                      <svg class="wsk-icon" aria-hidden="true">
+                        <use href="#user"></use>
+                      </svg>站务组</span
+                    >
+                    <span>
+                      <svg class="wsk-icon" aria-hidden="true">
+                        <use href="#clock"></use>
+                      </svg>2 小时前</span
+                    >
+                  </div>
+                </div>
+                <div class="wsk-thread-stats">
+                  <div><strong>24</strong><small>回复</small></div>
+                  <div><strong>1,832</strong><small>浏览</small></div>
+                </div>
+              </article>
+
+              <article class="wsk-thread">
+                <span class="wsk-avatar wsk-avatar-2" aria-hidden="true">LH</span>
+                <div class="wsk-thread-main">
+                  <div class="wsk-thread-tags">
+                    <span class="wsk-cat wsk-cat-3">问答</span>
+                    <span class="wsk-badge wsk-success">
+                      <svg class="wsk-icon" aria-hidden="true">
+                        <use href="#check"></use>
+                      </svg>
+                      已解决
+                    </span>
+                  </div>
+                  <a class="wsk-thread-title" href="#community-title">已解决状态</a>
+                  <p class="wsk-thread-excerpt">
+                    摘要限两行截断，标题取 <code>--link</code> 而不是主操作色。
+                  </p>
+                  <div class="wsk-thread-byline">
+                    <span>
+                      <svg class="wsk-icon" aria-hidden="true">
+                        <use href="#user"></use>
+                      </svg>林海</span
+                    >
+                    <span>
+                      <svg class="wsk-icon" aria-hidden="true">
+                        <use href="#message"></use>
+                      </svg>31</span
+                    >
+                  </div>
+                </div>
+                <div class="wsk-thread-stats">
+                  <div><strong>31</strong><small>回复</small></div>
+                  <div><strong>2,140</strong><small>浏览</small></div>
+                </div>
+              </article>
+
+              <article class="wsk-thread">
+                <span class="wsk-avatar wsk-avatar-4" aria-hidden="true">SW</span>
+                <div class="wsk-thread-main">
+                  <div class="wsk-thread-tags">
+                    <span class="wsk-cat wsk-cat-4">讨论</span>
+                    <span class="wsk-badge wsk-danger">
+                      <svg class="wsk-icon" aria-hidden="true">
+                        <use href="#lock"></use>
+                      </svg>
+                      已锁定
+                    </span>
+                  </div>
+                  <a class="wsk-thread-title" href="#community-title">已锁定状态</a>
+                  <p class="wsk-thread-excerpt">
+                    行只在悬停时换背景，不上浮——避免指针下的文字位移，与表格行一致。
+                  </p>
+                  <div class="wsk-thread-byline">
+                    <span>
+                      <svg class="wsk-icon" aria-hidden="true">
+                        <use href="#user"></use>
+                      </svg>苏晚</span
+                    >
+                    <span>
+                      <svg class="wsk-icon" aria-hidden="true">
+                        <use href="#clock"></use>
+                      </svg>3 天前</span
+                    >
+                  </div>
+                </div>
+                <div class="wsk-thread-stats">
+                  <div><strong>7</strong><small>回复</small></div>
+                  <div><strong>512</strong><small>浏览</small></div>
+                </div>
+              </article>
+            </div>
+          </div>
+
+          <div class="wsk-panel wsk-mt-5">
+            <p class="wsk-panel-title">回复项</p>
+            <div class="wsk-reply-list">
+              <article class="wsk-reply">
+                <span class="wsk-avatar wsk-avatar-sm wsk-avatar-2" aria-hidden="true"
+                  >LH</span
+                >
+                <div class="wsk-reply-body">
+                  <div class="wsk-reply-head">
+                    <strong>林海</strong>
+                    <span>5 小时前</span>
+                    <span class="wsk-reply-floor">#1</span>
+                  </div>
+                  <p class="wsk-reply-text">
+                    普通回复：头像、作者、时间、楼层号，右对齐的楼层号用等宽数字。
+                  </p>
+                  <div class="wsk-reply-actions">
+                    <div class="wsk-vote" role="group" aria-label="投票">
+                      <button type="button" aria-label="赞同" aria-pressed="false">
+                        <svg class="wsk-icon" aria-hidden="true">
+                          <use href="#arrow-up"></use>
+                        </svg>
+                      </button>
+                      <span class="wsk-vote-count">12</span>
+                    </div>
+                  </div>
+                </div>
+              </article>
+
+              <article class="wsk-reply">
+                <span class="wsk-avatar wsk-avatar-sm wsk-avatar-3" aria-hidden="true"
+                  >ZY</span
+                >
+                <div class="wsk-reply-body">
+                  <div class="wsk-reply-head">
+                    <strong>周予</strong>
+                    <span class="wsk-badge wsk-accent">楼主</span>
+                    <span>4 小时前</span>
+                    <span class="wsk-reply-floor">#2</span>
+                  </div>
+                  <blockquote class="wsk-reply-quote">
+                    <cite>引用 林安 #1</cite>
+                    <p>引用变体：左侧竖条加软底，与正文层的 blockquote 区分开。</p>
+                  </blockquote>
+                  <p class="wsk-reply-text">
+                    楼主用 <code>.wsk-badge.wsk-accent</code> 标记，回复本身不做悬停反馈
+                    ——它是阅读表面，不是可点对象。
+                  </p>
+                  <div class="wsk-reply-actions">
+                    <div class="wsk-vote wsk-is-voted" role="group" aria-label="投票">
+                      <button type="button" aria-label="赞同" aria-pressed="true">
+                        <svg class="wsk-icon" aria-hidden="true">
+                          <use href="#arrow-up"></use>
+                        </svg>
+                      </button>
+                      <span class="wsk-vote-count">29</span>
+                    </div>
+                  </div>
+                </div>
+              </article>
+            </div>
+          </div>
+        </section>
+
+        <section class="wsk-section" aria-labelledby="prose-title">
+          <div class="wsk-section-head">
+            <h2 id="prose-title">正文排版</h2>
+            <span class="wsk-badge">Prose</span>
+          </div>
+          <div class="wsk-panel">
+            <div class="wsk-prose">
+              <h2>数据资产的登记口径</h2>
+              <p>
+                正文层只负责 <a href="#prose-title">运行文本</a>，不引入组件类名：把
+                <code>.wsk-prose</code> 放在容器上，其中的标题、列表、引用、表格、
+                图片与代码都会自动取到令牌。适合 Markdown 渲染结果直接落进来。
+              </p>
+              <h3>登记要求</h3>
+              <ul>
+                <li>字段级血缘必须可追溯到上游系统。</li>
+                <li>
+                  质量规则至少覆盖<strong>非空</strong>、<strong>唯一</strong>与值域三类。
+                  <ul>
+                    <li>嵌套列表继承同一套间距节奏。</li>
+                  </ul>
+                </li>
+                <li>责任人变更需在 <kbd>T+1</kbd> 内同步。</li>
+              </ul>
+              <blockquote>
+                <p>
+                  未登记的数据资产不进入服务编排，这一条没有例外。
+                </p>
+              </blockquote>
+              <h3>类别标签</h3>
+              <p>
+                语义色承担不了「一组彼此无关的类别」——挑四个出来，就会有两个都落在
+                红色上。类别色是独立的一组，每对都按文字落在自身背景上校验过：
+              </p>
+              <p class="wsk-cat-row">
+                <span class="wsk-cat wsk-cat-1">主数据</span>
+                <span class="wsk-cat wsk-cat-2">交易</span>
+                <span class="wsk-cat wsk-cat-3">指标</span>
+                <span class="wsk-cat wsk-cat-4">日志</span>
+              </p>
+              <h3>登记状态</h3>
+              <table>
+                <thead>
+                  <tr>
+                    <th>资产</th>
+                    <th>负责人</th>
+                    <th>状态</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>客户主数据</td>
+                    <td>数据治理组</td>
+                    <td>已登记</td>
+                  </tr>
+                  <tr>
+                    <td>交易明细</td>
+                    <td>交易平台组</td>
+                    <td>已登记</td>
+                  </tr>
+                  <tr>
+                    <td>库存快照</td>
+                    <td>供应链组</td>
+                    <td>待补充</td>
+                  </tr>
+                </tbody>
+              </table>
+              <hr />
+              <h4>代码块</h4>
+              <p>
+                行内代码与代码块的底色需求不同，因此拆成两组令牌；正文代码块跟随主题，
+                不像 <code>.wsk-code-panel</code> 那样在浅色下也强制深底。
+              </p>
+              <pre><code><span class="wsk-tok-comment"># 登记一个数据资产</span>
+<span class="wsk-tok-keyword">def</span> <span class="wsk-tok-name">register</span>(asset, owner):
+    <span class="wsk-tok-keyword">if</span> asset.quality <span class="wsk-tok-keyword">&lt;</span> <span class="wsk-tok-number">0.95</span>:
+        <span class="wsk-tok-keyword">raise</span> ValueError(<span class="wsk-tok-string">"质量未达标"</span>)
+    <span class="wsk-tok-keyword">return</span> catalog.add(asset, owner=owner)</code></pre>
+              <figure>
+                <hr />
+                <figcaption>图注与分隔线同样走正文令牌。</figcaption>
+              </figure>
+            </div>
+          </div>
         </section>
       </div>
 
@@ -1319,7 +1811,12 @@
                 <span class="wsk-badge wsk-success">统一身份认证</span>
               </div>
               <div class="wsk-auth-grid">
-                <form class="wsk-auth-card" id="reference-login">
+                <form
+                  class="wsk-auth-card"
+                  id="reference-login"
+                  data-demo-submit="静态参考页面未连接后端认证服务。"
+                  data-demo-submit-variant="info"
+                >
                   <p class="wsk-panel-title">DATA FABRIC</p>
                   <h3>数据中台登录</h3>
                   <p class="wsk-help wsk-mt-2">
@@ -1371,6 +1868,7 @@
                     class="wsk-button wsk-secondary wsk-auth-submit"
                     type="button"
                     data-toast="账号申请入口暂未开放。"
+                    data-js-only
                     data-toast-variant="warning"
                   >
                     提交账号申请
@@ -1379,6 +1877,1217 @@
               </div>
             </section>
           </div>
+        </div>
+      </div>
+
+      <div class="wsk-page" id="forum-view" data-view="forum" hidden>
+        <nav class="wsk-breadcrumb" aria-label="面包屑">
+          <ol>
+            <li><a href="#forum-overview">社区</a></li>
+            <li aria-current="page">全部主题</li>
+          </ol>
+        </nav>
+
+        <div class="wsk-page-head" id="forum-overview">
+          <div>
+            <h1 tabindex="-1">社区论坛参考</h1>
+            <p>
+              内容型站点的参考实现：帖子列表与正文两页，取自与数据中台参考完全相同的一套令牌。
+            </p>
+          </div>
+          <span class="wsk-badge wsk-accent">
+            <span class="wsk-dot" aria-hidden="true"></span>内容型
+          </span>
+        </div>
+
+        <div class="wsk-forum-shell">
+          <div class="wsk-forum-main">
+            <section class="wsk-section" aria-labelledby="forum-threads-title">
+              <div class="wsk-section-head">
+                <h2 id="forum-threads-title">主题列表</h2>
+                <span class="wsk-badge">Threads</span>
+              </div>
+
+              <div class="wsk-panel wsk-tabs" data-tabs>
+                <div class="wsk-tab-list" role="tablist" aria-label="板块">
+                  <button
+                    id="forum-tab-all"
+                    type="button"
+                    role="tab"
+                    aria-selected="true"
+                    aria-controls="forum-panel-all"
+                  >
+                    全部
+                  </button>
+                  <button
+                    id="forum-tab-notice"
+                    type="button"
+                    role="tab"
+                    aria-selected="false"
+                    tabindex="-1"
+                    aria-controls="forum-panel-notice"
+                  >
+                    公告
+                  </button>
+                  <button
+                    id="forum-tab-ask"
+                    type="button"
+                    role="tab"
+                    aria-selected="false"
+                    tabindex="-1"
+                    aria-controls="forum-panel-ask"
+                  >
+                    问答
+                  </button>
+                  <button
+                    id="forum-tab-share"
+                    type="button"
+                    role="tab"
+                    aria-selected="false"
+                    tabindex="-1"
+                    aria-controls="forum-panel-share"
+                  >
+                    分享
+                  </button>
+                </div>
+
+                <div
+                  class="wsk-tab-panel"
+                  id="forum-panel-all"
+                  role="tabpanel"
+                  aria-labelledby="forum-tab-all"
+                  data-list-scope
+                >
+                  <div class="wsk-toolbar wsk-mb-3" data-js-only>
+                    <div class="wsk-filter">
+                      <label class="wsk-sr-only" for="forum-filter"
+                        >筛选主题</label
+                      ><input
+                        class="wsk-control"
+                        id="forum-filter"
+                        type="search"
+                        placeholder="搜索标题、摘要或作者"
+                        data-table-filter
+                      />
+                    </div>
+                    <div class="wsk-sort-group" role="group" aria-label="排序">
+                      <button type="button" data-sort="activity" aria-pressed="false">
+                        <svg class="wsk-icon" aria-hidden="true">
+                          <use href="#sort"></use>
+                        </svg>
+                        活跃时间
+                      </button>
+                      <button type="button" data-sort="created" aria-pressed="false">
+                        <svg class="wsk-icon" aria-hidden="true">
+                          <use href="#sort"></use>
+                        </svg>
+                        发布时间
+                      </button>
+                      <button type="button" data-sort="replies" aria-pressed="false">
+                        <svg class="wsk-icon" aria-hidden="true">
+                          <use href="#sort"></use>
+                        </svg>
+                        回复数
+                      </button>
+                      <button type="button" data-sort="views" aria-pressed="false">
+                        <svg class="wsk-icon" aria-hidden="true">
+                          <use href="#sort"></use>
+                        </svg>
+                        浏览数
+                      </button>
+                    </div>
+                    <span
+                      class="wsk-filter-meta"
+                      aria-live="polite"
+                      data-table-result
+                      >6 个主题 · 第 1/2 页</span
+                    >
+                  </div>
+
+                  <div data-list data-page-size="4" data-unit="个主题">
+                    <div class="wsk-thread-list" data-rows>
+                  <article class="wsk-thread" data-row
+                    data-activity="2026-09-17T09:40"
+                    data-created="2026-03-02T10:00"
+                    data-replies="0024"
+                    data-views="01832">
+                    <span class="wsk-avatar wsk-avatar-1" aria-hidden="true"
+                      >ZW</span
+                    >
+                    <div class="wsk-thread-main">
+                      <div class="wsk-thread-tags">
+                        <span class="wsk-cat wsk-cat-1">公告</span>
+                      <span class="wsk-badge wsk-accent"><svg class="wsk-icon" aria-hidden="true"><use href="#pin"></use></svg>置顶</span>
+                      </div>
+                      <a class="wsk-thread-title" href="#forum-post-overview"
+                        >发帖前先读这份指南：板块划分与标题规范</a
+                      >
+                      <p class="wsk-thread-excerpt">社区按公告、问答、分享、讨论四类划分。标题请写清具体问题，避免「求助」「急」这类无信息量的词。</p>
+                      <div class="wsk-thread-byline">
+                        <span>
+                          <svg class="wsk-icon" aria-hidden="true">
+                            <use href="#user"></use>
+                          </svg>站务组</span
+                        >
+                        <span>
+                          <svg class="wsk-icon" aria-hidden="true">
+                            <use href="#clock"></use>
+                          </svg>2 小时前</span
+                        >
+                        <span>
+                          <svg class="wsk-icon" aria-hidden="true">
+                            <use href="#message"></use>
+                          </svg>24</span
+                        >
+                      </div>
+                    </div>
+                    <div class="wsk-thread-stats">
+                      <div><strong>24</strong><small>回复</small></div>
+                      <div><strong>1,832</strong><small>浏览</small></div>
+                    </div>
+                  </article>
+                  <article class="wsk-thread" data-row
+                    data-activity="2026-09-16T14:05"
+                    data-created="2026-09-16T14:05"
+                    data-replies="0009"
+                    data-views="00964">
+                    <span class="wsk-avatar wsk-avatar-1" aria-hidden="true"
+                      >ZW</span
+                    >
+                    <div class="wsk-thread-main">
+                      <div class="wsk-thread-tags">
+                        <span class="wsk-cat wsk-cat-1">公告</span>
+                      <span class="wsk-badge wsk-accent"><svg class="wsk-icon" aria-hidden="true"><use href="#pin"></use></svg>置顶</span>
+                      </div>
+                      <a class="wsk-thread-title" href="#forum-post-overview"
+                        >设计令牌迁移说明：深色不再依赖 JavaScript</a
+                      >
+                      <p class="wsk-thread-excerpt">本站配色已改为单份 light-dark() 定义，禁用脚本时深色仍然生效。自定义主题的同学请同步调整。</p>
+                      <div class="wsk-thread-byline">
+                        <span>
+                          <svg class="wsk-icon" aria-hidden="true">
+                            <use href="#user"></use>
+                          </svg>站务组</span
+                        >
+                        <span>
+                          <svg class="wsk-icon" aria-hidden="true">
+                            <use href="#clock"></use>
+                          </svg>1 天前</span
+                        >
+                        <span>
+                          <svg class="wsk-icon" aria-hidden="true">
+                            <use href="#message"></use>
+                          </svg>9</span
+                        >
+                      </div>
+                    </div>
+                    <div class="wsk-thread-stats">
+                      <div><strong>9</strong><small>回复</small></div>
+                      <div><strong>964</strong><small>浏览</small></div>
+                    </div>
+                  </article>
+                  <article class="wsk-thread" data-row
+                    data-activity="2026-09-17T07:20"
+                    data-created="2026-09-14T20:11"
+                    data-replies="0031"
+                    data-views="02140">
+                    <span class="wsk-avatar wsk-avatar-2" aria-hidden="true"
+                      >LH</span
+                    >
+                    <div class="wsk-thread-main">
+                      <div class="wsk-thread-tags">
+                        <span class="wsk-cat wsk-cat-3">问答</span>
+                      <span class="wsk-badge wsk-success">已解决</span>
+                      </div>
+                      <a class="wsk-thread-title" href="#forum-post-overview"
+                        >浅深阴影层数不同，light-dark() 表达不了怎么办？</a
+                      >
+                      <p class="wsk-thread-excerpt">浅色用三层阴影、深色两层，light-dark() 只能出现在颜色位置。有没有不改视觉的写法？</p>
+                      <div class="wsk-thread-byline">
+                        <span>
+                          <svg class="wsk-icon" aria-hidden="true">
+                            <use href="#user"></use>
+                          </svg>林海</span
+                        >
+                        <span>
+                          <svg class="wsk-icon" aria-hidden="true">
+                            <use href="#clock"></use>
+                          </svg>4 小时前</span
+                        >
+                        <span>
+                          <svg class="wsk-icon" aria-hidden="true">
+                            <use href="#message"></use>
+                          </svg>31</span
+                        >
+                      </div>
+                    </div>
+                    <div class="wsk-thread-stats">
+                      <div><strong>31</strong><small>回复</small></div>
+                      <div><strong>2,140</strong><small>浏览</small></div>
+                    </div>
+                  </article>
+                  <article class="wsk-thread" data-row
+                    data-activity="2026-09-17T05:48"
+                    data-created="2026-09-17T05:48"
+                    data-replies="0018"
+                    data-views="01276">
+                    <span class="wsk-avatar wsk-avatar-3" aria-hidden="true"
+                      >ZY</span
+                    >
+                    <div class="wsk-thread-main">
+                      <div class="wsk-thread-tags">
+                        <span class="wsk-cat wsk-cat-3">问答</span>
+                      </div>
+                      <a class="wsk-thread-title" href="#forum-post-overview"
+                        >服务端渲染 + HTMX，片段替换后事件全失效</a
+                      >
+                      <p class="wsk-thread-excerpt">每次 hx-swap 之后按钮就点不动了。现在只能在 afterSwap 里重新绑一遍，有没有更干净的做法？</p>
+                      <div class="wsk-thread-byline">
+                        <span>
+                          <svg class="wsk-icon" aria-hidden="true">
+                            <use href="#user"></use>
+                          </svg>周予</span
+                        >
+                        <span>
+                          <svg class="wsk-icon" aria-hidden="true">
+                            <use href="#clock"></use>
+                          </svg>6 小时前</span
+                        >
+                        <span>
+                          <svg class="wsk-icon" aria-hidden="true">
+                            <use href="#message"></use>
+                          </svg>18</span
+                        >
+                      </div>
+                    </div>
+                    <div class="wsk-thread-stats">
+                      <div><strong>18</strong><small>回复</small></div>
+                      <div><strong>1,276</strong><small>浏览</small></div>
+                    </div>
+                  </article>
+                  <article class="wsk-thread" data-row
+                    data-activity="2026-09-16T11:30"
+                    data-created="2026-09-12T09:02"
+                    data-replies="0042"
+                    data-views="03608">
+                    <span class="wsk-avatar wsk-avatar-4" aria-hidden="true"
+                      >CM</span
+                    >
+                    <div class="wsk-thread-main">
+                      <div class="wsk-thread-tags">
+                        <span class="wsk-cat wsk-cat-2">分享</span>
+                      </div>
+                      <a class="wsk-thread-title" href="#forum-post-overview"
+                        >分享一个零依赖的对比度校验脚本</a
+                      >
+                      <p class="wsk-thread-excerpt">直接解析 CSS，校验令牌集合一致性与一张声明的对比度契约表，渐变按实际几何逐点采样。</p>
+                      <div class="wsk-thread-byline">
+                        <span>
+                          <svg class="wsk-icon" aria-hidden="true">
+                            <use href="#user"></use>
+                          </svg>陈默</span
+                        >
+                        <span>
+                          <svg class="wsk-icon" aria-hidden="true">
+                            <use href="#clock"></use>
+                          </svg>1 天前</span
+                        >
+                        <span>
+                          <svg class="wsk-icon" aria-hidden="true">
+                            <use href="#message"></use>
+                          </svg>42</span
+                        >
+                      </div>
+                    </div>
+                    <div class="wsk-thread-stats">
+                      <div><strong>42</strong><small>回复</small></div>
+                      <div><strong>3,608</strong><small>浏览</small></div>
+                    </div>
+                  </article>
+                  <article class="wsk-thread" data-row
+                    data-activity="2026-09-14T16:22"
+                    data-created="2026-09-10T08:40"
+                    data-replies="0007"
+                    data-views="00512">
+                    <span class="wsk-avatar wsk-avatar-2" aria-hidden="true"
+                      >SW</span
+                    >
+                    <div class="wsk-thread-main">
+                      <div class="wsk-thread-tags">
+                        <span class="wsk-cat wsk-cat-4">讨论</span>
+                      <span class="wsk-badge wsk-danger">已锁定</span>
+                      </div>
+                      <a class="wsk-thread-title" href="#forum-post-overview"
+                        >中文标题的字距到底要不要归零</a
+                      >
+                      <p class="wsk-thread-excerpt">西文字体的默认字距对中文偏松，但归零之后小字号又显得挤。大家的取值是多少？</p>
+                      <div class="wsk-thread-byline">
+                        <span>
+                          <svg class="wsk-icon" aria-hidden="true">
+                            <use href="#user"></use>
+                          </svg>苏晚</span
+                        >
+                        <span>
+                          <svg class="wsk-icon" aria-hidden="true">
+                            <use href="#clock"></use>
+                          </svg>3 天前</span
+                        >
+                        <span>
+                          <svg class="wsk-icon" aria-hidden="true">
+                            <use href="#message"></use>
+                          </svg>7</span
+                        >
+                      </div>
+                    </div>
+                    <div class="wsk-thread-stats">
+                      <div><strong>7</strong><small>回复</small></div>
+                      <div><strong>512</strong><small>浏览</small></div>
+                    </div>
+                  </article>
+                      <div
+                        class="wsk-empty-state"
+                        data-table-empty
+                        hidden
+                      >
+                        <span class="wsk-empty-icon" aria-hidden="true">
+                          <svg class="wsk-icon">
+                            <use href="#search"></use>
+                          </svg>
+                        </span>
+                        <h3>没有匹配的主题</h3>
+                        <p>换一个关键词，或清空搜索框看全部主题。</p>
+                      </div>
+                    </div>
+                  </div>
+
+                  <nav
+                    class="wsk-pagination wsk-table-pagination"
+                    aria-label="主题分页"
+                    data-js-only
+                  >
+                    <button
+                      type="button"
+                      data-table-page-action="previous"
+                      aria-label="上一页"
+                    >
+                      <svg class="wsk-icon" aria-hidden="true">
+                        <use href="#chevron-left"></use>
+                      </svg></button
+                    ><span data-table-page-numbers></span
+                    ><button
+                      type="button"
+                      data-table-page-action="next"
+                      aria-label="下一页"
+                    >
+                      <svg class="wsk-icon" aria-hidden="true">
+                        <use href="#chevron-right"></use>
+                      </svg>
+                    </button>
+                  </nav>
+                </div>
+
+                <div
+                  class="wsk-tab-panel"
+                  id="forum-panel-notice"
+                  role="tabpanel"
+                  aria-labelledby="forum-tab-notice"
+                  hidden
+                >
+                  <div class="wsk-thread-list">
+                  <article class="wsk-thread">
+                    <span class="wsk-avatar wsk-avatar-1" aria-hidden="true"
+                      >ZW</span
+                    >
+                    <div class="wsk-thread-main">
+                      <div class="wsk-thread-tags">
+                        <span class="wsk-cat wsk-cat-1">公告</span>
+                      <span class="wsk-badge wsk-accent"><svg class="wsk-icon" aria-hidden="true"><use href="#pin"></use></svg>置顶</span>
+                      </div>
+                      <a class="wsk-thread-title" href="#forum-post-overview"
+                        >发帖前先读这份指南：板块划分与标题规范</a
+                      >
+                      <div class="wsk-thread-byline">
+                        <span>
+                          <svg class="wsk-icon" aria-hidden="true">
+                            <use href="#user"></use>
+                          </svg>站务组</span
+                        >
+                        <span>
+                          <svg class="wsk-icon" aria-hidden="true">
+                            <use href="#clock"></use>
+                          </svg>2 小时前</span
+                        >
+                        <span>
+                          <svg class="wsk-icon" aria-hidden="true">
+                            <use href="#message"></use>
+                          </svg>24</span
+                        >
+                      </div>
+                    </div>
+                  </article>
+                  <article class="wsk-thread">
+                    <span class="wsk-avatar wsk-avatar-1" aria-hidden="true"
+                      >ZW</span
+                    >
+                    <div class="wsk-thread-main">
+                      <div class="wsk-thread-tags">
+                        <span class="wsk-cat wsk-cat-1">公告</span>
+                      <span class="wsk-badge wsk-accent"><svg class="wsk-icon" aria-hidden="true"><use href="#pin"></use></svg>置顶</span>
+                      </div>
+                      <a class="wsk-thread-title" href="#forum-post-overview"
+                        >设计令牌迁移说明：深色不再依赖 JavaScript</a
+                      >
+                      <div class="wsk-thread-byline">
+                        <span>
+                          <svg class="wsk-icon" aria-hidden="true">
+                            <use href="#user"></use>
+                          </svg>站务组</span
+                        >
+                        <span>
+                          <svg class="wsk-icon" aria-hidden="true">
+                            <use href="#clock"></use>
+                          </svg>1 天前</span
+                        >
+                        <span>
+                          <svg class="wsk-icon" aria-hidden="true">
+                            <use href="#message"></use>
+                          </svg>9</span
+                        >
+                      </div>
+                    </div>
+                  </article>
+                  </div>
+                </div>
+
+                <div
+                  class="wsk-tab-panel"
+                  id="forum-panel-ask"
+                  role="tabpanel"
+                  aria-labelledby="forum-tab-ask"
+                  hidden
+                >
+                  <div class="wsk-thread-list">
+                  <article class="wsk-thread">
+                    <span class="wsk-avatar wsk-avatar-2" aria-hidden="true"
+                      >LH</span
+                    >
+                    <div class="wsk-thread-main">
+                      <div class="wsk-thread-tags">
+                        <span class="wsk-cat wsk-cat-3">问答</span>
+                      <span class="wsk-badge wsk-success">已解决</span>
+                      </div>
+                      <a class="wsk-thread-title" href="#forum-post-overview"
+                        >浅深阴影层数不同，light-dark() 表达不了怎么办？</a
+                      >
+                      <div class="wsk-thread-byline">
+                        <span>
+                          <svg class="wsk-icon" aria-hidden="true">
+                            <use href="#user"></use>
+                          </svg>林海</span
+                        >
+                        <span>
+                          <svg class="wsk-icon" aria-hidden="true">
+                            <use href="#clock"></use>
+                          </svg>4 小时前</span
+                        >
+                        <span>
+                          <svg class="wsk-icon" aria-hidden="true">
+                            <use href="#message"></use>
+                          </svg>31</span
+                        >
+                      </div>
+                    </div>
+                  </article>
+                  <article class="wsk-thread">
+                    <span class="wsk-avatar wsk-avatar-3" aria-hidden="true"
+                      >ZY</span
+                    >
+                    <div class="wsk-thread-main">
+                      <div class="wsk-thread-tags">
+                        <span class="wsk-cat wsk-cat-3">问答</span>
+                      </div>
+                      <a class="wsk-thread-title" href="#forum-post-overview"
+                        >服务端渲染 + HTMX，片段替换后事件全失效</a
+                      >
+                      <div class="wsk-thread-byline">
+                        <span>
+                          <svg class="wsk-icon" aria-hidden="true">
+                            <use href="#user"></use>
+                          </svg>周予</span
+                        >
+                        <span>
+                          <svg class="wsk-icon" aria-hidden="true">
+                            <use href="#clock"></use>
+                          </svg>6 小时前</span
+                        >
+                        <span>
+                          <svg class="wsk-icon" aria-hidden="true">
+                            <use href="#message"></use>
+                          </svg>18</span
+                        >
+                      </div>
+                    </div>
+                  </article>
+                  </div>
+                </div>
+
+                <div
+                  class="wsk-tab-panel"
+                  id="forum-panel-share"
+                  role="tabpanel"
+                  aria-labelledby="forum-tab-share"
+                  hidden
+                >
+                  <div class="wsk-thread-list">
+                  <article class="wsk-thread">
+                    <span class="wsk-avatar wsk-avatar-4" aria-hidden="true"
+                      >CM</span
+                    >
+                    <div class="wsk-thread-main">
+                      <div class="wsk-thread-tags">
+                        <span class="wsk-cat wsk-cat-2">分享</span>
+                      </div>
+                      <a class="wsk-thread-title" href="#forum-post-overview"
+                        >分享一个零依赖的对比度校验脚本</a
+                      >
+                      <div class="wsk-thread-byline">
+                        <span>
+                          <svg class="wsk-icon" aria-hidden="true">
+                            <use href="#user"></use>
+                          </svg>陈默</span
+                        >
+                        <span>
+                          <svg class="wsk-icon" aria-hidden="true">
+                            <use href="#clock"></use>
+                          </svg>1 天前</span
+                        >
+                        <span>
+                          <svg class="wsk-icon" aria-hidden="true">
+                            <use href="#message"></use>
+                          </svg>42</span
+                        >
+                      </div>
+                    </div>
+                  </article>
+                  <article class="wsk-thread">
+                    <span class="wsk-avatar wsk-avatar-2" aria-hidden="true"
+                      >SW</span
+                    >
+                    <div class="wsk-thread-main">
+                      <div class="wsk-thread-tags">
+                        <span class="wsk-cat wsk-cat-4">讨论</span>
+                      <span class="wsk-badge wsk-danger">已锁定</span>
+                      </div>
+                      <a class="wsk-thread-title" href="#forum-post-overview"
+                        >中文标题的字距到底要不要归零</a
+                      >
+                      <div class="wsk-thread-byline">
+                        <span>
+                          <svg class="wsk-icon" aria-hidden="true">
+                            <use href="#user"></use>
+                          </svg>苏晚</span
+                        >
+                        <span>
+                          <svg class="wsk-icon" aria-hidden="true">
+                            <use href="#clock"></use>
+                          </svg>3 天前</span
+                        >
+                        <span>
+                          <svg class="wsk-icon" aria-hidden="true">
+                            <use href="#message"></use>
+                          </svg>7</span
+                        >
+                      </div>
+                    </div>
+                  </article>
+                  </div>
+                </div>
+              </div>
+            </section>
+          </div>
+
+          <aside class="wsk-forum-aside" aria-label="社区侧栏">
+            <div class="wsk-panel">
+              <button
+                class="wsk-button wsk-auth-submit"
+                type="button"
+                data-js-only
+                data-toast="示例站点未连接后端，主题未提交。"
+                data-toast-variant="info"
+              >
+                <svg class="wsk-icon" aria-hidden="true">
+                  <use href="#message"></use>
+                </svg>
+                发起新主题
+              </button>
+              <div class="wsk-alert wsk-info wsk-mt-5">
+                <svg class="wsk-icon" aria-hidden="true">
+                  <use href="#info"></use>
+                </svg>
+                <div>
+                  <strong>社区公告</strong>
+                  <p>本周六 02:00–04:00 例行维护，期间只读。</p>
+                </div>
+              </div>
+            </div>
+
+            <div class="wsk-panel">
+              <p class="wsk-panel-title">热门话题</p>
+              <div class="wsk-status-list">
+                <div>
+                  <span
+                    >深色模式的阴影分层<small>问答 · 31 回复</small></span
+                  ><strong>2.1k</strong>
+                </div>
+                <div>
+                  <span
+                    >零依赖对比度校验<small>分享 · 42 回复</small></span
+                  ><strong>3.6k</strong>
+                </div>
+                <div>
+                  <span>片段替换与事件委托<small>问答 · 18 回复</small></span
+                  ><strong>1.3k</strong>
+                </div>
+              </div>
+            </div>
+
+            <div class="wsk-panel">
+              <p class="wsk-panel-title">标签</p>
+              <div class="wsk-capability-list">
+                <a class="wsk-tag" href="#forum-overview"
+                  ><svg class="wsk-icon" aria-hidden="true">
+                    <use href="#tag"></use></svg
+                  >设计令牌<span class="wsk-tag-count">128</span></a
+                ><a class="wsk-tag" href="#forum-overview"
+                  ><svg class="wsk-icon" aria-hidden="true">
+                    <use href="#tag"></use></svg
+                  >无障碍<span class="wsk-tag-count">64</span></a
+                ><a class="wsk-tag" href="#forum-overview"
+                  ><svg class="wsk-icon" aria-hidden="true">
+                    <use href="#tag"></use></svg
+                  >中文排版<span class="wsk-tag-count">51</span></a
+                ><a class="wsk-tag" href="#forum-overview"
+                  ><svg class="wsk-icon" aria-hidden="true">
+                    <use href="#tag"></use></svg
+                  >服务端渲染<span class="wsk-tag-count">37</span></a
+                ><a class="wsk-tag" href="#forum-overview"
+                  ><svg class="wsk-icon" aria-hidden="true">
+                    <use href="#tag"></use></svg
+                  >深色模式<span class="wsk-tag-count">29</span></a
+                >
+              </div>
+            </div>
+
+            <div class="wsk-panel">
+              <p class="wsk-panel-title">活跃贡献者</p>
+              <div class="wsk-user-list">
+                <div>
+                  <span class="wsk-user-row">
+                    <span class="wsk-avatar wsk-avatar-sm" aria-hidden="true"
+                      >ZW</span
+                    >
+                    <div><strong>站务组</strong><small>管理员</small></div>
+                  </span>
+                  <strong>186</strong>
+                </div>
+                <div>
+                  <span class="wsk-user-row">
+                    <span
+                      class="wsk-avatar wsk-avatar-sm wsk-avatar-4"
+                      aria-hidden="true"
+                      >CM</span
+                    >
+                    <div><strong>陈默</strong><small>分享 · 42</small></div>
+                  </span>
+                  <strong>97</strong>
+                </div>
+                <div>
+                  <span class="wsk-user-row">
+                    <span
+                      class="wsk-avatar wsk-avatar-sm wsk-avatar-2"
+                      aria-hidden="true"
+                      >LH</span
+                    >
+                    <div><strong>林海</strong><small>问答 · 31</small></div>
+                  </span>
+                  <strong>73</strong>
+                </div>
+              </div>
+            </div>
+
+            <div class="wsk-panel">
+              <p class="wsk-panel-title">站点统计</p>
+              <div class="wsk-mini-metric-grid">
+                <div><span>主题</span><strong>11,284</strong></div>
+                <div><span>回复</span><strong>19,730</strong></div>
+                <div><span>成员</span><strong>113,416</strong></div>
+              </div>
+            </div>
+          </aside>
+        </div>
+      </div>
+
+      <div class="wsk-page" id="forum-post-view" data-view="forum-post" hidden>
+        <nav class="wsk-breadcrumb" aria-label="面包屑">
+          <ol>
+            <li><a href="#forum-overview">社区</a></li>
+            <li><a href="#forum-overview">问答</a></li>
+            <li aria-current="page">片段替换后事件全失效</li>
+          </ol>
+        </nav>
+
+        <div class="wsk-forum-shell">
+          <div class="wsk-forum-main">
+            <article class="wsk-panel" id="forum-post-overview">
+              <header class="wsk-post-head">
+                <div class="wsk-thread-tags">
+                  <span class="wsk-cat wsk-cat-3">问答</span>
+                  <span class="wsk-badge wsk-success">
+                    <svg class="wsk-icon" aria-hidden="true">
+                      <use href="#check"></use>
+                    </svg>
+                    已解决
+                  </span>
+                </div>
+                <h1 tabindex="-1">服务端渲染 + HTMX，片段替换后事件全失效</h1>
+                <div class="wsk-post-meta">
+                  <span class="wsk-user-row">
+                    <span
+                      class="wsk-avatar wsk-avatar-sm wsk-avatar-3"
+                      aria-hidden="true"
+                      >ZY</span
+                    >
+                    <div><strong>周予</strong></div>
+                  </span>
+                  <span>
+                    <svg class="wsk-icon" aria-hidden="true">
+                      <use href="#clock"></use>
+                    </svg>
+                    发布于 6 小时前
+                  </span>
+                  <span>
+                    <svg class="wsk-icon" aria-hidden="true">
+                      <use href="#message"></use>
+                    </svg>
+                    18 回复
+                  </span>
+                  <span>
+                    <svg class="wsk-icon" aria-hidden="true">
+                      <use href="#eye"></use>
+                    </svg>
+                    1,276 浏览
+                  </span>
+                </div>
+              </header>
+
+              <div class="wsk-prose wsk-mt-5" id="forum-post-body">
+                <p>
+                  页面是服务端渲染的，交互靠 HTMX 换片段。第一次加载一切正常，但只要
+                  <code>hx-swap</code> 换过一次内容，那一块里的按钮就全点不动了。
+                </p>
+
+                <h2 id="forum-post-symptom">现象</h2>
+                <p>
+                  控制台没有任何报错，元素也在 DOM 里，<code>querySelector</code>
+                  拿得到——就是没有反应。现在只能在每次替换后手工重绑：
+                </p>
+                <pre><code><span class="wsk-tok-comment">// 每次换完片段都要重来一遍，而且很容易漏</span>
+document.body.<span class="wsk-tok-name">addEventListener</span>(<span class="wsk-tok-string">"htmx:afterSwap"</span>, () <span class="wsk-tok-keyword">=&gt;</span> {
+  initMenu();
+  initTable();
+  initDialog();
+});</code></pre>
+
+                <h2 id="forum-post-cause">为什么会失效</h2>
+                <p>
+                  因为监听器绑在<strong>元素</strong>上，不是绑在事件流上。片段替换会把
+                  旧节点整个丢掉，连同挂在上面的监听器一起。新节点是全新的对象，没人给它绑过
+                  任何东西。
+                </p>
+                <blockquote>
+                  <p>
+                    换句话说：加载时绑定的写法，隐含了一个「DOM 不会被替换」的假设。服务端
+                    渲染 + 片段替换恰好打破这个假设。
+                  </p>
+                </blockquote>
+                <p>下面这几种写法都带着同一个假设：</p>
+                <ul>
+                  <li><code>getElementById(...).addEventListener(...)</code></li>
+                  <li>
+                    <code>querySelectorAll(...).forEach(el =&gt; el.addEventListener(...))</code>
+                  </li>
+                  <li>
+                    在模块顶层缓存节点引用，例如
+                    <code>const region = document.getElementById("toast-region")</code>
+                    ——节点被换掉之后，往里写就是往游离节点里写
+                  </li>
+                </ul>
+
+                <h2 id="forum-post-fix">做法：把监听下沉到 document</h2>
+                <p>
+                  事件会冒泡到 <code>document</code>，而 <code>document</code>
+                  永远不会被片段替换换掉。所以只绑一次，用
+                  <code>closest()</code> 判断这次点的是谁：
+                </p>
+                <pre><code><span class="wsk-tok-keyword">function</span> <span class="wsk-tok-name">on</span>(type, selector, handler) {
+  document.<span class="wsk-tok-name">addEventListener</span>(type, (event) <span class="wsk-tok-keyword">=&gt;</span> {
+    <span class="wsk-tok-keyword">const</span> target = event.target <span class="wsk-tok-keyword">instanceof</span> Element
+      <span class="wsk-tok-keyword">?</span> event.target.<span class="wsk-tok-name">closest</span>(selector)
+      <span class="wsk-tok-keyword">:</span> <span class="wsk-tok-keyword">null</span>;
+    <span class="wsk-tok-keyword">if</span> (target) <span class="wsk-tok-name">handler</span>(event, target);
+  });
+}
+
+<span class="wsk-tok-comment">// 绑一次，之后换多少次片段都不用管</span>
+<span class="wsk-tok-name">on</span>(<span class="wsk-tok-string">"click"</span>, <span class="wsk-tok-string">"[data-dialog-open]"</span>, (event, button) <span class="wsk-tok-keyword">=&gt;</span> {
+  document.<span class="wsk-tok-name">getElementById</span>(button.dataset.dialogOpen)?.<span class="wsk-tok-name">showModal</span>();
+});</code></pre>
+                <p>两种写法的差别：</p>
+                <table>
+                  <thead>
+                    <tr>
+                      <th>维度</th>
+                      <th>加载时绑定</th>
+                      <th>document 委托</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td>片段替换后</td>
+                      <td>失效，需重绑</td>
+                      <td>照常工作</td>
+                    </tr>
+                    <tr>
+                      <td>同页多实例</td>
+                      <td>固定 id 只支持一个</td>
+                      <td>按属性匹配，天然支持</td>
+                    </tr>
+                    <tr>
+                      <td>监听器数量</td>
+                      <td>随元素数量增长</td>
+                      <td>每类事件一个</td>
+                    </tr>
+                  </tbody>
+                </table>
+
+                <hr />
+
+                <h2 id="forum-post-mount">替换之后还需要做什么</h2>
+                <p>
+                  事件不用管了，但<strong>初次渲染</strong>还是要做——标签同步、分页按钮、
+                  首屏要显示第几页，这些新节点不会自己算出来。所以留一个幂等的入口：
+                </p>
+                <pre><code>document.body.<span class="wsk-tok-name">addEventListener</span>(<span class="wsk-tok-string">"htmx:afterSwap"</span>, (event) <span class="wsk-tok-keyword">=&gt;</span> {
+  wsk.<span class="wsk-tok-name">mount</span>(event.target);
+});</code></pre>
+                <p>
+                  状态放在 <code>dataset</code> 上而不是闭包里，元素被换掉时状态自然重置，
+                  也方便直接用 <kbd>F12</kbd> 看当前值。
+                </p>
+                <figure>
+                  <hr />
+                  <figcaption>
+                    以上写法在本套件的 script.js 里可以直接读到实现。
+                  </figcaption>
+                </figure>
+              </div>
+
+              <div class="wsk-post-actions">
+                <div class="wsk-vote wsk-is-voted" role="group" aria-label="投票">
+                  <button type="button" aria-label="赞同" aria-pressed="true">
+                    <svg class="wsk-icon" aria-hidden="true">
+                      <use href="#arrow-up"></use>
+                    </svg>
+                  </button>
+                  <span class="wsk-vote-count">36</span>
+                  <button type="button" aria-label="反对" aria-pressed="false">
+                    <svg class="wsk-icon" aria-hidden="true">
+                      <use href="#arrow-down"></use>
+                    </svg>
+                  </button>
+                </div>
+                <button
+                  class="wsk-button wsk-quiet"
+                  type="button"
+                  data-js-only
+                  data-toast="已收藏该主题。"
+                >
+                  <svg class="wsk-icon" aria-hidden="true">
+                    <use href="#bookmark"></use>
+                  </svg>
+                  收藏
+                </button>
+                <button
+                  class="wsk-button wsk-quiet"
+                  type="button"
+                  data-js-only
+                  data-toast="链接已复制。"
+                >
+                  <svg class="wsk-icon" aria-hidden="true">
+                    <use href="#external"></use>
+                  </svg>
+                  分享
+                </button>
+                <span class="wsk-spacer"></span>
+                <button
+                  class="wsk-icon-button"
+                  type="button"
+                  data-js-only
+                  aria-label="更多操作"
+                  title="更多操作"
+                >
+                  <svg class="wsk-icon" aria-hidden="true">
+                    <use href="#more"></use>
+                  </svg>
+                </button>
+              </div>
+            </article>
+
+            <section class="wsk-section" aria-labelledby="forum-post-replies-title">
+              <div class="wsk-section-head" id="forum-post-replies">
+                <h2 id="forum-post-replies-title">回复</h2>
+                <span class="wsk-badge">18 条</span>
+              </div>
+
+              <div class="wsk-panel">
+                <div class="wsk-reply-list">
+                  <article class="wsk-reply">
+                    <span
+                      class="wsk-avatar wsk-avatar-sm wsk-avatar-2"
+                      aria-hidden="true"
+                      >LH</span
+                    >
+                    <div class="wsk-reply-body">
+                      <div class="wsk-reply-head">
+                        <strong>林海</strong>
+                        <span>5 小时前</span>
+                        <span class="wsk-reply-floor">#1</span>
+                      </div>
+                      <p class="wsk-reply-text">
+                        先确认一下：你是不是把监听器绑在被替换的那个容器上了？如果绑在容器
+                        外层，冒泡还是能接到的，只有绑在容器内部才会连人带监听器一起被删。
+                      </p>
+                      <div class="wsk-reply-actions">
+                        <div class="wsk-vote" role="group" aria-label="投票">
+                          <button type="button" aria-label="赞同" aria-pressed="false">
+                            <svg class="wsk-icon" aria-hidden="true">
+                              <use href="#arrow-up"></use>
+                            </svg>
+                          </button>
+                          <span class="wsk-vote-count">12</span>
+                        </div>
+                        <button
+                          class="wsk-button wsk-quiet"
+                          type="button"
+                          data-js-only
+                          data-toast="示例站点未连接后端，回复未提交。"
+                          data-toast-variant="info"
+                        >
+                          <svg class="wsk-icon" aria-hidden="true">
+                            <use href="#message"></use>
+                          </svg>
+                          回复
+                        </button>
+                      </div>
+                    </div>
+                  </article>
+
+                  <article class="wsk-reply">
+                    <span
+                      class="wsk-avatar wsk-avatar-sm wsk-avatar-3"
+                      aria-hidden="true"
+                      >ZY</span
+                    >
+                    <div class="wsk-reply-body">
+                      <div class="wsk-reply-head">
+                        <strong>周予</strong>
+                        <span class="wsk-badge wsk-accent">楼主</span>
+                        <span>5 小时前</span>
+                        <span class="wsk-reply-floor">#2</span>
+                      </div>
+                      <blockquote class="wsk-reply-quote">
+                        <cite>引用 林海 #1</cite>
+                        <p>是不是把监听器绑在被替换的那个容器上了？</p>
+                      </blockquote>
+                      <p class="wsk-reply-text">
+                        确认了，是绑在容器内部的。那按你说的挪到外层就行——不过外层要挪到
+                        哪一层才算安全？每加一个可替换区域就要重新想一次。
+                      </p>
+                      <div class="wsk-reply-actions">
+                        <div class="wsk-vote" role="group" aria-label="投票">
+                          <button type="button" aria-label="赞同" aria-pressed="false">
+                            <svg class="wsk-icon" aria-hidden="true">
+                              <use href="#arrow-up"></use>
+                            </svg>
+                          </button>
+                          <span class="wsk-vote-count">4</span>
+                        </div>
+                      </div>
+                    </div>
+                  </article>
+
+                  <article class="wsk-reply">
+                    <span
+                      class="wsk-avatar wsk-avatar-sm wsk-avatar-4"
+                      aria-hidden="true"
+                      >CM</span
+                    >
+                    <div class="wsk-reply-body">
+                      <div class="wsk-reply-head">
+                        <strong>陈默</strong>
+                        <span>4 小时前</span>
+                        <span class="wsk-reply-floor">#3</span>
+                      </div>
+                      <p class="wsk-reply-text">
+                        别挑层级了，直接绑 <code>document</code>。它是唯一一个保证不会被
+                        替换掉的节点，绑在上面就再也不用判断「外层到底是哪一层」。代价是每次
+                        事件多一次 closest 匹配，量级可以忽略。
+                      </p>
+                      <div class="wsk-reply-actions">
+                        <div class="wsk-vote wsk-is-voted" role="group" aria-label="投票">
+                          <button type="button" aria-label="赞同" aria-pressed="true">
+                            <svg class="wsk-icon" aria-hidden="true">
+                              <use href="#arrow-up"></use>
+                            </svg>
+                          </button>
+                          <span class="wsk-vote-count">29</span>
+                        </div>
+                        <span class="wsk-badge wsk-success">
+                          <svg class="wsk-icon" aria-hidden="true">
+                            <use href="#check"></use>
+                          </svg>
+                          最佳答案
+                        </span>
+                      </div>
+                    </div>
+                  </article>
+
+                  <article class="wsk-reply">
+                    <span class="wsk-avatar wsk-avatar-sm" aria-hidden="true"
+                      >ZW</span
+                    >
+                    <div class="wsk-reply-body">
+                      <div class="wsk-reply-head">
+                        <strong>站务组</strong>
+                        <span>3 小时前</span>
+                        <span class="wsk-reply-floor">#4</span>
+                      </div>
+                      <p class="wsk-reply-text">
+                        补一句：事件解决了，初次渲染没有。分页按钮、标签文案这类要算出来的
+                        东西，还是得在替换后跑一次幂等的 mount。已把本帖标记为已解决。
+                      </p>
+                      <div class="wsk-reply-actions">
+                        <div class="wsk-vote" role="group" aria-label="投票">
+                          <button type="button" aria-label="赞同" aria-pressed="false">
+                            <svg class="wsk-icon" aria-hidden="true">
+                              <use href="#arrow-up"></use>
+                            </svg>
+                          </button>
+                          <span class="wsk-vote-count">7</span>
+                        </div>
+                      </div>
+                    </div>
+                  </article>
+                </div>
+              </div>
+            </section>
+
+            <section class="wsk-section" aria-labelledby="forum-post-form-title">
+              <div class="wsk-section-head" id="forum-post-form">
+                <h2 id="forum-post-form-title">写回复</h2>
+                <span class="wsk-badge">Reply</span>
+              </div>
+              <form
+                class="wsk-panel"
+                id="forum-reply-form"
+                data-demo-submit="示例站点未连接后端，回复未提交。"
+                data-demo-submit-variant="info"
+              >
+                <div class="wsk-field">
+                  <label class="wsk-label" for="forum-reply">回复内容</label>
+                  <textarea
+                    class="wsk-textarea"
+                    id="forum-reply"
+                    name="reply"
+                    rows="4"
+                    required
+                    placeholder="支持 Markdown。请先读过上面的讨论再回复。"
+                  ></textarea>
+                  <p class="wsk-help">发布后 5 分钟内可以编辑。</p>
+                </div>
+                <div class="wsk-button-row wsk-mt-5">
+                  <button class="wsk-button" type="submit">发布回复</button>
+                  <button class="wsk-button wsk-secondary" type="reset">
+                    清空
+                  </button>
+                </div>
+              </form>
+            </section>
+          </div>
+
+          <aside class="wsk-forum-aside" aria-label="主题侧栏">
+            <div class="wsk-panel">
+              <div class="wsk-user-row">
+                <span
+                  class="wsk-avatar wsk-avatar-lg wsk-avatar-3"
+                  aria-hidden="true"
+                  >ZY</span
+                >
+                <div>
+                  <strong>周予</strong>
+                  <small>加入于 2025 年 4 月</small>
+                </div>
+              </div>
+              <p class="wsk-help wsk-mt-2">
+                在做一个服务端渲染的内部系统，正在把交互层从框架换成原生。
+              </p>
+              <div class="wsk-mini-metric-grid wsk-mt-5">
+                <div><span>主题</span><strong>23</strong></div>
+                <div><span>回复</span><strong>184</strong></div>
+                <div><span>获赞</span><strong>512</strong></div>
+              </div>
+            </div>
+
+            <div class="wsk-panel wsk-is-sticky">
+              <p class="wsk-panel-title">本页目录</p>
+              <nav class="wsk-reference-nav" aria-label="本页目录">
+                <div class="wsk-reference-links">
+                  <a
+                    class="wsk-active"
+                    href="#forum-post-body"
+                    aria-current="location"
+                    >正文</a
+                  >
+                  <a href="#forum-post-symptom">现象</a>
+                  <a href="#forum-post-cause">为什么会失效</a>
+                  <a href="#forum-post-fix">做法</a>
+                  <a href="#forum-post-mount">替换之后</a>
+                  <a href="#forum-post-replies">回复（18）</a>
+                  <a href="#forum-post-form">写回复</a>
+                </div>
+              </nav>
+            </div>
+
+            <div class="wsk-panel">
+              <p class="wsk-panel-title">相关主题</p>
+              <div class="wsk-status-list">
+                <div>
+                  <span
+                    >深色模式的阴影分层<small>问答 · 已解决</small></span
+                  ><strong>31</strong>
+                </div>
+                <div>
+                  <span
+                    >零依赖对比度校验脚本<small>分享</small></span
+                  ><strong>42</strong>
+                </div>
+                <div>
+                  <span>令牌迁移说明<small>公告</small></span
+                  ><strong>9</strong>
+                </div>
+              </div>
+            </div>
+          </aside>
         </div>
       </div>
     </main>
@@ -1435,6 +3144,7 @@
           type="button"
           data-dialog-close
           data-toast="操作已确认。"
+          data-js-only
         >
           确认
         </button>
