@@ -9,6 +9,7 @@
 //! | 建号幂等、停用不复活、空 fs_id 不撞唯一索引 | [`authz`] |
 //! | 回调顺序：拒未知参数 → 无写入地校验 → 成功后才写墓碑 | [`callback`] |
 //! | 一轮对抗式审查逐条落回来的回归 | [`regressions`] |
+//! | 订阅 token 生命周期、三个响应细节、凭据缺失 | [`subscription`] |
 
 #[path = "m4/harness.rs"]
 mod harness;
@@ -23,3 +24,5 @@ mod outbound;
 mod regressions;
 #[path = "m5/state.rs"]
 mod state;
+#[path = "m5/subscription.rs"]
+mod subscription;

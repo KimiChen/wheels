@@ -154,8 +154,23 @@ struct Candidate {
 /// FIFO 挑一个在**全部**目标节点上都空闲、且四向计数全零的身份。
 ///
 /// 零基线门禁用的是**实际观察**而不是「配置里应该是零」（D11 §4.6）：
-/// 只要它在任何一个已批准 runtime 上动过哪怕一个字节，就不再可认领。
+/// 只要它在**当前** runtime 上动过哪怕一个字节，就不再可认领。
 /// 这条挡住的是「把一个用过的身份发给新用户，于是他一上来就欠着别人的账」。
+///
+/// # 为什么只看当前 runtime，不看历史上全部已批准的
+///
+/// 原先看的是「任何一个已批准 runtime」。那过严，而且严得没有收益：
+/// `usage_lifetime_totals` 是按 `runtime_identity_id` 键的——**每个 runtime 一行**，
+/// 所以 `bump_lifetime` 的 `coalesce(user_id, ?)` 只会填当前 runtime 那一行。
+/// 跨 runtime 的追溯归属在结构上不可能发生，历史字节留在历史那一行、归属为空。
+///
+/// 而代价是实打实的：节点一重启就换 runtime，旧窗口的非零计数会把那个身份
+/// **永久**挡在池子外面——池子只减不增，等于每次重启都悄悄损耗几个名额，
+/// 而且损耗的是「用过的那几个」，看起来毫无规律。
+///
+/// 「当前」的判据与配额下发用的是同一个（`quota::service::latest_settled`）：
+/// 按 `started_at_unix_ms` 取最新的那个已批准 runtime。两处必须一致，
+/// 否则会出现「能领到、但配额表里没有它」这种对不上的状态。
 async fn pick_free_slot(
     txn: &mut crate::store::WriteTxn<'_>,
     node_count: i64,
@@ -173,6 +188,9 @@ async fn pick_free_slot(
                     JOIN runtime_identities i ON i.runtime_identity_id = c.runtime_identity_id \
                     JOIN node_runtimes nr ON nr.runtime_pk = i.runtime_pk \
                    WHERE nr.approval_status = 'approved' \
+                     AND nr.started_at_unix_ms = ( \
+                           SELECT MAX(started_at_unix_ms) FROM node_runtimes \
+                            WHERE node_id = nr.node_id AND approval_status = 'approved') \
                      AND i.identity_name = r.identity_name \
                      AND (c.tcp_uplink_bytes <> ? OR c.tcp_downlink_bytes <> ? \
                        OR c.udp_uplink_bytes <> ? OR c.udp_downlink_bytes <> ?)) \

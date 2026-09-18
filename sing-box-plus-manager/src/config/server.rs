@@ -24,6 +24,10 @@ pub struct ServerConfig {
     /// 而那时写配置的人已经不在现场了。
     #[serde(default)]
     pub sso: Option<crate::config::SsoConfig>,
+    /// 订阅（M6）。**整段缺省即不启用**——那时 `/sub/…` 不挂载，
+    /// 而 `/api/v1/subscriptions/…` 仍然明确回「未启用」，不是 404。
+    #[serde(default)]
+    pub subscription: Option<crate::config::SubscriptionConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -169,6 +173,9 @@ impl ServerConfig {
         // 它是显式调 `NodeQuotaControl::validate` 的。
         if let Some(sso) = &self.sso {
             sso.validate()?;
+        }
+        if let Some(subscription) = &self.subscription {
+            subscription.validate()?;
         }
         if self.quota.display_timezone.is_empty() {
             return Err(Error::invalid_config(

@@ -56,8 +56,16 @@ async fn main() -> anyhow::Result<()> {
 
     let (_tx, rx) = tokio::sync::watch::channel(false);
     // 预览用 `local` 会话，所以角色取自 `users.role`，不需要成员名单（D27）。
-    proxy_manager::api::serve(store.clone(), std::sync::Arc::new(Vec::new()), None, listener, rx)
-        .await?;
+    // 预览不带订阅：`/sub/…` 不挂载，`me.html` 上那块保持占位。
+    proxy_manager::api::serve(
+        store.clone(),
+        std::sync::Arc::new(Vec::new()),
+        None,
+        None,
+        listener,
+        rx,
+    )
+    .await?;
     Ok(())
 }
 
