@@ -67,7 +67,10 @@ func benchState(b *testing.B, quota bool) *connState {
 		b.Fatal("身份未注册")
 	}
 	if quota {
-		registry.quota.enabled = true
+		registry.configureQuota(&QuotaControlOptions{
+			StartupAction: string(QuotaActionAllow),
+			StaleAction:   string(QuotaActionAllow),
+		})
 		// 额度给得足够大，使基准衡量的是「扣减」而不是「闸断后立刻短路」。
 		user.quota.setLimited(1 << 62)
 	}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"sort"
 	"sync"
 	"testing"
@@ -13,6 +14,7 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/log"
 	M "github.com/sagernet/sing/common/metadata"
+	"github.com/sagernet/sing/service"
 )
 
 // TestSaturatingCounter 断言饱和加法在溢出时钉住而不是回绕。
@@ -496,5 +498,68 @@ func TestTombstonesRemainBoundedByTotalCeiling(t *testing.T) {
 	}
 	if !snapshot.Health.IdentityLimitReached {
 		t.Fatal("总量越过上限后必须置位 identity_limit_reached")
+	}
+}
+
+// TestQuotaAndAuditAttachBeforeListenersBind 是启动窗口的结构性回归守卫。
+//
+// 上游在同一次 adapter.Start(StartStateStart, s.inbound, s.service) 里先起 inbound
+// 再起 service，而 inbound 在该阶段就绑定监听。若审计与配额也在 Start 阶段才挂上，
+// 从最后一个 listener 起来到 service 返回之间，admit() 会因策略未装而放行任何身份，
+// auditWriterRef() 为 nil 则使该窗口内建立的连接永远不产生审计记录。
+//
+// 因此这里断言的是阶段归属本身：Initialize 一结束，策略与审计就必须已经就位，
+// 而 socket 必须尚未绑定。用裸 Service 而非起 Box，所以这条能进无抑制 -race 轮。
+func TestQuotaAndAuditAttachBeforeListenersBind(t *testing.T) {
+	registry := quotaRegistry(t, "u1")
+	dir := shortTempDir(t)
+	statsPath := sockPath(dir, "s.sock")
+	quotaPath := sockPath(dir, "q.sock")
+
+	ctx := service.ContextWith(context.Background(), registry)
+	raw, err := NewService(ctx, nil, "stats", Options{
+		NodeID:     registry.NodeID(),
+		ListenPath: statsPath,
+		Inbounds:   []string{"in"},
+		QuotaControl: &QuotaControlOptions{
+			ListenPath:    quotaPath,
+			StartupAction: string(QuotaActionDeny),
+			StaleAction:   string(QuotaActionAllow),
+		},
+	})
+	if err != nil {
+		t.Fatalf("构造 service 失败：%v", err)
+	}
+	instance := raw.(*Service)
+	t.Cleanup(func() { _ = instance.Close() })
+
+	// 初始：策略是 init() 装的那份禁用策略。
+	if registry.quota.policy.Load().enabled {
+		t.Fatal("尚未 Start 就不应有已启用的配额策略")
+	}
+
+	if err = instance.Start(adapter.StartStateInitialize); err != nil {
+		t.Fatalf("Initialize 阶段失败：%v", err)
+	}
+	policy := registry.quota.policy.Load()
+	if !policy.enabled {
+		t.Fatal("Initialize 结束时配额策略必须已启用——否则 inbound 绑定后存在放行窗口")
+	}
+	if policy.startupAction != QuotaActionDeny {
+		t.Fatalf("策略未按配置装上：startupAction=%q", policy.startupAction)
+	}
+	for _, path := range []string{statsPath, quotaPath} {
+		if _, statErr := os.Stat(path); statErr == nil {
+			t.Fatalf("Initialize 阶段不应绑定 socket：%s 已存在", path)
+		}
+	}
+
+	if err = instance.Start(adapter.StartStateStart); err != nil {
+		t.Fatalf("Start 阶段失败：%v", err)
+	}
+	for _, path := range []string{statsPath, quotaPath} {
+		if _, statErr := os.Stat(path); statErr != nil {
+			t.Fatalf("Start 阶段后 socket 应已绑定：%s：%v", path, statErr)
+		}
 	}
 }

@@ -80,15 +80,25 @@ const (
 	QuotaActionDeny  QuotaAction = "deny"
 )
 
-// quotaState 是 registry 上的配额控制面状态。
-type quotaState struct {
-	// enabled 为假时整条闸断链路不存在：准入判断直接返回放行，不读任何字段。
+// quotaPolicy 是一份不可变的闸断策略。
+//
+// 装进 atomic.Pointer 整体替换，而不是五个普通字段逐个赋值：后者既与数据面读取构成
+// 数据竞争，也允许观察到「新 staleAction 配旧 staleAfter」这样的撕裂组合。
+type quotaPolicy struct {
+	// enabled 为假时整条闸断链路不存在：准入判断直接返回放行。
 	enabled bool
 
 	startupAction     QuotaAction
 	staleAction       QuotaAction
 	staleAfter        time.Duration
 	reconnectThrottle time.Duration
+}
+
+// quotaState 是 registry 上的配额控制面状态。
+type quotaState struct {
+	// policy 由 configureQuota 在 Start 的 Initialize 阶段整体换掉，由数据面 goroutine
+	// 高频读取。指针恒不为 nil：init() 先装一份禁用策略。
+	policy atomic.Pointer[quotaPolicy]
 
 	epoch              atomic.Uint64
 	accepted           atomic.Bool
@@ -105,8 +115,7 @@ type quotaState struct {
 }
 
 func (q *quotaState) init() {
-	q.startupAction = QuotaActionAllow
-	q.staleAction = QuotaActionAllow
+	q.policy.Store(&quotaPolicy{startupAction: QuotaActionAllow, staleAction: QuotaActionAllow})
 }
 
 // QuotaEntry 是 PUT /v3/quota 请求体中的一项。
@@ -151,7 +160,10 @@ func (r *Registry) admit(user *userRecord, nowNanos int64) admitVerdict {
 	if r.draining.Load() {
 		return admitDenyDraining
 	}
-	if !r.quota.enabled {
+	// 一次 Load 拿到整份策略，后续只读本地指针：既消除与 configureQuota 的竞争，
+	// 也保证同一次准入判断看到的是自洽的一份策略。
+	policy := r.quota.policy.Load()
+	if !policy.enabled {
 		return admitAllow
 	}
 	if user.quota.exhausted() {
@@ -161,13 +173,13 @@ func (r *Registry) admit(user *userRecord, nowNanos int64) admitVerdict {
 		return admitDenyThrottled
 	}
 	if !r.quota.accepted.Load() {
-		if r.quota.startupAction == QuotaActionDeny {
+		if policy.startupAction == QuotaActionDeny {
 			return admitDenyNoTable
 		}
 		return admitAllow
 	}
-	if r.quota.staleAfter > 0 && r.quota.staleAction == QuotaActionDeny {
-		if nowNanos-r.quota.lastAcceptedNanos.Load() > int64(r.quota.staleAfter) {
+	if policy.staleAfter > 0 && policy.staleAction == QuotaActionDeny {
+		if nowNanos-r.quota.lastAcceptedNanos.Load() > int64(policy.staleAfter) {
 			return admitDenyStale
 		}
 	}
@@ -176,10 +188,11 @@ func (r *Registry) admit(user *userRecord, nowNanos int64) admitVerdict {
 
 // noteDenied 在拒绝一条连接后记下冷却窗口。
 func (r *Registry) noteDenied(user *userRecord, nowNanos int64) {
-	if r.quota.reconnectThrottle <= 0 {
+	throttle := r.quota.policy.Load().reconnectThrottle
+	if throttle <= 0 {
 		return
 	}
-	user.quota.markThrottle(nowNanos + int64(r.quota.reconnectThrottle))
+	user.quota.markThrottle(nowNanos + int64(throttle))
 }
 
 // ApplyQuotaTable 应用一份全量剩余额度表（README §4.9 控制端点契约）。
