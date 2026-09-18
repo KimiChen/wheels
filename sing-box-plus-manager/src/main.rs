@@ -221,6 +221,13 @@ async fn run_service(config_dir: &std::path::Path) -> anyhow::Result<ExitCode> {
 
     let (config, store) = open_store(config_dir).await?;
     let store = std::sync::Arc::new(store);
+    // 单行设置在这里建出来：`quota::settings::apply` 只负责改，不负责建——
+    // 那条 INSERT 分支必须凭空编出一个 display_timezone，而这个值只有配置知道。
+    proxy_manager::quota::settings::ensure_initialized(
+        &store,
+        &config.server.quota.display_timezone,
+    )
+    .await?;
     let policy = SchedulePolicy::from_config(&config.server.collect);
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 

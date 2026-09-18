@@ -16,7 +16,6 @@ interval_secs = 60
 min_interval_secs = 10
 snapshot_max_age_secs = 120
 [quota]
-monthly_bytes = "322122547200"
 display_timezone = "Asia/Shanghai"
 "#;
 
@@ -48,7 +47,6 @@ fn 仓库里的示例配置能解析并通过全部校验() {
     assert_eq!(config.nodes.len(), 1);
     assert_eq!(config.nodes[0].first_snapshot, FirstSnapshotPolicy::Baseline);
     assert!(config.nodes[0].quota_enabled());
-    assert_eq!(config.server.quota.monthly_bytes().unwrap(), 322_122_547_200);
 }
 
 // ---- C8：首快照策略缺省即启动失败 ----
@@ -282,22 +280,10 @@ fn 未知字段失败关闭() {
     assert!(Config::from_str(&server, &nodes_with(r#"first_snapshot = "baseline""#)).is_err());
 }
 
-/// C3：额度是 u64，TOML 整数是有符号 64 位，所以走十进制字符串。
-#[test]
-fn 额度走十进制字符串且覆盖u64上界() {
-    let max = u64::MAX.to_string();
-    let server = SERVER.replace("322122547200", &max);
-    let config = Config::from_str(&server, &nodes_with(r#"first_snapshot = "baseline""#)).unwrap();
-    assert_eq!(config.server.quota.monthly_bytes().unwrap(), u64::MAX);
-
-    for bad in ["", "-1", "1.5", " 12", "12 ", "0x10", "18446744073709551616"] {
-        let server = SERVER.replace("322122547200", bad);
-        assert!(
-            Config::from_str(&server, &nodes_with(r#"first_snapshot = "baseline""#)).is_err(),
-            "monthly_bytes {bad:?} 必须被拒"
-        );
-    }
-}
+// C3（额度走十进制字符串、覆盖 u64 上界）原本在这里，钉的是配置里的
+// quota.monthly_bytes。分档之后那个字段已删除，这条纪律的载体变成
+// quota_groups 的定宽文本列与它的 i64 上界 CHECK，用例相应搬到
+// tests/m2/settings.rs——那里能真的写一次库，证明超界值写不进去。
 
 #[test]
 fn 提频下限不得大于目标周期() {

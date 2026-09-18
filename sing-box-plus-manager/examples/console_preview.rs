@@ -69,8 +69,8 @@ async fn seed(store: &Store) -> anyhow::Result<()> {
         [("admin", "管理员", Role::Admin), ("member", "普通用户", Role::User)]
     {
         sqlx::query(
-            "INSERT INTO users(login_name, display_name, role, status, created_at, updated_at) \
-             VALUES (?, ?, ?, 'active', ?, ?)",
+            "INSERT INTO users(login_name, display_name, role, quota_group, status, created_at, updated_at) \
+             VALUES (?, ?, ?, 'normal', 'active', ?, ?)",
         )
         .bind(login)
         .bind(display)
@@ -118,8 +118,17 @@ async fn seed(store: &Store) -> anyhow::Result<()> {
 
     // 走真实的 apply：设置、revision、审计与待下发任务必须同事务落库，
     // 预览里也不绕过它，否则看到的收敛状态是假的。
-    proxy_manager::quota::settings::apply(store, 300 * 1024 * 1024 * 1024, "preview", &cycle, true)
-        .await?;
+    proxy_manager::quota::settings::apply(
+        store,
+        &proxy_manager::quota::settings::Scope::Group {
+            group_name: "normal".into(),
+            new_monthly_bytes: 300 * 1024 * 1024 * 1024,
+        },
+        "preview",
+        &cycle,
+        true,
+    )
+    .await?;
 
     let count: i64 =
         sqlx::query("SELECT count(*) FROM users").fetch_one(store.readers()).await?.get(0);

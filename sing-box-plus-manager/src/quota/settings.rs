@@ -66,8 +66,9 @@ impl TaskStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuotaSettings {
-    pub monthly_bytes: u64,
     pub revision: i64,
+    /// 新建用户的默认档位。
+    pub default_group: String,
     pub display_timezone: String,
     pub updated_by: String,
     pub updated_at: String,
@@ -75,21 +76,103 @@ pub struct QuotaSettings {
 
 pub async fn load(store: &Store) -> Result<Option<QuotaSettings>> {
     let row = sqlx::query(
-        "SELECT monthly_bytes, revision, display_timezone, updated_by, updated_at \
+        "SELECT revision, default_group, display_timezone, updated_by, updated_at \
          FROM quota_settings WHERE id = 1",
     )
     .fetch_optional(store.readers())
     .await?;
-    row.map(|row| {
-        Ok(QuotaSettings {
-            monthly_bytes: U64Text::decode(&row.get::<String, _>(0))?.get(),
-            revision: row.get(1),
-            display_timezone: row.get(2),
-            updated_by: row.get(3),
-            updated_at: row.get(4),
+    Ok(row.map(|row| QuotaSettings {
+        revision: row.get(0),
+        default_group: row.get(1),
+        display_timezone: row.get(2),
+        updated_by: row.get(3),
+        updated_at: row.get(4),
+    }))
+}
+
+/// 确保单行设置存在。**幂等**：已存在就原样返回，不覆盖任何人改过的值。
+///
+/// 独立于 [`apply`] 是有意的：`apply` 只负责「改」，插入初始行是「建」。
+/// 合在一起会让 `apply` 里出现一条 INSERT 分支，而那条分支必须凭空
+/// 编出一个 display_timezone——历史上它硬编码成了 'UTC'，
+/// 与 UTC+8 的计费周期不一致，会让某一天的用量显示进错误的月份。
+pub async fn ensure_initialized(store: &Store, display_timezone: &str) -> Result<()> {
+    if display_timezone.trim().is_empty() {
+        return Err(Error::Quota("display_timezone 不能为空：日桶按它的日历日计算".into()));
+    }
+    let now = bucket::to_rfc3339(OffsetDateTime::now_utc());
+    let mut txn = store.begin_immediate().await?;
+    sqlx::query(
+        "INSERT INTO quota_settings(id, revision, default_group, display_timezone, \
+         updated_by, updated_at) VALUES (1, 0, 'normal', ?, 'schema', ?) \
+         ON CONFLICT(id) DO NOTHING",
+    )
+    .bind(display_timezone)
+    .bind(&now)
+    .execute(txn.conn())
+    .await?;
+    txn.commit().await?;
+    Ok(())
+}
+
+/// 一个档位。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupQuota {
+    pub group_name: String,
+    pub display_name: String,
+    pub monthly_bytes: u64,
+    pub sort_order: i64,
+}
+
+/// 全部档位，按 `sort_order`。
+pub async fn load_groups(store: &Store) -> Result<Vec<GroupQuota>> {
+    let rows = sqlx::query(
+        "SELECT group_name, display_name, monthly_bytes, sort_order FROM quota_groups \
+         ORDER BY sort_order",
+    )
+    .fetch_all(store.readers())
+    .await?;
+    rows.into_iter()
+        .map(|row| {
+            Ok(GroupQuota {
+                group_name: row.get(0),
+                display_name: row.get(1),
+                monthly_bytes: U64Text::decode(&row.get::<String, _>(2))?.get(),
+                sort_order: row.get(3),
+            })
         })
-    })
-    .transpose()
+        .collect()
+}
+
+/// 每个**在用**用户的月度额度。规划一轮额度表时一次查出来，不在循环里逐个查。
+///
+/// 只收 `status = 'active'`：被禁用的人不在这张表里，规划侧因此看不到他的额度。
+/// 注意这不等于「从额度表里省略他」——省略在 wire 上等于**无限额度**（C16/C30），
+/// 禁用的人必须显式拿到零。那一步在 `table::assemble`。
+pub async fn user_quota_map(store: &Store) -> Result<std::collections::BTreeMap<i64, u64>> {
+    let rows = sqlx::query(
+        "SELECT u.user_id, g.monthly_bytes FROM users u \
+         JOIN quota_groups g ON g.group_name = u.quota_group \
+         WHERE u.status = 'active'",
+    )
+    .fetch_all(store.readers())
+    .await?;
+    rows.into_iter()
+        .map(|row| Ok((row.get(0), U64Text::decode(&row.get::<String, _>(1))?.get())))
+        .collect()
+}
+
+/// 单个用户的月度额度与档位。查不到（不存在或已禁用）时返回 `None`。
+pub async fn user_quota(store: &Store, user_id: i64) -> Result<Option<(String, u64)>> {
+    let row = sqlx::query(
+        "SELECT u.quota_group, g.monthly_bytes FROM users u \
+         JOIN quota_groups g ON g.group_name = u.quota_group \
+         WHERE u.user_id = ? AND u.status = 'active'",
+    )
+    .bind(user_id)
+    .fetch_optional(store.readers())
+    .await?;
+    row.map(|row| Ok((row.get(0), U64Text::decode(&row.get::<String, _>(1))?.get()))).transpose()
 }
 
 /// 一个用户在本周期的用量与闸断状态。
@@ -97,10 +180,20 @@ pub async fn load(store: &Store) -> Result<Option<QuotaSettings>> {
 pub struct UserUsage {
     pub user_id: i64,
     pub login_name: String,
+    pub quota_group: String,
+    /// 该用户所在档位的月度额度。带在这里而不是让调用方再传一个参数：
+    /// 分档之后「用谁的额度判断谁」必须是不会传错的。
+    pub quota_bytes: u64,
     pub cycle_used: u128,
 }
 
 impl UserUsage {
+    /// 按**自己档位**的额度判断是否已用尽。
+    pub fn blocked(&self) -> bool {
+        self.cycle_used >= self.quota_bytes as u128
+    }
+
+    /// 假设该用户的额度变成 `quota` 时是否会被闸断。用于预览。
     pub fn blocked_at(&self, quota: u64) -> bool {
         self.cycle_used >= quota as u128
     }
@@ -109,6 +202,7 @@ impl UserUsage {
 /// 调低的预览（README §4.5：**调低必须先预览再确认**）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Preview {
+    pub scope: Scope,
     pub current_monthly_bytes: u64,
     pub new_monthly_bytes: u64,
     pub is_reduction: bool,
@@ -134,17 +228,26 @@ impl Preview {
     }
 }
 
-async fn cycle_usage(store: &Store, cycle_key: &str) -> Result<Vec<UserUsage>> {
+/// 本周期各用户的用量。`group` 非空时只取该档位的成员。
+async fn cycle_usage(
+    store: &Store,
+    cycle_key: &str,
+    group: Option<&str>,
+) -> Result<Vec<UserUsage>> {
     let rows = sqlx::query(
-        "SELECT u.user_id, u.login_name, coalesce(t.total_bytes, ?) \
+        "SELECT u.user_id, u.login_name, u.quota_group, g.monthly_bytes, coalesce(t.total_bytes, ?) \
          FROM users u \
+         JOIN quota_groups g ON g.group_name = u.quota_group \
          LEFT JOIN usage_cycle_totals t \
                 ON t.user_id = u.user_id AND t.cycle_key = ? AND t.rule_version = ? \
-         WHERE u.status = 'active' ORDER BY u.user_id",
+         WHERE u.status = 'active' AND (? IS NULL OR u.quota_group = ?) \
+         ORDER BY u.user_id",
     )
     .bind(U128Text::new(0).encode())
     .bind(cycle_key)
     .bind(crate::ledger::settle::CYCLE_RULE_VERSION)
+    .bind(group)
+    .bind(group)
     .fetch_all(store.readers())
     .await?;
     rows.into_iter()
@@ -152,34 +255,94 @@ async fn cycle_usage(store: &Store, cycle_key: &str) -> Result<Vec<UserUsage>> {
             Ok(UserUsage {
                 user_id: row.get(0),
                 login_name: row.get(1),
-                cycle_used: U128Text::decode(&row.get::<String, _>(2))?.get(),
+                quota_group: row.get(2),
+                quota_bytes: U64Text::decode(&row.get::<String, _>(3))?.get(),
+                cycle_used: U128Text::decode(&row.get::<String, _>(4))?.get(),
             })
         })
         .collect()
 }
 
+/// 一次额度变更的对象。
+///
+/// 两种动作都可能降低某人的额度，所以都走同一套预览/确认与审计纪律。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Scope {
+    /// 改某一档的字节数，影响该档全体。
+    Group { group_name: String, new_monthly_bytes: u64 },
+    /// 把某个用户换到另一档，影响一人。
+    UserGroup { login_name: String, new_group: String },
+}
+
+impl Scope {
+    fn kind(&self) -> &'static str {
+        match self {
+            Scope::Group { .. } => "group",
+            Scope::UserGroup { .. } => "user_group",
+        }
+    }
+
+    fn subject(&self) -> &str {
+        match self {
+            Scope::Group { group_name, .. } => group_name,
+            Scope::UserGroup { login_name, .. } => login_name,
+        }
+    }
+}
+
+async fn group_bytes(store: &Store, group_name: &str) -> Result<u64> {
+    let row = sqlx::query("SELECT monthly_bytes FROM quota_groups WHERE group_name = ?")
+        .bind(group_name)
+        .fetch_optional(store.readers())
+        .await?
+        .ok_or_else(|| Error::Quota(format!("没有这个档位：{group_name}")))?;
+    U64Text::decode(&row.get::<String, _>(0)).map(|v| v.get())
+}
+
 /// 预览一次额度变更。**不改设置、不写下发任务。**
-pub async fn preview(store: &Store, new_monthly_bytes: u64, cycle_key: &str) -> Result<Preview> {
-    let current = load(store).await?.map(|s| s.monthly_bytes).unwrap_or(0);
-    let usage = cycle_usage(store, cycle_key).await?;
+pub async fn preview(store: &Store, scope: &Scope, cycle_key: &str) -> Result<Preview> {
+    let (current, new_bytes, usage) = match scope {
+        Scope::Group { group_name, new_monthly_bytes } => {
+            let current = group_bytes(store, group_name).await?;
+            // 只看这一档的成员：换成全体会把与本次操作无关的人算进受影响人数。
+            let usage = cycle_usage(store, cycle_key, Some(group_name)).await?;
+            (current, *new_monthly_bytes, usage)
+        }
+        Scope::UserGroup { login_name, new_group } => {
+            let new_bytes = group_bytes(store, new_group).await?;
+            let usage: Vec<UserUsage> = cycle_usage(store, cycle_key, None)
+                .await?
+                .into_iter()
+                .filter(|u| &u.login_name == login_name)
+                .collect();
+            let current = match usage.first() {
+                Some(user) => user.quota_bytes,
+                None => {
+                    return Err(Error::Quota(format!("没有这个在用用户：{login_name}")));
+                }
+            };
+            (current, new_bytes, usage)
+        }
+    };
 
     let will_be_blocked: Vec<UserUsage> =
-        usage.iter().filter(|u| u.blocked_at(new_monthly_bytes)).cloned().collect();
+        usage.iter().filter(|u| u.blocked_at(new_bytes)).cloned().collect();
     let newly_blocked: Vec<UserUsage> = usage
         .iter()
-        .filter(|u| u.blocked_at(new_monthly_bytes) && !u.blocked_at(current))
+        .filter(|u| u.blocked_at(new_bytes) && !u.blocked_at(current))
         .cloned()
         .collect();
     let newly_unblocked: Vec<UserUsage> = usage
         .iter()
-        .filter(|u| !u.blocked_at(new_monthly_bytes) && u.blocked_at(current))
+        .filter(|u| !u.blocked_at(new_bytes) && u.blocked_at(current))
         .cloned()
         .collect();
 
     Ok(Preview {
+        scope: scope.clone(),
         current_monthly_bytes: current,
-        new_monthly_bytes,
-        is_reduction: new_monthly_bytes < current,
+        new_monthly_bytes: new_bytes,
+        is_reduction: new_bytes < current,
         will_be_blocked,
         newly_blocked,
         newly_unblocked,
@@ -206,15 +369,15 @@ pub struct Applied {
 /// 调低必须 `confirmed = true`（调用方先看过 [`preview`]）；调高不要求。
 pub async fn apply(
     store: &Store,
-    new_monthly_bytes: u64,
+    scope: &Scope,
     actor: &str,
     cycle_key: &str,
     confirmed: bool,
 ) -> Result<Applied> {
     if actor.trim().is_empty() {
-        return Err(Error::Quota("改额度必须留下操作者：这是一次影响全体的操作".into()));
+        return Err(Error::Quota("改额度必须留下操作者：这是一次影响他人的操作".into()));
     }
-    let preview = preview(store, new_monthly_bytes, cycle_key).await?;
+    let preview = preview(store, scope, cycle_key).await?;
     if preview.is_reduction && !confirmed {
         return Err(Error::Quota(format!(
             "调低额度必须先预览再确认：按 {} 的已结算用量，将有 {} 人被闸断",
@@ -225,53 +388,72 @@ pub async fn apply(
 
     let now = bucket::to_rfc3339(OffsetDateTime::now_utc());
     let affected = preview.affected_users();
+    let old_bytes = preview.current_monthly_bytes;
+    let new_bytes = preview.new_monthly_bytes;
     let mut txn = store.begin_immediate().await?;
 
-    let current = sqlx::query("SELECT monthly_bytes, revision FROM quota_settings WHERE id = 1")
+    // revision 是单条全序序列：改档位字节数与给用户换档共用它。
+    let revision = sqlx::query("SELECT revision FROM quota_settings WHERE id = 1")
         .fetch_optional(txn.conn())
-        .await?;
-    let (old_bytes, revision) = match &current {
-        Some(row) => (
-            U64Text::decode(&row.get::<String, _>(0))?.get(),
-            row.get::<i64, _>(1)
-                .checked_add(1)
-                .ok_or_else(|| Error::Quota("revision 已耗尽：非负 i64 不回绕".into()))?,
-        ),
-        None => (0, 1),
-    };
+        .await?
+        .ok_or_else(|| {
+            Error::Quota("quota_settings 尚未初始化：启动时应先调用 ensure_initialized".into())
+        })?
+        .get::<i64, _>(0)
+        .checked_add(1)
+        .ok_or_else(|| Error::Quota("revision 已耗尽：非负 i64 不回绕".into()))?;
 
-    if current.is_some() {
-        sqlx::query(
-            "UPDATE quota_settings SET monthly_bytes = ?, revision = ?, updated_by = ?, \
-             updated_at = ? WHERE id = 1",
-        )
-        .bind(U64Text::new(new_monthly_bytes).encode())
-        .bind(revision)
-        .bind(actor)
-        .bind(&now)
-        .execute(txn.conn())
-        .await?;
-    } else {
-        sqlx::query(
-            "INSERT INTO quota_settings(id, monthly_bytes, revision, display_timezone, \
-             updated_by, updated_at) VALUES (1, ?, ?, 'UTC', ?, ?)",
-        )
-        .bind(U64Text::new(new_monthly_bytes).encode())
-        .bind(revision)
-        .bind(actor)
-        .bind(&now)
-        .execute(txn.conn())
-        .await?;
+    match scope {
+        Scope::Group { group_name, .. } => {
+            sqlx::query(
+                "UPDATE quota_groups SET monthly_bytes = ?, updated_by = ?, updated_at = ? \
+                 WHERE group_name = ?",
+            )
+            .bind(U64Text::new(new_bytes).encode())
+            .bind(actor)
+            .bind(&now)
+            .bind(group_name)
+            .execute(txn.conn())
+            .await?;
+        }
+        Scope::UserGroup { login_name, new_group } => {
+            let changed = sqlx::query(
+                "UPDATE users SET quota_group = ?, updated_at = ? \
+                 WHERE login_name = ? AND status = 'active'",
+            )
+            .bind(new_group)
+            .bind(&now)
+            .bind(login_name)
+            .execute(txn.conn())
+            .await?
+            .rows_affected();
+            if changed != 1 {
+                return Err(Error::Quota(format!(
+                    "换档影响了 {changed} 行而不是 1 行：{login_name}"
+                )));
+            }
+        }
     }
 
-    // 落审计：谁、何时、从多少改到多少、影响多少人。
     sqlx::query(
-        "INSERT INTO quota_setting_audits(revision, old_monthly_bytes, new_monthly_bytes, \
-         affected_users, actor, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        "UPDATE quota_settings SET revision = ?, updated_by = ?, updated_at = ? WHERE id = 1",
     )
     .bind(revision)
+    .bind(actor)
+    .bind(&now)
+    .execute(txn.conn())
+    .await?;
+
+    // 落审计：谁、何时、改的是哪一档或哪个人、从多少到多少、影响多少人。
+    sqlx::query(
+        "INSERT INTO quota_setting_audits(revision, scope, subject, old_monthly_bytes, \
+         new_monthly_bytes, affected_users, actor, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(revision)
+    .bind(scope.kind())
+    .bind(scope.subject())
     .bind(U64Text::new(old_bytes).encode())
-    .bind(U64Text::new(new_monthly_bytes).encode())
+    .bind(U64Text::new(new_bytes).encode())
     .bind(affected as i64)
     .bind(actor)
     .bind(&now)
