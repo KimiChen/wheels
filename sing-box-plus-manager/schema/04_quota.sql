@@ -52,26 +52,12 @@ CREATE TABLE quota_update_tasks (
     UNIQUE(revision, node_id)
 ) STRICT;
 
--- 身份目标、权重、观察窗口与样本有效性（data-model.md §11）。
-CREATE TABLE quota_allocations (
-    allocation_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    node_id    TEXT NOT NULL REFERENCES nodes(node_id),
-    runtime_identity_id INTEGER NOT NULL REFERENCES runtime_identities(runtime_identity_id),
-    user_id    INTEGER NOT NULL REFERENCES users(user_id),
-    -- 单身份下发额度：wire 上是**非负 int64**（C31），不是 u64。
-    -- 这里用 INTEGER 而不是定宽文本，正是为了让「超出 int64」在库层就写不进去。
-    remaining_bytes INTEGER NOT NULL CHECK(remaining_bytes >= 0),
-    -- 确认下发的 a_i，用于需求权重。跨 epoch 或结果不明时不更新权重。
-    confirmed_bytes INTEGER CHECK(confirmed_bytes IS NULL OR confirmed_bytes >= 0),
-    -- 正整数需求权重（D7）。冷节点权重始终为正，a_i = 0 不做除法。
-    demand_weight INTEGER NOT NULL CHECK(demand_weight > 0),
-    observation_from TEXT,
-    observation_to   TEXT,
-    sample_valid  INTEGER NOT NULL CHECK(sample_valid IN (0, 1)),
-    budget_version INTEGER NOT NULL CHECK(budget_version >= 0),
-    updated_at TEXT NOT NULL,
-    UNIQUE(node_id, runtime_identity_id, budget_version)
-) STRICT;
+-- 原本这里还有一张 quota_allocations，存单身份下发目标、需求权重与观察窗口，
+-- 供加权跨节点分配使用。本轮采用**镜像分配**：每个节点都收到该用户本月的全额剩余，
+-- 不做拆分。理由是额度的定位是观察用量而非强制封顶，而拆分会让用户把流量压在
+-- 单一节点时在 1/4 额度处被切断——那是没人要求的强制行为。
+-- 镜像不需要权重，也就不需要这张表。allocate.rs / weight.rs 及其测试保留但不接线，
+-- 将来要换回加权分配时，这张表要连同它们一起恢复。
 
 -- 完整节点请求、发送前分配的 epoch 与结果。
 --
