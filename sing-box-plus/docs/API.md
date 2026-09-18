@@ -4,7 +4,7 @@
 
 | 端点 | socket | 方法与路径 | 作用 |
 | --- | --- | --- | --- |
-| 快照导出 | `user_stats.listen_path` | `GET /v3/snapshot`、`GET /healthz` | 只读，采集与结算的唯一数据源 |
+| 快照导出 | `user_stats.listen_path` | `GET /v3/snapshot`、`GET /healthz`、`GET /v3/quota_status` | 只读，采集与结算的唯一数据源 |
 | 配额控制 | `user_stats.quota_control.listen_path` | `PUT /v3/quota` | 只写，下发全量剩余额度表 |
 
 两者的权限档次不同：快照是只读旁观者，配额端点能改变转发行为。**不要把它们放在同一个 socket 上**
@@ -105,6 +105,39 @@ HTTP/1.1-over-Unix-stream，每连接单请求单响应，禁 keep-alive 与 que
 ```json
 {"schema_version": 3, "status": "ok"}
 ```
+
+## `GET /v3/quota_status`
+
+配额控制面的运维遥测。**不是结算输入**，结算方不应读取它。
+
+```json
+{
+  "schema_version": 3,
+  "enabled": true,
+  "accepted": true,
+  "epoch": 128,
+  "last_applied_unix_ms": 1789740000000,
+  "applied_entries": 301,
+  "rejected_by_runtime": 0,
+  "rejected_by_epoch": 2,
+  "rejected_by_unknown": 0,
+  "throttled_conns": 0,
+  "active_lineages": 301,
+  "total_lineages": 301
+}
+```
+
+这些计数此前只写不读、任何端点都不暴露，于是「这个身份为什么连不上」「额度表上次何时
+应用」在节点侧无从回答。单开一条路由而不是加进 `GET /v3/snapshot`：快照键集是结算契约的
+闭集，两端按严格相等校验，加一个键即等于 schema v4，需要先在控制器与每个节点上同步升级
+解析器。本路由与 `/healthz` 一样**不推进 `sequence`**。
+
+- `enabled` 为假时其余计数无意义（未配置 `quota_control`）。
+- `last_applied_unix_ms` 为 0 表示本 runtime 尚未成功应用过任何一张表。
+- `rejected_by_runtime` / `rejected_by_epoch` / `rejected_by_unknown` 分别对应 409（runtime 不符）、
+  409（epoch 不前进）与 400（表内含未知身份）。
+- `active_lineages` 越过 `max_identities`、或 `total_lineages` 越过派生的总量上限时，
+  才会置位 `identity_limit_reached`。暴露这两个数是为了在 `/healthz` 变 503 之前就能看到逼近。
 
 ## `PUT /v3/quota`
 

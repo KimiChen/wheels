@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -618,4 +619,79 @@ func TestReconcileAndSnapshotAreRaceFree(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	close(stop)
 	workers.Wait()
+}
+
+// TestQuotaStatusIsObservableAndSeparateFromTheSnapshot 覆盖新的观测路由。
+//
+// 六个配额计数器此前只写不读，任何端点都不暴露：运维无从知道有多少连接被配额拒了、
+// 有多少推送因 runtime/epoch 不匹配被拒、额度表上次何时应用——正是排查
+// 「这个身份为什么连不上」最先要看的东西。
+//
+// 同样重要的是它**不能**进快照：快照键集在控制器与四个节点上都按严格相等校验，
+// 加一个键就等于 schema v4，会让每个解析器同时拒绝每一份快照。
+func TestQuotaStatusIsObservableAndSeparateFromTheSnapshot(t *testing.T) {
+	registry := quotaRegistry(t, "u1")
+	registry.configureQuota(&QuotaControlOptions{
+		StartupAction: string(QuotaActionAllow),
+		StaleAction:   string(QuotaActionAllow),
+	})
+
+	status := registry.QuotaStatus()
+	if !status.Enabled {
+		t.Fatal("configureQuota 之后 enabled 应为真")
+	}
+	if status.Accepted || status.Epoch != 0 || status.LastAppliedUnixMs != 0 {
+		t.Fatalf("尚未应用任何表，状态却是 %+v", status)
+	}
+	if status.ActiveLineages != 1 || status.TotalLineages != 1 {
+		t.Fatalf("血统数应为 1/1，实际 %d/%d", status.ActiveLineages, status.TotalLineages)
+	}
+
+	if _, _, err := registry.ApplyQuotaTable(9, quotaTable(1000, "u1")); err != nil {
+		t.Fatalf("应用额度表失败：%v", err)
+	}
+	// 一次会被拒的重投：拒绝计数必须动。
+	if _, _, err := registry.ApplyQuotaTable(9, quotaTable(1, "u1")); err == nil {
+		t.Fatal("重复 epoch 本应被拒")
+	}
+	status = registry.QuotaStatus()
+	if !status.Accepted || status.Epoch != 9 {
+		t.Fatalf("应用后 accepted/epoch 不对：%+v", status)
+	}
+	if status.AppliedEntries != 1 {
+		t.Fatalf("applied_entries 应为 1，实际 %d", status.AppliedEntries)
+	}
+	if status.LastAppliedUnixMs <= 0 {
+		t.Fatal("last_applied_unix_ms 应已被写入")
+	}
+	if status.RejectedByEpoch != 1 {
+		t.Fatalf("rejected_by_epoch 应为 1，实际 %d", status.RejectedByEpoch)
+	}
+
+	// 快照的键集不得因此变化。
+	snapshot, err := registry.Snapshot()
+	if err != nil {
+		t.Fatalf("取快照失败：%v", err)
+	}
+	encoded, err := marshalJSONLine(snapshot)
+	if err != nil {
+		t.Fatalf("序列化快照失败：%v", err)
+	}
+	for _, leaked := range []string{"rejected_by_epoch", "applied_entries", "quota_status", "throttled_conns"} {
+		if strings.Contains(string(encoded), leaked) {
+			t.Fatalf("配额观测字段泄漏进了快照：%s——那会把 schema 推到 v4 并让所有 collector 拒收", leaked)
+		}
+	}
+
+	// 观测不得推进结算用的 sequence。
+	before := registry.QuotaStatus()
+	after := registry.QuotaStatus()
+	_ = before
+	_ = after
+	first, _ := registry.Snapshot()
+	registry.QuotaStatus()
+	second, _ := registry.Snapshot()
+	if second.Sequence != first.Sequence+1 {
+		t.Fatalf("QuotaStatus 不应推进 sequence：两次快照间隔 %d", second.Sequence-first.Sequence)
+	}
 }

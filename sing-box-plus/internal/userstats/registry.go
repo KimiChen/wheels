@@ -408,6 +408,55 @@ func (r *Registry) noteAuditDropped() {
 	r.auditDroppedSticky.Store(true)
 }
 
+// QuotaStatus 是配额控制面的可观测状态。
+//
+// 它刻意不进 GET /v3/snapshot：快照键集是结算契约的闭集，两端都按严格相等校验，
+// 加一个键就等于 schema v4，需要先在控制器与每个节点上同步升级解析器。
+// 这些数字是运维遥测而不是结算输入，单开一条附加路由代价小得多。
+type QuotaStatus struct {
+	SchemaVersion int `json:"schema_version"`
+	// Enabled 为假时下面的计数全部无意义。
+	Enabled  bool   `json:"enabled"`
+	Accepted bool   `json:"accepted"`
+	Epoch    uint64 `json:"epoch"`
+	// LastAppliedUnixMs 为 0 表示本 runtime 尚未成功应用过任何一张表。
+	LastAppliedUnixMs int64 `json:"last_applied_unix_ms"`
+	AppliedEntries    int64 `json:"applied_entries"`
+	// 以下四项是拒绝计数，排查「这个身份为什么连不上」时最先要看的东西。
+	RejectedByRuntime int64 `json:"rejected_by_runtime"`
+	RejectedByEpoch   int64 `json:"rejected_by_epoch"`
+	RejectedByUnknown int64 `json:"rejected_by_unknown"`
+	ThrottledConns    int64 `json:"throttled_conns"`
+	// 活跃与总血统数：越过前者即 max_identities，越过后者才置 identity_limit_reached。
+	// 放在这里让运维能提前看到逼近，而不是等 /healthz 变 503 才发现。
+	ActiveLineages int `json:"active_lineages"`
+	TotalLineages  int `json:"total_lineages"`
+}
+
+// QuotaStatus 取一份配额控制面快照。它不推进 sequence——那是结算用的序号，
+// 只有 GET /v3/snapshot 该推进它。
+func (r *Registry) QuotaStatus() QuotaStatus {
+	policy := r.quota.policy.Load()
+	r.mu.RLock()
+	active := r.countActiveLineagesLocked()
+	total := r.countAllLineagesLocked()
+	r.mu.RUnlock()
+	return QuotaStatus{
+		SchemaVersion:     SchemaVersion,
+		Enabled:           policy.enabled,
+		Accepted:          r.quota.accepted.Load(),
+		Epoch:             r.quota.epoch.Load(),
+		LastAppliedUnixMs: r.quota.lastAppliedUnixMs.Load(),
+		AppliedEntries:    r.quota.appliedEntries.Load(),
+		RejectedByRuntime: r.quota.rejectedByRuntime.Load(),
+		RejectedByEpoch:   r.quota.rejectedByEpoch.Load(),
+		RejectedByUnknown: r.quota.rejectedByUnknown.Load(),
+		ThrottledConns:    r.quota.throttledConnCount.Load(),
+		ActiveLineages:    active,
+		TotalLineages:     total,
+	}
+}
+
 // BeginDrain 进入排空状态：拒绝新的计费连接，已有连接继续跑完。
 //
 // 这是 §4.4 第 3 条在**零补丁形态下能做到的那一半**。真正的「停止 accept」需要拿到 listener，
