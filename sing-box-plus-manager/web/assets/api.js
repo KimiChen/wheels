@@ -226,12 +226,23 @@
         toggle("[data-pm-sub-disabled]", !sub.enabled);
         toggle(".pm-subscription-address", sub.enabled);
         toggle("[data-pm-copy]", sub.enabled);
-        toggle("[data-pm-no-identity]", sub.enabled && !sub.identity);
         // 徽标说的是状态，不是装饰。**没有地址就不许说「有效」**，
-        // 「0 条入口可用」也不该顶着一个绿勾——那两种写法都会让人
+        // 不可用的时候也不该顶着一个绿勾——那两种写法都会让人
         // 把一次真实的缺失读成「页面没加载出来」，然后反复刷新。
-        toggle("[data-pm-sub-valid]", sub.enabled && !!sub.url);
-        toggle("[data-pm-entry-badge]", sub.enabled && sub.entry_count > 0);
+        // 「有效」说的是**这份订阅现在能不能用**，不是「地址这一格有没有字」。
+        // 凭据缺失时地址照样下载得到，下载到的却是一份空配置——
+        // 那时还挂着绿色「有效」，就是在页面上同时给出两个相反的结论。
+        toggle("[data-pm-sub-valid]", sub.enabled && sub.usable);
+        toggle("[data-pm-entry-badge]", sub.enabled && sub.usable && sub.entry_count > 0);
+        toggle("[data-pm-entries-included]", sub.enabled && sub.usable);
+        // 不可用的理由由服务端给，页面只负责挑出对应的那一条文案。
+        // **不在前端推导理由**：服务端知道的比页面多（凭据文件读不读得到），
+        // 而两边各推一次的结果一定会在某个状态上分叉。
+        document.querySelectorAll("[data-pm-unusable]").forEach((node) => {
+          const reasons = node.dataset.pmUnusable.split(/\s+/);
+          node.hidden = !sub.enabled || !sub.unusable_reason ||
+            !reasons.includes(sub.unusable_reason);
+        });
       },
     },
 
@@ -300,6 +311,9 @@
       load: () => getJson("/settings/quota"),
       render: (settings) => {
         applyBindings(document, settings);
+        // 四档来自库里，**页面上不写死**：写死的那一份会在某次调档之后
+        // 与库里分家，而分家之后没有任何东西会报错。
+        renderCollection("quota-groups", settings.groups, "还没有档位");
         renderCollection("quota-nodes", settings.nodes, "还没有待下发的节点任务");
       },
     },
@@ -379,7 +393,53 @@
 
   // ---- 启动 ----
 
+  // **服务端说了这是真实模式，就先把页面上那些编的值清掉。**
+  //
+  // 这些示例值（839 GiB、两张入口卡、`user0000`）本来只在原型里有意义。
+  // 不清的话有两个后果，第二个才是致命的：
+  //
+  // 1. 取数成功前的那几百毫秒，屏幕上是一份看起来完全正常的假数据；
+  // 2. **取数失败时它们就永远留在那儿了**——`render()` 一行都不会执行，
+  //    而 `reportError()` 只加一条红条。使用者看到的是「有一条报错，
+  //    但我的数据都在」，其中没有一个数字是真的。他会据此以为自己
+  //    这个月用掉了 839 GiB。
+  //
+  // 判据取 `<body>` 上服务端盖的那个属性（`src/web/mod.rs::stamp`），
+  // 它与页面同步到达，不需要等任何一次 fetch——而这正是关键：
+  // 要是等 `/me` 回来才清，那 `/me` 失败的那一路就又清不掉了。
+  function neutralize() {
+    if (document.body.dataset.pmMode !== "live") return;
+    for (const attr of ["data-pm", "data-pm-bytes", "data-pm-exact", "data-pm-digits"]) {
+      document.querySelectorAll(`[${attr}]`).forEach((node) => {
+        // `<template>` 里的绑定是给行渲染用的，不能动：它们是模板不是内容。
+        if (node.closest("template")) return;
+        setText(node, "—");
+      });
+    }
+    // 由数据决定显隐的元素一律先藏起来。露出来的每一个都必须是 render 决定的。
+    document.querySelectorAll("[data-pm-state], [data-pm-unusable]").forEach((node) => {
+      node.hidden = true;
+    });
+    // 集合里的示例行同样是编的。清掉之后先显示「加载中」，
+    // 失败时由 reportError 改成说清楚的那句。
+    document.querySelectorAll("[data-pm-collection]").forEach((container) => {
+      const template = container.querySelector("[data-pm-template]");
+      if (!template) return;
+      const body = template.parentElement;
+      for (const child of Array.from(body.children)) {
+        if (child !== template && !child.hasAttribute("data-table-empty")) child.remove();
+      }
+      const empty = body.querySelector("[data-table-empty]");
+      if (empty) {
+        empty.hidden = false;
+        const cell = empty.querySelector("[data-pm-empty-text]");
+        if (cell) cell.textContent = "加载中…";
+      }
+    });
+  }
+
   async function start() {
+    neutralize();
     let me;
     try {
       me = await getJson("/me");
@@ -407,6 +467,10 @@
   // 失败要可见。静默失效的界面比报错的界面糟得多——
   // 它让人以为「没有数据」，而真相是「没取到数据」。
   function reportError(error) {
+    // 「加载中…」停在那儿等于把一次失败显示成一次还没结束的加载。
+    document.querySelectorAll("[data-table-empty] [data-pm-empty-text]").forEach((cell) => {
+      cell.textContent = "没能取到数据";
+    });
     const banner = document.querySelector("[data-pm-error]");
     if (banner) {
       banner.hidden = false;

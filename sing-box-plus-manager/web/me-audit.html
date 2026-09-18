@@ -235,7 +235,15 @@
                 </div>
               </div>
 
-              <div class="wsk-table-wrap wsk-mt-5">
+              <!--
+                **这张表是编的，而且编的是「这个人访问过什么」。**
+                出站目标审计属于 M6 的另一半，`/api/v1/me/audit/access` 现在回
+                `audit_not_enabled`。留着的话，一个使用者会以为系统真的记下了
+                他访问过 www.example.com 一千二百多次——那是一条关于他本人的假记录，
+                比任何一处假数字都糟。live 模式下 app.js 把整块换成一句说明。
+              -->
+              <div class="wsk-table-wrap wsk-mt-5"
+                   data-pm-prototype="出站目标审计属于 M6 的另一半，还没有启用。启用之前这里不会有任何记录——查不到不等于没有访问">
                 <table class="wsk-table">
                   <caption class="wsk-sr-only">我的出站目标</caption>
                   <thead>

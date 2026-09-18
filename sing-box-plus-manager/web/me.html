@@ -208,11 +208,37 @@
               </div>
             </div>
 
-            <div class="wsk-alert wsk-warning wsk-mt-5" role="status" data-pm-no-identity hidden>
+            <!--
+              **服务端知道这份订阅能不能用，这里就得说出来。**
+              四个值与 `routes.rs` 的 `UNUSABLE_REASONS` 一一对应，
+              少一条的后果是那个人看到一片空白：没有地址、没有解释、没有下一步。
+              由 tests/m5 机械核对，不靠人眼。
+            -->
+            <div class="wsk-alert wsk-warning wsk-mt-5" role="status"
+                 data-pm-unusable="no_token" data-pm-state hidden>
+              <svg class="wsk-icon" aria-hidden="true"><use href="#warning"></use></svg>
+              <div>
+                <strong>你现在没有有效的订阅地址</strong>
+                <p>之前那条已经被吊销。请联系管理员重新签发——刷新这一页不会让它回来。</p>
+              </div>
+            </div>
+            <div class="wsk-alert wsk-warning wsk-mt-5" role="status"
+                 data-pm-unusable="no_identity" data-pm-state hidden>
               <svg class="wsk-icon" aria-hidden="true"><use href="#warning"></use></svg>
               <div>
                 <strong>你还没有分配到计费身份</strong>
                 <p>订阅可以下载，但里面不会有能用的节点。请联系管理员——重新导入不会改变这一点。</p>
+              </div>
+            </div>
+            <div class="wsk-alert wsk-danger wsk-mt-5" role="alert"
+                 data-pm-unusable="no_credential credentials_unreadable" data-pm-state hidden>
+              <svg class="wsk-icon" aria-hidden="true"><use href="#warning"></use></svg>
+              <div>
+                <strong>服务端取不到你这个身份的节点凭据</strong>
+                <p>
+                  这是部署侧的问题，不是你的账号问题，服务端已经记了一条告警。
+                  在它修好之前，订阅里不会有能用的节点——请联系管理员，不要反复重新导入。
+                </p>
               </div>
             </div>
 
@@ -225,7 +251,7 @@
                   用量合并计入本周期额度。
                 </p>
               </div>
-              <span class="wsk-badge wsk-success" data-pm-entry-badge
+              <span class="wsk-badge wsk-success" data-pm-entry-badge data-pm-state
                 ><span class="wsk-dot"></span><span data-pm="entry_count">7</span> 条入口可用</span
               >
             </div>
@@ -236,22 +262,23 @@
                 <div class="wsk-button-row">
                   <!-- 只有真的有地址时才说「有效」。没有地址还亮着绿徽标，
                        会让人以为是页面没加载出来，然后反复刷新。 -->
-                  <span class="wsk-badge wsk-success" data-pm-sub-valid>有效</span>
+                  <span class="wsk-badge wsk-success" data-pm-sub-valid data-pm-state>有效</span>
                   <button
                     class="wsk-button wsk-secondary"
                     type="button"
                     data-pm-copy=".pm-subscription-address code"
+                    data-pm-state
                     data-js-only
                   >
                     复制
                   </button>
                 </div>
               </div>
-              <p class="wsk-help" data-pm-sub-disabled hidden>
+              <p class="wsk-help" data-pm-sub-disabled data-pm-state hidden>
                 主控没有配置订阅出口（<code>[subscription]</code>），所以现在没有订阅地址可发。
                 这是一项服务端配置，不是你的账号问题。
               </p>
-              <pre class="wsk-code-panel pm-subscription-address"><code data-pm="url">https://&lt;控制台域名&gt;/sub/Proxy-<span class="wsk-tok-string">••••••••••••••••</span>.yaml</code></pre>
+              <pre class="wsk-code-panel pm-subscription-address" data-pm-state><code data-pm="url">https://&lt;控制台域名&gt;/sub/Proxy-<span class="wsk-tok-string">••••••••••••••••</span>.yaml</code></pre>
               <p class="wsk-help wsk-mt-2">
                 <strong>这个地址本身就是凭据</strong>——拿到它的人就能用你的额度上网，
                 所以不要发进任何群，也不要贴进工单。
@@ -262,23 +289,28 @@
             <section class="wsk-section" aria-labelledby="me-nodes">
               <div class="wsk-section-head">
                 <h2 id="me-nodes">我的入口</h2>
-                <span class="wsk-badge">全部已包含在订阅里</span>
+                <!-- 只在这份订阅真的能用时才说「全部已包含」：
+                     没有身份或缺凭据时订阅正文是 `proxies: []`，这句就是假的。 -->
+                <span class="wsk-badge" data-pm-entries-included data-pm-state>全部已包含在订阅里</span>
               </div>
               <div class="pm-node-grid" data-pm-collection="me-entries">
                 <article class="pm-node-card">
                   <div><h3>Forward-甲地-直连</h3><p>node-a</p></div>
-                  <span class="wsk-badge wsk-success">可用</span>
                 </article>
                 <article class="pm-node-card">
                   <div><h3>MTLS-乙地-经甲地</h3><p>node-b</p></div>
-                  <span class="wsk-badge wsk-success">可用</span>
                 </article>
                 <!-- 真实模式下上面两张示例卡会被整体清掉，不会与真行混排。 -->
                 <p data-table-empty hidden class="wsk-help"><span data-pm-empty-text>还没有为你配置入口</span></p>
+                <!--
+                  卡片上**没有**状态徽标。服务端的 entries 只有名字与落点，
+                  没有任何可用性字段，写一个「可用」上去就是替服务端编答案：
+                  节点掉线、采集失败、额度闸断时它照样是绿的。
+                  一列永远是同一个答案的状态，看几次之后就不再有人读它。
+                -->
                 <template data-pm-template>
                   <article class="pm-node-card">
                     <div><h3 data-pm="name"></h3><p data-pm="node_id"></p></div>
-                    <span class="wsk-badge wsk-success">可用</span>
                   </article>
                 </template>
               </div>

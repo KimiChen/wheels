@@ -267,7 +267,13 @@
                 <h2 id="overview-alerts">活跃告警</h2>
                 <a class="wsk-button wsk-secondary" href="alerts.html">全部告警</a>
               </div>
-              <div class="wsk-alert-list">
+              <!--
+                与 alerts.html 同一条：规则引擎属于 M5，**还没有人在按规则报警**。
+                live 模式下 app.js 把整块换成一句说明——留着的话，管理员的落地页上
+                会永远挂着同样三条 P1/P2，看几天之后就再也不会认真看告警了。
+                上面那四项判据是真的，它们有自己的绑定。
+              -->
+              <div class="wsk-alert-list" data-pm-prototype="告警规则引擎、限频合并与 IM 通道属于 M5。上方的四项判据是真实的，但还没有人在按规则报警">
                 <div class="wsk-alert wsk-danger">
                   <svg class="wsk-icon" aria-hidden="true">
                     <use href="#warning"></use>
