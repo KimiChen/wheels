@@ -579,6 +579,57 @@ inbound 注册表给单个 inbound 加自有字段（`adapter/inbound/registry.g
 它会把上游构造函数签名变成必须逐版本跟随的接口，且覆盖后本二进制会接受上游 `check` 拒绝的配置。
 两者只选其一，无论用哪种方式选中 inbound，都仍须通过本节第 2 条的全部校验。
 
+#### 4.6.1 配置项全表
+
+本表是配置项的唯一权威清单，`tests/test_docs_consistency.py` 会断言
+`internal/userstats/options.go` 里的**每一个** json 标签都在这里出现、且这里的每一行
+都对应一个真实字段。加表之前有七个键（`socket_group`、`socket_mode`、`read_timeout`、
+`write_timeout`、`max_concurrency`、`max_request_bytes`、`queue_size`）在全部文档里零出现——
+它们被声明、被校验、生效，却无处可查。
+
+`user_stats` 服务本体：
+
+| 键 | 默认 | 说明 |
+| --- | --- | --- |
+| `node_id` | 必填 | 结算方的节点身份。**重载时必须逐字节不变**，改了会被拒绝重载 |
+| `listen_path` | 必填 | 快照 socket 的 Unix 路径。**重载时必须逐字节不变** |
+| `socket_mode` | `0600` | 只接受 `0600` 或 `0660`。给 `0660` 而不给 `socket_group`，等于把口开给了主组 |
+| `socket_group` | 空 | socket 的属组名。**必须与 `socket_mode: "0660"` 同时给**，否则校验失败——单给组名而权限仍是 `0600` 是个什么都没发生的配置 |
+| `max_identities` | `4096` | 活跃血统数上限。只数 `active` 的，墓碑不占额 |
+| `inbounds` | 必填 | 被统计的 inbound tag 名单。名单里有不存在的 tag 即启动失败 |
+| `drain_timeout` | `0` | 停止时等待在途连接的时长。`0` 保持上游「收到信号即关」的语义 |
+| `read_timeout` | `5s` | 快照 socket 的读超时 |
+| `write_timeout` | `5s` | 快照 socket 的写超时 |
+| `max_concurrency` | `8` | 快照 socket 的并发连接上限，超出返回 429 |
+| `max_request_bytes` | `65536` | 快照口单个请求的字节上限，含请求行与全部头部 |
+| `access_log` | 不启用 | §4.8 的访问审计，见下表 |
+| `quota_control` | 不启用 | §4.9 的配额闸断，见下表 |
+
+`access_log`（§4.8，默认关闭；不配置则不创建任何 goroutine、文件或 socket）：
+
+| 键 | 默认 | 说明 |
+| --- | --- | --- |
+| `directory` | 必填 | JSONL 落盘目录 |
+| `max_bytes` | `16 MiB` | 单个文件的轮转阈值。越界量等于一条记录的长度，不是零 |
+| `max_total_bytes` | `2 GiB` | 目录总量上限。超限时删**全目录最老**的已轮转文件，并在其所属身份的文件里写 `gap` 行 |
+| `flush_interval_ms` | `1000` | 刷盘间隔。它同时是纪律 9 `rm` 分支的丢失上界 |
+| `queue_size` | `8192` | 内存队列深度。满了就丢记录并置 `health.audit_dropped` |
+| `max_open_files` | `256` | 同时打开的审计文件数 |
+| `exclude_hosts` | 空 | 不记录的目的主机名 |
+| `exclude_ips` | 空 | 不记录的目的网段 |
+
+`quota_control`（§4.9，默认关闭）：
+
+| 键 | 默认 | 说明 |
+| --- | --- | --- |
+| `listen_path` | 必填 | 配额 socket 的 Unix 路径。**重载时必须逐字节不变**，且不得与快照 socket 同路径 |
+| `startup_action` | `allow` | 进程启动到收到第一份额度表之间怎么办。没有安全的默认值，见 `docs/OPERATIONS.md` |
+| `stale_action` | `allow` | 额度表过期后怎么办。**选 `deny` 时必须同时给 `stale_after`**，否则校验硬失败 |
+| `stale_after` | `0`（永不过期） | 额度表多久算过期。`stale_action: deny` 时不给它，`deny` 会静默失效——所以这里是硬失败而不是给默认值：默认值会让生效策略在配置里不可见 |
+| `reconnect_throttle` | `0` | 被闸断的身份重连的最小间隔 |
+| `max_request_bytes` | `4 MiB` | 配额口单个请求的字节上限。比快照口大，因为全量额度表本身就大 |
+
+
 ### 4.7 overlay 形态：零补丁 wrapper
 
 交付物是一个独立 Go module，`go.mod` 中 `require github.com/sagernet/sing-box v1.14.0`，

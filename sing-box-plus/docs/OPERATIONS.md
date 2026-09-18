@@ -120,9 +120,12 @@ UDS 不得直接映射为公网监听。
    - `startup_action`：`allow`（默认）意味着重启窗口内超额用户可继续跑；`deny` 意味着
      collector 没起来时全节点不可用。
    - `stale_action`：`allow`（默认）意味着 collector 挂掉后所有人无限用；`deny` 意味着把
-     collector 变成转发链路上的单点。
+     collector 变成转发链路上的单点。**选 `deny` 就必须同时给 `stale_after`**
+     （例如 `"stale_after": "10m"`），否则 `check` 直接失败——不给它，`deny` 会静默失效，
+     所以这里是硬失败而不是给个默认值：默认值会让生效策略在配置里看不见。
 
 选哪个都要写进对外的服务说明，不要留给默认值替你做决定。
+全部配置项的默认值与约束见 README §4.6.1 的配置项全表。
 
 ### 让限额真的生效：collector 必须周期性重推
 
