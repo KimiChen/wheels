@@ -3,6 +3,7 @@ package userstats
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"sort"
 	"sync"
@@ -418,4 +419,82 @@ func TestSnapshotSequenceAndCountersAreTakenTogether(t *testing.T) {
 	}
 	close(stop)
 	traffic.Wait()
+}
+
+// TestIdentityChurnDoesNotExhaustMaxIdentities 反复轮换身份。
+//
+// 这是生产上真实会走到的路径：每次 SIGHUP 换一批用户名。旧实现数的是
+// len(record.users)，而停用的身份只把 active 置 false 后长期留存，于是这个数单调增长，
+// 越过上限即置粘滞位、/healthz 永久 503、结算方拒绝入账——计费瘫痪，唯一恢复手段是重启。
+func TestIdentityChurnDoesNotExhaustMaxIdentities(t *testing.T) {
+	registry, err := NewRegistry("node-churn", 4)
+	if err != nil {
+		t.Fatalf("创建 registry 失败：%v", err)
+	}
+	spec := func(users ...string) []InboundSpec {
+		return []InboundSpec{{Tag: "in", Type: "vless", Listen: "127.0.0.1", ListenPort: 1, Users: users}}
+	}
+	if err = registry.Reconcile(spec("a", "b"), true); err != nil {
+		t.Fatalf("初始对账失败：%v", err)
+	}
+	const rounds = 5
+	for round := 0; round < rounds; round++ {
+		users := spec(fmt.Sprintf("u%da", round), fmt.Sprintf("u%db", round))
+		if err = registry.Reconcile(users, false); err != nil {
+			t.Fatalf("第 %d 轮轮换失败：%v", round, err)
+		}
+	}
+	snapshot, err := registry.Snapshot()
+	if err != nil {
+		t.Fatalf("取快照失败：%v", err)
+	}
+	if snapshot.Health.IdentityLimitReached {
+		t.Fatal("身份轮换不应触发 max_identities：活跃数始终是 2")
+	}
+	if registry.unhealthy() {
+		t.Fatal("轮换后 /healthz 不应转为 unhealthy")
+	}
+	// 墓碑必须仍在快照里：结算方要靠它把最后一段字节收尾（§4.3 第 1 条）。
+	if got, want := len(snapshot.Inbounds[0].Users), 2+rounds*2; got != want {
+		t.Fatalf("快照里保留 %d 个血统，应为 %d（含墓碑）", got, want)
+	}
+	active := 0
+	for _, user := range snapshot.Inbounds[0].Users {
+		if user.Active {
+			active++
+		}
+	}
+	if active != 2 {
+		t.Fatalf("活跃血统应为 2，实际 %d", active)
+	}
+}
+
+// TestTombstonesRemainBoundedByTotalCeiling 确认放宽 max_identities 之后总量仍然有界。
+//
+// 墓碑不占业务名额，但不能无界增长；越过派生的总量上限才是真正的
+// 「这个 runtime 已不可信」，此时置粘滞位是恰当的。
+func TestTombstonesRemainBoundedByTotalCeiling(t *testing.T) {
+	registry, err := NewRegistry("node-total", 2) // 总量上限派生为 8
+	if err != nil {
+		t.Fatalf("创建 registry 失败：%v", err)
+	}
+	spec := func(users ...string) []InboundSpec {
+		return []InboundSpec{{Tag: "in", Type: "vless", Listen: "127.0.0.1", ListenPort: 1, Users: users}}
+	}
+	if err = registry.Reconcile(spec("a", "b"), true); err != nil {
+		t.Fatalf("初始对账失败：%v", err)
+	}
+	for round := 0; round < 4; round++ {
+		users := spec(fmt.Sprintf("u%da", round), fmt.Sprintf("u%db", round))
+		if err = registry.Reconcile(users, false); err != nil {
+			t.Fatalf("第 %d 轮轮换失败：%v", round, err)
+		}
+	}
+	snapshot, _ := registry.Snapshot()
+	if len(snapshot.Inbounds[0].Users) <= 8 {
+		t.Fatalf("本用例需要总数超过 8 才有意义，实际 %d", len(snapshot.Inbounds[0].Users))
+	}
+	if !snapshot.Health.IdentityLimitReached {
+		t.Fatal("总量越过上限后必须置位 identity_limit_reached")
+	}
 }

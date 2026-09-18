@@ -84,6 +84,9 @@ HTTP/1.1-over-Unix-stream，每连接单请求单响应，禁 keep-alive 与 que
    `generation`）。以 64 位整数或十进制字符串解析并做整数运算。
 2. **`health` 是闭集**：恰好四个 bool 键，出现额外键即整份拒绝。四位分两类：
    `counter_overflow` / `sequence_overflow` / `identity_limit_reached` 任一为真即**这份快照不可入账**；
+   其中 `identity_limit_reached` 只在活跃血统数超过 `max_identities`、或含已停用血统在内的
+   总数超过派生的总量上限时置位——普通的身份轮换（停用旧名、启用新名）不会触发它，
+   停用的血统按 §4.3 必须保留在快照中供结算方收尾；
    `audit_dropped` 只说明 §4.8 的访问审计旁路丢过记录（证据链有缺口，应告警），
    计费计数器仍然准确，**照常入账**。`/healthz` 也只看前三位。
    把审计丢弃算进入账判据等于让磁盘写满连带停掉计费，这是刻意不做的。

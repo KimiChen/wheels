@@ -25,6 +25,14 @@ const SchemaVersion = 3
 //
 // 队列满导致的丢弃不在这一位里：那种丢弃在文件内就地写成 ev=gap 行，是自描述的，
 // 不需要带外信号；这一位专门对付**连 gap 行都写不出去**的那些路径。
+//
+// identity_limit_reached 只由两种越限触发，都不是普通的身份轮换：
+//   - 活跃血统数超过 max_identities；
+//   - 含墓碑在内的总血统数超过由 max_identities 派生的总量上限。
+//
+// 2026-09 之前它数的是含墓碑的总数并以 max_identities 为界，于是每一轮身份轮换都让
+// 这个数单调增长，最终把一个完全健康的节点变成永久 503。墓碑不会让任何数字失真——
+// Reconcile 不截断任何东西——所以拿它去触发「数字不可信」是按构造过度触发。
 type Health struct {
 	CounterOverflow      bool `json:"counter_overflow"`
 	SequenceOverflow     bool `json:"sequence_overflow"`
