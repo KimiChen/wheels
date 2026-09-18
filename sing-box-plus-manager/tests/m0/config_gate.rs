@@ -80,47 +80,129 @@ fn 首快照策略的两种取值都被接受() {
     assert!(error.to_string().contains("first_snapshot"));
 }
 
-// ---- C12：受限节点必须 deny ----
+// ---- C12：受限节点可以失败开放，但必须签字 ----
+//
+// 这一组原本钉的是「两个动作都必须是 deny」。放宽是一次有意的产品决定
+// （额度用于观察用量而非强制封顶），所以这些用例改写而不是删除：
+// 要证明 allow 现在能启动，**并且**证明它没有被悄悄放进去。
 
 #[test]
-fn 受限节点的startup_action必须是deny() {
-    let allow = nodes_with(
+fn 失败开放没有签字要被拒() {
+    for action in ["startup_action", "stale_action"] {
+        let mut block = String::from(
+            "first_snapshot = \"baseline\"\n[node.quota_control]\nenabled = true\nstale_after_secs = 600\n",
+        );
+        block.push_str(&format!("{action} = \"allow\"\n"));
+        block.push_str(if action == "startup_action" {
+            "stale_action = \"deny\"\n"
+        } else {
+            "startup_action = \"deny\"\n"
+        });
+
+        let error = Config::from_str(SERVER, &nodes_with(&block)).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("C12"), "错误要带约束编号，实际：{message}");
+        assert!(
+            message.contains("fail_open_acknowledged"),
+            "错误要指出缺的是签字，实际：{message}"
+        );
+    }
+}
+
+#[test]
+fn 签了字的失败开放可以启动并且状态可见() {
+    let nodes = nodes_with(
         r#"first_snapshot = "baseline"
 [node.quota_control]
 enabled = true
 startup_action = "allow"
 stale_after_secs = 600
-stale_action = "deny""#,
+stale_action = "allow"
+fail_open_acknowledged = "额度用于观察用量，不接受控制面成为转发单点""#,
     );
-    let error = Config::from_str(SERVER, &allow).unwrap_err();
-    let message = error.to_string();
-    assert!(message.contains("C12"), "错误要带约束编号，实际：{message}");
-    assert!(message.contains("startup_action"));
+    let config = Config::from_str(SERVER, &nodes).expect("签过字的失败开放应当能启动");
+    // 只能启动还不够：这个状态必须能被读出来交给 API，否则它只存在于 TOML 里。
+    assert_eq!(
+        config.nodes[0].fail_open_reason(),
+        Some("额度用于观察用量，不接受控制面成为转发单点")
+    );
 }
 
 #[test]
-fn 受限节点的过期策略必须显式且为deny() {
-    for (extra, needle) in [
-        (
-            r#"enabled = true
+fn 失败关闭时没有失败开放状态可报() {
+    let nodes = nodes_with(
+        r#"first_snapshot = "baseline"
+[node.quota_control]
+enabled = true
+startup_action = "deny"
+stale_after_secs = 600
+stale_action = "deny""#,
+    );
+    let config = Config::from_str(SERVER, &nodes).unwrap();
+    assert_eq!(config.nodes[0].fail_open_reason(), None);
+}
+
+#[test]
+fn 改回失败关闭却留着签字要被拒() {
+    let nodes = nodes_with(
+        r#"first_snapshot = "baseline"
+[node.quota_control]
+enabled = true
+startup_action = "deny"
+stale_after_secs = 600
+stale_action = "deny"
+fail_open_acknowledged = "早就改回去了但忘了删""#,
+    );
+    let error = Config::from_str(SERVER, &nodes).unwrap_err();
+    let message = error.to_string();
+    assert!(message.contains("C12"), "实际：{message}");
+    assert!(message.contains("fail_open_acknowledged"), "实际：{message}");
+}
+
+#[test]
+fn 空白签字不算签字() {
+    let nodes = nodes_with(
+        r#"first_snapshot = "baseline"
+[node.quota_control]
+enabled = true
+startup_action = "allow"
+stale_after_secs = 600
+stale_action = "deny"
+fail_open_acknowledged = "   ""#,
+    );
+    let error = Config::from_str(SERVER, &nodes).unwrap_err();
+    assert!(error.to_string().contains("fail_open_acknowledged"), "实际：{error}");
+}
+
+#[test]
+fn 未启用配额时不检查失败开放() {
+    // 只采集不下发的节点（切换阶段 P3 的形态）本来就不谈额度，
+    // 不该因为 allow 而拒绝启动。
+    let nodes = nodes_with(
+        r#"first_snapshot = "baseline"
+[node.quota_control]
+enabled = false
+startup_action = "allow"
+stale_after_secs = 600
+stale_action = "allow""#,
+    );
+    let config = Config::from_str(SERVER, &nodes).expect("未启用配额的节点不该被 C12 拦下");
+    assert_eq!(config.nodes[0].fail_open_reason(), None);
+}
+
+#[test]
+fn 受限节点的过期期限必须显式() {
+    // 这一条与失败开放无关：没有期限就不存在「过期」这个事件。
+    let nodes = nodes_with(
+        r#"first_snapshot = "baseline"
+[node.quota_control]
+enabled = true
 startup_action = "deny"
 stale_after_secs = 0
 stale_action = "deny""#,
-            "stale_after_secs",
-        ),
-        (
-            r#"enabled = true
-startup_action = "deny"
-stale_after_secs = 600
-stale_action = "allow""#,
-            "stale_action",
-        ),
-    ] {
-        let nodes =
-            nodes_with(&format!("first_snapshot = \"baseline\"\n[node.quota_control]\n{extra}"));
-        let error = Config::from_str(SERVER, &nodes).unwrap_err();
-        assert!(error.to_string().contains(needle), "实际：{error}");
-    }
+    );
+    let error = Config::from_str(SERVER, &nodes).unwrap_err();
+    assert!(error.to_string().contains("stale_after_secs"), "实际：{error}");
 }
 
 /// 反向证据：未启用配额的节点不受这三条约束。

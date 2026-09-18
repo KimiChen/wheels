@@ -36,7 +36,7 @@ impl Api {
         let config = StorageConfig { path: dir.path().join("pm.db"), busy_timeout_ms: 5_000 };
         let store = Arc::new(Store::open(&config).await.unwrap());
         store.init_schema().await.unwrap();
-        let router = proxy_manager::api::router(store.clone());
+        let router = proxy_manager::api::router(store.clone(), Arc::new(Vec::new()));
         Api { _dir: dir, store, router }
     }
 
