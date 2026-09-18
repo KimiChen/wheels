@@ -624,7 +624,7 @@ async fn settle_in_txn(
     let only_deltas: Vec<LineageDelta> = deltas.iter().map(|(_, d)| d.clone()).collect();
     let batch_id = canonical::batch_id(node_id, runtime_id, sequence, &only_deltas);
     let hour = bucket::to_rfc3339(bucket::hour_bucket(accounting_at));
-    let cycle_key = cycle_key_of(accounting_at);
+    let cycle_key = cycle_key(accounting_at);
 
     // 步骤 8（后半）：只写**非零增量**的账本行。
     let mut ledger_rows = 0usize;
@@ -1018,16 +1018,49 @@ async fn bump_cycle(
 
 /// 计费规则版本。
 ///
-/// **当前口径：周期键按 UTC 自然月。** D21 只写了「同一个自然月周期」，没有指定时区；
-/// 展示时区（`quota.display_timezone`）在 data-model.md §6 里只约束**日桶**。
-/// 按 UTC 取月是一个显式选择而不是遗漏：它不需要引入 IANA 时区库，
-/// 而且 `rule_version` 让将来改成按展示时区取月这件事可追溯——
-/// 改口径要推进这个版本号，历史行留在旧版本下，不重算。
-pub const CYCLE_RULE_VERSION: i64 = 1;
+/// - v1：**UTC 自然月**。已废弃，只用来解释 v1 的历史行。
+/// - v2：**UTC+8 自然月**。月初 = UTC+8 当月 1 日 00:00，即前一月最后一日 16:00Z。
+///
+/// 改到 UTC+8 是定案第三条（周期在 UTC+8 月初重置）。当初选 UTC 的理由是
+/// 「不需要引入 IANA 时区库」——这条理由对 +08:00 不成立：它是整小时偏移、
+/// 无夏令时，一个编译期常量就够。
+///
+/// 每个读者都按 `rule_version = CYCLE_RULE_VERSION` 过滤，所以版本号一变，
+/// 旧版本的行对配额立刻不可见。**不要跨版本求和**：UTC 的 "2026-09" 与
+/// UTC+8 的 "2026-09" 是不同区间（`2026-08-31T16:00Z..24:00Z` 属于前者的八月、
+/// 后者的九月），相加既重复计入又遗漏，得到的是一个编造的数。
+/// 正确做法是重建库（决策 8 在首个真实用户跑满一个自然月前允许），
+/// 于是不存在 v1 的行。
+pub const CYCLE_RULE_VERSION: i64 = 2;
 
-fn cycle_key_of(at: OffsetDateTime) -> String {
-    let utc = at.to_offset(time::UtcOffset::UTC);
-    format!("{:04}-{:02}", utc.year(), u8::from(utc.month()))
+/// v2 的偏移量。**与版本号绑定的编译期常量，不是一条可改的设置**——
+/// 做成设置意味着有人能在不推进版本号的情况下改它，
+/// 那时同一个 `(cycle_key, rule_version)` 下会并存两种区间含义，
+/// 而这种损坏没有任何办法被发现。
+const CYCLE_OFFSET_V2: time::UtcOffset = time::macros::offset!(+8);
+
+/// 按指定规则版本算周期键。
+///
+/// 带版本分支是为了让对账器能用**写入时**那套规则去核对历史行：
+/// `usage_cycle_totals` 是否等于对应账本行之和，这个不变量只有在
+/// 按行自己的 `rule_version` 分桶时才成立。
+pub fn cycle_key_for(at: OffsetDateTime, rule_version: i64) -> crate::Result<String> {
+    let offset = match rule_version {
+        1 => time::UtcOffset::UTC,
+        2 => CYCLE_OFFSET_V2,
+        other => {
+            return Err(crate::Error::Ledger(format!(
+                "未知的计费规则版本 {other}：不猜测口径，宁可失败关闭"
+            )))
+        }
+    };
+    let local = at.to_offset(offset);
+    Ok(format!("{:04}-{:02}", local.year(), u8::from(local.month())))
+}
+
+/// 当前口径的周期键。用编译期常量，不会失败。
+pub fn cycle_key(at: OffsetDateTime) -> String {
+    cycle_key_for(at, CYCLE_RULE_VERSION).expect("CYCLE_RULE_VERSION 必须是已知版本")
 }
 
 async fn upsert_cursor(

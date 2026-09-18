@@ -44,15 +44,13 @@ pub fn user_pool(quota_bytes: u64, cycle_used: U128Text) -> u64 {
     budget(quota_bytes, cycle_used)
 }
 
-/// 自然月周期键。
+/// 自然月周期键。**只有一份实现**，就在结算那一侧。
 ///
-/// 当前口径是 **UTC 自然月**（与 `ledger::settle::CYCLE_RULE_VERSION` 同一套）。
-/// D21 只写了「同一个自然月周期」，没有指定时区；展示时区只约束日桶。
-/// 改口径要推进 `CYCLE_RULE_VERSION`，历史行留在旧版本下不重算。
-pub fn cycle_key(at: time::OffsetDateTime) -> String {
-    let utc = at.to_offset(time::UtcOffset::UTC);
-    format!("{:04}-{:02}", utc.year(), u8::from(utc.month()))
-}
+/// 这里曾经是一份逐字相同的拷贝。两份拷贝的危险不在于重复，而在于改一份不改
+/// 另一份时的失败形态：配额引擎与账本对「这个月」的理解会悄悄分家，
+/// 而两边各自都是自洽的，谁都不会报错。口径与 `CYCLE_RULE_VERSION` 是同一件事，
+/// 所以实现跟着版本号走。
+pub use crate::ledger::settle::cycle_key;
 
 #[cfg(test)]
 mod tests {
@@ -89,12 +87,48 @@ mod tests {
         assert_eq!(budget(u64::MAX, U128Text::MAX), 0);
     }
 
+    /// 定案第三条：周期在 **UTC+8 月初**重置。月界是前一月最后一日 16:00Z。
     #[test]
-    fn 周期键是utc自然月() {
+    fn 周期键是utc加八自然月() {
         use time::macros::datetime;
+        // 月界两侧各一个样本，差一秒。
+        assert_eq!(cycle_key(datetime!(2026-08-31 15:59:59 UTC)), "2026-08");
+        assert_eq!(cycle_key(datetime!(2026-08-31 16:00:00 UTC)), "2026-09");
+        // 同一时刻用 +08:00 表示：9 月 1 日 00:00，属于九月。
+        assert_eq!(cycle_key(datetime!(2026-09-01 00:00:00 +08:00)), "2026-09");
+        // 旧口径（UTC 自然月）会把上面第二个样本判成八月——现在必须不是。
+        assert_ne!(cycle_key(datetime!(2026-08-31 16:00:00 UTC)), "2026-08");
         assert_eq!(cycle_key(datetime!(2026-09-18 10:00:00 UTC)), "2026-09");
-        assert_eq!(cycle_key(datetime!(2026-01-01 00:00:00 UTC)), "2026-01");
-        // 跨时区输入先归一到 UTC：北京时间 9 月 1 日 07:00 还是 UTC 的 8 月。
-        assert_eq!(cycle_key(datetime!(2026-09-01 07:00:00 +08:00)), "2026-08");
+    }
+
+    /// 结算与配额必须用同一个周期函数。
+    ///
+    /// 现在是同一个函数的再导出，这条测试因此恒真——这正是想要的形态。
+    /// 留着它是因为它约束的是**将来**：谁再写第二份实现，这里就会红。
+    #[test]
+    fn 两个入口是同一个周期函数() {
+        use time::macros::datetime;
+        for at in [
+            datetime!(2026-01-01 00:00:00 UTC),
+            datetime!(2026-08-31 15:59:59 UTC),
+            datetime!(2026-08-31 16:00:00 UTC),
+            datetime!(2026-12-31 16:00:00 UTC),
+            datetime!(2027-06-15 08:30:00 +08:00),
+        ] {
+            assert_eq!(cycle_key(at), crate::ledger::settle::cycle_key(at));
+        }
+    }
+
+    #[test]
+    fn 未知规则版本失败关闭() {
+        use crate::ledger::settle::cycle_key_for;
+        use time::macros::datetime;
+        let at = datetime!(2026-09-18 10:00:00 UTC);
+        // v1 仍可解释历史行。
+        assert_eq!(cycle_key_for(at, 1).unwrap(), "2026-09");
+        assert_eq!(cycle_key_for(datetime!(2026-08-31 16:00:00 UTC), 1).unwrap(), "2026-08");
+        // 未知版本不猜口径。
+        assert!(cycle_key_for(at, 3).is_err());
+        assert!(cycle_key_for(at, 0).is_err());
     }
 }

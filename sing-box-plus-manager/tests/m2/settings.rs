@@ -12,15 +12,21 @@ const GIB: u64 = 1 << 30;
 const CYCLE: &str = "2026-09";
 
 /// 给某个用户塞一笔本周期已结算用量。
+///
+/// `rule_version` 绑常量而不是写字面量 1：读者一律按
+/// `rule_version = CYCLE_RULE_VERSION` 过滤，写死版本号会让这个测试在版本一变时
+/// 静默地不再测它自以为在测的东西——播进去的用量对被测代码不可见，
+/// 于是「已超额的人应当被挡」变成「没有人超额」，断言照样有可能过。
 async fn seed_usage(stack: &Stack, user_id: i64, bytes: u128) {
     let mut txn = stack.store.begin_immediate().await.unwrap();
     sqlx::query(
         "INSERT INTO usage_cycle_totals(user_id, cycle_key, rule_version, total_bytes, updated_at) \
-         VALUES (?, ?, 1, ?, ?) \
+         VALUES (?, ?, ?, ?, ?) \
          ON CONFLICT(user_id, cycle_key, rule_version) DO UPDATE SET total_bytes = excluded.total_bytes",
     )
     .bind(user_id)
     .bind(CYCLE)
+    .bind(proxy_manager::ledger::settle::CYCLE_RULE_VERSION)
     .bind(U128Text::new(bytes).encode())
     .bind("2026-09-18T00:00:00Z")
     .execute(txn.conn())
