@@ -48,6 +48,12 @@ clap = { version = "4", features = ["derive"] }
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio", "matched-path"] }
 tower = "0.5"
 argon2 = "0.5"                                      # break-glass 口令哈希（入口属于 M5）
+# 泡游 SSO 换取身份要打一次公网 HTTPS（M5）。这里**只**加根证书来源，不加 HTTP 客户端：
+# 需求是「一个固定端点、一个方法、一种 content-type、有界响应体」，
+# 而 src/agent/mod.rs 已经有一份手写 HTTP/1.1 的现成口味可循。引 reqwest 会连带
+# hyper-util / http-body-util / tower-http 一整串，为一次外呼不值当。
+# 取 webpki-roots 而非 rustls-native-certs：无平台依赖，构建可复现。
+webpki-roots = "1"
 
 # 集成测试用的依赖。集成测试是独立 crate，用不到 [dependencies] 里的条目，
 # 需要的必须在这里再声明一次。

@@ -10,9 +10,13 @@ CREATE TABLE sessions (
     -- 库被读到也不能直接冒充会话——攻击者拿到的是摘要，反推不出 cookie 里那个值。
     session_id_sha256 TEXT NOT NULL UNIQUE CHECK(length(session_id_sha256) = 64),
     user_id           INTEGER NOT NULL REFERENCES users(user_id),
-    -- provider 抽象：feishu / wecom / local（break-glass）。
-    -- M4 只实现会话机制，登录入口属于 M5。
-    provider          TEXT NOT NULL CHECK(provider IN ('feishu', 'wecom', 'local')),
+    -- provider 抽象：paoyou（泡游 SSO，承载飞书实名）/ feishu / wecom / local（break-glass）。
+    -- 取值域是闭集：一个拼错的 provider 会让 resolve 里那条「非 local 必须有成员事实」
+    -- 的分支走进完全不同的语义，所以它必须在库层就被挡住，而不是靠调用方自觉。
+    --
+    -- `paoyou` 是本项目实际在用的那一个（D27）。`feishu` / `wecom` 留着是因为
+    -- README §4.9 的双 IM 登录仍在计划内，先占住取值不算预先实现。
+    provider          TEXT NOT NULL CHECK(provider IN ('paoyou', 'feishu', 'wecom', 'local')),
     -- 双提交 CSRF：同样只存哈希。
     csrf_token_sha256 TEXT NOT NULL CHECK(length(csrf_token_sha256) = 64),
     created_at        TEXT NOT NULL,
@@ -39,4 +43,19 @@ CREATE TABLE server_secrets (
     name       TEXT PRIMARY KEY NOT NULL,
     secret_hex TEXT NOT NULL CHECK(length(secret_hex) = 64),
     created_at TEXT NOT NULL
+) STRICT;
+
+-- SSO `state` 的一次性墓碑（README §4.9 加固 3）。
+--
+-- **只在上游换取身份成功之后才写。** 顺序写反就等于把登录入口变成一个免认证的
+-- 写放大入口：任何人构造一个回调 URL 就能让主控写一行。
+--
+-- 主键是 state 的 SHA-256 而不是 state 本身：state 是一次性凭据，
+-- 库被读到也不该能拿去重放（与会话 ID 同一条纪律）。
+-- 插入冲突（PRIMARY KEY 违反）即重放，判 401。
+CREATE TABLE sso_used_states (
+    state_sha256 TEXT PRIMARY KEY NOT NULL CHECK(length(state_sha256) = 64),
+    -- 到期即可清理。清理与插入在同一个事务里做，所以这张表不会无限长。
+    expires_at   TEXT NOT NULL,
+    consumed_at  TEXT NOT NULL
 ) STRICT;

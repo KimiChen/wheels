@@ -38,7 +38,8 @@ async fn ordinary_user_gets_403_body_not_the_admin_page() {
 /// 把管理员从管理页弹到个人页——而且发生在任何请求回来之前。
 #[tokio::test]
 async fn served_page_carries_the_server_evaluated_role() {
-    let api = Api::new().await;
+    // 管理员身份来自名单，不是来自 users.role（D27）。
+    let api = Api::with_admins(&["boss"]).await;
     let admin = api.user("boss", Role::Admin, "feishu").await;
     let user = api.user("member", Role::User, "feishu").await;
 
@@ -85,7 +86,7 @@ async fn login_page_and_assets_need_no_session() {
 /// 页面与资源不得被共享缓存留下。会话态内容进了中间缓存就是跨用户串号。
 #[tokio::test]
 async fn authenticated_pages_are_not_publicly_cacheable() {
-    let api = Api::new().await;
+    let api = Api::with_admins(&["boss"]).await;
     let admin = api.user("boss", Role::Admin, "feishu").await;
     let (_, _, headers) = api.get_text("/overview.html", Some(&admin.cookie)).await;
     let cache = headers.get(header::CACHE_CONTROL).map(|v| v.to_str().unwrap()).unwrap_or("");

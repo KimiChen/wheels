@@ -4,6 +4,10 @@
 //! 否则用例和被测代码会共用同一个键格式化函数，
 //! 「结算写的键」与「查询找的键」不一致这件事就永远测不出来。
 
+// `seed_ledger` 住在这里而不是 harness 里：它依赖 `crate::ledger_harness` 与
+// `crate::fixtures`，而那两个模块只在 M4 的入口里声明。留在 harness 里，
+// M5 就复用不了同一个 harness——共用的东西不该带着只有一个用户的依赖。
+
 use axum::http::StatusCode;
 use proxy_manager::api::session::Role;
 
@@ -148,4 +152,67 @@ async fn trend_is_admin_only() {
     let user = api.user("member", Role::User, "local").await;
     let (status, _, _) = api.get("/api/v1/usage/trend", Some(&user)).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+/// 让账本行由**真实结算**产生。
+///
+/// 直接 `INSERT INTO usage_ledger` 会让用例用上与被测代码同一个格式化函数，
+/// 于是「结算写的键」和「查询找的键」不一致这件事永远测不出来。
+/// 这里走 `runtime::approve` → `settle::receive` → `settle::settle_next`，
+/// 与生产路径完全一致，只是把 `collected_at` 拨到指定的小时。
+impl Api {
+    pub async fn seed_ledger(&self, node_id: &str, points: &[(i64, u64)]) {
+        use proxy_manager::ledger::runtime;
+        use proxy_manager::ledger::settle::{self, FirstSnapshot};
+
+        const RUNTIME: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f90";
+        let mut txn = self.store.begin_immediate().await.unwrap();
+        sqlx::query(
+            "INSERT INTO nodes(node_id, provider, address, first_snapshot, agent_spki_sha256, \
+             quota_enabled, status, created_at, updated_at) \
+             VALUES (?, 'plus_v3', '203.0.113.9:8443', 'baseline', ?, 1, 'active', ?, ?)",
+        )
+        .bind(node_id)
+        .bind("0".repeat(64))
+        .bind("2026-09-18T00:00:00Z")
+        .bind("2026-09-18T00:00:00Z")
+        .execute(txn.conn())
+        .await
+        .unwrap();
+        txn.commit().await.unwrap();
+
+        runtime::approve(
+            &self.store,
+            node_id,
+            RUNTIME,
+            1_700_000_000_000,
+            FirstSnapshot::Baseline,
+            "用例：已确认是预期的进程窗口",
+            "test",
+        )
+        .await
+        .expect("批准 runtime");
+
+        // baseline 策略：首快照只建基线，所以计数器要从 0 起一路累加，
+        // 之后每一发的**增量**才是该小时的流量。
+        let skew = 5 * 60 * 1000; // 允许的时钟偏差（毫秒）
+        let mut cumulative = 0_u64;
+        let base = crate::ledger_harness::Snapshot::new().runtime(RUNTIME);
+        let schedule = [&[(0_i64, 0_u64)][..], points].concat();
+        for (sequence, (hours_ago, delta)) in (1_u64..).zip(schedule) {
+            cumulative += delta;
+            let at = proxy_manager::ledger::bucket::hour_bucket(time::OffsetDateTime::now_utc())
+                - time::Duration::hours(hours_ago)
+                + time::Duration::minutes(30);
+            let snapshot = base.clone().sequence(sequence).counter(
+                "u_example_01",
+                "tcp_uplink_bytes",
+                cumulative,
+            );
+            settle::receive(&self.store, node_id, &snapshot.bytes(), at, at, skew)
+                .await
+                .expect("接收不该失败");
+            settle::settle_next(&self.store, node_id, RUNTIME).await.expect("结算不该 Err");
+        }
+    }
 }

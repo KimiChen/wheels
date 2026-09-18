@@ -45,6 +45,7 @@ pub const EXPECTED_TABLES: &[&str] = &[
     "sessions",
     "snapshot_batches",
     "snapshot_payloads",
+    "sso_used_states",
     "usage_cycle_totals",
     "usage_ledger",
     "usage_lifetime_totals",

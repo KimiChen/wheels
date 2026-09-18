@@ -68,6 +68,19 @@ fn authenticated_pages_carry_the_role_anchor() {
     }
 }
 
+/// 登录页必须带 `stamp_sso()` 的锚点。
+///
+/// 与上面那条同一类：缺锚点时 `stamp_sso` 退回原文，页面照样打得开，
+/// 但「有没有配 SSO」就再也显示不出来了——**不报错的退化**。
+#[test]
+fn login_page_carries_the_sso_anchor() {
+    let body = web::page_body("login.html").expect("登录页必须嵌入");
+    assert!(body.contains(web::LOGIN_ANCHOR), "缺少 `{}` 锚点", web::LOGIN_ANCHOR);
+    let stamped = web::stamp_sso(body, true);
+    assert!(stamped.contains(r#"data-pm-sso="on""#));
+    assert!(stamped.contains(r#"class="pm-login""#), "盖属性不得把 class 顶掉");
+}
+
 /// 页面上的 `data-roles` 与服务端的 `PAGES` 可见性表必须一致。
 ///
 /// 两份表职责不同（一份拦截、一份让界面讲得通），但**不能互相矛盾**：
