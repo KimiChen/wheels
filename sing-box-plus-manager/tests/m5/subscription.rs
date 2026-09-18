@@ -407,6 +407,94 @@ async fn 没配订阅时明确回未启用() {
 
 // ============ 页面与端点的机械核对 ============
 
+/// **服务端知道这份订阅能不能用，就必须说出来。**
+///
+/// 三种不可用状态的处置完全不同——缺身份是容量问题，缺 uPSK 是部署问题，
+/// 缺 token 是签发问题——所以它们不能折成同一句「暂时不可用」。
+#[tokio::test]
+async fn 不可用的理由分得开() {
+    // 1) 一切正常。
+    let api = Api::with_subscription(&[], &["slot-01"]).await;
+    api.seed_claimable_pool(&["node-a"], &["slot-01"]).await;
+    let alice = login(&api, "alice").await;
+    let (_, body, _) = api.get("/api/v1/me/subscription", Some(&actor(&alice))).await;
+    assert_eq!(body["usable"], true, "{body}");
+    assert!(body["unusable_reason"].is_null(), "{body}");
+    // **能用就一定有地址。** 页面上的「有效」徽标只看 `usable`，
+    // 这条不变式就是它可以不再另外判一次 `url` 的理由。
+    assert!(body["url"].is_string(), "usable 为真却没有地址：{body}");
+
+    // 2) 吊销之后：有身份、有凭据，但没有地址。
+    proxy_manager::subscription::revoke_for_user(&api.store, alice.user_id).await.unwrap();
+    let (_, body, _) = api.get("/api/v1/me/subscription", Some(&actor(&alice))).await;
+    assert_eq!(body["usable"], false);
+    assert_eq!(body["unusable_reason"], "no_token");
+
+    // 3) 池子里是 slot-99，凭据文件里只有 slot-01：**服务端已经知道订阅会是空的**。
+    //    这一条是本轮对抗审查揪出来的——原先页面照样报「N 条入口可用」。
+    let api = Api::with_subscription(&[], &["slot-01"]).await;
+    api.seed_claimable_pool(&["node-a"], &["slot-99"]).await;
+    let bob = login(&api, "bob").await;
+    let (_, body, _) = api.get("/api/v1/me/subscription", Some(&actor(&bob))).await;
+    assert_eq!(body["identity"], "slot-99", "这个人确实领到了身份");
+    assert_eq!(body["usable"], false, "但凭据文件里没有它：{body}");
+    assert_eq!(body["unusable_reason"], "no_credential");
+
+    // 4) 池子是空的：登录成功但没领到身份。
+    let api = Api::with_subscription(&[], &["slot-01"]).await;
+    let carol = login(&api, "carol").await;
+    let (_, body, _) = api.get("/api/v1/me/subscription", Some(&actor(&carol))).await;
+    assert!(body["identity"].is_null(), "{body}");
+    assert_eq!(body["unusable_reason"], "no_identity");
+}
+
+/// **服务端能给出的每一种理由，页面上都得有一条对应的说明。**
+///
+/// 少一条的后果不是报错，是**一片空白**：没有地址、没有解释、没有下一步。
+/// 那个人只会看到一个「—」，然后刷新几次，然后来问「是不是坏了」。
+///
+/// 这条核的是集合的封闭性，所以新增一个理由而忘了写文案时它会先红。
+#[test]
+fn 每种不可用理由都配了文案() {
+    let html = proxy_manager::web::page_body("me.html").expect("me.html 必须嵌在二进制里");
+    let declared: std::collections::BTreeSet<String> = attr_values(html, "data-pm-unusable")
+        .iter()
+        .flat_map(|value| value.split_whitespace().map(str::to_string).collect::<Vec<_>>())
+        .collect();
+    assert!(!declared.is_empty(), "一条 data-pm-unusable 都没扫到：扫描器多半坏了");
+
+    for reason in proxy_manager::api::routes::UNUSABLE_REASONS {
+        assert!(
+            declared.contains(*reason),
+            "me.html 里没有 {reason:?} 的说明：那个人会看到一片空白而不是一句话"
+        );
+    }
+    // 反过来也要核：页面上写了一条服务端**永远不会给**的理由，
+    // 那条文案就是死的——而它看起来和活的一模一样。
+    for reason in &declared {
+        assert!(
+            proxy_manager::api::routes::UNUSABLE_REASONS.contains(&reason.as_str()),
+            "me.html 写了 {reason:?} 的说明，但服务端永远不会给出这个理由"
+        );
+    }
+}
+
+/// 入口卡上**不许有状态徽标**。
+///
+/// 服务端的 `entries` 只有名字与落点，没有任何可用性字段。写一个「可用」上去
+/// 就是替服务端编答案：节点掉线、采集失败、额度闸断时它照样是绿的。
+/// 这条是那次改动的回归测试——加回去很容易，因为那样"好看"。
+#[test]
+fn 入口卡上没有编出来的状态徽标() {
+    let html = proxy_manager::web::page_body("me.html").unwrap();
+    let (_, inside) = split_templates(html);
+    assert!(inside.contains("data-pm=\"name\""), "模板没扫到：扫描器坏了");
+    assert!(
+        !inside.contains("wsk-badge"),
+        "入口卡模板里出现了徽标——服务端没有任何字段能支撑它：{inside}"
+    );
+}
+
 /// 把 `<template>` 里外分开。
 ///
 /// 模板里的绑定是**按集合成员**求值的（`renderRows` 克隆之后对每一行 applyBindings），

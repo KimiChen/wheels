@@ -258,38 +258,42 @@
                 <div class="wsk-alert wsk-info wsk-mt-2">
                   <svg class="wsk-icon" aria-hidden="true"><use href="#info"></use></svg>
                   <div>
-                    <strong>额度是全局统一的，没有「套餐」这个概念（D21）</strong>
+                    <strong>额度分四档，每个人属于其中一档（定案第三条）</strong>
                     <p>
-                      所有人同一个月度额度、同一个自然月周期。
-                      <strong>改这里对本周期立即生效</strong>——额度是参数，账本记的是用量，
-                      「剩余 = 额度 − 本周期已用」跟着重算即可。
-                      调高 300 → 500 GiB，已用 320 GiB 的人从「已用尽」变回「剩余 180 GiB」；
-                      调低 300 → 100 GiB，已用 150 GiB 的人将在节点收到新额度后被闸断。
+                      档位的字节数与「谁在哪一档」都是**数据库里的权威值**，这一页只读。
+                      改档位走 <code>proxy-manager user tier</code>，调低要按 D21 先预览再确认。
+                      <strong>改动对本周期立即生效</strong>——额度是参数，账本记的是用量，
+                      「剩余 = 档位字节数 − 本周期已用」跟着重算即可。
+                      调高不会让已经断掉的连接自己回来，节点侧只是重新允许新连接。
                     </p>
                   </div>
                 </div>
                 <div class="wsk-form-grid wsk-mt-5">
                   <div class="wsk-field">
-                    <label class="wsk-label" for="monthly-quota">每月额度（全员统一）</label>
-                    <input class="wsk-control" id="monthly-quota" type="text" value="300 GiB" data-pm-bytes="monthly_bytes" readonly />
-                    <p class="wsk-help">
-                      322,122,547,200 字节。超出后新连接被拒；已建立的连接仍受剩余额度约束直到结束。
-                    </p>
-                    <div class="wsk-alert wsk-warning wsk-mt-2">
-                      <svg class="wsk-icon" aria-hidden="true"><use href="#warning"></use></svg>
-                      <div>
-                        <strong>调低可能让部分用户用尽额度，保存前先确认名单</strong>
-                        <p>
-                          按当前已结算用量，改成 100 GiB 预计会闸断 <strong>2 人</strong>（wangwei、kimi）；后续流量可能增加人数。
-                          调高不需要这一步——它只会放宽。<br />
-                          另外：<strong>调高不会让已经断掉的连接自己回来</strong>，
-                          节点侧只是重新允许新连接，用户需要自己重连。
-                        </p>
-                      </div>
+                    <span class="wsk-label">四档额度</span>
+                    <!-- 这四行来自 `/api/v1/settings/quota` 的 `groups`。
+                         **不要在这里写死数字**：页面上写一份、库里一份，
+                         两份一定会在某次调档之后分家，而分家之后没有任何东西会报错。 -->
+                    <div class="wsk-status-list wsk-mt-2" data-pm-collection="quota-groups">
+                      <div data-table-empty hidden><span data-pm-empty-text>还没有档位</span></div>
+                      <template data-pm-template>
+                        <div>
+                          <span data-pm="display_name"></span>
+                          <strong data-pm-bytes="monthly_bytes"></strong>
+                          <small data-pm-exact="monthly_bytes"></small>
+                        </div>
+                      </template>
                     </div>
                     <p class="wsk-help wsk-mt-2">
-                      保存后<strong>立即采集、结算并下发</strong>，不等下一个定时周期；改动落审计。
-                      节点确认前显示“已保存，节点待生效”。采集失败时显示原因并重试，可连通的节点会尝试安全置零。
+                      单位是**十进制** TB（1 TB = 10¹² 字节），不是 TiB——
+                      与客户端流量条上那个数同一个口径。
+                      超出后新连接被拒；已建立的连接仍受剩余额度约束直到结束。
+                    </p>
+                    <p class="wsk-help wsk-mt-2">
+                      默认档位 <strong data-pm="default_group">—</strong>。
+                      每个节点拿到的是「这个人本月还剩多少」的**同一个数**（镜像下发），
+                      不按节点拆分——拆分会让一个人把流量压在单一节点时，
+                      在四分之一额度处就被切断。
                     </p>
                   </div>
                   <div class="wsk-field">
@@ -315,18 +319,22 @@
                   </div>
                   <div class="wsk-field">
                     <label class="wsk-label" for="cycle">计费周期</label>
-                    <input class="wsk-control" id="cycle" type="text" value="自然月（UTC 存储，按展示时区分桶）" readonly />
-                    <p class="wsk-help">统一额度下不再需要 per-user 周期锚点，周期也随之统一。</p>
+                    <input class="wsk-control" id="cycle" type="text" value="自然月（UTC+8 切月，UTC 存储）" readonly />
+                    <p class="wsk-help">
+                      展示时区 <strong data-pm="display_timezone">—</strong>。
+                      账本的时刻是 UTC，而月界按 UTC+8——2026-09 这个周期的起点是
+                      <code>2026-08-31T16:00:00Z</code>。写成 UTC 零点的话，
+                      每个月头 8 小时的用量会算进上一个月，而那只有对账时才看得出来。
+                    </p>
                   </div>
                   <div class="wsk-field">
-                    <label class="wsk-label" for="interval">采集周期</label>
-                    <input class="wsk-control" id="interval" type="text" value="60s（提频时 10s）" readonly />
-                    <p class="wsk-help">提频触发条件有两个：池将尽，或任一节点被自己的分配额挡住。</p>
-                  </div>
-                  <div class="wsk-field">
-                    <label class="wsk-label" for="floor">每节点地板</label>
-                    <input class="wsk-control" id="floor" type="text" value="64 MiB（软约束）" readonly />
-                    <p class="wsk-help">预算低于 N × floor 时地板失效，退化为探测额度。</p>
+                    <label class="wsk-label" for="interval">采集与下发周期</label>
+                    <input class="wsk-control" id="interval" type="text" value="60s" readonly />
+                    <p class="wsk-help">
+                      每一轮先采集入账，再按已结算的用量算额度，最后整表下发——
+                      顺序是结构上保证的，不是靠调用方自觉。
+                      每次采集恰好产生一个已结算序列，每次正额度下发恰好消耗一个。
+                    </p>
                   </div>
                   <div class="wsk-field">
                     <label class="wsk-label" for="startup">节点 startup_action</label>

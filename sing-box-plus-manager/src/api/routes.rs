@@ -661,8 +661,22 @@ async fn subscription_view(state: &AppState, user_id: i64, login_name: &str) -> 
     let expire =
         crate::subscription::cycle_expire_unix().map_err(|e| ApiError::internal(e.to_string()))?;
 
+    // **服务端已经知道这份订阅能不能用，就必须说出来。**
+    //
+    // `/sub/…` 那一侧对同样的状态是有判断的：没有身份或凭据文件里没有这个身份的
+    // uPSK 时，它发的是一份 `proxies: []` 的**明说的空配置**（`src/api/sub.rs`）。
+    // 而页面这一侧如果只回一个「N 条入口」的全局常数，使用者看到的就是满屏绿——
+    // 他照着绿色导入、逐条试连、全部失败，再回来问「是不是你们的节点挂了」。
+    // 那是本项目定义的假绿：**服务端知道，界面不说。**
+    let reason = unusable_reason(state, token.as_deref(), identity.as_deref());
+
     Ok(json!({
         "enabled": true,
+        // 这份订阅现在**拿不拿得到能用的节点**。页面上每一处绿色状态都由它决定。
+        "usable": reason.is_none(),
+        // 给使用者看的是文案，给运维看的是这个键——两者的处置完全不同：
+        // 缺身份是容量问题，缺 uPSK 是部署问题，缺 token 是签发问题。
+        "unusable_reason": reason,
         // 客户端里显示的名字。与 `Content-Disposition` 的文件名、
         // 订阅正文里的注释是同一个串——三处对不上时人会以为导错了订阅。
         "profile_name": crate::subscription::render::profile_name(login_name),
@@ -689,6 +703,41 @@ async fn subscription_view(state: &AppState, user_id: i64, login_name: &str) -> 
         },
         "metric_scope": METRIC_SCOPE,
     }))
+}
+
+/// 一份订阅现在拿不到能用节点的理由。`None` 表示能用。
+///
+/// **这个集合是封闭的**，而且 `me.html` 里必须为每一个值都备着一条文案——
+/// 由 `tests/m5` 的 `每一种不可用理由页面上都有对应的说明` 机械保证。
+/// 少一条的后果是那个人看到一片空白：没有地址、没有解释、没有下一步。
+pub const UNUSABLE_REASONS: &[&str] =
+    &["no_token", "no_identity", "no_credential", "credentials_unreadable"];
+
+fn unusable_reason(
+    state: &AppState,
+    token: Option<&str>,
+    identity: Option<&str>,
+) -> Option<String> {
+    if token.is_none() {
+        return Some("no_token".to_string());
+    }
+    let Some(identity) = identity else {
+        return Some("no_identity".to_string());
+    };
+    match state.credentials() {
+        // 凭据文件读得出来，但里面没有这个身份：**订阅正文会是空的**，
+        // 而 `/sub/…` 已经为此打过一条 P1。页面上不说，等于让那条 P1 只有运维看得见。
+        Ok(credentials) if !credentials.upsk.contains_key(identity) => {
+            Some("no_credential".to_string())
+        }
+        Ok(_) => None,
+        Err(error) => {
+            // 与上一种**分开**：这是部署事故（文件权限、文件没了），
+            // 后果也不同——那时 `/sub/…` 回 503，连下载都失败，不是下载到一份空的。
+            tracing::error!(%error, "读订阅凭据失败：本人页面按不可用显示（P1）");
+            Some("credentials_unreadable".to_string())
+        }
+    }
 }
 
 // ============ 尚未启用的能力 ============
