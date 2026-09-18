@@ -262,6 +262,15 @@ impl FakeNode {
         }
     }
 
+    /// 让节点改口说自己是另一个 `node_id`。
+    ///
+    /// 现实里的成因是「端点指错了」：两台机器的 agent 地址写反、或一条 DNS 记录
+    /// 指向了别人。这正是 §4.5 409 判别第 1 步要挡的那件事。
+    pub async fn set_node_id(&self, node_id: &str) {
+        let mut state = self.state.lock().await;
+        state.snapshot["node_id"] = serde_json::json!(node_id);
+    }
+
     // ---- 向测试暴露的观察点 ----
 
     pub async fn node_id(&self) -> String {

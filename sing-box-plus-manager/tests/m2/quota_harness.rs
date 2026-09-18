@@ -27,11 +27,12 @@ pub const RUNTIME: &str = "0123456789abcdef0123456789abcdef";
 pub const STARTED_AT_MS: u64 = 1_787_587_200_000;
 
 pub struct Stack {
-    _materials: harness::Materials,
+    materials: harness::Materials,
     _dir: tempfile::TempDir,
     pub node: FakeNode,
     pub store: Arc<Store>,
     pub client: AgentClient,
+    pub endpoint: String,
 }
 
 impl Stack {
@@ -81,11 +82,18 @@ impl Stack {
 
         let client =
             AgentClient::new(NODE, &endpoint, DNS_NAME, &materials.controller_dir).unwrap();
-        let stack =
-            Stack { _materials: materials, _dir: dir, node, store: Arc::new(store), client };
+        let stack = Stack { materials, _dir: dir, node, store: Arc::new(store), client, endpoint };
         stack.approve(RUNTIME).await;
         stack.settle_once().await;
         stack
+    }
+
+    /// 再开一条到同一个 agent 的连接。
+    ///
+    /// `AgentClient` 不是 `Clone`（里面有一份 nonce 缓存的锁），
+    /// 而 `NodeCollector` 要独占一条，所以下发用例自己新建一条。
+    pub fn new_client(&self) -> AgentClient {
+        AgentClient::new(NODE, &self.endpoint, DNS_NAME, &self.materials.controller_dir).unwrap()
     }
 
     pub async fn approve(&self, runtime_id: &str) {
