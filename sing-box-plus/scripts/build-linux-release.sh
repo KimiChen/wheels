@@ -61,7 +61,16 @@ build_once() {
   # 真正换工作目录，而不是只换 GOCACHE。此前两次都 cd 到同一个源码根，
   # 于是 cmp 只证明了「没复用构建缓存」，证明不了路径与环境没泄漏进产物——
   # 而那正是脚本开头宣称的用意。顺带：只导出已提交内容，与上面的干净树要求呼应。
-  git -C "$SING_BOX_PLUS_ROOT" archive HEAD | tar -x -C "$work"
+  # 按子目录前缀导出子树：本仓库是 monorepo，直接 archive HEAD 会把整个仓库铺开，
+  # go.mod 就不在 $work 根上了。前缀为空时（独立仓库布局）退回整树。
+  #
+  # 必须从仓库根执行：在子目录里跑时 git 会把当前目录当作隐式路径过滤，于是它在子树里
+  # 再找一层同名目录，结果是一个空归档——而且退出码是 0，不会有人发现。
+  local prefix toplevel
+  prefix="$(git -C "$SING_BOX_PLUS_ROOT" rev-parse --show-prefix)"
+  toplevel="$(git -C "$SING_BOX_PLUS_ROOT" rev-parse --show-toplevel)"
+  git -C "$toplevel" archive "HEAD:${prefix%/}" | tar -x -C "$work"
+  [[ -f "$work/go.mod" ]] || die "源码子树导出为空：$work 下没有 go.mod"
   ( cd "$work" && \
     CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
     GOCACHE="$build_root/gocache" \
