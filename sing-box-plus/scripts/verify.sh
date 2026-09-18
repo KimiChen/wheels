@@ -102,13 +102,40 @@ box_sites="$(grep -c "AppendTracker" "$source_dir/box.go" || true)"
 #        而上游 sing-vmess 的 Vision 实现用 uintptr 运算读 crypto/tls 私有字段，
 #        会被 checkptr 判为 fatal，见 docs/UPSTREAM_BASELINE.md）；
 #    (b) 带抑制的 -race 全量；
-#    (c) 不带抑制的纯单元用例，使 tests/race-suppressions.txt 无法掩盖本项目自身的竞争。
+#    (c) 不带抑制、排除构造 Box 的用例，使 tests/race-suppressions.txt 无法掩盖本项目自身的竞争。
 go test -count=1 -tags "$tags" ./...
 GORACE="suppressions=$SING_BOX_PLUS_ROOT/tests/race-suppressions.txt" \
   go test -race -count=1 -tags "$tags" ./...
-go test -race -count=1 -tags "$tags" \
-  -run 'TestSaturatingCounter|TestQuotaCellWriteOrder|TestTrackerFailClose|TestTrackerPassthroughForUnbilledInbound|TestReconcileLineage|TestMaxIdentities|TestValidate|TestScanRawConfig|TestCheckReloadInvariant|TestAudit(StartupHardening|SuccessCriteria|SentinelSkipped|HostNormalization|QueueFullGap|WriteFailureResets|RepairTrailingNewline|RotationDetection|TotalCapNoSelfReferentialGap|CloseIsIdempotent)' \
-  ./internal/userstats/
+
+# 第三轮取补集：排除清单里登记的才跳过，其余全跑。用 -run 白名单时，
+# 名字写错会被 go test 静默匹配为零个用例——2026-09 就有三个不存在的名字在清单里躺着，
+# 那一轮实际只跑了七个用例。所以这里先断言每个被排除的名字确实存在。
+exclusions_file="$SING_BOX_PLUS_ROOT/tests/race-round-c-exclusions.txt"
+[[ -f "$exclusions_file" ]] || die "缺少无抑制轮排除清单：$exclusions_file"
+listed="$(go test -list '.*' -tags "$tags" ./internal/userstats/ 2>/dev/null)"
+section=""
+skip_names=()
+while IFS= read -r line; do
+  line="${line%%#*}"
+  line="$(printf '%s' "$line" | tr -d '[:space:]')"
+  [[ -z "$line" ]] && continue
+  case "$line" in
+    "["*"]")
+      section="${line#[}"; section="${section%]}"
+      case "$section" in all|linux) ;; *) die "排除清单中的未知段名：$section" ;; esac
+      continue
+      ;;
+  esac
+  [[ -n "$section" ]] || die "排除清单中的条目出现在任何段之前：$line"
+  if [[ "$section" == all || "$(go env GOOS)" == linux ]]; then
+    grep -qx "$line" <<<"$listed" || \
+      die "排除清单中的 $line 不是一个存在的用例：清单已陈旧，或名字写错了"
+  fi
+  skip_names+=("$line")
+done < "$exclusions_file"
+[[ "${#skip_names[@]}" -gt 0 ]] || die "排除清单为空：第三轮应当有明确的排除项"
+skip_pattern="^($(IFS='|'; printf '%s' "${skip_names[*]}"))\$"
+go test -race -count=1 -tags "$tags" -skip "$skip_pattern" ./internal/userstats/
 
 python3 -m unittest discover -s tests -p 'test_*.py' -v
 

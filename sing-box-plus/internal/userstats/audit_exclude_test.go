@@ -28,7 +28,7 @@ func TestExcludeFilterMatch(t *testing.T) {
 		{"cdn-apple.com", auditHostSourceSniff, true, "前导点规范化"},
 		{"github.com", auditHostSourceFqdn, true, "fqdn 来源同样走域名规则"},
 		{"198.18.7.112", auditHostSourceIP, true, "fake-ip 网段"},
-		{"198.20.0.1", auditHostSourceIP, false, "/15 之外"},
+		{"198.51.100.1", auditHostSourceIP, false, "/15 之外"},
 		{"17.253.114.43", auditHostSourceIP, true, "Apple 网段"},
 		{"1.1.1.1", auditHostSourceIP, true, "裸地址按 /32"},
 		{"1.1.1.2", auditHostSourceIP, false, "裸地址不扩散到邻居"},
