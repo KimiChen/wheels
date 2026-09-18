@@ -201,7 +201,7 @@ async fn 个人端点只返回自己的数据() {
 async fn 写操作缺少或错配csrf一律拒绝() {
     let api = Api::new().await;
     let admin = api.admin().await;
-    let body = serde_json::json!({ "monthly_bytes": "1073741824" });
+    let body = serde_json::json!({ "scope": "group", "group_name": "normal", "monthly_bytes": "2000000000000" });
 
     // 缺 header
     let (status, resp, _) =
@@ -251,7 +251,7 @@ async fn 写操作缺少或错配csrf一律拒绝() {
 async fn if_match不符返回412() {
     let api = Api::new().await;
     let admin = api.admin().await;
-    let body = serde_json::json!({ "monthly_bytes": "1073741824" });
+    let body = serde_json::json!({ "scope": "group", "group_name": "normal", "monthly_bytes": "2000000000000" });
     api.put_json("/api/v1/settings/quota", &admin, body.clone(), Some(&admin.csrf), None).await;
 
     // 当前 revision 是 1；拿 0 去提交必须被拒。
@@ -273,10 +273,10 @@ async fn if_match不符返回412() {
 async fn dry_run不改设置() {
     let api = Api::new().await;
     let admin = api.admin().await;
-    let set = serde_json::json!({ "monthly_bytes": "1073741824" });
+    let set = serde_json::json!({ "scope": "group", "group_name": "normal", "monthly_bytes": "2000000000000" });
     api.put_json("/api/v1/settings/quota", &admin, set, Some(&admin.csrf), None).await;
 
-    let preview = serde_json::json!({ "monthly_bytes": "1", "dry_run": true });
+    let preview = serde_json::json!({ "scope": "group", "group_name": "normal", "monthly_bytes": "1", "dry_run": true });
     let (status, body, _) =
         api.put_json("/api/v1/settings/quota", &admin, preview, Some(&admin.csrf), None).await;
     assert_eq!(status, StatusCode::OK);
@@ -288,7 +288,13 @@ async fn dry_run不改设置() {
 
     // 设置没变。
     let (_, current, _) = api.get("/api/v1/settings/quota", Some(&admin)).await;
-    assert_eq!(current["monthly_bytes"], "1073741824");
+    let normal = current["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|g| g["group_name"] == "normal")
+        .expect("normal 档");
+    assert_eq!(normal["monthly_bytes"], "2000000000000");
     assert_eq!(current["revision"].as_i64(), Some(1));
 }
 
@@ -297,23 +303,24 @@ async fn dry_run不改设置() {
 async fn 调低必须确认而调高不要求() {
     let api = Api::new().await;
     let admin = api.admin().await;
-    let set = serde_json::json!({ "monthly_bytes": "1073741824" });
+    let set = serde_json::json!({ "scope": "group", "group_name": "normal", "monthly_bytes": "2000000000000" });
     api.put_json("/api/v1/settings/quota", &admin, set, Some(&admin.csrf), None).await;
 
-    let lower = serde_json::json!({ "monthly_bytes": "1" });
+    let lower =
+        serde_json::json!({ "scope": "group", "group_name": "normal", "monthly_bytes": "1" });
     let (status, resp, _) = api
         .put_json("/api/v1/settings/quota", &admin, lower.clone(), Some(&admin.csrf), None)
         .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(error_code(&resp), "confirmation_required");
 
-    let confirmed = serde_json::json!({ "monthly_bytes": "1", "confirm": true });
+    let confirmed = serde_json::json!({ "scope": "group", "group_name": "normal", "monthly_bytes": "1", "confirm": true });
     let (status, _, _) =
         api.put_json("/api/v1/settings/quota", &admin, confirmed, Some(&admin.csrf), None).await;
     assert_eq!(status, StatusCode::ACCEPTED);
 
     // 调高不要求。
-    let higher = serde_json::json!({ "monthly_bytes": "2147483648" });
+    let higher = serde_json::json!({ "scope": "group", "group_name": "normal", "monthly_bytes": "2147483648" });
     let (status, _, _) =
         api.put_json("/api/v1/settings/quota", &admin, higher, Some(&admin.csrf), None).await;
     assert_eq!(status, StatusCode::ACCEPTED);
@@ -324,7 +331,7 @@ async fn 调低必须确认而调高不要求() {
 async fn 提交返回202且不声称全部已生效() {
     let api = Api::new().await;
     let admin = api.admin().await;
-    let body = serde_json::json!({ "monthly_bytes": "1073741824" });
+    let body = serde_json::json!({ "scope": "group", "group_name": "normal", "monthly_bytes": "2000000000000" });
     let (status, resp, _) =
         api.put_json("/api/v1/settings/quota", &admin, body, Some(&admin.csrf), None).await;
     assert_eq!(status, StatusCode::ACCEPTED);
@@ -350,7 +357,9 @@ async fn 字节字段一律是十进制字符串() {
     api.put_json(
         "/api/v1/settings/quota",
         &admin,
-        serde_json::json!({ "monthly_bytes": "18446744073709551615" }),
+        // i64::MAX：额度的上界（C31 —— wire 上 remaining_bytes 是非负 int64）。
+        // 仍然远超 IEEE754 双精度能精确表示的范围，足以验证全链路不走浮点。
+        serde_json::json!({ "scope": "group", "group_name": "normal", "monthly_bytes": "9223372036854775807" }),
         Some(&admin.csrf),
         None,
     )
@@ -368,9 +377,52 @@ async fn 字节字段一律是十进制字符串() {
         assert_bytes_are_strings(&body, path);
     }
 
-    // u64 上界也要原样回来，不能被 JSON 数字精度削掉。
+    // 上界也要原样回来，不能被 JSON 数字精度削掉。
     let (_, body, _) = api.get("/api/v1/settings/quota", Some(&admin)).await;
-    assert_eq!(body["monthly_bytes"], "18446744073709551615");
+    let normal = body["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|g| g["group_name"] == "normal")
+        .expect("normal 档");
+    assert_eq!(normal["monthly_bytes"], "9223372036854775807");
+}
+
+/// 超过 i64::MAX 的额度必须被**拒绝**，不能被静默截断。
+///
+/// 这条原本在 `tests/m0/config_gate.rs`，钉的是配置里的 `quota.monthly_bytes`。
+/// 分档之后那个字段已删除，纪律的载体变成 `quota_groups` 的定宽文本列与它的
+/// i64 上界 CHECK——分配那一层对超界值做的是静默截断，把上界写进库，
+/// 等于把一次静默截断换成一次写入失败。
+#[tokio::test]
+async fn 超过i64上界的额度被拒而不是截断() {
+    let api = Api::new().await;
+    let admin = api.admin().await;
+
+    for bad in ["9223372036854775808", "18446744073709551615"] {
+        let (status, _, _) = api
+            .put_json(
+                "/api/v1/settings/quota",
+                &admin,
+                serde_json::json!({
+                    "scope": "group", "group_name": "normal", "monthly_bytes": bad, "confirm": true
+                }),
+                Some(&admin.csrf),
+                None,
+            )
+            .await;
+        assert_ne!(status, StatusCode::ACCEPTED, "额度 {bad} 超出 i64::MAX，必须被拒");
+    }
+
+    // 反向证据：档位没有被改成一个截断值，仍是种子值。
+    let (_, body, _) = api.get("/api/v1/settings/quota", Some(&admin)).await;
+    let normal = body["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|g| g["group_name"] == "normal")
+        .expect("normal 档");
+    assert_eq!(normal["monthly_bytes"], "1000000000000", "普通档应当还是种下的 1 TB");
 }
 
 /// 错误对象形状固定，不随端点变化。

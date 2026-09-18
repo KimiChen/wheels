@@ -1,28 +1,43 @@
--- 全局额度、逐节点任务、分配与下发请求（docs/data-model.md §3、§11；README §4.5）。
+-- 分档额度、逐节点任务与下发请求（docs/data-model.md §3、§11；README §4.5）。
 --
--- 额度与周期都是全局的（D21）：所有人同一个月度额度、同一个自然月周期。
--- 没有 per-user 套餐，因此这里没有任何按用户存额度的列——
--- 加回来之前先重估 D21，不要在这张表上打补丁。
+-- **额度挂在组上，不挂在用户上。** D21 移除的是「一个贴在用户身上的额度数字」
+-- 及其带来的周期锚点、折算系数与套餐迁移；四个固定档位一样没有这些东西：
+-- 全体同一个周期、同一个折算口径（四向求和），换档只是改一列。
+-- 所以这是对 D21 的收紧而不是推翻——用户仍然不携带额度，只携带一个组名。
+
+-- 档位表 quota_groups 在 01_config_dimensions.sql——users 要外键引用它，
+-- 而 schema/ 下的文件按外键顺序加载，被引用者必须先建。
 
 CREATE TABLE quota_settings (
     -- 单行表。用固定主键而不是「取最新一行」，让「同时存在两份设置」在库层就不可能。
     id           INTEGER PRIMARY KEY CHECK(id = 1),
-    -- 全局月度额度，u64 字节（C3 的 20 位定宽文本）。
-    monthly_bytes TEXT COLLATE BINARY NOT NULL
-        CHECK(typeof(monthly_bytes) = 'text' AND length(monthly_bytes) = 20
-              AND monthly_bytes NOT GLOB '*[^0-9]*'
-              AND monthly_bytes <= '18446744073709551615'),
-    -- 乐观并发用的 revision（README §6 的 If-Match）。非负 i64，耗尽即报错不回绕。
+    -- **额度这个数已经不在这里了**——它在 quota_groups。留在这里的是真正全局的三样。
+    --
+    -- revision 保持单条序列：任何与额度有关的变更（改档位字节数、给用户换档）
+    -- 都推进这同一个数。不做 per-档 revision——quota_update_tasks 的唯一键是
+    -- (revision, node_id)，而 latest_tasks 只看 MAX(revision)；
+    -- 两条并行的序列会让「最新」失去全序，收敛循环随即失去意义。
     revision     INTEGER NOT NULL CHECK(revision >= 0),
+    -- 新建用户的默认档位。
+    default_group TEXT NOT NULL REFERENCES quota_groups(group_name),
+    -- 日桶用的展示时区。计费周期是 UTC+8（CYCLE_RULE_VERSION = 2），
+    -- 这里要与之对齐，否则某一天的用量会显示进「错误的月份」。
     display_timezone TEXT NOT NULL,
     updated_by   TEXT NOT NULL,
     updated_at   TEXT NOT NULL
 ) STRICT;
 
--- 改额度落审计：一条记录含操作者、时间、旧值、新值与受影响人数（README §8）。
+-- 改额度落审计：操作者、时间、旧值、新值与受影响人数（README §8）。
+--
+-- 两种动作都会降低某人的额度，所以都要留痕，用 scope + subject 区分：
+--   group      改某一档的字节数，影响该档全体
+--   user_group 把某个用户换档，影响一人
 CREATE TABLE quota_setting_audits (
     audit_id     INTEGER PRIMARY KEY AUTOINCREMENT,
     revision     INTEGER NOT NULL,
+    scope        TEXT NOT NULL CHECK(scope IN ('group', 'user_group')),
+    -- scope = 'group' 时是档位名，scope = 'user_group' 时是 login_name。
+    subject      TEXT NOT NULL,
     old_monthly_bytes TEXT COLLATE BINARY NOT NULL
         CHECK(typeof(old_monthly_bytes) = 'text' AND length(old_monthly_bytes) = 20
               AND old_monthly_bytes NOT GLOB '*[^0-9]*'

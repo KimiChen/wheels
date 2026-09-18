@@ -11,6 +11,36 @@ use super::quota_harness::{Stack, NODE, RUNTIME};
 const GIB: u64 = 1 << 30;
 const CYCLE: &str = "2026-09";
 
+/// 改 normal 档的字节数。这些用例测的是预览/确认/审计/任务生成这套通用机制，
+/// 用哪一档不影响结论，所以统一用 normal。
+fn group(new_monthly_bytes: u64) -> settings::Scope {
+    settings::Scope::Group { group_name: "normal".into(), new_monthly_bytes }
+}
+
+/// 读 normal 档当前的字节数。断言改档结果要看**档位表**，
+/// 不再看 quota_settings——那里已经没有额度这个数了。
+/// 从 user_id 查登录名。`map_users()` 的键是**身份名**，不是登录名——
+/// 换档接口按登录名定位用户，两者混用会得到「没有这个在用用户」。
+async fn login_of(stack: &Stack, user_id: i64) -> String {
+    use sqlx::Row;
+    sqlx::query("SELECT login_name FROM users WHERE user_id = ?")
+        .bind(user_id)
+        .fetch_one(stack.store.readers())
+        .await
+        .unwrap()
+        .get(0)
+}
+
+async fn normal_bytes(stack: &Stack) -> u64 {
+    settings::load_groups(&stack.store)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|g| g.group_name == "normal")
+        .expect("normal 档由建库种下")
+        .monthly_bytes
+}
+
 /// 给某个用户塞一笔本周期已结算用量。
 ///
 /// `rule_version` 绑常量而不是写字面量 1：读者一律按
@@ -61,7 +91,7 @@ async fn 已用三百二十gib的用户在调高后拿到一百八十gib() {
     let config = AllocationConfig::default();
 
     // 额度 300 GiB：已用尽 → 零额度。
-    settings::apply(&stack.store, 300 * GIB, "kimi", CYCLE, true).await.unwrap();
+    settings::apply(&stack.store, &group(300 * GIB), "kimi", CYCLE, true).await.unwrap();
     let ctx = context(&stack).await;
     let plan = converge::plan_round(&stack.store, std::slice::from_ref(&ctx), &config, CYCLE)
         .await
@@ -69,7 +99,7 @@ async fn 已用三百二十gib的用户在调高后拿到一百八十gib() {
     assert_eq!(quota_of(&plan, heavy, &stack).await, Quota::Limited(0), "已用尽");
 
     // 300 → 500：从「已用尽」变成「剩余 180 GiB」。
-    settings::apply(&stack.store, 500 * GIB, "kimi", CYCLE, false).await.unwrap();
+    settings::apply(&stack.store, &group(500 * GIB), "kimi", CYCLE, false).await.unwrap();
     let ctx = context(&stack).await;
     let plan = converge::plan_round(&stack.store, std::slice::from_ref(&ctx), &config, CYCLE)
         .await
@@ -81,7 +111,7 @@ async fn 已用三百二十gib的用户在调高后拿到一百八十gib() {
     );
 
     // 500 → 100：仍为已用尽，下发零额度。
-    settings::apply(&stack.store, 100 * GIB, "kimi", CYCLE, true).await.unwrap();
+    settings::apply(&stack.store, &group(100 * GIB), "kimi", CYCLE, true).await.unwrap();
     let ctx = context(&stack).await;
     let plan = converge::plan_round(&stack.store, std::slice::from_ref(&ctx), &config, CYCLE)
         .await
@@ -97,8 +127,8 @@ async fn 改额度不写用量账本() {
     let before: i64 = scalar(&stack, "SELECT count(*) FROM usage_ledger").await;
     let before_totals: i64 = scalar(&stack, "SELECT count(*) FROM usage_cycle_totals").await;
 
-    settings::apply(&stack.store, 300 * GIB, "kimi", CYCLE, true).await.unwrap();
-    settings::apply(&stack.store, 100 * GIB, "kimi", CYCLE, true).await.unwrap();
+    settings::apply(&stack.store, &group(300 * GIB), "kimi", CYCLE, true).await.unwrap();
+    settings::apply(&stack.store, &group(100 * GIB), "kimi", CYCLE, true).await.unwrap();
 
     assert_eq!(scalar(&stack, "SELECT count(*) FROM usage_ledger").await, before);
     assert_eq!(
@@ -117,16 +147,17 @@ async fn 调低必须先确认而调高不要求() {
     let users = stack.map_users().await;
     let heavy = *users.values().next().unwrap();
     seed_usage(&stack, heavy, 200 * GIB as u128).await;
-    settings::apply(&stack.store, 300 * GIB, "kimi", CYCLE, true).await.unwrap();
+    settings::apply(&stack.store, &group(300 * GIB), "kimi", CYCLE, true).await.unwrap();
 
     // 调低且未确认 → 拒绝。
-    let error = settings::apply(&stack.store, 100 * GIB, "kimi", CYCLE, false).await.unwrap_err();
+    let error =
+        settings::apply(&stack.store, &group(100 * GIB), "kimi", CYCLE, false).await.unwrap_err();
     assert!(error.to_string().contains("先预览再确认"), "实际：{error}");
-    assert_eq!(settings::load(&stack.store).await.unwrap().unwrap().monthly_bytes, 300 * GIB);
+    assert_eq!(normal_bytes(&stack).await, 300 * GIB);
 
     // 调高不要求确认。
-    settings::apply(&stack.store, 400 * GIB, "kimi", CYCLE, false).await.unwrap();
-    assert_eq!(settings::load(&stack.store).await.unwrap().unwrap().monthly_bytes, 400 * GIB);
+    settings::apply(&stack.store, &group(400 * GIB), "kimi", CYCLE, false).await.unwrap();
+    assert_eq!(normal_bytes(&stack).await, 400 * GIB);
 }
 
 /// 相同已结算用量下，预览名单与实际提交结果一致，且预览带**用量核验时刻**。
@@ -137,9 +168,9 @@ async fn 预览名单与实际提交一致且带核验时刻() {
     let ids: Vec<i64> = users.values().copied().collect();
     seed_usage(&stack, ids[0], 200 * GIB as u128).await;
     seed_usage(&stack, ids[1], 50 * GIB as u128).await;
-    settings::apply(&stack.store, 300 * GIB, "kimi", CYCLE, true).await.unwrap();
+    settings::apply(&stack.store, &group(300 * GIB), "kimi", CYCLE, true).await.unwrap();
 
-    let preview = settings::preview(&stack.store, 100 * GIB, CYCLE).await.unwrap();
+    let preview = settings::preview(&stack.store, &group(100 * GIB), CYCLE).await.unwrap();
     assert!(preview.is_reduction);
     assert!(!preview.usage_verified_at.is_empty(), "必须带用量核验时刻");
     // 只有用了 200 GiB 的那个会被闸断。
@@ -148,10 +179,11 @@ async fn 预览名单与实际提交一致且带核验时刻() {
     assert_eq!(preview.affected_users(), 1);
 
     // 预览**不改设置、不写下发任务**。
-    assert_eq!(settings::load(&stack.store).await.unwrap().unwrap().monthly_bytes, 300 * GIB);
+    assert_eq!(normal_bytes(&stack).await, 300 * GIB);
     let tasks_before = settings::latest_tasks(&stack.store).await.unwrap();
 
-    let applied = settings::apply(&stack.store, 100 * GIB, "kimi", CYCLE, true).await.unwrap();
+    let applied =
+        settings::apply(&stack.store, &group(100 * GIB), "kimi", CYCLE, true).await.unwrap();
     assert_eq!(
         applied.affected_users,
         preview.affected_users(),
@@ -168,9 +200,9 @@ async fn 调高把已用尽的人解出来() {
     let users = stack.map_users().await;
     let heavy = *users.values().next().unwrap();
     seed_usage(&stack, heavy, 320 * GIB as u128).await;
-    settings::apply(&stack.store, 300 * GIB, "kimi", CYCLE, true).await.unwrap();
+    settings::apply(&stack.store, &group(300 * GIB), "kimi", CYCLE, true).await.unwrap();
 
-    let preview = settings::preview(&stack.store, 500 * GIB, CYCLE).await.unwrap();
+    let preview = settings::preview(&stack.store, &group(500 * GIB), CYCLE).await.unwrap();
     assert!(!preview.is_reduction);
     assert_eq!(preview.newly_unblocked.len(), 1);
     assert_eq!(preview.newly_blocked.len(), 0);
@@ -186,8 +218,8 @@ async fn 改额度落审计() {
     let users = stack.map_users().await;
     seed_usage(&stack, *users.values().next().unwrap(), 320 * GIB as u128).await;
 
-    settings::apply(&stack.store, 300 * GIB, "kimi", CYCLE, true).await.unwrap();
-    settings::apply(&stack.store, 500 * GIB, "someone-else", CYCLE, false).await.unwrap();
+    settings::apply(&stack.store, &group(300 * GIB), "kimi", CYCLE, true).await.unwrap();
+    settings::apply(&stack.store, &group(500 * GIB), "someone-else", CYCLE, false).await.unwrap();
 
     let log = settings::audit_log(&stack.store).await.unwrap();
     assert_eq!(log.len(), 2);
@@ -202,7 +234,8 @@ async fn 改额度落审计() {
 #[tokio::test]
 async fn 没有操作者就不许改() {
     let stack = Stack::new().await;
-    let error = settings::apply(&stack.store, 300 * GIB, "  ", CYCLE, true).await.unwrap_err();
+    let error =
+        settings::apply(&stack.store, &group(300 * GIB), "  ", CYCLE, true).await.unwrap_err();
     assert!(error.to_string().contains("操作者"), "实际：{error}");
 }
 
@@ -212,7 +245,8 @@ async fn 没有操作者就不许改() {
 #[tokio::test]
 async fn 设置与任务同事务提交() {
     let stack = Stack::new().await;
-    let applied = settings::apply(&stack.store, 300 * GIB, "kimi", CYCLE, true).await.unwrap();
+    let applied =
+        settings::apply(&stack.store, &group(300 * GIB), "kimi", CYCLE, true).await.unwrap();
     assert_eq!(applied.revision, 1);
     assert_eq!(applied.nodes, vec![NODE.to_string()]);
 
@@ -230,7 +264,7 @@ async fn 设置与任务同事务提交() {
 #[tokio::test]
 async fn 只有applied才算新配置已生效() {
     let stack = Stack::new().await;
-    settings::apply(&stack.store, 300 * GIB, "kimi", CYCLE, true).await.unwrap();
+    settings::apply(&stack.store, &group(300 * GIB), "kimi", CYCLE, true).await.unwrap();
     assert!(!settings::fully_applied(&stack.store).await.unwrap(), "pending 不算");
 
     for status in [TaskStatus::SafeZero, TaskStatus::Unknown, TaskStatus::Failed] {
@@ -253,7 +287,7 @@ async fn 改设置后不得复用已占用的sequence() {
     let stack = Stack::new().await;
     let users = stack.map_users().await;
     seed_usage(&stack, *users.values().next().unwrap(), 10 * GIB as u128).await;
-    settings::apply(&stack.store, 300 * GIB, "kimi", CYCLE, true).await.unwrap();
+    settings::apply(&stack.store, &group(300 * GIB), "kimi", CYCLE, true).await.unwrap();
 
     let config = AllocationConfig::default();
     let ctx = context(&stack).await;
@@ -265,7 +299,7 @@ async fn 改设置后不得复用已占用的sequence() {
     assert!(matches!(outcome, ConvergeOutcome::Applied { .. }), "实际：{outcome:?}");
 
     // 改设置之后拿同一个 sequence 再来一次：必须被挡住。
-    settings::apply(&stack.store, 400 * GIB, "kimi", CYCLE, false).await.unwrap();
+    settings::apply(&stack.store, &group(400 * GIB), "kimi", CYCLE, false).await.unwrap();
     let stale_ctx = NodeContext { fresh_sequence: Some(used_sequence), ..ctx.clone() };
     let plan = converge::plan_round(&stack.store, std::slice::from_ref(&stale_ctx), &config, CYCLE)
         .await
@@ -290,7 +324,7 @@ async fn 改设置后不得复用已占用的sequence() {
 async fn 规划与发送之间改了设置就判过时() {
     let stack = Stack::new().await;
     stack.map_users().await;
-    settings::apply(&stack.store, 300 * GIB, "kimi", CYCLE, true).await.unwrap();
+    settings::apply(&stack.store, &group(300 * GIB), "kimi", CYCLE, true).await.unwrap();
 
     let config = AllocationConfig::default();
     let ctx = context(&stack).await;
@@ -299,7 +333,7 @@ async fn 规划与发送之间改了设置就判过时() {
         .unwrap();
 
     // 规划完、发送前，有人又改了一次。
-    settings::apply(&stack.store, 400 * GIB, "kimi", CYCLE, false).await.unwrap();
+    settings::apply(&stack.store, &group(400 * GIB), "kimi", CYCLE, false).await.unwrap();
 
     let outcome = converge::converge_node(&stack.store, &stack.client, &ctx, &plan).await.unwrap();
     match outcome {
@@ -324,7 +358,7 @@ async fn 规划与发送之间改了设置就判过时() {
 async fn 快照不健康时只做零表收敛() {
     let stack = Stack::new().await;
     stack.map_users().await;
-    settings::apply(&stack.store, 300 * GIB, "kimi", CYCLE, true).await.unwrap();
+    settings::apply(&stack.store, &group(300 * GIB), "kimi", CYCLE, true).await.unwrap();
     stack.node.set_health_bit("counter_overflow", true).await;
 
     // 拿不到新鲜的已结算 sequence。
@@ -381,9 +415,9 @@ async fn 主动零表收敛拿到200() {
 async fn 连续修改时只按最新revision收敛() {
     let stack = Stack::new().await;
     stack.map_users().await;
-    settings::apply(&stack.store, 300 * GIB, "kimi", CYCLE, true).await.unwrap();
-    settings::apply(&stack.store, 500 * GIB, "kimi", CYCLE, false).await.unwrap();
-    settings::apply(&stack.store, 700 * GIB, "kimi", CYCLE, false).await.unwrap();
+    settings::apply(&stack.store, &group(300 * GIB), "kimi", CYCLE, true).await.unwrap();
+    settings::apply(&stack.store, &group(500 * GIB), "kimi", CYCLE, false).await.unwrap();
+    settings::apply(&stack.store, &group(700 * GIB), "kimi", CYCLE, false).await.unwrap();
 
     let tasks = settings::latest_tasks(&stack.store).await.unwrap();
     assert_eq!(tasks.len(), 1);
@@ -416,4 +450,168 @@ async fn quota_of(plan: &converge::RoundPlan, user_id: i64, stack: &Stack) -> Qu
 async fn scalar(stack: &Stack, sql: &str) -> i64 {
     use sqlx::Row;
     sqlx::query(sql).fetch_one(stack.store.readers()).await.unwrap().get(0)
+}
+
+// ============ 四档额度（定案第三条） ============
+
+/// 十进制 TB，不是 2^40。这个错不会报错，只会让每个人多拿约 10%。
+#[tokio::test]
+async fn 档位初值是十进制tb() {
+    let stack = Stack::new().await;
+    let groups = settings::load_groups(&stack.store).await.unwrap();
+    let by_name: std::collections::BTreeMap<_, _> =
+        groups.iter().map(|g| (g.group_name.as_str(), g.monthly_bytes)).collect();
+
+    assert_eq!(by_name["normal"], 1_000_000_000_000);
+    assert_eq!(by_name["advanced"], 2_000_000_000_000);
+    assert_eq!(by_name["manage"], 5_000_000_000_000);
+    assert_eq!(by_name["admin"], 10_000_000_000_000);
+    // 反向：如果有人按二进制理解，1 TB 会是这个数。
+    assert_ne!(by_name["normal"], 1_u64 << 40);
+}
+
+/// 预算按**用户自己的档位**取，而不是某个共同的值。
+///
+/// 两个用户用量相同、档位不同，拿到的剩余必须不同。用一个共同额度去算所有人，
+/// 在分档之后是错的，而且错得不显眼——每个数字单看都合理。
+#[tokio::test]
+async fn 预算按用户档位而不是共同值() {
+    let stack = Stack::new().await;
+    let users = stack.map_users().await;
+    let mut ids: Vec<i64> = users.values().copied().collect();
+    ids.sort();
+    let (low, high) = (ids[0], ids[1]);
+
+    // 同样用掉 100 GiB。
+    let used = 100 * GIB as u128;
+    seed_usage(&stack, low, used).await;
+    seed_usage(&stack, high, used).await;
+
+    // 一个留在 normal（1 TB），一个换到 manage（5 TB）。
+    let login_high = login_of(&stack, high).await;
+    settings::apply(
+        &stack.store,
+        &settings::Scope::UserGroup { login_name: login_high, new_group: "manage".into() },
+        "kimi",
+        CYCLE,
+        false,
+    )
+    .await
+    .unwrap();
+
+    let ctx = context(&stack).await;
+    let plan = converge::plan_round(
+        &stack.store,
+        std::slice::from_ref(&ctx),
+        &AllocationConfig::default(),
+        CYCLE,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        quota_of(&plan, low, &stack).await,
+        Quota::Limited(1_000_000_000_000 - used as u64),
+        "normal 档按 1 TB 算剩余"
+    );
+    assert_eq!(
+        quota_of(&plan, high, &stack).await,
+        Quota::Limited(5_000_000_000_000 - used as u64),
+        "manage 档按 5 TB 算剩余"
+    );
+}
+
+/// 被禁用的用户拿到**零额度**，而不是从表里被省略。
+///
+/// 省略在 wire 上等于无限额度（C16/C30）：节点会把不在表里的身份当成不受限。
+/// 这条失败时 PUT 照样返回 200，表也照样是「全量」的——除了少一行。
+#[tokio::test]
+async fn 禁用的用户拿零额度而不是被省略() {
+    let stack = Stack::new().await;
+    let users = stack.map_users().await;
+    let victim = *users.values().next().unwrap();
+
+    let before = {
+        let ctx = context(&stack).await;
+        converge::plan_round(
+            &stack.store,
+            std::slice::from_ref(&ctx),
+            &AllocationConfig::default(),
+            CYCLE,
+        )
+        .await
+        .unwrap()
+        .tables[NODE]
+            .len()
+    };
+
+    let mut txn = stack.store.begin_immediate().await.unwrap();
+    sqlx::query("UPDATE users SET status = 'disabled' WHERE user_id = ?")
+        .bind(victim)
+        .execute(txn.conn())
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+
+    let ctx = context(&stack).await;
+    let plan = converge::plan_round(
+        &stack.store,
+        std::slice::from_ref(&ctx),
+        &AllocationConfig::default(),
+        CYCLE,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(quota_of(&plan, victim, &stack).await, Quota::Limited(0), "禁用即零额度");
+    assert_eq!(plan.tables[NODE].len(), before, "**条目数不变**：禁用不等于从表里拿掉");
+}
+
+/// 换到更低的档位也是降额，同样必须先预览再确认。
+#[tokio::test]
+async fn 把用户换到更低档位也要确认() {
+    let stack = Stack::new().await;
+    let users = stack.map_users().await;
+    let user_id = *users.values().next().unwrap();
+    let login = login_of(&stack, user_id).await;
+    // 先换到 manage（5 TB），再往回换到 normal（1 TB）——后者是降额。
+    let up = settings::Scope::UserGroup { login_name: login.clone(), new_group: "manage".into() };
+    settings::apply(&stack.store, &up, "kimi", CYCLE, false).await.unwrap();
+    seed_usage(&stack, user_id, 2_000_000_000_000_u128).await;
+
+    let down = settings::Scope::UserGroup { login_name: login, new_group: "normal".into() };
+    let error = settings::apply(&stack.store, &down, "kimi", CYCLE, false).await.unwrap_err();
+    assert!(error.to_string().contains("先预览再确认"), "实际：{error}");
+
+    settings::apply(&stack.store, &down, "kimi", CYCLE, true).await.unwrap();
+}
+
+/// 审计要能区分「改了哪一档」与「换了谁的档」。
+#[tokio::test]
+async fn 审计带scope与subject() {
+    let stack = Stack::new().await;
+    let users = stack.map_users().await;
+    let login = login_of(&stack, *users.values().next().unwrap()).await;
+
+    settings::apply(&stack.store, &group(3_000_000_000_000), "kimi", CYCLE, false).await.unwrap();
+    settings::apply(
+        &stack.store,
+        &settings::Scope::UserGroup { login_name: login.clone(), new_group: "manage".into() },
+        "kimi",
+        CYCLE,
+        false,
+    )
+    .await
+    .unwrap();
+
+    let rows = sqlx::query("SELECT scope, subject FROM quota_setting_audits ORDER BY audit_id")
+        .fetch_all(stack.store.readers())
+        .await
+        .unwrap();
+    use sqlx::Row;
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].get::<String, _>(0), "group");
+    assert_eq!(rows[0].get::<String, _>(1), "normal");
+    assert_eq!(rows[1].get::<String, _>(0), "user_group");
+    assert_eq!(rows[1].get::<String, _>(1), login);
 }

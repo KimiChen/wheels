@@ -50,16 +50,20 @@ pub async fn readyz(State(state): State<AppState>) -> ApiResult<impl IntoRespons
 
 /// 目标**固定取服务端会话主体**，不接受客户端提供的用户 ID。
 pub async fn me(State(state): State<AppState>, subject: Subject) -> ApiResult<impl IntoResponse> {
-    let quota = settings::load(&state.store).await?;
     let cycle = crate::quota::pool::cycle_key(OffsetDateTime::now_utc());
     let used = cycle_used(&state, subject.user_id, &cycle).await?;
-    let monthly = quota.as_ref().map(|q| q.monthly_bytes).unwrap_or(0);
+    // 额度按用户自己的档位取（定案第三条）。查不到就是 0，不回退到某个全局值——
+    // 回退会让一个档位缺失的账号看起来有额度。
+    let (group, monthly) = settings::user_quota(&state.store, subject.user_id)
+        .await?
+        .unwrap_or_else(|| (String::new(), 0));
 
     Ok(Json(json!({
         "user_id": subject.user_id,
         "login_name": subject.login_name,
         "role": subject.role.as_str(),
         "provider": subject.provider,
+        "quota_group": group,
         "cycle": {
             "key": cycle,
             // 三个口径不混用：这里是**周期累计**，不是永久累计。
@@ -271,12 +275,13 @@ pub async fn list_users(
 ) -> ApiResult<impl IntoResponse> {
     subject.require_admin()?;
     let page = Page::parse(page.cursor.as_deref(), page.limit)?;
-    let quota = settings::load(&state.store).await?.map(|q| q.monthly_bytes).unwrap_or(0);
     let cycle = crate::quota::pool::cycle_key(OffsetDateTime::now_utc());
 
     let rows = sqlx::query(
-        "SELECT user_id, login_name, display_name, role, status FROM users \
-         WHERE user_id > ? ORDER BY user_id LIMIT ?",
+        "SELECT u.user_id, u.login_name, u.display_name, u.role, u.status, \
+                u.quota_group, g.monthly_bytes \
+         FROM users u JOIN quota_groups g ON g.group_name = u.quota_group \
+         WHERE u.user_id > ? ORDER BY u.user_id LIMIT ?",
     )
     .bind(page.after.unwrap_or(0))
     .bind(page.limit)
@@ -291,19 +296,26 @@ pub async fn list_users(
     for row in &rows {
         let user_id: i64 = row.get(0);
         let used = cycle_used(&state, user_id, &cycle).await?;
+        // 每个人按**自己档位**的额度算剩余。用一个共同的额度去算所有人的剩余，
+        // 在分档之后是错的，而且错得不显眼——数字看着都合理。
+        let quota = U64Text::decode(&row.get::<String, _>(6))
+            .map_err(|e| ApiError::internal(e.to_string()))?
+            .get();
         users.push(json!({
             "user_id": user_id,
             "login_name": row.get::<String, _>(1),
             "display_name": row.get::<String, _>(2),
             "role": row.get::<String, _>(3),
             "status": row.get::<String, _>(4),
+            "quota_group": row.get::<String, _>(5),
+            "monthly_bytes": bytes_str(quota as u128),
             "cycle_used_bytes": bytes_str(used),
             "cycle_remaining_bytes": bytes_str(
                 crate::quota::pool::user_pool(quota, U128Text::new(used)) as u128
             ),
         }));
     }
-    // **没有 per-user 额度字段**——额度是全局设置（D21）。
+    // 用户身上仍然没有额度字段：这里的 monthly_bytes 来自他所在档位（quota_groups）。
     Ok(Json(json!({ "users": users, "next_cursor": next_cursor })))
 }
 
@@ -363,9 +375,17 @@ pub async fn get_quota_settings(
     let current = settings::load(&state.store).await?;
     let tasks = settings::latest_tasks(&state.store).await?;
     let fully = settings::fully_applied(&state.store).await?;
+    let groups = settings::load_groups(&state.store).await?;
 
     Ok(Json(json!({
-        "monthly_bytes": current.as_ref().map(|s| bytes_str(s.monthly_bytes as u128)),
+        // 四档额度（定案第三条）。额度挂在组上，用户只携带组名。
+        "groups": groups.iter().map(|g| json!({
+            "group_name": g.group_name,
+            "display_name": g.display_name,
+            "monthly_bytes": bytes_str(g.monthly_bytes as u128),
+            "sort_order": g.sort_order,
+        })).collect::<Vec<_>>(),
+        "default_group": current.as_ref().map(|s| s.default_group.clone()),
         "revision": current.as_ref().map(|s| s.revision),
         "display_timezone": current.as_ref().map(|s| s.display_timezone.clone()),
         "updated_by": current.as_ref().map(|s| s.updated_by.clone()),
@@ -382,15 +402,65 @@ pub async fn get_quota_settings(
     })))
 }
 
+/// 一次额度变更请求。
+///
+/// 两种对象：`scope = "group"` 改某一档的字节数（影响该档全体），
+/// `scope = "user_group"` 把某个用户换档（影响一人）。两者都可能降低某人的额度，
+/// 所以共用同一套 dry_run / confirm 纪律。
+///
+/// 字段做成扁平的可选项而不是 serde 的内部标记枚举：`deny_unknown_fields`
+/// 与 `flatten` 不能一起工作，而在一个改额度的接口上，
+/// 「多打了一个字段却被静默忽略」比多几行校验代码危险得多。
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct QuotaUpdate {
+    scope: String,
+    #[serde(default)]
+    group_name: Option<String>,
     /// 十进制字符串。TOML/JSON 的整数都是有符号 64 位，而额度口径是 u64（C3）。
-    monthly_bytes: String,
+    #[serde(default)]
+    monthly_bytes: Option<String>,
+    #[serde(default)]
+    login_name: Option<String>,
+    #[serde(default)]
+    new_group: Option<String>,
     #[serde(default)]
     dry_run: bool,
     /// 调低必须先预览再确认；调高不要求。
     #[serde(default)]
     confirm: bool,
+}
+
+impl QuotaUpdate {
+    fn to_scope(&self) -> ApiResult<settings::Scope> {
+        match self.scope.as_str() {
+            "group" => {
+                let group_name = self
+                    .group_name
+                    .clone()
+                    .ok_or_else(|| ApiError::invalid("scope=group 需要 group_name"))?;
+                let bytes = self
+                    .monthly_bytes
+                    .as_deref()
+                    .ok_or_else(|| ApiError::invalid("scope=group 需要 monthly_bytes"))?;
+                Ok(settings::Scope::Group { group_name, new_monthly_bytes: parse_bytes(bytes)? })
+            }
+            "user_group" => {
+                let login_name = self
+                    .login_name
+                    .clone()
+                    .ok_or_else(|| ApiError::invalid("scope=user_group 需要 login_name"))?;
+                let new_group = self
+                    .new_group
+                    .clone()
+                    .ok_or_else(|| ApiError::invalid("scope=user_group 需要 new_group"))?;
+                Ok(settings::Scope::UserGroup { login_name, new_group })
+            }
+            other => {
+                Err(ApiError::invalid(format!("未知的 scope：{other}，只接受 group 或 user_group")))
+            }
+        }
+    }
 }
 
 pub async fn put_quota_settings(
@@ -401,7 +471,7 @@ pub async fn put_quota_settings(
 ) -> ApiResult<axum::response::Response> {
     subject.require_admin()?;
 
-    let monthly = parse_bytes(&body.monthly_bytes)?;
+    let scope = body.to_scope()?;
     let cycle = crate::quota::pool::cycle_key(OffsetDateTime::now_utc());
     let current = settings::load(&state.store).await?;
 
@@ -421,12 +491,13 @@ pub async fn put_quota_settings(
         }
     }
 
-    let preview = settings::preview(&state.store, monthly, &cycle).await?;
+    let preview = settings::preview(&state.store, &scope, &cycle).await?;
     if body.dry_run {
         // **只返回预览，不改设置、不写下发任务。**
         // 调用方展示结果时须核对 revision，不能把旧结果用于新设置。
         return Ok(Json(json!({
             "dry_run": true,
+            "scope": body.scope,
             "revision": current.as_ref().map(|s| s.revision).unwrap_or(0),
             "current_monthly_bytes": bytes_str(preview.current_monthly_bytes as u128),
             "new_monthly_bytes": bytes_str(preview.new_monthly_bytes as u128),
@@ -452,7 +523,7 @@ pub async fn put_quota_settings(
     }
 
     let applied =
-        settings::apply(&state.store, monthly, &subject.login_name, &cycle, body.confirm).await?;
+        settings::apply(&state.store, &scope, &subject.login_name, &cycle, body.confirm).await?;
     let tasks = settings::latest_tasks(&state.store).await?;
 
     // 202：**「立即生效」指主控立即采用新参数并启动重算与下发，

@@ -13,7 +13,9 @@ use sqlx::Row;
 
 use crate::agent::AgentClient;
 use crate::error::{Error, Result};
-use crate::quota::allocate::{self, AllocationConfig, NodeWeight};
+// 镜像分配不用 allocate::plan 与 NodeWeight；两者连同 weight 模块保留不接线，
+// 换回加权分配时一并恢复。AllocationConfig 仍在签名里，所以调用方无需改动。
+use crate::quota::allocate::AllocationConfig;
 use crate::quota::dispatch::{self, ConflictResolution, PushOutcome};
 use crate::quota::pool;
 use crate::quota::settings::{self, TaskStatus};
@@ -48,11 +50,24 @@ pub struct RoundPlan {
 /// 按最新设置规划各节点的完整表。
 ///
 /// **先按用户/计费池计算目标，再按节点合并全部用户，形成一次全量请求**（§4.5）。
-/// 地板是 per (用户, 节点) 的：它要防的是「用户漫游到冷节点被立刻闸断」。
+///
+/// # 镜像分配
+///
+/// 每个可更新的节点都收到该用户本周期的**全额剩余**，不做跨节点拆分。
+/// 这是一次有意的产品选择：额度的定位是观察每个用户的用量而不是强制封顶，
+/// 而按权重拆分会让把流量压在单一节点的用户在 1/4 额度处被切断——
+/// 那是没人要求的强制行为，而且在下一轮重新分配之前一直存在。
+///
+/// 代价是短期内最多按节点数倍超发。这在当前定位下可接受：控制器每轮都从账本
+/// 重算 `剩余 = 额度 − 本周期已用`，一旦用尽所有节点同时归零，
+/// 因此实际超出的量是一个采集周期的流量，而不是 N 倍的月度额度。
+///
+/// `allocate` / `weight` 两个模块及其测试保留但不接线。换回加权分配时，
+/// 改动集中在下面这一个循环，外加恢复 `quota_allocations` 表。
 pub async fn plan_round(
     store: &Store,
     nodes: &[NodeContext],
-    config: &AllocationConfig,
+    _config: &AllocationConfig,
     cycle_key: &str,
 ) -> Result<RoundPlan> {
     let settings =
@@ -73,46 +88,34 @@ pub async fn plan_round(
         }
     }
 
-    // 每个用户的池，再按他所在的节点分配。
+    // 每个用户的池。额度按**档位**取（定案第三条），不再有全局单值。
     let used = cycle_used_by_user(store, cycle_key).await?;
-    let weights: BTreeMap<&str, u32> =
-        nodes.iter().map(|n| (n.node_id.as_str(), n.weight)).collect();
+    let quotas = settings::user_quota_map(store).await?;
     // 每个节点上、每个用户拿到多少。
     let mut per_node_user: BTreeMap<&str, BTreeMap<i64, Quota>> =
         nodes.iter().map(|n| (n.node_id.as_str(), BTreeMap::new())).collect();
 
     for (user_id, user_nodes) in &nodes_of_user {
-        let budget = pool::user_pool(
-            settings.monthly_bytes,
-            used.get(user_id).copied().unwrap_or(U128Text::new(0)),
-        );
-        // 只把额度分给**本轮可更新**的节点。拿不到新鲜快照的节点不参与正额度分配，
-        // 它上面的身份会在下面被置零。
-        let updatable: Vec<NodeWeight> = user_nodes
-            .iter()
-            .filter(|node_id| {
-                nodes.iter().any(|n| n.node_id == **node_id && n.fresh_sequence.is_some())
-            })
-            .map(|node_id| NodeWeight {
-                node_id: (*node_id).to_string(),
-                weight: weights.get(node_id).copied().unwrap_or(1),
-            })
-            .collect();
-
-        let plan = allocate::plan(budget, &updatable, config, 0)?;
-        for (node_id, bytes) in plan.allocations {
-            if let Some(entry) = per_node_user.get_mut(node_id.as_str()) {
-                entry.insert(*user_id, Quota::Limited(bytes));
+        // 查不到额度就是零，**不是跳过**。查不到只有两种可能：用户被禁用，
+        // 或者他的档位不存在。两种都该被挡住，而跳过在 wire 上等于无限额度（C16）——
+        // 从额度表里省略一个身份，节点会把它当成不受限。
+        let budget = match quotas.get(user_id) {
+            Some(quota) => {
+                pool::user_pool(*quota, used.get(user_id).copied().unwrap_or(U128Text::new(0)))
             }
-        }
-        // 不可更新的节点：该用户在那上面置零。
+            None => 0,
+        };
+        // 镜像：每个**本轮可更新**的节点都拿到全额剩余，不拆分。
+        // 拿不到新鲜快照的节点不参与正额度刷新，它上面的身份在下面被置零。
+        //
+        // 钳到 i64::MAX：wire 上 remaining_bytes 是非负 int64（C31）。
+        // 库层已经把档位额度限在这个范围内，这里是第二道，防的是将来
+        // 有人从别的路径塞进一个更大的池。
+        let mirrored = Quota::Limited(budget.min(i64::MAX as u64));
         for node_id in user_nodes {
-            let updatable_here =
-                nodes.iter().any(|n| n.node_id == **node_id && n.fresh_sequence.is_some());
-            if !updatable_here {
-                if let Some(entry) = per_node_user.get_mut(node_id) {
-                    entry.insert(*user_id, Quota::Limited(0));
-                }
+            let fresh = nodes.iter().any(|n| n.node_id == **node_id && n.fresh_sequence.is_some());
+            if let Some(entry) = per_node_user.get_mut(node_id) {
+                entry.insert(*user_id, if fresh { mirrored } else { Quota::Limited(0) });
             }
         }
     }

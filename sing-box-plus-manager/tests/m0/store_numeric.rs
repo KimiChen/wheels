@@ -209,8 +209,8 @@ async fn 跨u64聚合在u128里精确保存并排序正确() {
     // usage_cycle_totals 用 39 位文本存周期累计。
     let mut txn = fixture.store.begin_immediate().await.unwrap();
     sqlx::query(
-        "INSERT INTO users(login_name, display_name, role, status, created_at, updated_at) \
-         VALUES ('u1', 'U1', 'user', 'active', ?, ?)",
+        "INSERT INTO users(login_name, display_name, role, quota_group, status, created_at, updated_at) \
+         VALUES ('u1', 'U1', 'user', 'normal', 'active', ?, ?)",
     )
     .bind("2026-09-18T00:00:00Z")
     .bind("2026-09-18T00:00:00Z")

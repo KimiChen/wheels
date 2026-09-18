@@ -33,6 +33,7 @@ pub const EXPECTED_TABLES: &[&str] = &[
     "identity_routes",
     "node_runtimes",
     "nodes",
+    "quota_groups",
     "quota_requests",
     "quota_setting_audits",
     "quota_settings",
@@ -101,6 +102,44 @@ pub async fn initialize(conn: &mut SqliteConnection) -> Result<InitOutcome> {
             return Err(crate::error::Error::Codec(format!("建表 {name} 失败：{error}")));
         }
     }
+    if let Err(error) = seed_quota_groups(&mut *conn).await {
+        let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+        return Err(error);
+    }
     sqlx::query("COMMIT").execute(&mut *conn).await?;
     Ok(InitOutcome::Created)
+}
+
+/// 四个档位的初值（定案第三条）。**十进制 TB**，1 TB = 1 000 000 000 000 字节。
+///
+/// `(group_name, display_name, monthly_bytes, sort_order)`
+pub const SEED_QUOTA_GROUPS: &[(&str, &str, u64, i64)] = &[
+    ("normal", "普通用户", 1_000_000_000_000, 0),
+    ("advanced", "Advanced", 2_000_000_000_000, 1),
+    ("manage", "Manage", 5_000_000_000_000, 2),
+    ("admin", "Admin", 10_000_000_000_000, 3),
+];
+
+/// 在建库同一个事务里把四档写进去。
+///
+/// 放在建库事务内而不是留给首次启动：`users.quota_group` 是 NOT NULL 外键，
+/// 库一旦存在就必须有可指向的行，否则第一个建号事务会失败在一个
+/// 与它自己无关的地方。四档是被明确批准的闭集，不是运行期配置。
+/// 之后改额度一律走 `quota::settings` 的审计路径，那里会推进 revision 并生成下发任务。
+async fn seed_quota_groups(conn: &mut SqliteConnection) -> Result<()> {
+    let now = crate::ledger::bucket::to_rfc3339(time::OffsetDateTime::now_utc());
+    for (name, display, bytes, order) in SEED_QUOTA_GROUPS {
+        sqlx::query(
+            "INSERT INTO quota_groups(group_name, display_name, monthly_bytes, sort_order, \
+             updated_by, updated_at) VALUES (?, ?, ?, ?, 'schema', ?)",
+        )
+        .bind(name)
+        .bind(display)
+        .bind(crate::store::codec::U64Text::new(*bytes).encode())
+        .bind(order)
+        .bind(&now)
+        .execute(&mut *conn)
+        .await?;
+    }
+    Ok(())
 }

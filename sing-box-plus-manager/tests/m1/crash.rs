@@ -46,7 +46,6 @@ interval_secs = 60
 min_interval_secs = 10
 snapshot_max_age_secs = 120
 [quota]
-monthly_bytes = "322122547200"
 display_timezone = "Asia/Shanghai"
 "#,
             db.display()

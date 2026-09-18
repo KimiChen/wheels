@@ -26,13 +26,42 @@ CREATE TABLE nodes (
 -- 需要「配置声明的入口」与「实际观察到的入口」对账时再加回来，那时它要连同
 -- 写入路径和对账测试一起加。
 
+-- 四个额度档位（定案第三条）。额度挂在**组**上而不是用户上：
+-- 改一档是一次写入而不是 N 次，用户换档也不复制字节数，
+-- 于是「两个地方存着同一个额度」这种状态不存在。
+--
+-- 闭集 CHECK 沿用本库口味：加第五档是一次显式的 schema 变更（D22 下即重建库），
+-- 不是在代码里加一个 if。当前恰好四档是被明确批准的。
+CREATE TABLE quota_groups (
+    group_name   TEXT PRIMARY KEY NOT NULL
+        CHECK(group_name IN ('normal', 'advanced', 'manage', 'admin')),
+    display_name TEXT NOT NULL,
+    -- 月度额度，u64 字节（C3 的 20 位定宽文本）。**十进制 TB**：
+    -- 1 TB = 1 000 000 000 000，不是 2^40。
+    --
+    -- 上界钉在 i64::MAX 而不是 u64::MAX：wire 上 remaining_bytes 是非负 int64（C31），
+    -- 超界值在分配那一层是**静默截断**。把上界写进库，等于把一次静默截断
+    -- 换成一次写入失败。
+    monthly_bytes TEXT COLLATE BINARY NOT NULL
+        CHECK(typeof(monthly_bytes) = 'text' AND length(monthly_bytes) = 20
+              AND monthly_bytes NOT GLOB '*[^0-9]*'
+              AND monthly_bytes <= '09223372036854775807'),
+    sort_order   INTEGER NOT NULL UNIQUE CHECK(sort_order >= 0),
+    updated_by   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL
+) STRICT;
+
 -- 业务用户。角色收敛为两档（D19），管理员即全权。
--- **没有 per-user 额度字段**——额度是全局设置（D21）。
+--
+-- 用户身上**没有额度字段**，只有一个组名：额度在 quota_groups 上。
+-- NOT NULL + 外键：每个用户都有确定的档位，不存在「NULL 表示默认」这种二义；
+-- 默认值在建号事务里从 quota_settings.default_group 取成具体值。
 CREATE TABLE users (
     user_id     INTEGER PRIMARY KEY AUTOINCREMENT,
     login_name  TEXT NOT NULL UNIQUE,
     display_name TEXT NOT NULL,
     role        TEXT NOT NULL CHECK(role IN ('admin', 'user')),
+    quota_group TEXT NOT NULL REFERENCES quota_groups(group_name),
     status      TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'disabled')),
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL

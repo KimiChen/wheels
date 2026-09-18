@@ -23,9 +23,10 @@ snapshot_max_age_secs = 120
 max_clock_skew_secs = 120
 
 [quota]
-# 额度与周期都是全局的（D21）：所有人同一个月度额度、同一个自然月周期。
-# 没有 per-user 套餐，因此这里只有一个值。改额度对本周期立即生效。
-monthly_bytes = "322122547200"   # 300 GiB
+# 额度**不在这里**：分档之后（定案第三条）它挂在 quota_groups 上，建库时按
+# 普通 1 TB / Advanced 2 TB / Manage 5 TB / Admin 10 TB（十进制）种下，
+# 之后一律走 PUT /api/v1/settings/quota 的审计路径修改——那条路径会推进
+# revision 并生成逐节点下发任务。配置里再留一个额度字段就是设了也不生效。
 # 日桶按这个展示时区的日历日计算（data-model.md §6）。
 # 改展示时区必须完整重建日缓存。
 display_timezone = "Asia/Shanghai"

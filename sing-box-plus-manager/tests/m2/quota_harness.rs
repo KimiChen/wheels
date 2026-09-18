@@ -61,6 +61,8 @@ impl Stack {
         let storage = StorageConfig { path: dir.path().join("pm.db"), busy_timeout_ms: 5_000 };
         let store = Store::open(&storage).await.unwrap();
         store.init_schema().await.unwrap();
+        // 单行设置由启动流程建出来（apply 只负责改，不负责建），测试装置照做。
+        proxy_manager::quota::settings::ensure_initialized(&store, "+08:00").await.unwrap();
 
         let mut txn = store.begin_immediate().await.unwrap();
         sqlx::query(
@@ -129,8 +131,8 @@ impl Stack {
         for (index, identity) in identities.iter().enumerate() {
             let login = format!("u{index}");
             let row = sqlx::query(
-                "INSERT INTO users(login_name, display_name, role, status, created_at, updated_at) \
-                 VALUES (?, ?, 'user', 'active', ?, ?) RETURNING user_id",
+                "INSERT INTO users(login_name, display_name, role, quota_group, status, created_at, updated_at) \
+                 VALUES (?, ?, 'user', 'normal', 'active', ?, ?) RETURNING user_id",
             )
             .bind(&login)
             .bind(&login)

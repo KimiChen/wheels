@@ -65,17 +65,18 @@ fn default_max_clock_skew_secs() -> i64 {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct QuotaConfig {
-    /// 全局月度额度，十进制字符串的字节数（D21 + C3）。
-    pub monthly_bytes: String,
     /// 日桶所用的展示时区（data-model.md §6）。改它必须完整重建日缓存。
+    ///
+    /// 计费周期是 UTC+8（`CYCLE_RULE_VERSION = 2`），这里要与之对齐，
+    /// 否则某一天的用量会显示进「错误的月份」。
     pub display_timezone: String,
 }
 
-impl QuotaConfig {
-    pub fn monthly_bytes(&self) -> Result<u64> {
-        parse_u64_bytes("quota.monthly_bytes", &self.monthly_bytes)
-    }
-}
+// 这里曾经有一个 `monthly_bytes`：D21 时代全体共用一个月度额度，配一个值。
+// 分档之后（定案第三条）额度挂在 quota_groups 上，建库时按四档种下、
+// 之后一律走 quota::settings 的审计路径修改，那条路径会推进 revision
+// 并生成逐节点下发任务。配置里再留一个额度字段就是**设了也不生效**——
+// 一个静默无操作的配置项比没有这个配置项危险。
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -136,9 +137,6 @@ impl ServerConfig {
                 "collect.snapshot_max_age_secs 必须为正：它是正额度请求的新鲜度门禁",
             ));
         }
-        // 额度在这里就解析一次，让一个写错的字节量在**启动时**失败，
-        // 而不是等到第一次下发时才炸在配额链路上。
-        self.quota.monthly_bytes()?;
         if self.quota.display_timezone.is_empty() {
             return Err(Error::invalid_config(
                 "§6",
