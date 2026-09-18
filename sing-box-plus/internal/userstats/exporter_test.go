@@ -1,9 +1,11 @@
 package userstats
 
 import (
+	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -187,5 +189,86 @@ func TestExporterSlowClientTimesOut(t *testing.T) {
 	// 单个超时请求只影响该连接。
 	if snapshot := fetchSnapshot(t, handle.sockPath); snapshot.Sequence == 0 {
 		t.Fatal("超时请求不应影响后续采集")
+	}
+}
+
+// bareServer 起一个不依赖 Box 的 udsServer，handler 由调用方给定。
+// 不走 startServer 是为了让这些用例能进无抑制 -race 轮。
+func bareServer(t *testing.T, limits serverLimits, handler func(*request) (int, []byte)) string {
+	t.Helper()
+	path := sockPath(shortTempDir(t), "bare.sock")
+	listener, err := listenUnix(path, 0o600, "")
+	if err != nil {
+		t.Fatalf("绑定 socket 失败：%v", err)
+	}
+	server := newUDSServer("bare", listener, limits, handler, nil, func(error) {})
+	server.Serve()
+	t.Cleanup(func() { _ = server.Close() })
+	return path
+}
+
+func roundTrip(t *testing.T, path string, raw string) string {
+	t.Helper()
+	conn, err := net.DialTimeout("unix", path, 3*time.Second)
+	if err != nil {
+		t.Fatalf("连接失败：%v", err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+	if _, err = conn.Write([]byte(raw)); err != nil {
+		t.Fatalf("写请求失败：%v", err)
+	}
+	response, err := io.ReadAll(conn)
+	if err != nil {
+		t.Fatalf("读响应失败：%v", err)
+	}
+	return string(response)
+}
+
+// TestRequestSizeLimitCoversHeadersOnTheBodylessSocket 覆盖统计口的 max_request_bytes。
+//
+// 该选项此前对无请求体的那一路完全失效：readRequest 在校验体积之前就提前返回了，
+// 于是实际上界是「请求行 + 最多 65 行头部」，约为配置值的八倍。而它就写在随仓库
+// 发布的示例配置里，看上去是生效的。
+func TestRequestSizeLimitCoversHeadersOnTheBodylessSocket(t *testing.T) {
+	limits := serverLimits{
+		readTimeout: 3 * time.Second, writeTimeout: 3 * time.Second,
+		maxConcurrency: 4, maxRequestBytes: 4096, allowBody: false,
+	}
+	path := bareServer(t, limits, func(*request) (int, []byte) {
+		return statusOK, []byte(`{"ok":true}`)
+	})
+
+	var builder strings.Builder
+	builder.WriteString("GET /healthz HTTP/1.1\r\n")
+	for index := 0; index < 8; index++ {
+		builder.WriteString("X-Pad-" + strconv.Itoa(index) + ": " + strings.Repeat("a", 1000) + "\r\n")
+	}
+	builder.WriteString("\r\n")
+	if got := roundTrip(t, path, builder.String()); !strings.Contains(got, "413") {
+		t.Fatalf("累计头部超过 max_request_bytes 应返回 413，实际：%q", firstLine(got))
+	}
+
+	small := "GET /healthz HTTP/1.1\r\nX-Pad: ok\r\n\r\n"
+	if got := roundTrip(t, path, small); !strings.Contains(got, "200") {
+		t.Fatalf("正常请求应返回 200，实际：%q", firstLine(got))
+	}
+}
+
+// TestServiceUnavailableHasItsReasonPhrase 盯的是状态行而不只是状态码。
+//
+// 503 此前不在 statusText 闭集里，writeResponse 会落到默认分支写出
+// 「HTTP/1.1 503 Unknown」——偏偏这是运维最常 grep 的那个码。
+func TestServiceUnavailableHasItsReasonPhrase(t *testing.T) {
+	limits := serverLimits{
+		readTimeout: 3 * time.Second, writeTimeout: 3 * time.Second,
+		maxConcurrency: 4, maxRequestBytes: 4096, allowBody: false,
+	}
+	path := bareServer(t, limits, func(*request) (int, []byte) {
+		return statusServiceUnavailable, []byte(`{"status":"unhealthy"}`)
+	})
+	got := firstLine(roundTrip(t, path, "GET /healthz HTTP/1.1\r\n\r\n"))
+	if got != "HTTP/1.1 503 Service Unavailable" {
+		t.Fatalf("状态行应带正确的原因短语，实际：%q", got)
 	}
 }

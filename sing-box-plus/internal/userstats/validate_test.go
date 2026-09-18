@@ -238,6 +238,13 @@ func TestValidateRejections(t *testing.T) {
 			"需要 socket_mode=0660",
 		},
 		{
+			// deny 配默认的 stale_after=0 会让陈旧判定永不触发：fail-closed 被静默翻成
+			// fail-open。不给默认值而是硬失败，否则生效策略在配置里看不见。
+			"stale_action=deny 但缺 stale_after",
+			configWith(vlessOK, statsService(`"quota_control":{"listen_path":"/tmp/q.sock","stale_action":"deny"}`), ""),
+			"必须同时设置 stale_after",
+		},
+		{
 			"socket_group 指向不存在的组",
 			configWith(vlessOK, statsService(`"socket_mode":"0660","socket_group":"sbp-no-such-group"`), ""),
 			"socket_group 无法解析",
