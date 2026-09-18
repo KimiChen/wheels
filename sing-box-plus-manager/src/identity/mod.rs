@@ -10,6 +10,16 @@
 //!
 //! 槽位行不是在这里创建的：**结算发现，这里只移动状态**（见 `ledger::settle`）。
 //! 因此注册表的内容永远来自节点实际上报的东西。
+//!
+//! # 认领的目标节点是「在册的」，不是「启用了配额的」
+//!
+//! 这里曾经要求 `quota_enabled = 1`。那是错的耦合：认领定的是**归属**，
+//! 而归属服务于**计费**——账本给谁记账，跟这个节点推不推配额没有关系。
+//! 一个只计量、不限额的节点上，字节照样要有主人。
+//!
+//! 现实里的后果也很直接：本轮四台节点刻意不武装配额（原型控制器仍是唯一的
+//! 配额写入方），于是 `quota_enabled` 全是 0——按旧口径，**没有任何人能被开通**，
+//! 而那跟「要不要限额」根本是两件事。
 
 use sqlx::Row;
 use time::OffsetDateTime;
@@ -26,7 +36,8 @@ const ZERO_U64: &str = "00000000000000000000";
 pub struct Claim {
     pub user_id: i64,
     pub identity_name: String,
-    /// 认领落在哪些节点上。镜像分配下这是**全部**启用配额的节点。
+    /// 认领落在哪些节点上。**全部在册节点**——同一个身份名在每台上是同一份
+    /// 凭据，缺一台，用户的订阅里就会有一条连不上的入口。
     pub nodes: Vec<String>,
     /// 是否是本次新认领。重复调用返回 `false` 且给回同一个身份。
     pub newly_claimed: bool,
@@ -44,13 +55,12 @@ pub async fn claim_for_user(store: &Store, user_id: i64, actor: &str) -> Result<
     let now = bucket::to_rfc3339(OffsetDateTime::now_utc());
     let mut txn = store.begin_immediate().await?;
 
-    let targets: Vec<String> =
-        sqlx::query("SELECT node_id FROM nodes WHERE status = 'active' AND quota_enabled = 1")
-            .fetch_all(txn.conn())
-            .await?
-            .into_iter()
-            .map(|row| row.get(0))
-            .collect();
+    let targets: Vec<String> = sqlx::query("SELECT node_id FROM nodes WHERE status = 'active'")
+        .fetch_all(txn.conn())
+        .await?
+        .into_iter()
+        .map(|row| row.get(0))
+        .collect();
     if targets.is_empty() {
         return Err(Error::Quota("没有启用配额的在用节点，认领无处落地".into()));
     }
@@ -84,7 +94,7 @@ pub async fn claim_for_user(store: &Store, user_id: i64, actor: &str) -> Result<
             SET user_id = ?, state = 'claimed', claimed_at = ?, \
                 claim_fence_runtime_id = ?, claim_fence_sequence = ? \
           WHERE identity_name = ? AND state = 'free' \
-            AND node_id IN (SELECT node_id FROM nodes WHERE status = 'active' AND quota_enabled = 1)",
+            AND node_id IN (SELECT node_id FROM nodes WHERE status = 'active')",
     )
     .bind(user_id)
     .bind(&now)
@@ -154,7 +164,7 @@ async fn pick_free_slot(
         "SELECT r.identity_name \
            FROM identity_routes r \
            JOIN nodes n ON n.node_id = r.node_id \
-                       AND n.status = 'active' AND n.quota_enabled = 1 \
+                       AND n.status = 'active' \
           GROUP BY r.identity_name \
          HAVING count(*) = ? \
             AND sum(CASE WHEN r.state = 'free' THEN 1 ELSE 0 END) = ? \
@@ -198,9 +208,16 @@ async fn pick_free_slot(
 
 /// 退役一个身份。**永久**：它不会回到空闲池。
 ///
-/// 归属**不解绑**。撤权是额度置零而不是删除凭据（定案第二条），
-/// 退役后到达的字节确实是那个人产生的；置空 user_id 会把真实尾账
-/// 变成无主字节，并且让那个人的周期累计悄悄停止增长。
+/// 两种用法，形状相同：
+///
+/// * **用过之后退役**——归属**不解绑**。撤权是额度置零而不是删除凭据
+///   （定案第二条），退役后到达的字节确实是那个人产生的；置空 user_id
+///   会把真实尾账变成无主字节，并让那个人的周期累计悄悄停止增长。
+/// * **从未认领就退役**——把一个名字永久挡在池子外面。部署侧的测试身份
+///   （`deploy-test`）、原型控制器的测试账号（`user0001`）都在节点的 inbound 里，
+///   但它们的凭据在别处流通，发给真人等于两个人共用一份凭据。
+///   在这条路存在之前，排除它们只能靠「计数非零」这个**巧合**，
+///   而一次进程重启就会让计数归零，它们悄悄变回可领取。
 pub async fn retire(
     store: &Store,
     identity_name: &str,
@@ -228,13 +245,10 @@ pub async fn retire(
     }
 
     for (route_id, user_id) in &routes {
-        // free 槽位没有归属，退役它需要先给一个占位归属才能满足
-        // 「state <> 'free' 必须有 user_id」的 CHECK——所以只退役已认领的。
-        if user_id.is_none() {
-            return Err(Error::Quota(format!(
-                "槽位 {identity_name} 尚未认领，无需退役；直接退役会让它既不可用也不可认领"
-            )));
-        }
+        // 从未认领的槽位**也能退役**，而且这正是主要用途之一：
+        // 把一个「永远不该发给人」的名字永久挡在池子外面。
+        // schema 的 CHECK 允许 `retired` 配 NULL 归属——user_id 与 claimed_at
+        // 同进同出，所以「用过之后退役」与「从未认领就退役」两种形状都自洽。
         sqlx::query(
             "UPDATE identity_routes SET state = 'retired', retired_at = ? WHERE route_id = ?",
         )
@@ -274,7 +288,7 @@ pub async fn free_slots(store: &Store) -> Result<Vec<(String, i64)>> {
     let rows = sqlx::query(
         "SELECT n.node_id, count(r.route_id) FROM nodes n \
            LEFT JOIN identity_routes r ON r.node_id = n.node_id AND r.state = 'free' \
-          WHERE n.status = 'active' AND n.quota_enabled = 1 \
+          WHERE n.status = 'active' \
           GROUP BY n.node_id ORDER BY n.node_id",
     )
     .fetch_all(store.readers())

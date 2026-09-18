@@ -317,14 +317,55 @@ async fn 退役槽位拿零额度且归属被抹掉() {
     assert_eq!(entry.2, Quota::Limited(0));
 }
 
-/// 尚未认领的槽位不能退役——那会让它既不可用也不可认领，是一个纯粹的坑。
+/// **尚未认领的槽位也能退役**，而且这是主要用途之一。
+///
+/// 这条原先断言的是相反的行为，理由是「那会让它既不可用也不可认领，
+/// 是一个纯粹的坑」。那个判断错了：**「既不可用也不可认领」正是想要的结果**。
+///
+/// 部署侧的测试身份（`deploy-test`）、原型控制器的测试账号（`user0001`）
+/// 都在节点的 inbound 里，但它们的凭据在别处流通——发给真人等于两个人
+/// 共用一份凭据。在这条路存在之前，排除它们只能靠「计数非零」这个**巧合**，
+/// 而一次进程重启就会让计数归零，它们悄悄变回可领取。
 #[tokio::test]
-async fn 未认领的槽位不能退役() {
+async fn 未认领的槽位也能永久退出池子() {
+    use sqlx::Row;
     let stack = Stack::new().await;
     stack.settle_once().await;
     let name = stack.identities().await[0].name.clone();
-    let error = identity::retire(&stack.store, &name, "kimi", "测试").await.unwrap_err();
-    assert!(error.to_string().contains("尚未认领"), "实际：{error}");
+    let before = identity::free_slots(&stack.store).await.unwrap();
+
+    let count = identity::retire(&stack.store, &name, "kimi", "凭据在别处流通，不得发给真人")
+        .await
+        .expect("从未认领的槽位也该退得掉");
+    assert!(count >= 1);
+
+    // 它真的从空闲池里少了一个，而不是只改了个状态字段。
+    let after = identity::free_slots(&stack.store).await.unwrap();
+    for ((node, before_n), (_, after_n)) in before.iter().zip(&after) {
+        assert_eq!(*after_n, before_n - 1, "{node} 的空闲槽位应当少一个");
+    }
+
+    // 退役行没有归属，且 `claimed_at` 与 `user_id` 同进同出（schema 的 CHECK）。
+    let (user_id, claimed_at): (Option<i64>, Option<String>) = sqlx::query(
+        "SELECT user_id, claimed_at FROM identity_routes \
+          WHERE identity_name = ? AND state = 'retired' LIMIT 1",
+    )
+    .bind(&name)
+    .fetch_one(stack.store.readers())
+    .await
+    .map(|row| (row.get(0), row.get(1)))
+    .unwrap();
+    assert!(user_id.is_none() && claimed_at.is_none(), "从未认领的退役行两者都该为空");
+
+    // **反向**：退役不是「删掉」——行还在，只是永远不会再被挑中。
+    let still_there: i64 =
+        sqlx::query("SELECT count(*) FROM identity_routes WHERE identity_name = ?")
+            .bind(&name)
+            .fetch_one(stack.store.readers())
+            .await
+            .unwrap()
+            .get(0);
+    assert!(still_there > 0, "退役不删行：节点上那个身份还在，账本还要靠它收尾");
 }
 
 // ============ 审计 ============

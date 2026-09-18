@@ -81,6 +81,10 @@ enum UserCommand {
     },
     /// 给一个用户开通身份：从 D11 的账号池里认领一个，落到全部启用配额的节点。
     ///
+    /// **常规路径不需要它**——首次 SSO 登录会自动领取。这条命令是补救用的：
+    /// 登录那次因为池空、节点未就绪或还没结算出槽位而没领到时，
+    /// 处理完原因之后用它补上。
+    ///
     /// **幂等**：已经有的直接返回，不再消耗一个名额。
     Grant {
         #[arg(long, default_value = "/etc/proxy-manager")]
@@ -91,6 +95,26 @@ enum UserCommand {
         /// 操作者。必填并落进审计——这是一次影响他人的操作。
         #[arg(long)]
         actor: String,
+    },
+    /// 永久退役一个身份名：它在全部节点上的槽位一并置为 retired。
+    ///
+    /// **退役即永久**——复用一个槽位前必须更换 uPSK，而那要改节点配置并 reload。
+    ///
+    /// 两种用法：用过之后退役（归属保留，尾账仍算在原主头上），
+    /// 或者把一个**从未认领**的名字永久挡在池子外面——部署侧的测试身份、
+    /// 原型控制器的测试账号都属于后者：它们在节点的 inbound 里，
+    /// 但凭据在别处流通，发给真人等于两个人共用一份。
+    Retire {
+        #[arg(long, default_value = "/etc/proxy-manager")]
+        config_dir: PathBuf,
+        /// 身份名，例如 deploy-test。
+        #[arg(long)]
+        identity: String,
+        #[arg(long)]
+        actor: String,
+        /// 为什么退役。落进审计。
+        #[arg(long)]
+        reason: String,
     },
     /// 把一个用户换到另一档额度。
     ///
@@ -826,6 +850,13 @@ async fn user_command(command: UserCommand) -> anyhow::Result<ExitCode> {
                 println!("{account} 早已开通：身份 {}（本次未消耗名额）", claim.identity_name);
             }
             println!("覆盖节点：{}", claim.nodes.join(", "));
+            Ok(ExitCode::SUCCESS)
+        }
+
+        UserCommand::Retire { config_dir, identity, actor, reason } => {
+            let (store, _) = open_with_roster(&config_dir).await?;
+            let count = proxy_manager::identity::retire(&store, &identity, &actor, &reason).await?;
+            println!("已退役 {identity}：{count} 个槽位（全部节点）。**不可复用。**");
             Ok(ExitCode::SUCCESS)
         }
 

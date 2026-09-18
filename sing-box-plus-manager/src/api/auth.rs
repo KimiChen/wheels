@@ -254,11 +254,24 @@ async fn complete(
             "名单里的档位与库里不一致：请跑 proxy-manager sso reconcile"
         );
     }
-    tracing::info!(
-        login_name = %logged_in.login_name,
-        role = logged_in.role.as_str(),
-        "SSO 登录成功"
-    );
+    match &logged_in.claim {
+        Some(claim) if claim.newly_claimed => tracing::info!(
+            login_name = %logged_in.login_name, role = logged_in.role.as_str(),
+            identity = %claim.identity_name, nodes = claim.nodes.len(),
+            "SSO 登录成功，并领到了一个计费槽位"
+        ),
+        Some(claim) => tracing::info!(
+            login_name = %logged_in.login_name, role = logged_in.role.as_str(),
+            identity = %claim.identity_name,
+            "SSO 登录成功"
+        ),
+        // 已经在 complete_login 里按 P2 报过了，这里只把「这次登录没身份」这件事
+        // 记在同一条登录日志的位置上，免得看日志的人要把两处对起来。
+        None => tracing::warn!(
+            login_name = %logged_in.login_name, role = logged_in.role.as_str(),
+            "SSO 登录成功，但**没有**可用的计费槽位"
+        ),
+    }
     Ok(session_cookies(&logged_in.session))
 }
 

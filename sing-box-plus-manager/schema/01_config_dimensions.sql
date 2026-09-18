@@ -138,8 +138,21 @@ CREATE TABLE identity_routes (
     -- 不同入口的同名身份不合并：唯一键必须带 inbound_tag。
     UNIQUE(node_id, inbound_tag, identity_name),
     -- state 与 user_id 必须自洽，否则「无主的 claimed」能被写进来。
-    CHECK((state = 'free'  AND user_id IS NULL     AND claimed_at IS NULL)
-       OR (state <> 'free' AND user_id IS NOT NULL AND claimed_at IS NOT NULL)),
+    -- 三种状态各自的自洽形状。
+    --
+    -- `retired` 有两种来历，都要允许：
+    --   * 用过之后退役——保留 user_id 与 claimed_at（退役**不解绑**归属：
+    --     撤权是额度置零而非删除凭据，退役后到达的字节确实是那个人产生的）；
+    --   * 从未认领就退役——两者都为 NULL。这一种是给「这个名字永远不该
+    --     发给任何人」用的：部署侧的测试身份（`deploy-test`）、原型控制器的
+    --     测试账号（`user0001`）都在节点的 inbound 里，但它们的凭据在别处流通，
+    --     发给真人等于让两个人共用一份凭据。
+    --
+    -- 没有后一种的时候，排除它们只能靠「计数非零」这个**巧合**——
+    -- 而一次进程重启就会让计数归零，于是它们悄悄变回可领取。
+    CHECK((state = 'free'    AND user_id IS NULL     AND claimed_at IS NULL)
+       OR (state = 'claimed' AND user_id IS NOT NULL AND claimed_at IS NOT NULL)
+       OR (state = 'retired' AND (user_id IS NULL) = (claimed_at IS NULL))),
     CHECK((state = 'retired') = (retired_at IS NOT NULL))
 ) STRICT;
 
