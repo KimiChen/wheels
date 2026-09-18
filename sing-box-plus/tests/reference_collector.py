@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import sys
 import time
@@ -30,6 +31,46 @@ from settlement_model import (  # noqa: E402
 
 LEDGER_FILE = "ledger.jsonl"
 STATE_FILE = "state.json"
+
+# not_accepted 的四种成因。判据必须按成因分桶：「未知 runtime」与「序号未前进」
+# 是两条彼此独立的判据，数进同一个计数等于两条都没测。
+#
+# 键是 settlement_model 给出的 reason 的稳定前缀。把分类放在这里、而不是让
+# settlement_model 多返回一个字段，是因为那份文件同时锁定安装在控制器与四个节点上，
+# 为一个只有长跑报告会读的字段去动那五份拷贝不划算。
+# 代价是本表与 reason 的文案耦合——由 test_every_rejection_reason_maps_to_a_code
+# 钉住：改了文案而不改这里，那个测试会红。
+REJECTION_CODES = (
+    ("started_at_unix_ms 变化", "unknown_runtime"),
+    ("health 有位为真", "unhealthy"),
+    ("sequence ", "stale_sequence"),  # 理由里嵌了序号，只能前缀匹配
+    ("批次已入账", "duplicate_batch"),
+)
+
+
+def rejection_code(reason: str) -> str:
+    """把 not_accepted 的文字理由归入一个稳定的桶名。
+
+    认不出来的一律归入 unclassified，**且 unclassified 计入失败**——
+    「出现了没见过的拒绝理由」与「有问题」在判据里必须同义。否则新增一条拒绝路径
+    会让判据悄悄地少测一项而依然全绿，这正是旧报告的病根。
+    """
+    for prefix, code in REJECTION_CODES:
+        if reason.startswith(prefix):
+            return code
+    return "unclassified"
+
+
+def tripped_health(snapshot: dict) -> list[str]:
+    """记下入账那一刻为真的 health 位。
+
+    只有 audit_dropped 会出现在这里：health_ok 只闸断三个**计费**位，
+    审计丢记录按设计不停止计费（settlement_model.py:191）。所以
+    「有没有对不健康的快照计过费」不是一句结构保证就能答完的——
+    三个计费位是结构保证，audit_dropped 不是，它必须被观测。
+    旧账本不记这一项，于是那条判据只能写成字面量 0。
+    """
+    return sorted(key for key, value in snapshot["health"].items() if value)
 
 
 class Ledger:
@@ -212,6 +253,7 @@ def collect_once(
             {
                 "ts": now,
                 "result": "not_accepted",
+                "code": rejection_code(settlement.reason),
                 "detail": settlement.reason,
                 "sequence": snapshot["sequence"],
             }
@@ -243,6 +285,7 @@ def collect_once(
             "node_id": snapshot["node_id"],
             "runtime_id": snapshot["runtime_id"],
             "first_snapshot": settlement.first_snapshot,
+            "health": tripped_health(snapshot),
             "total": total,
             "entries": entries,
         }
@@ -253,41 +296,138 @@ def collect_once(
     return 0
 
 
-def report(ledger: Ledger) -> int:
-    """输出长跑的四项判据（README §7 里程碑 5）。"""
-    counters = {
-        "accepted": 0,
-        "transport_error": 0,
-        "schema_rejected": 0,
-        "failed_closed": 0,
-        "not_accepted": 0,
-        "retryable": 0,
-        "rejected": 0,
-    }
+def moment(text: str) -> int:
+    """把命令行上的时刻解析成毫秒时间戳。
+
+    不带时区的写法一律按**本机本地时区**解释：账本里的 ts 是 time.time()，
+    而报告是人按当地钟点划窗口的，这里不做转换才是会错的那一种。
+    """
+    if text.isdigit():
+        return int(text)
+    try:
+        parsed = datetime.datetime.fromisoformat(text)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(f"无法解析时刻 {text!r}：{error}") from error
+    if parsed.tzinfo is None:
+        parsed = parsed.astimezone()
+    return int(parsed.timestamp() * 1000)
+
+
+def report(ledger: Ledger, since: int | None = None, until: int | None = None) -> int:
+    """输出长跑判据（README §7 里程碑 5）。
+
+    2026-09 之前这个函数的四项判据有三项是假的，而且三项的假法各不相同：
+
+    * unknown_runtime 数的是 schema_rejected。未知 runtime 走的是 not_accepted，
+      永远进不了那个桶——这一项恒为 0，与实际发生了多少次无关。
+    * duplicate_sequence 只从**已入账**的行里推导。而 ingest 早就拒绝了不前进的
+      sequence，于是能进入推导的行按定义不可能重号——同样恒为 0。
+    * unhealthy_accepted 是个字面量 0，一次都没查过。
+
+    退出码只看这三项，所以 transport_error 与 not_accepted 再多也返回 0，
+    连一份空账本都返回 0。这里逐条改掉：按成因分桶、把传输与拒绝计入失败、
+    并要求 accepted > 0（否则「七天全绿」与「七天一次没采到」仍然同形）。
+
+    since/until 是毫秒时间戳，闭区间，用于对已归档的账本按窗口重算。
+    """
+    counters: dict[str, int] = {}
+    codes: dict[str, int] = {}
     sequences: dict[str, set[int]] = {}
     duplicate_sequences = 0
+    billing_unhealthy = 0
+    audit_dropped = 0
+    health_not_recorded = 0
+    rows = 0
+    first_ts: int | None = None
+    last_ts: int | None = None
     if ledger.path.is_file():
         for line in ledger.path.read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
             record = json.loads(line)
+            ts = record.get("ts")
+            if since is not None and (ts is None or ts < since):
+                continue
+            if until is not None and (ts is None or ts > until):
+                continue
+            rows += 1
+            if ts is not None:
+                first_ts = ts if first_ts is None else min(first_ts, ts)
+                last_ts = ts if last_ts is None else max(last_ts, ts)
             result = record.get("result", "")
             counters[result] = counters.get(result, 0) + 1
-            if result == "accepted":
+            if result == "not_accepted":
+                # 新账本自带 code；2026-09 之前的账本只有中文 detail，回推同一张表。
+                # 两条路径必须落到同一组桶名，否则「重算历史」与「监控当期」
+                # 就不是同一个判据。
+                code = record.get("code") or rejection_code(record.get("detail", ""))
+                codes[code] = codes.get(code, 0) + 1
+            elif result == "accepted":
                 bucket = sequences.setdefault(record["runtime_id"], set())
                 if record["sequence"] in bucket:
                     duplicate_sequences += 1
                 bucket.add(record["sequence"])
+                health = record.get("health")
+                if health is None:
+                    health_not_recorded += 1
+                else:
+                    if "audit_dropped" in health:
+                        audit_dropped += 1
+                    if [key for key in health if key != "audit_dropped"]:
+                        billing_unhealthy += 1
+
     verdict = {
-        "negative_delta": counters["failed_closed"],
-        "unknown_runtime": counters["schema_rejected"],
-        "duplicate_sequence": duplicate_sequences,
-        "unhealthy_accepted": 0,
-        "accepted": counters["accepted"],
+        # —— 四项判据 ——
+        "negative_delta": counters.get("failed_closed", 0),
+        "unknown_runtime": codes.get("unknown_runtime", 0),
+        # 两个来源都算：not_accepted 里被挡下的，以及万一真有两行已入账撞号的。
+        # 后者若非零说明 ingest 的互斥出了问题，比前者严重得多。
+        "duplicate_sequence": codes.get("stale_sequence", 0) + duplicate_sequences,
+        "billing_unhealthy_accepted": billing_unhealthy,
+        # —— 判据之外，但必须与判据一起看 ——
+        "unhealthy_rejected": codes.get("unhealthy", 0),
+        # 按设计允许：审计丢记录不停止计费，但它是证据链缺口，要看得见。
+        "audit_dropped_accepted": audit_dropped,
+        "health_not_recorded": health_not_recorded,
+        "unclassified_rejection": codes.get("unclassified", 0),
+        "duplicate_batch": codes.get("duplicate_batch", 0),
+        "accepted": counters.get("accepted", 0),
         "runtimes": len(sequences),
     }
-    print(json.dumps({"counters": counters, "verdict": verdict}, ensure_ascii=False, indent=2))
-    failing = verdict["negative_delta"] or verdict["duplicate_sequence"] or verdict["unhealthy_accepted"]
+
+    # 逐条列出不合格项，而不是只给一个退出码：一个说不出自己为什么红的判据，
+    # 下一次也就只会被人按「大概是环境问题」处理掉。
+    checks = (
+        ("negative_delta", verdict["negative_delta"]),
+        ("unknown_runtime", verdict["unknown_runtime"]),
+        ("duplicate_sequence", verdict["duplicate_sequence"]),
+        ("billing_unhealthy_accepted", verdict["billing_unhealthy_accepted"]),
+        ("unhealthy_rejected", verdict["unhealthy_rejected"]),
+        ("unclassified_rejection", verdict["unclassified_rejection"]),
+        ("transport_error", counters.get("transport_error", 0)),
+        ("quota_transport_error", counters.get("quota_transport_error", 0)),
+        ("quota_rejected", counters.get("quota_rejected", 0)),
+        ("schema_rejected", counters.get("schema_rejected", 0)),
+        ("rejected", counters.get("rejected", 0)),
+    )
+    failing = [name for name, value in checks if value]
+    if not verdict["accepted"]:
+        # 空账本、或窗口切歪了。旧实现对这两种情况都返回 0。
+        failing.append("no_accepted_rows")
+
+    print(
+        json.dumps(
+            {
+                "window": {"since": since, "until": until,
+                           "first_ts": first_ts, "last_ts": last_ts, "rows": rows},
+                "counters": counters,
+                "verdict": verdict,
+                "failing": failing,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
     return 1 if failing else 0
 
 
@@ -316,6 +456,12 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--timeout", type=float, default=10.0)
     parser.add_argument("--report", action="store_true", help="只输出长跑判据，不采集")
     parser.add_argument(
+        "--since",
+        type=moment,
+        help="只统计此刻之后的行：本地时间 YYYY-MM-DD[ HH:MM[:SS]]，或直接给毫秒时间戳",
+    )
+    parser.add_argument("--until", type=moment, help="只统计此刻之前的行（闭区间），格式同 --since")
+    parser.add_argument(
         "--reset-period",
         action="store_true",
         help="开一个新的计费周期：清零本周期已用，保留基线与 runtime 状态",
@@ -324,7 +470,7 @@ def main(argv: list[str]) -> int:
 
     ledger = Ledger(args.ledger)
     if args.report:
-        return report(ledger)
+        return report(ledger, since=args.since, until=args.until)
     if args.reset_period:
         # 只清「本周期已用」，**不动基线**：基线清掉的话，下一次采集会把快照里的
         # 全部历史累计值当成一次巨额增量重新入账。

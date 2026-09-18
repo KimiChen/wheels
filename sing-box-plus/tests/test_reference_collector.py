@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import socket
@@ -14,7 +16,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from fixtures import encode, snapshot  # noqa: E402
-from reference_collector import Ledger, QuotaPlan, collect_once, report  # noqa: E402
+from reference_collector import (  # noqa: E402
+    Ledger,
+    QuotaPlan,
+    collect_once,
+    rejection_code,
+    report,
+)
 from settlement_model import Collector, SnapshotRejected  # noqa: E402
 
 
@@ -371,6 +379,178 @@ class ReferenceCollectorTest(unittest.TestCase):
         ledger = Ledger(self.ledger_dir)
         collect_once(server.path, ledger, Collector(), 5.0)
         self.assertEqual(report(ledger), 0)
+
+
+class ReportVerdictTest(unittest.TestCase):
+    """长跑判据本身的测试。
+
+    这一组整体上是回归测试：2026-09 之前的 report() 让下面每一个用例都是绿的，
+    因为它的 unknown_runtime 读错了桶、duplicate_sequence 只看已入账的行、
+    unhealthy_accepted 是字面量 0，而退出码又不看 transport_error 与 not_accepted。
+    所以每个用例都只断言一件事——**这个故障必须让报告变红**。
+    """
+
+    def setUp(self) -> None:
+        self.ledger_dir = Path(tempfile.mkdtemp(prefix="sbp", dir="/tmp"))
+        self.ledger = Ledger(self.ledger_dir)
+
+    def _records(self) -> list[dict]:
+        path = self.ledger_dir / "ledger.jsonl"
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    def _verdict(self, **window) -> tuple[int, dict]:
+        stream = io.StringIO()
+        with contextlib.redirect_stdout(stream):
+            code = report(self.ledger, **window)
+        return code, json.loads(stream.getvalue())
+
+    def _serve(self, *snapshots) -> None:
+        """把若干份快照依次喂给同一个 collector。"""
+        server = SnapshotServer([http_ok(encode(value)) for value in snapshots])
+        self.addCleanup(server.close)
+        collector = Collector(first_snapshot="include")
+        for _ in snapshots:
+            collect_once(server.path, self.ledger, collector, 5.0)
+
+    def test_unknown_runtime_is_counted(self):
+        """started_at_unix_ms 变了却复用同一个 runtime_id。
+
+        旧实现从 schema_rejected 里数这一项，而这条路径写的是 not_accepted，
+        于是它恒为 0——判据永远测不到自己要测的东西。
+        """
+        self._serve(snapshot(sequence=1), snapshot(sequence=2, started_at_unix_ms=1787587200001))
+        self.assertEqual(self._records()[1]["code"], "unknown_runtime")
+        code, out = self._verdict()
+        self.assertEqual(out["verdict"]["unknown_runtime"], 1)
+        self.assertIn("unknown_runtime", out["failing"])
+        self.assertEqual(code, 1)
+
+    def test_stale_sequence_is_counted(self):
+        """同一个序号来第二次。
+
+        旧实现只从**已入账**的行里推重号，而 ingest 早已把不前进的序号挡在入账之外，
+        能进入推导的行按定义不可能重号——同样恒为 0。
+        """
+        self._serve(snapshot(sequence=7), snapshot(sequence=7))
+        self.assertEqual(self._records()[1]["code"], "stale_sequence")
+        code, out = self._verdict()
+        self.assertEqual(out["verdict"]["duplicate_sequence"], 1)
+        self.assertEqual(code, 1)
+
+    def test_billing_unhealthy_snapshot_is_rejected_and_visible(self):
+        """三个计费位之一为真：必须拒绝入账，且必须在报告里看得见。
+
+        拒绝本身由 health_ok 保证（这一条是结构性的），但「闸门触发过」
+        是运行期事实，旧报告一个字都没记。
+        """
+        sick = snapshot(sequence=2)
+        sick["health"]["counter_overflow"] = True
+        self._serve(snapshot(sequence=1), sick)
+        records = self._records()
+        self.assertEqual(records[1]["result"], "not_accepted")
+        self.assertEqual(records[1]["code"], "unhealthy")
+        code, out = self._verdict()
+        self.assertEqual(out["verdict"]["unhealthy_rejected"], 1)
+        # 闸门生效，所以判据本身仍是 0——两者要能分开读。
+        self.assertEqual(out["verdict"]["billing_unhealthy_accepted"], 0)
+        self.assertEqual(code, 1)
+
+    def test_audit_dropped_is_billed_but_recorded(self):
+        """audit_dropped 按设计不停止计费，但必须落进账本。
+
+        它是唯一能出现在已入账行上的 health 位（health_ok 只闸三个计费位），
+        所以「有没有对不健康的快照计过费」不能只靠一句结构保证作答。
+        """
+        noisy = snapshot(sequence=2)
+        noisy["health"]["audit_dropped"] = True
+        self._serve(snapshot(sequence=1), noisy)
+        records = self._records()
+        self.assertEqual(records[1]["result"], "accepted")
+        self.assertEqual(records[1]["health"], ["audit_dropped"])
+        self.assertEqual(records[0]["health"], [])
+        code, out = self._verdict()
+        self.assertEqual(out["verdict"]["audit_dropped_accepted"], 1)
+        self.assertEqual(out["verdict"]["billing_unhealthy_accepted"], 0)
+        self.assertEqual(out["verdict"]["health_not_recorded"], 0)
+        self.assertEqual(code, 0, "审计丢记录不该让长跑判据变红")
+
+    def test_transport_error_fails_the_report(self):
+        self.ledger.append({"ts": 1, "result": "accepted", "runtime_id": "r", "sequence": 1,
+                            "health": []})
+        self.ledger.append({"ts": 2, "result": "transport_error", "detail": "socket 不在"})
+        code, out = self._verdict()
+        self.assertIn("transport_error", out["failing"])
+        self.assertEqual(code, 1)
+
+    def test_empty_ledger_fails_the_report(self):
+        """空账本与「七天全绿」在旧实现里同形，都返回 0。"""
+        code, out = self._verdict()
+        self.assertEqual(out["failing"], ["no_accepted_rows"])
+        self.assertEqual(code, 1)
+
+    def test_unclassified_rejection_fails(self):
+        """没见过的拒绝理由必须让报告变红，而不是悄悄归零。"""
+        self.ledger.append({"ts": 1, "result": "accepted", "runtime_id": "r", "sequence": 1,
+                            "health": []})
+        self.ledger.append({"ts": 2, "result": "not_accepted", "detail": "某种新的拒绝理由"})
+        code, out = self._verdict()
+        self.assertEqual(out["verdict"]["unclassified_rejection"], 1)
+        self.assertEqual(code, 1)
+
+    def test_legacy_rows_are_classified_by_detail(self):
+        """2026-09 之前的账本没有 code 字段，只有中文 detail。
+
+        重算历史与监控当期必须落到同一组桶名，否则「判据」这个词就有两个意思。
+        """
+        self.ledger.append({"ts": 1, "result": "accepted", "runtime_id": "r", "sequence": 1})
+        self.ledger.append({"ts": 2, "result": "not_accepted",
+                            "detail": "started_at_unix_ms 变化：视为未知 runtime"})
+        self.ledger.append({"ts": 3, "result": "not_accepted", "detail": "sequence 7 未前进"})
+        code, out = self._verdict()
+        self.assertEqual(out["verdict"]["unknown_runtime"], 1)
+        self.assertEqual(out["verdict"]["duplicate_sequence"], 1)
+        self.assertEqual(out["verdict"]["unclassified_rejection"], 0)
+        # 旧账本的已入账行不记 health，报告要说「没记」，不能假装是 0。
+        self.assertEqual(out["verdict"]["health_not_recorded"], 1)
+        self.assertEqual(code, 1)
+
+    def test_every_rejection_reason_maps_to_a_code(self):
+        """把 settlement_model 真实产出的每一条拒绝理由过一遍分类表。
+
+        分类表按 reason 的前缀匹配，所以改文案而不改表会让判据静默失效。
+        这个测试是那张表与文案之间唯一的钉子：它驱动真实的 ingest，
+        而不是把文案抄进断言里。
+        """
+        collector = Collector(first_snapshot="include")
+        collector.ingest(snapshot(sequence=1))
+        sick = snapshot(sequence=2)
+        sick["health"]["identity_limit_reached"] = True
+        seen = {
+            rejection_code(collector.ingest(snapshot(sequence=2, started_at_unix_ms=9)).reason),
+            rejection_code(collector.ingest(sick).reason),
+            rejection_code(collector.ingest(snapshot(sequence=1)).reason),
+        }
+        # 幂等丢弃得单独造：把 runtime 状态回退、只留幂等集合，也就是
+        # 「state.json 回滚了而账本没回滚」这一真实情形——重投的批次算出同一个 id。
+        # 光把 last_sequence 归零不够：基线还在的话增量为零，批次 id 就不一样了。
+        replay = Collector(first_snapshot="include")
+        replay.ingest(snapshot(sequence=1))
+        state = replay.runtimes[("node-example-01", "0123456789abcdef0123456789abcdef")]
+        state.last_sequence = 0
+        state.baselines.clear()
+        seen.add(rejection_code(replay.ingest(snapshot(sequence=1)).reason))
+        self.assertEqual(seen, {"unknown_runtime", "unhealthy", "stale_sequence", "duplicate_batch"})
+        self.assertNotIn("unclassified", seen)
+
+    def test_window_scopes_the_verdict(self):
+        """归档账本要能按窗口重算，否则七天的判据只能连着十二天一起算。"""
+        self.ledger.append({"ts": 100, "result": "accepted", "runtime_id": "r", "sequence": 1,
+                            "health": []})
+        self.ledger.append({"ts": 200, "result": "transport_error", "detail": "窗口外"})
+        code, out = self._verdict(since=50, until=150)
+        self.assertEqual(out["window"]["rows"], 1)
+        self.assertEqual(out["counters"].get("transport_error"), None)
+        self.assertEqual(code, 0)
 
 
 if __name__ == "__main__":
