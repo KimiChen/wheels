@@ -603,19 +603,95 @@ pub async fn list_alerts(
     })))
 }
 
-// ============ 尚未启用的能力 ============
+// ============ 订阅（§4.7） ============
 
-/// 订阅属于 M6。**回「未启用」而不是 404**——404 会被读成「打错了」。
-pub async fn subscriptions_not_enabled(
+/// 本人的订阅。**目标固定取会话主体**，`user_id` 不从请求里来。
+pub async fn me_subscription(
+    State(state): State<AppState>,
     subject: Subject,
-    Path(_user_id): Path<i64>,
+) -> ApiResult<impl IntoResponse> {
+    Ok(Json(subscription_view(&state, subject.user_id, &subject.login_name).await?))
+}
+
+/// 管理员看别人的订阅。
+///
+/// 与 CLI 的 `user subscription` 是同一件事、同一套库函数。两边都要有：
+/// 控制台上做不到而命令行做得到的事，最后都会变成「找管理员上机器」，
+/// 而登录依赖对外域名与 SSO 这些主控之外的事实，命令行不能因此停摆。
+///
+/// 这**不是**新权限：管理员本来就持有凭据文件，也本来就能跑那条命令。
+pub async fn user_subscription(
+    State(state): State<AppState>,
+    subject: Subject,
+    Path(user_id): Path<i64>,
 ) -> ApiResult<impl IntoResponse> {
     subject.require_admin()?;
-    Err::<Json<Value>, _>(
-        ApiError::new(ApiCode::AuditNotEnabled, "订阅尚未启用：属于 M6")
-            .with_detail(json!({ "milestone": "M6" })),
-    )
+    let row = sqlx::query("SELECT login_name FROM users WHERE user_id = ?")
+        .bind(user_id)
+        .fetch_optional(state.store.readers())
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let Some(row) = row else {
+        return Err(ApiError::new(ApiCode::NotFound, "没有这个用户"));
+    };
+    Ok(Json(subscription_view(&state, user_id, &row.get::<String, _>(0)).await?))
 }
+
+/// 两个端点共用的正文。
+///
+/// **GET 不签发。** 没有有效 token 就回 `url: null`——让一次查看变成一次写入，
+/// 会让「谁在什么时候拿到了订阅」这条审计线索失去意义，
+/// 而且任何人刷一下页面就能把自己的地址换掉。签发只发生在登录时。
+async fn subscription_view(state: &AppState, user_id: i64, login_name: &str) -> ApiResult<Value> {
+    let Some(config) = &state.subscription else {
+        // **不是错误**：没配 `[subscription]` 是一个确定的事实，页面据此说「未启用」。
+        // 回错误会被读成「加载失败，刷新试试」，而刷多少次都一样。
+        return Ok(json!({ "enabled": false }));
+    };
+
+    let token = crate::subscription::current_token(&state.store, user_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let identity = crate::subscription::claimed_identity(&state.store, user_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let usage = crate::subscription::cycle_usage(&state.store, user_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let expire =
+        crate::subscription::cycle_expire_unix().map_err(|e| ApiError::internal(e.to_string()))?;
+
+    Ok(json!({
+        "enabled": true,
+        // 客户端里显示的名字。与 `Content-Disposition` 的文件名、
+        // 订阅正文里的注释是同一个串——三处对不上时人会以为导错了订阅。
+        "profile_name": crate::subscription::render::profile_name(login_name),
+        "url": token.as_deref().map(|token| config.subscription_url(token)),
+        // 身份名不是秘密，而且它是对账时唯一能把人和节点上的条目对上的东西。
+        // 没有身份时是 null——那时订阅是一份明说的空配置，不是一份坏配置。
+        "identity": identity,
+        // **只给显示名与落点。** 地址与端口在订阅正文里，那是给客户端的；
+        // 页面上列出来只是让人知道自己有哪几条入口（§4.11）。
+        "entries": config
+            .entries
+            .iter()
+            .map(|entry| json!({ "name": entry.name, "node_id": entry.node_id }))
+            .collect::<Vec<_>>(),
+        "entry_count": config.entries.len(),
+        "cycle": {
+            // 与 `Subscription-Userinfo` 是同一组数——页面上看到的和客户端里
+            // 显示的必须一致，否则「哪个是对的」会变成一个没人能回答的问题。
+            "upload_bytes": bytes_str(usage.upload),
+            "download_bytes": bytes_str(usage.download),
+            "used_bytes": bytes_str(usage.upload + usage.download),
+            "monthly_bytes": bytes_str(usage.total as u128),
+            "expire_unix": expire,
+        },
+        "metric_scope": METRIC_SCOPE,
+    }))
+}
+
+// ============ 尚未启用的能力 ============
 
 /// §4.8 的全局审计开关没开。
 ///

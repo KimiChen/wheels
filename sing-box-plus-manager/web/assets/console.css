@@ -198,6 +198,11 @@ svg[role="img"] { max-width: 100%; }
    链接可见、缺失提示带 hidden。 */
 body[data-pm-sso="off"] [data-pm-sso-link] { display: none; }
 body[data-pm-sso="off"] [data-pm-sso-missing][hidden] { display: flex; }
+/* 登录页是 Public 页，不经 stamp()，所以 app.js 的 live 清理够不到它的
+   「演示环境」徽标。`data-pm-sso` 只要存在就说明这一页是主控服务出来的
+   （stamp_sso 总会盖上 on 或 off），据此把徽标藏掉——纯 CSS，
+   因为这是一条服务端事实，不该等脚本跑完才正确。 */
+body[data-pm-sso] [data-demo-badge] { display: none; }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; animation: none !important; }

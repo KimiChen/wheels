@@ -483,16 +483,17 @@ async fn 分页用游标不用offset() {
 ///
 /// 404 会被读成「打错了」，而真相是「这个能力还没开」——
 /// 没有记录可看和不让你看是两回事（D18）。
+///
+/// 订阅曾经也在这一条里；M6 之后它是真的了，
+/// 「没配 `[subscription]`」那一支由 `tests/m5` 的 `没配订阅时明确回未启用` 钉住。
 #[tokio::test]
 async fn 未启用的能力明确回未启用() {
     let api = Api::new().await;
     let admin = api.admin().await;
-    for path in ["/api/v1/me/audit/access", "/api/v1/subscriptions/1"] {
-        let (status, body, _) = api.get(path, Some(&admin)).await;
-        assert_eq!(status, StatusCode::CONFLICT, "{path}");
-        assert_eq!(error_code(&body), "audit_not_enabled", "{path}");
-        assert_eq!(body["error"]["detail"]["milestone"], "M6");
-    }
+    let (status, body, _) = api.get("/api/v1/me/audit/access", Some(&admin)).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(error_code(&body), "audit_not_enabled");
+    assert_eq!(body["error"]["detail"]["milestone"], "M6");
 }
 
 /// 告警页接的是**已经落库的事实**：四项判据置顶。

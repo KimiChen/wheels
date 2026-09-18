@@ -25,7 +25,9 @@ pub struct ServerConfig {
     #[serde(default)]
     pub sso: Option<crate::config::SsoConfig>,
     /// 订阅（M6）。**整段缺省即不启用**——那时 `/sub/…` 不挂载，
-    /// 而 `/api/v1/subscriptions/…` 仍然明确回「未启用」，不是 404。
+    /// 而 `/api/v1/me/subscription` 回 `enabled: false`，不是 404 也不是错误：
+    /// 「服务端没配」是一个确定的事实，页面据此说得出话；
+    /// 回错误会被读成「加载失败，刷新试试」，而刷多少次都一样。
     #[serde(default)]
     pub subscription: Option<crate::config::SubscriptionConfig>,
 }

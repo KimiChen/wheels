@@ -236,6 +236,14 @@
       document.querySelectorAll(".pm-principal-switch, [data-demo-principal]").forEach((node) => {
         node.remove();
       });
+      // 「演示环境」徽标与那条常驻反馈位都是原型内容：**live 模式下没有任何东西
+      // 会往它们里面写**。徽标留着会让人怀疑眼前这份数据是不是也是编的；
+      // 那条反馈位更糟——它写死了一条 P1 文案（「fr-01 采集连续失败」），
+      // 于是管理员在每一页都看见同一条假告警，看几天之后就再也不会认真看告警了。
+      // 真告警有自己的页面，计数是真的（/api/v1/alerts）。
+      document.querySelectorAll("[data-demo-badge], .pm-global-notice").forEach((node) => {
+        node.remove();
+      });
       // 规则引擎属于 M5。原型里的告警条目是编的文案，live 模式必须说清楚，
       // 否则「没有新告警」会被读成「系统正常」，而真相是「还没有人在报警」。
       document.querySelectorAll("[data-pm-prototype]").forEach((node) => {

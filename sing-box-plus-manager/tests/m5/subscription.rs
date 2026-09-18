@@ -263,6 +263,148 @@ async fn 凭据缺失时是空订阅而不是假密码() {
     assert!(!body.contains("type: ss"), "不该编出任何节点");
 }
 
+// ============ 控制台上的订阅（`/api/v1/me/subscription`） ============
+
+fn actor(logged_in: &proxy_manager::sso::LoggedIn) -> super::harness::Actor {
+    super::harness::Actor {
+        user_id: logged_in.user_id,
+        session_pk: logged_in.session.session_pk,
+        cookie: logged_in.session.cookie_value.clone(),
+        csrf: logged_in.session.csrf_token.clone(),
+    }
+}
+
+/// 本人在控制台上看得到自己的订阅地址。
+///
+/// 这一条是 M6 对使用者那一半：token 派生得出来，所以**随时能再看一次**，
+/// 不需要管理员上机器跑一条命令再把地址贴给他——那条路径里地址会经过
+/// 聊天记录、工单和剪贴板，而它本身就是凭据。
+#[tokio::test]
+async fn 本人看得到自己的订阅地址() {
+    let api = Api::with_subscription(&[], &["slot-01", "slot-02"]).await;
+    api.seed_claimable_pool(&["node-a"], &["slot-01", "slot-02"]).await;
+    let logged_in = login(&api, "alice").await;
+    let token = logged_in.subscription.as_ref().unwrap().plaintext.clone();
+
+    let (status, body, _) = api.get("/api/v1/me/subscription", Some(&actor(&logged_in))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["enabled"], true);
+    assert_eq!(body["url"], format!("https://pm.example.com/sub/Proxy-{token}.yaml"));
+    assert_eq!(body["profile_name"], "Proxy-alice");
+    assert_eq!(body["identity"], "slot-01");
+    assert_eq!(body["entry_count"], 2);
+}
+
+/// **个人端点不带连接细节。**
+///
+/// 地址与端口写在订阅正文里，那是给客户端的。页面上再列一遍等于把同一份
+/// 凭据材料多放一个地方，而页面会被截图、会被投屏。§4.11 的同一条。
+#[tokio::test]
+async fn 个人端点只给入口名不给地址端口() {
+    let api = Api::with_subscription(&[], &["slot-01"]).await;
+    api.seed_claimable_pool(&["node-a"], &["slot-01"]).await;
+    let logged_in = login(&api, "alice").await;
+
+    let (_, body, _) = api.get("/api/v1/me/subscription", Some(&actor(&logged_in))).await;
+    let entries = body["entries"].as_array().expect("要有 entries");
+    assert_eq!(entries.len(), 2);
+    for entry in entries {
+        assert!(entry["name"].is_string(), "要有显示名：{entry}");
+        assert!(entry["node_id"].is_string(), "要有落点：{entry}");
+        assert!(entry.get("host").is_none(), "不该带地址：{entry}");
+        assert!(entry.get("port").is_none(), "不该带端口：{entry}");
+    }
+    // 整份响应里也不该出现那两个地址。
+    let text = body.to_string();
+    assert!(!text.contains("203.0.113.1"), "响应里漏了入口地址：{text}");
+    assert!(!text.contains("65002"), "响应里漏了入口端口：{text}");
+}
+
+/// **`/me` 里不带 token。**
+///
+/// 前端每一页都会取一次 `/me` 来判定 live 模式，塞进去等于把订阅地址复制进
+/// 每一个页面的响应与内存里。这条是那个决定的回归测试——
+/// 把它并进 `/me` 会很方便，而方便正是它会被并进去的原因。
+#[tokio::test]
+async fn me里不带订阅token() {
+    let api = Api::with_subscription(&[], &["slot-01"]).await;
+    api.seed_claimable_pool(&["node-a"], &["slot-01"]).await;
+    let logged_in = login(&api, "alice").await;
+    let token = logged_in.subscription.as_ref().unwrap().plaintext.clone();
+
+    let (status, body, _) = api.get("/api/v1/me", Some(&actor(&logged_in))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!body.to_string().contains(&token), "/me 不该带订阅 token");
+}
+
+/// **查看不是签发。**
+///
+/// GET 写库的话，任何人刷一下页面就把自己的地址换掉了，而「谁在什么时候
+/// 拿到了订阅」这条线索也就没了。吊销之后回 `url: null`，不偷偷补一条新的。
+#[tokio::test]
+async fn 查看订阅不签发新token() {
+    use sqlx::Row;
+    let api = Api::with_subscription(&[], &["slot-01"]).await;
+    api.seed_claimable_pool(&["node-a"], &["slot-01"]).await;
+    let logged_in = login(&api, "alice").await;
+    let actor = actor(&logged_in);
+
+    let (_, first, _) = api.get("/api/v1/me/subscription", Some(&actor)).await;
+    let (_, again, _) = api.get("/api/v1/me/subscription", Some(&actor)).await;
+    assert_eq!(first["url"], again["url"], "两次查看应当是同一个地址");
+
+    proxy_manager::subscription::revoke_for_user(&api.store, logged_in.user_id).await.unwrap();
+    let (_, after, _) = api.get("/api/v1/me/subscription", Some(&actor)).await;
+    assert!(after["url"].is_null(), "吊销之后不该还有地址：{after}");
+    assert_eq!(after["enabled"], true, "能力仍然是启用的，只是这个人没有 token");
+
+    let rows: i64 = sqlx::query("SELECT count(*) FROM subscription_tokens WHERE user_id = ?")
+        .bind(logged_in.user_id)
+        .fetch_one(api.store.readers())
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(rows, 1, "三次 GET 之后仍然只有登录时发的那一条");
+}
+
+/// 别人的订阅只有管理员看得到。
+#[tokio::test]
+async fn 别人的订阅要管理员() {
+    let api = Api::with_subscription(&["boss"], &["slot-01", "slot-02"]).await;
+    api.seed_claimable_pool(&["node-a"], &["slot-01", "slot-02"]).await;
+    let alice = login(&api, "alice").await;
+    let boss = login(&api, "boss").await;
+
+    let (status, body, _) =
+        api.get(&format!("/api/v1/subscriptions/{}", boss.user_id), Some(&actor(&alice))).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+    // 管理员看得到，而且与本人自己看到的是同一个地址。
+    let (status, seen_by_admin, _) =
+        api.get(&format!("/api/v1/subscriptions/{}", alice.user_id), Some(&actor(&boss))).await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, seen_by_self, _) = api.get("/api/v1/me/subscription", Some(&actor(&alice))).await;
+    assert_eq!(seen_by_admin["url"], seen_by_self["url"]);
+    assert_eq!(seen_by_admin["profile_name"], "Proxy-alice");
+
+    let (status, _, _) = api.get("/api/v1/subscriptions/999999", Some(&actor(&boss))).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "没有这个用户");
+}
+
+/// 没配 `[subscription]` 时回 `enabled: false`，**不是错误也不是 404**。
+///
+/// 这是一个确定的事实，页面据此说「服务端没配订阅出口」。
+/// 回错误会被读成「加载失败，刷新试试」，而刷多少次都一样。
+#[tokio::test]
+async fn 没配订阅时明确回未启用() {
+    let api = Api::new().await;
+    let user = api.user("alice", proxy_manager::api::session::Role::User, "local").await;
+    let (status, body, _) = api.get("/api/v1/me/subscription", Some(&user)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["enabled"], false);
+    assert!(body.get("url").is_none(), "没配的时候不该有 url 这个字段：{body}");
+}
+
 // ============ 渲染的纯函数部分 ============
 
 /// uPSK 是 base64 文本，含 `+` `/` `=`。**必须 URL 编码**——
