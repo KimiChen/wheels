@@ -63,7 +63,10 @@ type Registry struct {
 	runtimeID       string
 	startedAtUnixMs uint64
 	maxIdentities   int
-	validationOnly  bool
+	// maxTotalLineages 是含墓碑在内的总量上限，由 maxIdentities 派生而非独立配置：
+	// 墓碑是 §4.3 要求保留的（结算方要靠它把最后一段字节收尾），但它不该占用业务名额。
+	maxTotalLineages int
+	validationOnly   bool
 
 	sequence atomic.Uint64
 
@@ -103,11 +106,12 @@ func NewRegistry(nodeID string, maxIdentities int) (*Registry, error) {
 		return nil, E.Cause(err, "生成 runtime_id")
 	}
 	registry := &Registry{
-		nodeID:          nodeID,
-		runtimeID:       hex.EncodeToString(raw[:]),
-		startedAtUnixMs: uint64(time.Now().UnixMilli()),
-		maxIdentities:   maxIdentities,
-		inbounds:        make(map[string]*inboundRecord),
+		nodeID:           nodeID,
+		runtimeID:        hex.EncodeToString(raw[:]),
+		startedAtUnixMs:  uint64(time.Now().UnixMilli()),
+		maxIdentities:    maxIdentities,
+		maxTotalLineages: maxIdentities * 4,
+		inbounds:         make(map[string]*inboundRecord),
 	}
 	registry.quota.init()
 	return registry, nil
@@ -120,11 +124,12 @@ func NewRegistry(nodeID string, maxIdentities int) (*Registry, error) {
 // 它永不 Start、永不绑定 socket、永不参与结算，且拒绝提供快照。
 func NewValidationRegistry() *Registry {
 	registry := &Registry{
-		nodeID:         "validation-only",
-		runtimeID:      "00000000000000000000000000000000",
-		maxIdentities:  1 << 20,
-		validationOnly: true,
-		inbounds:       make(map[string]*inboundRecord),
+		nodeID:           "validation-only",
+		runtimeID:        "00000000000000000000000000000000",
+		maxIdentities:    1 << 20,
+		maxTotalLineages: 1 << 22,
+		validationOnly:   true,
+		inbounds:         make(map[string]*inboundRecord),
 	}
 	registry.quota.init()
 	return registry
@@ -193,18 +198,49 @@ func (r *Registry) Reconcile(specs []InboundSpec, startup bool) error {
 		}
 	}
 
-	total := r.countLineagesLocked()
-	if total > r.maxIdentities {
+	// max_identities 只约束**活跃**血统。
+	//
+	// 此前它数的是 len(record.users)，而 Reconcile 从不删除记录——停用的身份只把 active
+	// 置 false 后长期留存。于是每一轮身份轮换都让这个数单调增长，越过上限后
+	// identityLimitReached 置位且永不复位，/healthz 在该 runtime 余下时间里恒为 503，
+	// 结算方据此拒绝入账：计费瘫痪，而唯一的恢复手段是重启进程。
+	//
+	// 那个粘滞位的语义是「快照里的数字不可信」（见 Health 的文档串），可墓碑并没有让任何
+	// 数字失真——Reconcile 不截断任何东西。所以它是按构造过度触发的。
+	if active := r.countActiveLineagesLocked(); active > r.maxIdentities {
 		if startup {
-			return E.New("计费身份数 ", total, " 超过 max_identities ", r.maxIdentities)
+			return E.New("活跃计费身份数 ", active, " 超过 max_identities ", r.maxIdentities)
 		}
-		// 该位粘滞，置位后该 runtime 余下时间全部不可入账（§4.3 第 5 条）。
+		r.identityLimitReached.Store(true)
+	}
+	// 总量（含墓碑）仍需有界，否则长期轮换会把内存吃光。越过这条才是真正的
+	// 「这个 runtime 已经不可信」，此时置粘滞位是恰当的。
+	if total := r.countAllLineagesLocked(); total > r.maxTotalLineages {
+		if startup {
+			return E.New("计费身份总数（含已停用）", total, " 超过上限 ", r.maxTotalLineages)
+		}
 		r.identityLimitReached.Store(true)
 	}
 	return nil
 }
 
-func (r *Registry) countLineagesLocked() int {
+// countActiveLineagesLocked 只数 active 的血统，用于 max_identities。
+func (r *Registry) countActiveLineagesLocked() int {
+	var total int
+	for _, record := range r.inbounds {
+		record.mu.RLock()
+		for _, user := range record.users {
+			if user.active.Load() {
+				total++
+			}
+		}
+		record.mu.RUnlock()
+	}
+	return total
+}
+
+// countAllLineagesLocked 数全部血统（含墓碑），用于内存上限。
+func (r *Registry) countAllLineagesLocked() int {
 	var total int
 	for _, record := range r.inbounds {
 		record.mu.RLock()
