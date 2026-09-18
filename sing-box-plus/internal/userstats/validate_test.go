@@ -228,6 +228,18 @@ func TestValidateRejections(t *testing.T) {
 			configWith(vlessOK, statsService(""), `"network_namespaces": [{"name": "ns1", "path": "/var/run/netns/ns1"}]`),
 			"network_namespaces",
 		},
+		{
+			// 0600 下组权限位全关，设了组也授予不了任何访问：这正是「看起来生效、
+			// 实际没生效」，按 §4.6 不做静默回落。
+			"socket_group 搭配默认的 0600",
+			configWith(vlessOK, statsService(`"socket_group":"root"`), ""),
+			"需要 socket_mode=0660",
+		},
+		{
+			"socket_group 指向不存在的组",
+			configWith(vlessOK, statsService(`"socket_mode":"0660","socket_group":"sbp-no-such-group"`), ""),
+			"socket_group 无法解析",
+		},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {

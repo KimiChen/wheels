@@ -18,6 +18,35 @@ def read(relative: str) -> str:
     return (ROOT / relative).read_text(encoding="utf-8")
 
 
+# json:"name" 与 json:"name,omitempty" 都要认。只认前者的正则会让加了 omitempty
+# 的字段在两个方向上同时隐身——恰好是需要被检查的那一刻失效。
+JSON_TAG = re.compile(r'json:"([a-z_]+)(?:,[^"]*)?"')
+
+
+def go_struct_fields(relative: str) -> dict:
+    """按结构体收集 (Go 字段名, json 标签)：{结构体名: [(字段, 标签), ...]}。"""
+    source = read(relative)
+    result = {}
+    for match in re.finditer(r"(?ms)^type (\w+) struct \{(.*?)^\}", source):
+        fields = []
+        for line in match.group(2).splitlines():
+            tag = JSON_TAG.search(line)
+            name = re.match(r"\s*([A-Z]\w*)\s", line)
+            if tag and name:
+                fields.append((name.group(1), tag.group(1)))
+        result[match.group(1)] = fields
+    return result
+
+
+def go_struct_tags(relative: str) -> dict:
+    """按结构体收集 json 标签：{结构体名: {标签, ...}}。"""
+    source = read(relative)
+    result = {}
+    for match in re.finditer(r"(?ms)^type (\w+) struct \{(.*?)^\}", source):
+        result[match.group(1)] = set(JSON_TAG.findall(match.group(2)))
+    return result
+
+
 class UpstreamLockConsistencyTest(unittest.TestCase):
     def setUp(self) -> None:
         self.lock = {}
@@ -70,16 +99,23 @@ class SchemaConsistencyTest(unittest.TestCase):
         self.assertIn("/v2/snapshot", api)
 
     def test_snapshot_key_sets_match_between_go_and_python(self):
-        source = read("internal/userstats/snapshot.go")
-        json_tags = set(re.findall(r'json:"([a-z_]+)"', source))
+        """逐结构体双向比对。
+
+        单向比对（只查 Go 侧是否缺字段）挡不住真正危险的那个方向：Go 侧新增一个字段，
+        本检查照样通过，而 settlement_model.parse_snapshot 要求键集严格相等，
+        于是每个真实 collector 会拒绝每一份快照——门禁全绿，控制面全灭。
+        逐结构体而非取并集，则字段在结构体之间挪动也会被抓到。
+        """
         import sys
 
         sys.path.insert(0, str(ROOT / "tests"))
         from settlement_model import HEALTH_KEYS, INBOUND_KEYS, SNAPSHOT_KEYS, USER_KEYS
 
-        expected = SNAPSHOT_KEYS | HEALTH_KEYS | INBOUND_KEYS | USER_KEYS
-        missing = expected - json_tags
-        self.assertFalse(missing, f"Go 侧缺少字段：{sorted(missing)}")
+        structs = go_struct_tags("internal/userstats/snapshot.go")
+        for name, expected in (("Health", HEALTH_KEYS), ("SnapshotUser", USER_KEYS),
+                               ("SnapshotInbound", INBOUND_KEYS), ("Snapshot", SNAPSHOT_KEYS)):
+            self.assertIn(name, structs, f"snapshot.go 中找不到结构体 {name}")
+            self.assertEqual(structs[name], set(expected), f"{name} 与 Python 侧键集不一致")
 
 
 class ConfigExampleTest(unittest.TestCase):
@@ -120,6 +156,31 @@ class DocsPresenceTest(unittest.TestCase):
         self.assertIn("仍会向目的地拨号", operations)
         self.assertIn("不要用官方或 Homebrew 的 sing-box 校验", operations)
         self.assertIn("logrotate", operations)
+
+
+class DeadOptionTest(unittest.TestCase):
+    """用户配置里出现的键，必须真的被读取。
+
+    socket_group 在 2026-09 之前是个反例：它被声明、被解码、通过校验，然后什么都不做。
+    这在一个「未知字段硬失败」的项目里尤其有害——键被接受，于是运维有理由相信它生效了。
+    纯文本的文档一致性检查抓不到这类问题，只有「字段是否在 options.go 之外被引用过」能抓到。
+    """
+
+    OPTION_STRUCTS = ("Options", "AccessLogOptions", "QuotaControlOptions")
+
+    def test_every_option_field_is_read_somewhere(self):
+        structs = go_struct_fields("internal/userstats/options.go")
+        sources = [path for path in (ROOT / "internal").rglob("*.go")
+                   if path.name != "options.go"]
+        bodies = {path: path.read_text(encoding="utf-8") for path in sources}
+        dead = []
+        for struct in self.OPTION_STRUCTS:
+            self.assertIn(struct, structs, f"options.go 中找不到结构体 {struct}")
+            for field, tag in structs[struct]:
+                pattern = re.compile(r"\b" + re.escape(field) + r"\b")
+                if not any(pattern.search(body) for body in bodies.values()):
+                    dead.append(f"{struct}.{field}（json:\"{tag}\"）")
+        self.assertFalse(dead, "以下配置项被声明却从未被读取：" + "，".join(dead))
 
 
 if __name__ == "__main__":

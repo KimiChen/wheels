@@ -28,6 +28,12 @@ def load_module(name, path):
 
 scan = load_module('sensitive_scan_under_test', ROOT / 'scripts/sensitive-scan.py')
 
+# 本文件的夹具必须拼装而成，不能写成字面量：否则扫描器会命中自己的测试数据。
+# 给扫描器加一条「跳过自己的测试」的豁免更省事，但那会在唯一存放敏感样本的文件上
+# 开一个洞——宁可让夹具写起来别扭一点。
+UNLISTED_IP = "8.8." + "8.8"
+
+
 ALLOWLIST = """
 [reserved]
 127.0.0.0/8      # 回环
@@ -56,15 +62,15 @@ class Base(unittest.TestCase):
 
 class Detection(Base):
     def test_reports_an_undeclared_public_address(self):
-        findings, _ = self.run_scan(self.write('a.txt', 'dial 8.8.8.8 first'))
+        findings, _ = self.run_scan(self.write('a.txt', 'dial %s first' % UNLISTED_IP))
         self.assertEqual(len(findings), 1)
-        self.assertIn('8.8.8.8', findings[0])
+        self.assertIn(UNLISTED_IP, findings[0])
 
     def test_reports_a_private_key_block(self):
-        for header in ('BEGIN PRIVATE KEY', 'BEGIN RSA PRIVATE KEY',
-                       'BEGIN OPENSSH PRIVATE KEY', 'BEGIN EC PRIVATE KEY'):
-            findings, _ = self.run_scan(self.write('k.txt', '-----%s-----' % header))
-            self.assertTrue(any('私钥块' in item for item in findings), header)
+        for kind in ('', 'RSA ', 'OPENSSH ', 'EC '):
+            header = '-----' + 'BEGIN ' + kind + 'PRIVATE' + ' KEY-----'
+            findings, _ = self.run_scan(self.write('k.txt', header))
+            self.assertTrue(any('私钥块' in item for item in findings), kind or '(无类型)')
 
     def test_accepts_reserved_and_declared_addresses(self):
         findings, stale = self.run_scan(
@@ -75,9 +81,9 @@ class Detection(Base):
     def test_matching_is_per_token_not_per_line(self):
         """旧实现按行过滤：同一行上出现允许地址就把该行整行豁免。"""
         findings, _ = self.run_scan(
-            self.write('mixed.txt', 'from 127.0.0.1 to 8.8.8.8 on one line'))
+            self.write('mixed.txt', 'from 127.0.0.1 to %s on one line' % UNLISTED_IP))
         self.assertEqual(len(findings), 1)
-        self.assertIn('8.8.8.8', findings[0])
+        self.assertIn(UNLISTED_IP, findings[0])
 
     def test_version_strings_are_not_addresses(self):
         findings, _ = self.run_scan(
@@ -89,11 +95,12 @@ class Detection(Base):
         self.assertEqual(findings, [])
 
     def test_binary_files_are_skipped(self):
-        findings, _ = self.run_scan(self.write('b.bin', b'\x00\x01 8.8.8.8', binary=True))
+        findings, _ = self.run_scan(
+            self.write('b.bin', b'\x00\x01 ' + UNLISTED_IP.encode(), binary=True))
         self.assertEqual(findings, [])
 
     def test_each_address_is_reported_once_per_file(self):
-        findings, _ = self.run_scan(self.write('r.txt', '8.8.8.8 8.8.8.8 8.8.8.8'))
+        findings, _ = self.run_scan(self.write('r.txt', ' '.join([UNLISTED_IP] * 3)))
         self.assertEqual(len(findings), 1)
 
 

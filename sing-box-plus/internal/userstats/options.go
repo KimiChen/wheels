@@ -1,6 +1,7 @@
 package userstats
 
 import (
+	"os/user"
 	"strings"
 	"time"
 
@@ -30,6 +31,11 @@ const (
 	// 沿用 256 MiB 会让一个身份半年才轮转一次，等于纪律 9/10 在生产上从不触发。
 	defaultAuditMaxBytes     = 16 * 1024 * 1024
 	defaultAuditMaxOpenFiles = 256
+
+	// maxUnixPathBytes 取两个平台里更严格的那个，使同一份配置在 Linux 与 darwin 上行为一致。
+	// 定义在这里而不是 listen_unix.go：后者带 //go:build unix，而本文件无 build tag，
+	// 常量放在那边会让 !unix 构建直接编译失败，listen_other.go 里那条「明确报错」永远到不了。
+	maxUnixPathBytes = 103
 )
 
 // Options 是 user_stats 服务的配置。
@@ -137,6 +143,20 @@ func (o *Options) normalize() error {
 	}
 	if o.SocketMode != "" && o.SocketMode != "0600" && o.SocketMode != "0660" {
 		return E.New("user_stats.socket_mode 只接受 0600 或 0660，实际：", o.SocketMode)
+	}
+	if o.SocketGroup != "" {
+		// 0600 下组权限位全关，设了组也授予不了任何访问——这正是「看起来生效、实际没生效」，
+		// 按 §4.6 不做静默回落，直接拒绝这个组合。
+		if o.SocketMode != "0660" {
+			actual := o.SocketMode
+			if actual == "" {
+				actual = "0600（默认）"
+			}
+			return E.New("user_stats.socket_group 需要 socket_mode=0660，实际：", actual)
+		}
+		if _, err := user.LookupGroup(o.SocketGroup); err != nil {
+			return E.Cause(err, "user_stats.socket_group 无法解析：", o.SocketGroup)
+		}
 	}
 	if o.AccessLog != nil {
 		if err := o.AccessLog.normalize(); err != nil {
