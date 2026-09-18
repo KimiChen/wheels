@@ -664,7 +664,7 @@ instance.Router().AppendTracker(userstats.NewTracker(statsRegistry, logger))
 （已实测）。自有 `version` 固定输出四行：
 
 ```text
-sing-box-plus version <本项目版本>                              # -X main.Version
+sing-box-plus version <本项目版本> (<叠加层 commit 前 12 位>)   # -X main.Version + main.OverlayCommit
 Upstream: sing-box <upstream.lock 的 tag> (<commit 前 12 位>)   # -X …/constant.Version + 自有 -X
 Environment: <go 版本> <GOOS>/<GOARCH>
 Tags: <构建 tag 集>                                             # debug.ReadBuildInfo() 的 -tags
@@ -672,6 +672,12 @@ Tags: <构建 tag 集>                                             # debug.ReadB
 
 上游 commit 必须由本项目自己的 `-X` 变量携带，不能指望 `debug.ReadBuildInfo()`——`vcs.revision`
 指向本仓库自身的 commit，且 `-buildvcs=false` 会把该字段整个抹掉。
+
+**叠加层 commit 同理，且更要紧。** 没有它，产物只能说清自己基于哪个上游版本，说不清是从
+本项目的哪个源码状态构建的：manifest 里没有这个字段，`-buildvcs=false` 又去掉了 Go 自带的
+戳记。不改用 `-buildvcs=true` 的理由是本仓库为 monorepo——`vcs.revision` 会随其他子项目的
+提交变化，既误归因又破坏逐字节可复现。它并进第一行而不是新增一行，以保持四行不变；
+`version -n` 仍只打印裸版本号。
 
 产出的二进制保持 `run` / `check` / `format` / `version` 的 **argv 与退出码**与上游兼容，
 使既有部署与编排工具（包括发布前的 `check -c` 门禁）可以原样沿用——注意这是本项目自己的实现义务，
