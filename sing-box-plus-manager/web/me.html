@@ -82,7 +82,7 @@
           原型专用：切换视角。真实控制台没有这个控件——主体由服务端按会话决定，
           前端拿不到的数据根本不会出现在响应里。
         -->
-        <span class="wsk-badge wsk-warning"
+        <span class="wsk-badge wsk-warning" data-demo-badge
           ><span class="wsk-dot"></span>演示环境</span
         >
         <div class="pm-principal-switch" data-js-only>
@@ -190,23 +190,45 @@
               <div>
                 <p class="wsk-panel-title">MY ACCOUNT</p>
                 <h1 tabindex="-1">我的订阅</h1>
-                <p>节点已为你准备好。导入订阅，即可开始使用。</p>
+                <p>节点已经为你准备好。把下面的地址导入客户端，即可开始使用。</p>
               </div>
               <span class="wsk-badge wsk-accent">个人中心</span>
             </div>
 
-            <div class="pm-welcome">
-              <div><h2>默认节点已自动授权</h2><p>首次登录即加入默认节点组，无需逐个申请。</p></div>
-              <span class="wsk-badge wsk-success"><span class="wsk-dot"></span>2 个节点可用</span>
+            <!--
+              取数失败必须可见。静默失效的界面比报错的界面糟得多——
+              它让人以为「我没有订阅」，而真相是「没取到」，
+              然后这个人会去找管理员要一个他本来就有的地址。
+            -->
+            <div class="wsk-alert wsk-danger wsk-mt-5" role="alert" data-pm-error hidden>
+              <svg class="wsk-icon" aria-hidden="true"><use href="#warning"></use></svg>
+              <div>
+                <strong>订阅信息没能取到</strong>
+                <p data-pm-error-text>请稍后重试；持续失败请联系管理员。</p>
+              </div>
             </div>
 
-            <section class="wsk-section" aria-labelledby="me-nodes">
-              <div class="wsk-section-head"><h2 id="me-nodes">我的节点</h2><span class="wsk-badge">默认节点组</span></div>
-              <div class="pm-node-grid">
-                <article class="pm-node-card"><span class="pm-node-mark" aria-hidden="true">HK</span><div><h3>hk-01</h3><p>默认授权 · 已加入订阅</p></div><span class="wsk-badge wsk-success">可用</span></article>
-                <article class="pm-node-card"><span class="pm-node-mark" aria-hidden="true">US</span><div><h3>us-01</h3><p>默认授权 · 已加入订阅</p></div><span class="wsk-badge wsk-success">可用</span></article>
+            <div class="wsk-alert wsk-warning wsk-mt-5" role="status" data-pm-no-identity hidden>
+              <svg class="wsk-icon" aria-hidden="true"><use href="#warning"></use></svg>
+              <div>
+                <strong>你还没有分配到计费身份</strong>
+                <p>订阅可以下载，但里面不会有能用的节点。请联系管理员——重新导入不会改变这一点。</p>
               </div>
-            </section>
+            </div>
+
+            <div class="pm-welcome">
+              <div>
+                <h2>登录即已分配，不需要申请</h2>
+                <p>
+                  你的计费身份是
+                  <strong data-pm="identity">user0000</strong>；下面每一条入口都用这一个身份，
+                  用量合并计入本周期额度。
+                </p>
+              </div>
+              <span class="wsk-badge wsk-success"
+                ><span class="wsk-dot"></span><span data-pm="entry_count">7</span> 条入口可用</span
+              >
+            </div>
 
             <section class="wsk-section" aria-labelledby="me-sub">
               <div class="wsk-section-head">
@@ -216,23 +238,58 @@
                   <button
                     class="wsk-button wsk-secondary"
                     type="button"
-                    data-toast="示例地址已脱敏；真实订阅将在登录后提供。"
+                    data-pm-copy=".pm-subscription-address code"
                     data-js-only
                   >
                     复制
                   </button>
                 </div>
               </div>
-              <pre class="wsk-code-panel pm-subscription-address"><code>https://&lt;控制台域名&gt;/s/pm-<span class="wsk-tok-string">••••••••••••••••</span>.yaml</code></pre>
+              <p class="wsk-help" data-pm-sub-disabled hidden>
+                主控没有配置订阅出口（<code>[subscription]</code>），所以现在没有订阅地址可发。
+                这是一项服务端配置，不是你的账号问题。
+              </p>
+              <pre class="wsk-code-panel pm-subscription-address"><code data-pm="url">https://&lt;控制台域名&gt;/sub/Proxy-<span class="wsk-tok-string">••••••••••••••••</span>.yaml</code></pre>
               <p class="wsk-help wsk-mt-2">
-                请妥善保管订阅地址。需要更换时请联系管理员，更新后需重新导入客户端。
+                <strong>这个地址本身就是凭据</strong>——拿到它的人就能用你的额度上网，
+                所以不要发进任何群，也不要贴进工单。
+                需要更换时请联系管理员；换过之后，你已经导入的客户端会全部失效，需要重新导入。
+              </p>
+            </section>
+
+            <section class="wsk-section" aria-labelledby="me-nodes">
+              <div class="wsk-section-head">
+                <h2 id="me-nodes">我的入口</h2>
+                <span class="wsk-badge">全部已包含在订阅里</span>
+              </div>
+              <div class="pm-node-grid" data-pm-collection="me-entries">
+                <article class="pm-node-card">
+                  <div><h3>Forward-甲地-直连</h3><p>node-a</p></div>
+                  <span class="wsk-badge wsk-success">可用</span>
+                </article>
+                <article class="pm-node-card">
+                  <div><h3>MTLS-乙地-经甲地</h3><p>node-b</p></div>
+                  <span class="wsk-badge wsk-success">可用</span>
+                </article>
+                <!-- 真实模式下上面两张示例卡会被整体清掉，不会与真行混排。 -->
+                <p data-table-empty hidden class="wsk-help"><span data-pm-empty-text>还没有为你配置入口</span></p>
+                <template data-pm-template>
+                  <article class="pm-node-card">
+                    <div><h3 data-pm="name"></h3><p data-pm="node_id"></p></div>
+                    <span class="wsk-badge wsk-success">可用</span>
+                  </article>
+                </template>
+              </div>
+              <p class="wsk-help wsk-mt-2">
+                名字里的 <strong>Forward</strong> 是直连落地，<strong>MTLS</strong> 是经中转再落地。
+                连接地址与端口只写在订阅正文里，这一页不重复——它们是给客户端看的。
               </p>
             </section>
 
             <section class="wsk-section" aria-labelledby="me-quota">
               <div class="wsk-section-head">
                 <h2 id="me-quota">本周期额度</h2>
-                <span class="wsk-badge">2026-09-01 → 2026-10-01</span>
+                <span class="wsk-badge" data-pm="cycle.key">2026-09</span>
               </div>
               <div class="wsk-metric-grid">
                 <div class="wsk-metric">
@@ -245,12 +302,10 @@
                   <span>剩余</span><strong data-pm-bytes="cycle.remaining_bytes">185 GiB</strong><small data-pm-exact="cycle.remaining_bytes">198,287,224,832 字节</small>
                 </div>
               </div>
-              <div class="wsk-progress-list wsk-mt-5">
-                <div>
-                  <span>周期水位<small>82%</small></span><strong>82%</strong
-                  ><progress max="100" value="82" aria-label="周期水位">82%</progress>
-                </div>
-              </div>
+              <p class="wsk-help wsk-mt-2">
+                周期按 UTC+8 的自然月切，下个月 1 日零点归零。
+                客户端里显示的流量条与这里是同一组数。
+              </p>
               <div class="wsk-alert wsk-info wsk-mt-5">
                 <svg class="wsk-icon" aria-hidden="true"><use href="#info"></use></svg>
                 <div>
@@ -280,31 +335,6 @@
         >
       </div>
     </footer>
-
-    <dialog class="wsk-dialog" data-roles="admin" id="revoke-dialog" aria-labelledby="revoke-title">
-      <div class="wsk-dialog-head">
-        <h2 id="revoke-title">吊销订阅 token</h2>
-        <button class="wsk-icon-button" type="button" data-dialog-close aria-label="关闭" title="关闭">
-          <svg class="wsk-icon" aria-hidden="true"><use href="#x"></use></svg>
-        </button>
-      </div>
-      <div class="wsk-dialog-body">
-        <p>用户 <strong>kimi</strong> 的订阅地址将立即失效。</p>
-        <div class="wsk-alert wsk-danger wsk-mt-5">
-          <svg class="wsk-icon" aria-hidden="true"><use href="#warning"></use></svg>
-          <div>
-            <strong>该用户所有已导入的客户端会静默失效</strong>
-            <p>他们不会收到任何提示，只会发现节点全部消失。吊销前请先通知本人。</p>
-          </div>
-        </div>
-      </div>
-      <div class="wsk-dialog-foot">
-        <button class="wsk-button wsk-secondary" type="button" data-dialog-close>取消</button
-        ><button class="wsk-button" type="button" data-dialog-close data-toast="原型页面不执行吊销。" data-js-only>
-          确认吊销
-        </button>
-      </div>
-    </dialog>
 
     <div class="wsk-toast-region" id="toast-region" aria-live="polite"></div>
   </body>

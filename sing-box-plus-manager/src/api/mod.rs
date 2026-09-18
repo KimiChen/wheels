@@ -143,6 +143,10 @@ pub fn router(
         // 个人中心：目标固定取服务端会话主体，**不接受客户端提供的用户 ID**。
         .route("/api/v1/me", get(routes::me))
         .route("/api/v1/me/usage", get(routes::me_usage))
+        // 订阅地址是**本人的凭据**，所以单独一个端点而不是塞进 `/me`：
+        // `/me` 每页都会取一次（前端靠它判定 live 模式），塞进去等于把 token
+        // 复制进每一个页面的内存与每一条响应里。这里只有 me.html 会取。
+        .route("/api/v1/me/subscription", get(routes::me_subscription))
         // 管理面。每个 handler 第一件事就是 require_admin()。
         .route("/api/v1/nodes", get(routes::list_nodes))
         .route("/api/v1/nodes/{node_id}", get(routes::get_node))
@@ -155,9 +159,9 @@ pub fn router(
         )
         .route("/api/v1/usage/trend", get(trend::usage_trend))
         .route("/api/v1/alerts", get(routes::list_alerts))
-        // 这两页的后端属于 M6/M5，现在明确回「未启用」而不是 404——
+        .route("/api/v1/subscriptions/{user_id}", get(routes::user_subscription))
+        // 出站目标审计属于 M6 的另一半，现在明确回「未启用」而不是 404——
         // 404 会被读成「打错了」，而真相是「这个能力还没开」。
-        .route("/api/v1/subscriptions/{user_id}", get(routes::subscriptions_not_enabled))
         .route("/api/v1/me/audit/access", get(routes::audit_not_enabled))
         // 退出。**是写操作**，所以走 CSRF 双提交——否则第三方页面可以把人踢下线。
         .route("/api/v1/auth/logout", axum::routing::post(auth::logout));

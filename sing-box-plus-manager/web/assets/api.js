@@ -202,8 +202,32 @@
 
   const PAGES = {
     "me.html": {
-      load: () => getJson("/me"),
-      render: (me) => applyBindings(document, me),
+      // 两个端点：`/me` 给身份与额度，`/me/subscription` 给订阅地址。
+      // 订阅地址单独一个端点是服务端的决定（它是凭据，不该出现在每一页的
+      // `/me` 响应里），页面这边照做即可。
+      load: async () => {
+        const [me, sub] = await Promise.all([getJson("/me"), getJson("/me/subscription")]);
+        return { me, sub };
+      },
+      render: ({ me, sub }) => {
+        // `cycle` 整个取自 `/me`——它带 `key` 与 `remaining_bytes`，
+        // 而订阅端点那份只带 `Subscription-Userinfo` 要的三个数。
+        // 两份都铺一遍的话，后铺的会把 `remaining_bytes` 抹成 undefined。
+        applyBindings(document, {
+          ...me,
+          url: sub.enabled ? sub.url : null,
+          identity: sub.identity,
+          entry_count: sub.enabled ? sub.entry_count : 0,
+        });
+        renderCollection("me-entries", sub.enabled ? sub.entries : [], "还没有为你配置入口");
+
+        // 三种状态各说各的话。**不要合并成一句「订阅不可用」**——
+        // 「服务端没配」「你还没分到身份」「加载失败」要做的事完全不同。
+        toggle("[data-pm-sub-disabled]", !sub.enabled);
+        toggle(".pm-subscription-address", sub.enabled);
+        toggle("[data-pm-copy]", sub.enabled);
+        toggle("[data-pm-no-identity]", sub.enabled && !sub.identity);
+      },
     },
 
     "me-usage.html": {
@@ -275,6 +299,36 @@
       },
     },
   };
+
+  // `hidden` 而不是 `style.display`：前者是语义属性，辅助技术据此跳过，
+  // 而且不会与 kit 自己的显示规则打架。
+  function toggle(selector, visible) {
+    document.querySelectorAll(selector).forEach((node) => {
+      node.hidden = !visible;
+    });
+  }
+
+  // 复制订阅地址。
+  //
+  // **只复制看起来像地址的东西**：原型模式下那一格是脱敏占位符，
+  // 复制它会得到一串圆点，而用户会把它粘进客户端然后说「订阅坏了」。
+  // 失败也要说话——`navigator.clipboard` 在非安全上下文里直接不存在。
+  document.addEventListener("click", async (event) => {
+    const button = event.target.closest?.("[data-pm-copy]");
+    if (!button) return;
+    const text = document.querySelector(button.dataset.pmCopy)?.textContent?.trim() ?? "";
+    if (!text.startsWith("http")) {
+      window.wsk?.showToast?.("还没有可复制的订阅地址。", "warning");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      window.wsk?.showToast?.("订阅地址已复制。请勿转发给他人。");
+    } catch {
+      // 不把地址写进任何日志——它是凭据。
+      window.wsk?.showToast?.("复制失败，请手动选中复制。", "danger");
+    }
+  });
 
   function renderCollection(name, items, emptyText) {
     const container = document.querySelector(`[data-pm-collection="${name}"]`);
