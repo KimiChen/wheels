@@ -405,6 +405,145 @@ async fn 没配订阅时明确回未启用() {
     assert!(body.get("url").is_none(), "没配的时候不该有 url 这个字段：{body}");
 }
 
+// ============ 页面与端点的机械核对 ============
+
+/// 把 `<template>` 里外分开。
+///
+/// 模板里的绑定是**按集合成员**求值的（`renderRows` 克隆之后对每一行 applyBindings），
+/// 模板外的是按整份响应求值的。两者取值的对象不同，所以必须分开核。
+fn split_templates(html: &str) -> (String, String) {
+    let (mut outside, mut inside) = (String::new(), String::new());
+    let mut rest = html;
+    loop {
+        let Some(open) = rest.find("<template") else {
+            outside.push_str(rest);
+            return (outside, inside);
+        };
+        outside.push_str(&rest[..open]);
+        let after = &rest[open..];
+        let Some(close) = after.find("</template>") else {
+            inside.push_str(after);
+            return (outside, inside);
+        };
+        inside.push_str(&after[..close]);
+        rest = &after[close + "</template>".len()..];
+    }
+}
+
+fn attr_values(html: &str, attr: &str) -> Vec<String> {
+    let needle = format!("{attr}=\"");
+    let mut out = Vec::new();
+    let mut rest = html;
+    while let Some(index) = rest.find(&needle) {
+        let after = &rest[index + needle.len()..];
+        let end = after.find('"').expect("属性没闭合");
+        out.push(after[..end].to_string());
+        rest = &after[end..];
+    }
+    out
+}
+
+fn binding_paths(html: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    for attr in ["data-pm", "data-pm-bytes", "data-pm-exact", "data-pm-digits"] {
+        paths.extend(attr_values(html, attr));
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+fn pick<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
+    let mut current = value;
+    for key in path.split('.') {
+        current = current.get(key)?;
+    }
+    Some(current)
+}
+
+/// **me.html 上的每一个绑定，都要在端点真的返回的 JSON 里取得到值。**
+///
+/// 这一页的绑定横跨两个端点（`/me` 给身份与额度，`/me/subscription` 给地址与入口），
+/// 而 `api.js` 把它们合成一个对象再铺上去。合并口径是**手写的**，
+/// 于是这里有三样东西必须同时对得上：页面上的路径、合并后的对象、两个端点的字段名。
+///
+/// 任何一样改了而另外两样没跟上，症状都是同一个：**那一格显示成「—」**。
+/// 它不报错、不进日志，看起来就像「这个人没有数据」。这条用例就是为了让它先红。
+#[tokio::test]
+async fn me页面上的每个绑定都取得到值() {
+    let api = Api::with_subscription(&[], &["slot-01"]).await;
+    api.seed_claimable_pool(&["node-a"], &["slot-01"]).await;
+    let logged_in = login(&api, "alice").await;
+    let actor = actor(&logged_in);
+
+    let (_, me, _) = api.get("/api/v1/me", Some(&actor)).await;
+    let (_, sub, _) = api.get("/api/v1/me/subscription", Some(&actor)).await;
+
+    // **与 `web/assets/api.js` 的 `PAGES["me.html"].render` 是同一个合并口径。**
+    // 那边改了这边不改，这条用例就是那次改动的报警器。
+    let mut merged = me.clone();
+    merged["url"] = sub["url"].clone();
+    merged["identity"] = sub["identity"].clone();
+    merged["entry_count"] = sub["entry_count"].clone();
+
+    let html = proxy_manager::web::page_body("me.html").expect("me.html 必须嵌在二进制里");
+    let (outside, inside) = split_templates(html);
+
+    // **先证明扫出来的东西不是空的。** 扫描器悄悄返回空列表的话，
+    // 下面那个循环一次都不执行，这条用例就变成一句恒真的断言——
+    // 而它看起来仍然是绿的。
+    let outside_paths = binding_paths(&outside);
+    assert!(
+        outside_paths.len() >= 7,
+        "只扫出 {} 条模板外绑定，扫描器多半坏了：{outside_paths:?}",
+        outside_paths.len()
+    );
+    assert!(outside_paths.contains(&"url".to_string()), "订阅地址那一格没扫到");
+    assert!(outside_paths.contains(&"cycle.remaining_bytes".to_string()), "额度那一格没扫到");
+
+    for path in outside_paths {
+        let value = pick(&merged, &path)
+            .unwrap_or_else(|| panic!("me.html 绑了 {path:?}，但合并后的响应里没有这个字段"));
+        assert!(!value.is_null(), "me.html 绑的 {path:?} 取到了 null：页面上会显示成「—」");
+    }
+
+    // 模板里的绑定按集合成员求值。
+    let entry = &sub["entries"][0];
+    assert!(entry.is_object(), "夹具里应当至少有一条入口：{sub}");
+    let inside_paths = binding_paths(&inside);
+    assert_eq!(
+        inside_paths,
+        vec!["name".to_string(), "node_id".to_string()],
+        "模板里的绑定变了：要么页面改了，要么扫描器把模板内外分错了"
+    );
+    for path in inside_paths {
+        let value = pick(entry, &path).unwrap_or_else(|| {
+            panic!("me.html 的模板绑了 {path:?}，但 entries 的元素里没有这个字段")
+        });
+        assert!(!value.is_null(), "模板绑的 {path:?} 取到了 null");
+    }
+}
+
+/// 集合名两边必须是同一个串。
+///
+/// `renderCollection` 找不到容器时**什么都不做，也不报错**——
+/// 页面上留着的是 HTML 里那两张示例卡片，看起来完全正常，
+/// 而它们是编的。这是本项目最不能接受的那一类失败。
+#[test]
+fn me页面的集合名与脚本里的一致() {
+    let html = proxy_manager::web::page_body("me.html").unwrap();
+    let (script, _) = proxy_manager::web::asset("assets/api.js").unwrap();
+    let names = attr_values(html, "data-pm-collection");
+    assert_eq!(names, vec!["me-entries".to_string()], "me.html 的集合名变了");
+    for name in names {
+        assert!(
+            script.contains(&format!("renderCollection(\"{name}\"")),
+            "api.js 里没有 renderCollection(\"{name}\")：容器找不到时它静默不动，\
+             页面上会留着 HTML 里那两张示例卡片"
+        );
+    }
+}
+
 // ============ 渲染的纯函数部分 ============
 
 /// uPSK 是 base64 文本，含 `+` `/` `=`。**必须 URL 编码**——
