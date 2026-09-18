@@ -1156,7 +1156,7 @@ shadowsocks-2022 + dns + `hijack-dns` 路由规则的配置全部解析通过，
 | 2 | 观测 PoC | 回环 VLESS Reality/Vision 与 Shadowsocks-2022 EIH 多用户 TCP+UDP 字节 oracle 差 = 0 的报告；复现并记录 ServiceName 覆写、静态白名单与重载丢数三项边界 |
 | 3 | 四向 tracker / registry | `go test -race` 全绿，含 `New → AppendTracker → Start` 全路径与“`Start` 后追加必被 `-race` 报出竞争”的负向用例；四向 oracle 误差 = 0；Linux amd64 真实 splice 用例覆盖；多 tracker 叠加 unwrap 断言通过；§4.6 十一条失败关闭路径全部有用例 |
 | 4 | UDS exporter | 权限 / 符号链接 / inode 替换 / 超限 / 慢客户端故障用例通过；exporter 异常退出导致进程失败退出；v3 契约测试全绿（对 §4.5 的快照与映射表逐字段断言），参考 collector 在 §8 故障矩阵下无漏计、无重复入账 |
-| 5 | 长跑与结算验证 | staging 连续运行 ≥ 7 天：负增量 = 0、未知 runtime = 0、`sequence` 重复 = 0、unhealthy 快照全部被拒；§5.3 计划重启流程演练无缺口、无重复 |
+| 5 | 长跑与结算验证 | staging 连续运行 ≥ 7 天：负增量 = 0、未知 runtime = 0、`sequence` 重复 = 0、三个**计费** health 位为真的快照全部被拒（`audit_dropped` 按设计不闸断，但须逐行留痕）；§5.3 计划重启流程演练无缺口、无重复 |
 | 6 | 可发布版本 | §8 故障矩阵与性能三组对照报告归档；可复现发布包与签名验签通过；`docs/OPERATIONS.md` 含部署、采集、重启屏障与回滚步骤 |
 
 ### 7.1 实施状态（2026-09-06，含一台 Debian 13 / x86_64 裸机上的实跑）
@@ -1170,7 +1170,7 @@ shadowsocks-2022 + dns + `hijack-dns` 路由规则的配置全部解析通过，
 | 2 观测 PoC | ✅（部分） | VLESS 与 SS-2022 EIH 多用户 TCP+UDP 四向 oracle 误差 = 0（`integration_test.go`）；Vision 链路小往返 4/4 与 100×64KiB 精确相等（`vision_test.go`）。**未做**：`with_v2ray_api` 的 PoC 集构建，以及 ServiceName 覆写与静态白名单两项边界的复现记录 |
 | 3 四向 tracker / registry | ✅ | `go test -race` 全绿（darwin/arm64 **与 Debian 13 / x86_64 native**）；含「`Start()` 后追加必被 -race 报出竞争」的负向用例（子进程执行）；多 tracker 叠加 unwrap 断言通过；§4.6 校验路径 23 例；真实 splice 的字节 oracle 与 splice 上的配额闸断在 Linux 实跑通过 |
 | 4 UDS exporter | ✅ | 权限 / 符号链接 / 旧 socket / 超限 / 版本 / 方法 / query 故障用例通过；v3 契约逐字段断言；参考 collector 在故障矩阵下无漏计、无重复入账 |
-| 5 长跑与结算验证 | ✅（带保留） | **7 天 7 小时连续运行完成**（2026-09-07 00:32 ~ 09-14 17:44，真实用户流量）：10 453 轮采集、10 453 次额度下发、合计入账 19.2 GiB，**四项判据（负增量 / 未知 runtime / 重复 sequence / unhealthy 入账）全为 0**。审计侧 65 747 条记录、0 半行、0 事件行、0 混入他人、`seq` 逐文件连续。保留项见 §7.1 末段：跨两个构建、流量不均。轮转与纪律 9/10 已于 09-15 单独验证（见 `docs/UPSTREAM_BASELINE.md`）|
+| 5 长跑与结算验证 | ✅（带保留） | **7 天 7 小时连续运行完成**（2026-09-07 00:32 ~ 09-14 17:44，真实用户流量）：10 453 轮采集、10 453 次额度下发、合计入账 19.2 GiB。判据数字是 2026-09-19 用修好的 `report()` 从归档账本**重算**的，不是当时那份报告的输出——原报告四项里三项是假的，见下第 6 条。重算：负增量 0、未知 runtime 0、重复 `sequence` 0、计费 health 位入账 0；另有 2 条 `transport_error`（09-08 换二进制的 98 秒空窗），新判据把传输失败计入失败，故**重算的退出码是 1 而非 0**。审计侧 65 747 条记录、0 半行、0 事件行、0 混入他人、`seq` 逐文件连续。保留项见 §7.1 末段第 2、6 条。轮转与纪律 9/10 已于 09-15 单独验证（见 `docs/UPSTREAM_BASELINE.md`）|
 | 6 可发布版本 | ⬜（部分） | 可复现构建已在裸机上实跑：linux/amd64 与 linux/arm64 各两次独立构建逐字节一致，产出 manifest + SHA256SUMS；跨机签名→验签演练通过，篡改一个字节即验签失败；三组性能对照见 `docs/PERFORMANCE.md`。**未做**：用真实离线私钥签名、带负载机的端到端性能验收、法务评审 |
 
 三项可选能力**均已实现且默认关闭**：§4.8 访问审计、§4.9 配额闸断，以及 §4.4 的重载对账与
@@ -1195,7 +1195,18 @@ shadowsocks-2022 + dns + `hijack-dns` 路由规则的配置全部解析通过，
    不许 `rm`；要删某人的历史，删的是已轮转文件，不是活动文件。
 4. **正式发布签名用的是一次性密钥**：跨机签名→验签的完整流程已演练通过（含篡改必失败），
    但真实的离线私钥在你手里，正式出包时须用它重签，并把公钥指纹写进 `docs/OPERATIONS.md`。
-5. **REALITY 链路未对账**：Vision 已覆盖（`vision_test.go`：TLS + `xtls-rprx-vision`，
+6. **长跑判据当时形同虚设，数字是事后重算的**：`reference_collector.report()` 在 2026-09-19 之前，
+   四项判据里有三项不可能非零——`unknown_runtime` 数的是 `schema_rejected`（未知 runtime 走的是
+   `not_accepted`，永远不进那个桶）、`duplicate_sequence` 只从**已入账**的行推导（而 ingest 早已把
+   不前进的序号挡在入账之外），`unhealthy_accepted` 干脆是个字面量 0；退出码又不看
+   `transport_error` 与 `not_accepted`，连空账本都返回 0。已按成因分桶重写，并对每一种故障各加一个
+   负向用例（`ReportVerdictTest`，8/8 在旧实现上全绿）。归档账本重算的结论见上表，
+   与采集端进程内独立累加的 `state.json:stats` 逐项一致（`accepted` 16 231、四个拒绝计数全 0）。
+   **一个遗留缺口**：`audit_dropped` 不受 `health_ok` 闸断（只闸三个计费位），因此它**可以**
+   出现在已入账的快照上，而旧账本的 `accepted` 行不记 `health`，这一项无法回溯——
+   窗口内 10 453 行全部计入 `health_not_recorded`。已入账行现在会写下触发的 health 位，
+   该判据自此可测；**不为补这一项重跑七天**。
+7. **REALITY 链路未对账**：Vision 已覆盖（`vision_test.go`：TLS + `xtls-rprx-vision`，
    小往返 4/4 证明 padding 不计入，100×64KiB 精确相等证明 buffered→direct 切换后口径不退化），
    但 REALITY 需要一个外部握手目标，会把用例变成依赖网络的用例，因此仍未覆盖；
    §12 已声明 REALITY 握手校验失败的伪装中继本就不可见于任何 tracker。
