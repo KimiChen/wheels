@@ -422,3 +422,188 @@ async fn 泡游会话不会在一分钟后掉线() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(body["error"]["code"], "member_fact_stale");
 }
+
+// ============ 首次登录自动领取（D11、README §4.9） ============
+
+/// **登录即领取。** 没有单独的「开通」步骤。
+///
+/// 这条曾经被刻意做成两步，理由是「开通要留操作者、要落审计、可能失败」。
+/// 三件事都成立，但没有一件需要一个**人**来按按钮——操作者记成 `sso:<账号>`，
+/// 审计照样落，池空照样是错误。而拆成两步的代价是：每个新人在管理员跑完
+/// 那条命令之前，登录进来看到的是一个什么都用不了的控制台。
+#[tokio::test]
+async fn 首次登录就领到槽位() {
+    use sqlx::Row;
+    let api = Api::new().await;
+    api.seed_claimable_pool(&["node-a"], &["slot-01", "slot-02"]).await;
+
+    let logged_in = proxy_manager::sso::complete_login(
+        &api.store,
+        &Roster::empty(),
+        &identity("alice", None),
+        time::Duration::hours(8),
+    )
+    .await
+    .unwrap();
+
+    let claim = logged_in.claim.expect("登录应当顺带领到一个槽位");
+    assert!(claim.newly_claimed);
+    assert_eq!(claim.nodes, vec!["node-a".to_string()]);
+
+    // 槽位真的落到了这个人头上，而不是只在返回值里。
+    let (name, state): (String, String) =
+        sqlx::query("SELECT identity_name, state FROM identity_routes WHERE user_id = ?")
+            .bind(logged_in.user_id)
+            .fetch_one(api.store.readers())
+            .await
+            .map(|row| (row.get(0), row.get(1)))
+            .unwrap();
+    assert_eq!(name, claim.identity_name);
+    assert_eq!(state, "claimed");
+}
+
+/// 重复登录**不再消耗一个名额**，拿回同一个身份。
+///
+/// 池子只减不增（退役永不复用），所以「每次登录领一个」会在第 301 次登录时
+/// 把池子掏空——而那看起来像一次容量规划失误，不像一个幂等 bug。
+#[tokio::test]
+async fn 重复登录不再消耗名额() {
+    use sqlx::Row;
+    let api = Api::new().await;
+    api.seed_claimable_pool(&["node-a"], &["slot-01", "slot-02"]).await;
+
+    let first = proxy_manager::sso::complete_login(
+        &api.store,
+        &Roster::empty(),
+        &identity("alice", None),
+        time::Duration::hours(8),
+    )
+    .await
+    .unwrap();
+    let second = proxy_manager::sso::complete_login(
+        &api.store,
+        &Roster::empty(),
+        &identity("alice", None),
+        time::Duration::hours(8),
+    )
+    .await
+    .unwrap();
+
+    let a = first.claim.unwrap();
+    let b = second.claim.unwrap();
+    assert_eq!(a.identity_name, b.identity_name, "应当拿回同一个身份");
+    assert!(a.newly_claimed && !b.newly_claimed, "第二次不是新领");
+
+    let claimed: i64 = sqlx::query("SELECT count(*) FROM identity_routes WHERE state = 'claimed'")
+        .fetch_one(api.store.readers())
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(claimed, 1, "只该占用一个名额");
+}
+
+/// **池空不让登录失败。**
+///
+/// 这是这一组里最重要的一条。领取是一次**容量**操作，而容量问题不该表现为
+/// 「登不进去」——反过来做，一次可恢复的池耗尽会变成全体彻底进不来，
+/// 连看一眼自己状态、连管理员进去扩容都做不到。
+#[tokio::test]
+async fn 池空时登录照常成功只是没有身份() {
+    let api = Api::new().await;
+    // 一个节点、一个槽位：第二个人必然领不到。
+    api.seed_claimable_pool(&["node-a"], &["slot-01"]).await;
+
+    let first = proxy_manager::sso::complete_login(
+        &api.store,
+        &Roster::empty(),
+        &identity("alice", None),
+        time::Duration::hours(8),
+    )
+    .await
+    .unwrap();
+    assert!(first.claim.is_some());
+
+    let second = proxy_manager::sso::complete_login(
+        &api.store,
+        &Roster::empty(),
+        &identity("bob", None),
+        time::Duration::hours(8),
+    )
+    .await
+    .expect("池空**不得**让登录失败");
+    assert!(second.claim.is_none(), "没领到就是 None，不是一个假的成功");
+    // 反向证据：他确实登进来了——会话是真的。
+    assert!(!second.session.cookie_value.is_empty());
+}
+
+/// 用过的身份不得被分配出去（D11 的零基线门禁）。
+///
+/// 挡的是「把一个用过的身份发给新用户，于是他一上来就欠着别人的账」。
+#[tokio::test]
+async fn 有过流量的身份不会被领走() {
+    let api = Api::new().await;
+    api.seed_claimable_pool(&["node-a"], &["slot-01"]).await;
+    api.dirty_slot("node-a", "slot-01").await;
+
+    let logged_in = proxy_manager::sso::complete_login(
+        &api.store,
+        &Roster::empty(),
+        &identity("alice", None),
+        time::Duration::hours(8),
+    )
+    .await
+    .unwrap();
+    assert!(logged_in.claim.is_none(), "唯一的候选身份动过字节，不该被领走");
+}
+
+/// **从未认领的身份也能退役**，而且这是主要用途之一。
+///
+/// 部署侧的测试身份（`deploy-test`）、原型控制器的测试账号（`user0001`）
+/// 都在节点的 inbound 里，但它们的凭据在别处流通——发给真人等于两个人
+/// 共用一份凭据。在这条路存在之前，排除它们只能靠「计数非零」这个**巧合**，
+/// 而一次进程重启就会让计数归零，它们悄悄变回可领取。
+#[tokio::test]
+async fn 从未认领的身份也能永久退出池子() {
+    let api = Api::new().await;
+    // 排序上 deploy-test 在 user0001 前面，所以不退役的话它必然先被挑中。
+    api.seed_claimable_pool(&["node-a"], &["deploy-test", "user0001"]).await;
+
+    let count = proxy_manager::identity::retire(
+        &api.store,
+        "deploy-test",
+        "kimi",
+        "部署侧测试身份，凭据在 verify 脚本里流通",
+    )
+    .await
+    .expect("从未认领的槽位也该退得掉");
+    assert_eq!(count, 1);
+
+    let logged_in = proxy_manager::sso::complete_login(
+        &api.store,
+        &Roster::empty(),
+        &identity("alice", None),
+        time::Duration::hours(8),
+    )
+    .await
+    .unwrap();
+    let claim = logged_in.claim.expect("还有 user0001 可领");
+    assert_eq!(claim.identity_name, "user0001", "退役掉的那个不该再被挑中");
+}
+
+/// 退役之后池子就空了——登录仍然成功，只是没有身份。
+#[tokio::test]
+async fn 全部退役之后池子为空() {
+    let api = Api::new().await;
+    api.seed_claimable_pool(&["node-a"], &["deploy-test"]).await;
+    proxy_manager::identity::retire(&api.store, "deploy-test", "kimi", "测试身份").await.unwrap();
+
+    let logged_in = proxy_manager::sso::complete_login(
+        &api.store,
+        &Roster::empty(),
+        &identity("alice", None),
+        time::Duration::hours(8),
+    )
+    .await
+    .unwrap();
+    assert!(logged_in.claim.is_none(), "池子空了就是没有，不是给一个退役的");
+}

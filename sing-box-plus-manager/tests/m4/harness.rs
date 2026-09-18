@@ -249,6 +249,128 @@ impl Api {
         self.send(builder.body(Body::empty()).unwrap()).await
     }
 
+    /// 造一个**可认领**的账号池：节点 + 已批准 runtime + 身份 + 零基线游标 + free 槽位。
+    ///
+    /// 手工造而不是跑真结算：这一组用例验的是「登录会不会自动领」，
+    /// 而不是「结算会不会登记槽位」（那条在 m2 的 identity_pool 里）。
+    /// 但零基线游标必须真的写进去——`pick_free_slot` 的门禁查的就是它，
+    /// 不写就等于把这条门禁从用例里摘掉了。
+    pub async fn seed_claimable_pool(&self, nodes: &[&str], identities: &[&str]) {
+        use sqlx::Row;
+        const ZERO: &str = "00000000000000000000";
+        let now = "2026-09-19T00:00:00Z";
+        let mut txn = self.store.begin_immediate().await.unwrap();
+        for (index, node) in nodes.iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO nodes(node_id, provider, address, first_snapshot, \
+                 agent_spki_sha256, quota_enabled, status, created_at, updated_at) \
+                 VALUES (?, 'plus_v3', ?, 'baseline', ?, 1, 'active', ?, ?) \
+                 ON CONFLICT(node_id) DO UPDATE SET quota_enabled = 1",
+            )
+            .bind(node)
+            .bind(format!("{node}.example.com:8443"))
+            .bind("0".repeat(64))
+            .bind(now)
+            .bind(now)
+            .execute(txn.conn())
+            .await
+            .unwrap();
+
+            let runtime = format!("{:032x}", index + 1);
+            let runtime_pk: i64 = sqlx::query(
+                "INSERT INTO node_runtimes(node_id, runtime_id, started_at_unix_ms, \
+                 first_snapshot, approval_status, window_state, first_seen_at, last_seen_at) \
+                 VALUES (?, ?, ?, 'baseline', 'approved', 'open', ?, ?) RETURNING runtime_pk",
+            )
+            .bind(node)
+            .bind(&runtime)
+            .bind(format!("{:020}", 1_789_000_000_000u64))
+            .bind(now)
+            .bind(now)
+            .fetch_one(txn.conn())
+            .await
+            .map(|row| row.get(0))
+            .unwrap();
+
+            let service_id: i64 = sqlx::query(
+                "INSERT INTO runtime_services(runtime_pk, inbound_tag, generation, \
+                 inbound_type, active, first_seen_at) \
+                 VALUES (?, 'ss-entry', ?, 'shadowsocks', 1, ?) RETURNING runtime_service_id",
+            )
+            .bind(runtime_pk)
+            .bind(format!("{:020}", 1u64))
+            .bind(now)
+            .fetch_one(txn.conn())
+            .await
+            .map(|row| row.get(0))
+            .unwrap();
+
+            for name in identities {
+                let identity_id: i64 = sqlx::query(
+                    "INSERT INTO runtime_identities(runtime_pk, runtime_service_id, \
+                     identity_name, generation, active, first_seen_at, last_seen_at) \
+                     VALUES (?, ?, ?, ?, 1, ?, ?) RETURNING runtime_identity_id",
+                )
+                .bind(runtime_pk)
+                .bind(service_id)
+                .bind(name)
+                .bind(format!("{:020}", 1u64))
+                .bind(now)
+                .bind(now)
+                .fetch_one(txn.conn())
+                .await
+                .map(|row| row.get(0))
+                .unwrap();
+
+                // 零基线：四向全为定宽零串。门禁查的就是这一行。
+                sqlx::query(
+                    "INSERT INTO counter_cursors(runtime_identity_id, tcp_uplink_bytes, \
+                     tcp_downlink_bytes, udp_uplink_bytes, udp_downlink_bytes, updated_at) \
+                     VALUES (?, ?, ?, ?, ?, ?)",
+                )
+                .bind(identity_id)
+                .bind(ZERO)
+                .bind(ZERO)
+                .bind(ZERO)
+                .bind(ZERO)
+                .bind(now)
+                .execute(txn.conn())
+                .await
+                .unwrap();
+
+                sqlx::query(
+                    "INSERT INTO identity_routes(node_id, inbound_tag, identity_name, \
+                     state, created_at) VALUES (?, 'ss-entry', ?, 'free', ?)",
+                )
+                .bind(node)
+                .bind(name)
+                .bind(now)
+                .execute(txn.conn())
+                .await
+                .unwrap();
+            }
+        }
+        txn.commit().await.unwrap();
+    }
+
+    /// 把一个槽位弄脏：给它的游标写上非零累计，于是零基线门禁不再放它过。
+    pub async fn dirty_slot(&self, node: &str, identity: &str) {
+        let mut txn = self.store.begin_immediate().await.unwrap();
+        sqlx::query(
+            "UPDATE counter_cursors SET tcp_uplink_bytes = ? WHERE runtime_identity_id IN ( \
+               SELECT i.runtime_identity_id FROM runtime_identities i \
+                 JOIN node_runtimes r ON r.runtime_pk = i.runtime_pk \
+                WHERE r.node_id = ? AND i.identity_name = ?)",
+        )
+        .bind(format!("{:020}", 4096u64))
+        .bind(node)
+        .bind(identity)
+        .execute(txn.conn())
+        .await
+        .unwrap();
+        txn.commit().await.unwrap();
+    }
+
     pub async fn send(&self, request: Request<Body>) -> (StatusCode, Value, axum::http::HeaderMap) {
         let response = self.router.clone().oneshot(request).await.unwrap();
         let status = response.status();

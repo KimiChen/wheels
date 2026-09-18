@@ -157,6 +157,9 @@ pub struct LoggedIn {
     pub quota_group: String,
     /// 档位与上一次不同时为 `Some(旧档位)`——调用方据此走审计路径同步。
     pub quota_group_changed_from: Option<String>,
+    /// 本次登录后这个人持有的计费槽位。`None` 表示领取失败（见 `complete_login`），
+    /// 那是一次**容量**问题，登录本身仍然是成功的。
+    pub claim: Option<crate::identity::Claim>,
     pub session: IssuedSession,
 }
 
@@ -165,10 +168,18 @@ pub struct LoggedIn {
 /// **建号是幂等的**，幂等键是 `login_name`（泡游账号名，大小写敏感）。
 /// 重复登录不重复建号、不重置任何用量。
 ///
-/// 这里**不做** D11 的账号池领取。README §4.9 把「首次登录自动授权节点」
-/// 挂在这条路径上，本轮刻意不做：开通是一次要留操作者、要落审计、
-/// 可能因池空而失败的动作，把它塞进登录路径意味着一次上游抖动就能变成
-/// 一次半成品的开通。开通走 `proxy-manager user grant`（同一套库函数）。
+/// **首次登录自动领取一个计费槽位**（README §4.9、D11）。
+///
+/// 这里曾经刻意不做，理由是「开通是一次要留操作者、要落审计、可能因池空而
+/// 失败的动作」。那个理由站不住：三件事都成立，但没有一件需要一个**人**来
+/// 按按钮——操作者记成 `sso:<账号>`，审计照样落，池空照样是错误。
+/// 而把它拆成单独一步的代价很实在：每个新人都要等管理员跑一条命令，
+/// 而在他跑之前，那个人登录进来看到的是一个什么都用不了的控制台。
+///
+/// **领取失败不让登录失败。** 池空、还没结算出槽位、或者节点还没就绪，
+/// 都只记一条告警——登录本身是成功的，人进得来、看得见自己的状态，
+/// 只是还没有身份。反过来（领取失败就拒绝登录）会把一个可恢复的容量问题
+/// 变成一次彻底进不去。
 pub async fn complete_login(
     store: &Store,
     roster: &Roster,
@@ -262,6 +273,25 @@ pub async fn complete_login(
     // 那一整套不该藏在一个 INSERT 后面。
     let quota_group_changed_from = previous_group.filter(|previous| *previous != grade.quota_group);
 
+    // 领取放在会话之外、且**不阻断登录**：它是一次容量操作，
+    // 而容量问题不该表现为「登不进去」。
+    //
+    // 操作者记成 `sso:<账号>`，让审计上看得出这不是管理员点的按钮，
+    // 而是这个人自己第一次登录触发的。
+    let claim =
+        match crate::identity::claim_for_user(store, user_id, &format!("sso:{}", identity.account))
+            .await
+        {
+            Ok(claim) => Some(claim),
+            Err(error) => {
+                tracing::error!(
+                    login_name = %identity.account, %error,
+                    "自动领取计费槽位失败：登录照常成功，但这个人还没有身份可用（P2）"
+                );
+                None
+            }
+        };
+
     let session = session::create(store, user_id, PROVIDER, session_ttl).await?;
     Ok(LoggedIn {
         user_id,
@@ -269,6 +299,7 @@ pub async fn complete_login(
         role: grade.role,
         quota_group: grade.quota_group,
         quota_group_changed_from,
+        claim,
         session,
     })
 }
