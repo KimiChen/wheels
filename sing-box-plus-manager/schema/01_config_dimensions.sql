@@ -20,16 +20,11 @@ CREATE TABLE nodes (
     updated_at        TEXT NOT NULL
 ) STRICT;
 
--- 节点内稳定的 inbound 标识。与 runtime_services 是两种语义：
--- 这里是「配置里有哪些入口」，那里是「某个 runtime 窗口内观察到的 generation」。
-CREATE TABLE services (
-    service_id  INTEGER PRIMARY KEY AUTOINCREMENT,
-    node_id     TEXT NOT NULL REFERENCES nodes(node_id),
-    inbound_tag TEXT NOT NULL,
-    inbound_type TEXT NOT NULL,
-    created_at  TEXT NOT NULL,
-    UNIQUE(node_id, inbound_tag)
-) STRICT;
+-- 原本这里还有一张 services（「配置里有哪些入口」）。它从建库起就没被写过：
+-- 入口是从快照里观察到的，runtime_services 才是真正在用的那张。一张永远为空、
+-- 却看起来像权威的配置表，只会让下一个人去查它并得到「这个节点没有入口」。
+-- 需要「配置声明的入口」与「实际观察到的入口」对账时再加回来，那时它要连同
+-- 写入路径和对账测试一起加。
 
 -- 业务用户。角色收敛为两档（D19），管理员即全权。
 -- **没有 per-user 额度字段**——额度是全局设置（D21）。
@@ -57,24 +52,10 @@ CREATE TABLE identity_routes (
     UNIQUE(node_id, inbound_tag, identity_name)
 ) STRICT;
 
--- 默认节点组与首次登录分配进度（D11）。
-CREATE TABLE default_node_groups (
-    group_id   INTEGER PRIMARY KEY AUTOINCREMENT,
-    name       TEXT NOT NULL UNIQUE,
-    node_id    TEXT NOT NULL REFERENCES nodes(node_id),
-    created_at TEXT NOT NULL,
-    UNIQUE(name, node_id)
-) STRICT;
-
--- 用户对节点的授权。显式撤销不被重复登录覆盖，所以 revoked_at 是状态而不是删行。
-CREATE TABLE user_node_grants (
-    grant_id   INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id    INTEGER NOT NULL REFERENCES users(user_id),
-    node_id    TEXT NOT NULL REFERENCES nodes(node_id),
-    granted_at TEXT NOT NULL,
-    revoked_at TEXT,
-    UNIQUE(user_id, node_id)
-) STRICT;
+-- 原本这里还有 default_node_groups 与 user_node_grants，用来表达「某个用户能用哪些节点」。
+-- 两张都没被写过，而且在当前形态下是纯粹的间接层：开通就是在**所有**启用配额的节点上
+-- 认领一个槽位，撤权是把用户置为 disabled 再把额度打到零，两者都不按节点区分。
+-- 真要做按用户选节点时再加回来——那是一个会改变额度表生成方式的功能，
+-- 不是一张表能顺带支持的。
 
 CREATE INDEX idx_identity_routes_user ON identity_routes(user_id);
-CREATE INDEX idx_user_node_grants_node ON user_node_grants(node_id);

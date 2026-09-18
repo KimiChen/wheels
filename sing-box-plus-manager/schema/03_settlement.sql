@@ -162,14 +162,10 @@ CREATE TABLE usage_cycle_totals (
     PRIMARY KEY(user_id, cycle_key, rule_version)
 ) STRICT;
 
--- 清理控制。**不属于可丢弃缓存**：它记的是已清理边界与累计检查点。
-CREATE TABLE ledger_retention_state (
-    scope        TEXT PRIMARY KEY NOT NULL,
-    purged_through TEXT NOT NULL,
-    checkpoint_sha256 TEXT CHECK(checkpoint_sha256 IS NULL OR length(checkpoint_sha256) = 64),
-    archive_uri  TEXT,
-    updated_at   TEXT NOT NULL
-) STRICT;
+-- 原本这里还有一张 ledger_retention_state，记已清理边界与累计检查点。
+-- 本轮不做保留期清理，账本只增不删，所以它没有写入者；而一个恒为空的
+-- purged_through 会让「这段区间的账本还在不在」这个问题得到一个假的肯定答案。
+-- 做清理时再加回来——它要和「清理不改变 lifetime 合计」的不变量测试一起加。
 
 CREATE INDEX idx_snapshot_batches_settle
     ON snapshot_batches(node_id, runtime_pk, status, sequence);
