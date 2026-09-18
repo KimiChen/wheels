@@ -45,6 +45,16 @@ impl SchedulePolicy {
             max_clock_skew_secs: collect.max_clock_skew_secs,
         }
     }
+
+    /// 按这次结果推进退避状态并算出下次等待时长。
+    pub fn next_wait(&self, outcome: &Tick, backoff: &mut Duration) -> Duration {
+        if outcome.should_back_off() {
+            *backoff = (*backoff * 2).min(self.max_backoff);
+        } else {
+            *backoff = self.target;
+        }
+        *backoff
+    }
 }
 
 /// 一次采集循环的结果。
@@ -66,8 +76,30 @@ pub enum Tick {
 
 impl Tick {
     /// 这次是否应当退避。
-    fn should_back_off(&self) -> bool {
+    ///
+    /// 退避只对传输类失败生效。整份拒绝**不退避**：那是节点在正常回应、
+    /// 只是内容不可入账，退避会把告警的节奏也拖慢。
+    pub fn should_back_off(&self) -> bool {
         matches!(self, Tick::Retryable(_) | Tick::NotAccountable { .. } | Tick::Unidentifiable)
+    }
+
+    /// 把这次结果按分级记进日志。
+    ///
+    /// 提出来是为了让下发那一层（`quota::service`）复用同一条循环骨架，
+    /// 而不是抄一份——抄一份的代价是两处的退避规则会慢慢分家。
+    pub fn log(&self, node_id: &str) {
+        match self {
+            Tick::Applied { settled, ledger_rows } => {
+                tracing::debug!(node_id, settled, ledger_rows, "入账完成");
+            }
+            Tick::Deferred(reason) => tracing::warn!(node_id, "暂不结算：{reason}"),
+            Tick::Rejected(reason) => tracing::warn!(node_id, "整份拒绝：{reason}"),
+            Tick::Retryable(detail) => tracing::warn!(node_id, detail, "可重试失败，不入账"),
+            Tick::NotAccountable { upstream_status, agent_status } => {
+                tracing::warn!(node_id, ?upstream_status, agent_status, "上游非 200，拒绝入账");
+            }
+            Tick::Unidentifiable => tracing::warn!(node_id, "响应无法识别 envelope"),
+        }
     }
 }
 
@@ -84,6 +116,18 @@ impl NodeCollector {
 
     pub fn node_id(&self) -> &str {
         &self.node_id
+    }
+
+    /// 下发那一层要走同一条连接。
+    ///
+    /// 暴露一个引用，而不是让这个模块知道配额的存在——顺序仍由结构固定：
+    /// 拿得到 client 的人必须先持有 collector，也就必须先入账。
+    pub fn client(&self) -> &AgentClient {
+        &self.client
+    }
+
+    pub fn policy(&self) -> &SchedulePolicy {
+        &self.policy
     }
 
     /// 一次采集 + 入账。可单独调用，便于测试与将来的手动采集端点。
@@ -163,43 +207,15 @@ impl NodeCollector {
     }
 
     /// 定时循环。收到停止信号即退出。
+    ///
+    /// 这是**只采集**的形态。要把配额挂在后面，用 `quota::service::QuotaService`——
+    /// 它包住这个结构体而不是改它。
     pub async fn run(self, store: Arc<Store>, mut shutdown: watch::Receiver<bool>) {
         let mut backoff = self.policy.target;
         loop {
             let outcome = self.tick(&store).await;
-            match &outcome {
-                Tick::Applied { settled, ledger_rows } => {
-                    tracing::debug!(node_id = %self.node_id, settled, ledger_rows, "入账完成");
-                }
-                Tick::Deferred(reason) => {
-                    tracing::warn!(node_id = %self.node_id, "暂不结算：{reason}");
-                }
-                Tick::Rejected(reason) => {
-                    tracing::warn!(node_id = %self.node_id, "整份拒绝：{reason}");
-                }
-                Tick::Retryable(detail) => {
-                    tracing::warn!(node_id = %self.node_id, detail, "可重试失败，不入账");
-                }
-                Tick::NotAccountable { upstream_status, agent_status } => {
-                    tracing::warn!(
-                        node_id = %self.node_id, ?upstream_status, agent_status,
-                        "上游非 200，拒绝入账"
-                    );
-                }
-                Tick::Unidentifiable => {
-                    tracing::warn!(node_id = %self.node_id, "响应无法识别 envelope");
-                }
-            }
-
-            // 退避只对传输类失败生效。整份拒绝**不退避**：
-            // 那是节点在正常回应、只是内容不可入账，退避会把告警的节奏也拖慢。
-            let wait = if outcome.should_back_off() {
-                backoff = (backoff * 2).min(self.policy.max_backoff);
-                backoff
-            } else {
-                backoff = self.policy.target;
-                self.policy.target
-            };
+            outcome.log(&self.node_id);
+            let wait = self.policy.next_wait(&outcome, &mut backoff);
 
             tokio::select! {
                 _ = tokio::time::sleep(wait) => {}

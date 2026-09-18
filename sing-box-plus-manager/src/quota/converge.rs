@@ -124,7 +124,20 @@ pub async fn plan_round(
     for node in nodes {
         let identities = identities_by_node.remove(node.node_id.as_str()).unwrap_or_default();
         let allocations = per_node_user.remove(node.node_id.as_str()).unwrap_or_default();
-        tables.insert(node.node_id.clone(), table::assemble(&identities, &allocations)?);
+        let entries = table::assemble(&identities, &allocations)?;
+        // C30 的**逐条**形态：组装出来的表必须一条不少地覆盖枚举到的身份。
+        // 少一条在 wire 上等于解除限额，而 PUT 照样返回 200——这是这条链路上
+        // 最隐蔽的失败，所以它要在规划阶段就被挡住，而不是等巡逻发现。
+        if entries.len() != identities.len() {
+            return Err(Error::Quota(format!(
+                "节点 {} 的完整表少了条目：枚举到 {} 个身份、表里只有 {} 条。\
+                 省略在节点上等于无限额度（C16）",
+                node.node_id,
+                identities.len(),
+                entries.len()
+            )));
+        }
+        tables.insert(node.node_id.clone(), entries);
     }
 
     Ok(RoundPlan { revision: settings.revision, tables })
@@ -165,6 +178,20 @@ pub async fn converge_node(
         .get(&context.node_id)
         .cloned()
         .ok_or_else(|| Error::Quota(format!("计划里没有节点 {}", context.node_id)))?;
+    // 定案第三条给 Admin 的也是有限额度（10 TB），因此**没有任何人是 Unlimited**。
+    // 于是 `wire::QuotaRequest::build` 唯一会丢条目的那条路径走不到，
+    // 「wire 条目数 == 表条目数 == 身份数」恒成立。断言在这里而不只在测试里：
+    // 哪天有人加回一档无限额度，这条会当场红，而不是悄悄变成一份漏人的表。
+    //
+    // 不放进 `dispatch::prepare`：那是低层原语，m2 有两条用例**故意**经它下发
+    // 漏条目的表来证明节点会把被省略的身份当成无限——挡住它们就等于把
+    // C16 的反向证据删掉。
+    if let Some((tag, name, _)) = entries.iter().find(|(_, _, q)| matches!(q, Quota::Unlimited)) {
+        return Err(Error::Quota(format!(
+            "计划里出现了无限额度身份 {tag}/{name}：它会在 wire 上被省略，\
+             使这份表不再覆盖全部身份（C30）"
+        )));
+    }
     let kind = dispatch::TableKind::of(&entries);
     // 正额度表必须绑定新鲜 sequence；零表不占用。
     let source = match kind {

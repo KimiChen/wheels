@@ -236,8 +236,22 @@ async fn run_service(config_dir: &std::path::Path) -> anyhow::Result<ExitCode> {
         let client =
             AgentClient::new(&node.node_id, &node.address, node.dns_name(), &node.materials_dir)?;
         let collector = NodeCollector::new(&node.node_id, client, policy.clone());
-        tracing::info!(node_id = %node.node_id, interval = ?policy.target, "启动采集循环");
-        tasks.push(tokio::spawn(collector.run(store.clone(), shutdown_rx.clone())));
+        // 采集循环外面**总是**包一层下发。没开配额控制的节点在 `dispatch_round`
+        // 的第一行就返回 `Disabled`——用一条运行时分支，而不是两种任务形态：
+        // 两种形态意味着切换时要改的是启动代码，而不是一个配置字段。
+        let service = proxy_manager::quota::service::QuotaService::from_config(
+            collector,
+            node,
+            &config.server.quota,
+            config.server.collect.snapshot_max_age_secs,
+        );
+        tracing::info!(
+            node_id = %node.node_id,
+            interval = ?policy.target,
+            quota = node.quota_control.as_ref().is_some_and(|q| q.enabled),
+            "启动采集与下发循环"
+        );
+        tasks.push(tokio::spawn(service.run(store.clone(), shutdown_rx.clone())));
     }
     if tasks.is_empty() {
         anyhow::bail!("nodes.toml 里没有可采集的节点");

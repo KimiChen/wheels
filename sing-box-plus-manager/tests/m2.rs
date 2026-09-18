@@ -11,6 +11,7 @@
 //! | 同口径多身份之和 == 节点分配额；不同口径各自成池 | [`allocation`] |
 //! | 409 三步分支、unknown 恢复、C30 全量集合、C33 零表收敛 | [`dispatch`] |
 //! | D21 改额度立即生效、调低先预览、审计、逐节点任务 | [`settings`] |
+//! | 下发接线：第一道闩、镜像一轮、不新鲜不推、409 三步、崩溃恢复 | [`service`] |
 
 // 复用 M0 的假节点与 M1 的 PKI 脚手架：配额端点与生效表在 M0 就做好了。
 #[path = "m0/fake_node.rs"]
@@ -28,5 +29,7 @@ mod allocation;
 mod dispatch;
 #[path = "m2/identity_pool.rs"]
 mod identity_pool;
+#[path = "m2/service.rs"]
+mod service;
 #[path = "m2/settings.rs"]
 mod settings;

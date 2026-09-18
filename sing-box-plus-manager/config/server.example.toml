@@ -28,8 +28,17 @@ max_clock_skew_secs = 120
 # 之后一律走 PUT /api/v1/settings/quota 的审计路径修改——那条路径会推进
 # revision 并生成逐节点下发任务。配置里再留一个额度字段就是设了也不生效。
 # 日桶按这个展示时区的日历日计算（data-model.md §6）。
-# 改展示时区必须完整重建日缓存。
+# 计费周期是 UTC+8（CYCLE_RULE_VERSION = 2），这里要与之对齐，
+# 否则某一天的用量会显示进「错误的月份」。改展示时区必须完整重建日缓存。
 display_timezone = "Asia/Shanghai"
+
+# 拿不到新鲜已结算 sequence 时是否下发 C33 的全零安全表。
+# 默认 false 是**对一条编号约束的有意偏离**（D25），不是疏漏：
+# 节点侧 admit() 先查 exhausted() 再查 stale，所以 stale_action=allow
+# 救不了被置零的身份——一次短暂的采集失败会把人硬切断，而镜像分配下
+# 节点上那份额度本来就等于全局剩余，不存在「跑到自己耗尽」。
+# 置 true 即回到 C33 的原行为。
+safe_zero_on_stale = false
 
 [alerts]
 # 通知降级通道与限频属于 M5，这里只保留占位键，解析时校验但不使用。
