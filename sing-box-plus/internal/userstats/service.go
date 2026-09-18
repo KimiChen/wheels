@@ -82,7 +82,7 @@ func (s *Service) Start(stage adapter.StartStage) error {
 	if s.options.SocketMode == "0660" {
 		mode = os.FileMode(0o660)
 	}
-	listener, err := listenUnix(s.options.ListenPath, mode)
+	listener, err := listenUnix(s.options.ListenPath, mode, s.options.SocketGroup)
 	if err != nil {
 		s.closeAudit()
 		return err
@@ -98,7 +98,7 @@ func (s *Service) Start(stage adapter.StartStage) error {
 
 	if s.options.QuotaControl != nil {
 		s.registry.configureQuota(*s.options.QuotaControl)
-		quotaListener, quotaErr := listenUnix(s.options.QuotaControl.ListenPath, mode)
+		quotaListener, quotaErr := listenUnix(s.options.QuotaControl.ListenPath, mode, s.options.SocketGroup)
 		if quotaErr != nil {
 			_ = s.exporter.Close()
 			s.closeAudit()

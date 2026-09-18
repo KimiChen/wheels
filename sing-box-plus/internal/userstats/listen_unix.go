@@ -6,19 +6,18 @@ import (
 	"io/fs"
 	"net"
 	"os"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 
 	E "github.com/sagernet/sing/common/exceptions"
 )
 
-// maxUnixPathBytes 取两个平台里更严格的那个，使同一份配置在 Linux 与 darwin 上行为一致。
-const maxUnixPathBytes = 103
-
 // listenUnix 绑定一个本机 UDS，并在绑定前后做 README §4.5 要求的全部检查：
 // 父目录、符号链接、旧 socket 与 inode 替换。
-func listenUnix(path string, mode os.FileMode) (net.Listener, error) {
+func listenUnix(path string, mode os.FileMode, group string) (net.Listener, error) {
 	// AF_UNIX 的 sun_path 有硬上限（Linux 107、darwin 103 可用字节）。超限时内核只回
 	// EINVAL，运维看到的是 "bind: invalid argument"，完全无法归因到路径长度上。
 	if len(path) > maxUnixPathBytes {
@@ -76,7 +75,27 @@ func listenUnix(path string, mode os.FileMode) (net.Listener, error) {
 		listener.Close()
 		return nil, E.Cause(err, "设置 socket 权限 ", path)
 	}
-	// inode 替换检查：绑定与 chmod 之间若被换掉，我们改的就是别人的文件。
+	// socket_group 让另一个 uid（例如独立的采集账号）能连上 0660 的 socket。
+	// 组不存在时必须报错而不是沿用进程主组——那会让一份看似生效的配置实际不授予任何访问。
+	wantGid := -1
+	if group != "" {
+		resolved, groupErr := user.LookupGroup(group)
+		if groupErr != nil {
+			listener.Close()
+			return nil, E.Cause(groupErr, "解析 user_stats.socket_group ", group)
+		}
+		parsed, parseErr := strconv.Atoi(resolved.Gid)
+		if parseErr != nil {
+			listener.Close()
+			return nil, E.Cause(parseErr, "组 ", group, " 的 gid 不是整数：", resolved.Gid)
+		}
+		if err = os.Chown(path, -1, parsed); err != nil {
+			listener.Close()
+			return nil, E.Cause(err, "设置 socket 属组 ", path)
+		}
+		wantGid = parsed
+	}
+	// inode 替换检查：绑定与 chmod/chown 之间若被换掉，我们改的就是别人的文件。
 	bound, err := os.Lstat(path)
 	if err != nil {
 		listener.Close()
@@ -85,6 +104,13 @@ func listenUnix(path string, mode os.FileMode) (net.Listener, error) {
 	if bound.Mode()&os.ModeSocket == 0 || bound.Mode().Perm() != mode.Perm() {
 		listener.Close()
 		return nil, E.New("socket 在绑定后被替换或权限不符：", path)
+	}
+	if wantGid >= 0 {
+		stat, ok := bound.Sys().(*syscall.Stat_t)
+		if !ok || int(stat.Gid) != wantGid {
+			listener.Close()
+			return nil, E.New("socket 属组在绑定后不符：", path)
+		}
 	}
 	if unixListener, ok := listener.(*net.UnixListener); ok {
 		// 由本进程负责在 Close 时删除 socket 文件。

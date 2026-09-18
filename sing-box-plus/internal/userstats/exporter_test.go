@@ -23,7 +23,7 @@ func TestListenUnixRefusesUnsafePaths(t *testing.T) {
 		if err := os.Symlink(target, link); err != nil {
 			t.Fatalf("创建符号链接失败：%v", err)
 		}
-		if _, err := listenUnix(link, 0o600); err == nil {
+		if _, err := listenUnix(link, 0o600, ""); err == nil {
 			t.Fatal("符号链接路径必须拒绝")
 		}
 	})
@@ -33,20 +33,20 @@ func TestListenUnixRefusesUnsafePaths(t *testing.T) {
 		if err := os.WriteFile(path, nil, 0o600); err != nil {
 			t.Fatalf("准备文件失败：%v", err)
 		}
-		if _, err := listenUnix(path, 0o600); err == nil {
+		if _, err := listenUnix(path, 0o600, ""); err == nil {
 			t.Fatal("已存在的普通文件必须拒绝覆盖")
 		}
 	})
 
 	t.Run("父目录不存在", func(t *testing.T) {
-		if _, err := listenUnix(filepath.Join(dir, "missing", "a.sock"), 0o600); err == nil {
+		if _, err := listenUnix(filepath.Join(dir, "missing", "a.sock"), 0o600, ""); err == nil {
 			t.Fatal("父目录不存在时必须拒绝")
 		}
 	})
 
 	t.Run("路径过长", func(t *testing.T) {
 		long := "/tmp/" + strings.Repeat("a", 120) + ".sock"
-		if _, err := listenUnix(long, 0o600); err == nil {
+		if _, err := listenUnix(long, 0o600, ""); err == nil {
 			t.Fatal("超长路径必须拒绝")
 		}
 	})
@@ -60,13 +60,13 @@ func TestListenUnixRefusesLiveSocket(t *testing.T) {
 	dir := shortTempDir(t)
 	path := filepath.Join(dir, "live.sock")
 
-	first, err := listenUnix(path, 0o600)
+	first, err := listenUnix(path, 0o600, "")
 	if err != nil {
 		t.Fatalf("首次绑定失败：%v", err)
 	}
 	defer first.Close()
 
-	if _, err = listenUnix(path, 0o600); err == nil {
+	if _, err = listenUnix(path, 0o600, ""); err == nil {
 		t.Fatal("已有进程在监听时必须拒绝绑定")
 	} else if !strings.Contains(err.Error(), "锁文件已被占用") && !strings.Contains(err.Error(), "已有进程在监听") {
 		t.Fatalf("拒绝理由应指向占用，实际：%v", err)
@@ -74,7 +74,7 @@ func TestListenUnixRefusesLiveSocket(t *testing.T) {
 
 	// 关闭之后同一路径必须可以重新绑定，否则重启会被自己的残留挡住。
 	first.Close()
-	second, err := listenUnix(path, 0o600)
+	second, err := listenUnix(path, 0o600, "")
 	if err != nil {
 		t.Fatalf("释放后应可重新绑定：%v", err)
 	}
@@ -99,7 +99,7 @@ func TestListenUnixReclaimsStaleSocket(t *testing.T) {
 		t.Fatalf("遗留 socket 应仍在：%v", err)
 	}
 
-	listener, err := listenUnix(path, 0o600)
+	listener, err := listenUnix(path, 0o600, "")
 	if err != nil {
 		t.Fatalf("遗留 socket 应被清理后重新绑定：%v", err)
 	}
