@@ -24,7 +24,7 @@ func newTestAudit(t *testing.T, identities []string, override func(*AccessLogOpt
 		override(&options)
 	}
 	writer, err := newAuditWriter("node-test", "0123456789abcdef0123456789abcdef", options,
-		identities, log.NewNOPFactory().Logger())
+		identities, log.NewNOPFactory().Logger(), nil)
 	if err != nil {
 		t.Fatalf("创建审计 writer 失败：%v", err)
 	}
@@ -331,7 +331,7 @@ func TestAuditRepairTrailingNewline(t *testing.T) {
 	if err := options.normalize(); err != nil {
 		t.Fatalf("规整失败：%v", err)
 	}
-	writer, err := newAuditWriter("n", "r", options, []string{"u1"}, log.NewNOPFactory().Logger())
+	writer, err := newAuditWriter("n", "r", options, []string{"u1"}, log.NewNOPFactory().Logger(), nil)
 	if err != nil {
 		t.Fatalf("创建 writer 失败：%v", err)
 	}
@@ -524,7 +524,7 @@ func TestAuditDirectoryMustExist(t *testing.T) {
 	if err := missing.normalize(); err != nil {
 		t.Fatalf("规整失败：%v", err)
 	}
-	if _, err := newAuditWriter("n", "r", missing, nil, log.NewNOPFactory().Logger()); err == nil {
+	if _, err := newAuditWriter("n", "r", missing, nil, log.NewNOPFactory().Logger(), nil); err == nil {
 		t.Fatal("目录不存在时必须启动失败")
 	}
 	link := filepath.Join(base, "link")
@@ -535,7 +535,93 @@ func TestAuditDirectoryMustExist(t *testing.T) {
 	if err := symlinked.normalize(); err != nil {
 		t.Fatalf("规整失败：%v", err)
 	}
-	if _, err := newAuditWriter("n", "r", symlinked, nil, log.NewNOPFactory().Logger()); err == nil {
+	if _, err := newAuditWriter("n", "r", symlinked, nil, log.NewNOPFactory().Logger(), nil); err == nil {
 		t.Fatal("目录是符号链接时必须拒绝")
+	}
+}
+
+// TestAuditDroppedStickyAcrossWriterSwap 覆盖 audit_dropped 的粘滞承诺。
+//
+// 该位的文档串写着「该 runtime 余下时间粘滞，只有重启进程才会清除」，而 writer 每次
+// SIGHUP 都会重建：若只读当前 writer 的计数器，一次 SIGHUP 就会把它清零，承诺不成立。
+// 另一半是 SIGHUP 期间投给已关闭 writer 的记录——那条记录既进不了文件，也写不出
+// ev=gap 行，是证据链上一个没有任何痕迹的洞。
+func TestAuditDroppedStickyAcrossWriterSwap(t *testing.T) {
+	registry, err := NewRegistry("node-audit-sticky", 8)
+	if err != nil {
+		t.Fatalf("创建 registry 失败：%v", err)
+	}
+	if err = registry.Reconcile([]InboundSpec{{
+		Tag: "in", Type: "vless", Listen: "127.0.0.1", ListenPort: 1, Users: []string{"u1"},
+	}}, true); err != nil {
+		t.Fatalf("对账失败：%v", err)
+	}
+	if registry.auditDropped() {
+		t.Fatal("初始不应为真")
+	}
+
+	dir := t.TempDir()
+	options := AccessLogOptions{Directory: dir}
+	if err = options.normalize(); err != nil {
+		t.Fatalf("normalize 失败：%v", err)
+	}
+	writer, err := newAuditWriter("node-audit-sticky", registry.RuntimeID(), options,
+		[]string{"u1"}, nil, registry.noteAuditDropped)
+	if err != nil {
+		t.Fatalf("创建 writer 失败：%v", err)
+	}
+	registry.setAudit(writer)
+
+	// 模拟一次写失败：置位后它必须留在 registry 上。
+	writer.droppedWrite.Add(1)
+	if !registry.auditDropped() {
+		t.Fatal("writer 有丢弃时 audit_dropped 必须为真")
+	}
+
+	// SIGHUP：旧 writer 关闭、指针清空。位必须仍然为真。
+	registry.setAudit(nil)
+	_ = writer.Close()
+	if !registry.auditDropped() {
+		t.Fatal("SIGHUP 换掉 writer 之后 audit_dropped 不得被清零——该位的承诺是按 runtime 粘滞")
+	}
+}
+
+// TestAuditDropAfterCloseLeavesASignal 覆盖「关闭后投递」这条无痕路径。
+func TestAuditDropAfterCloseLeavesASignal(t *testing.T) {
+	registry, err := NewRegistry("node-audit-closed", 8)
+	if err != nil {
+		t.Fatalf("创建 registry 失败：%v", err)
+	}
+	options := AccessLogOptions{Directory: t.TempDir()}
+	if err = options.normalize(); err != nil {
+		t.Fatalf("normalize 失败：%v", err)
+	}
+	writer, err := newAuditWriter("node-audit-closed", registry.RuntimeID(), options,
+		[]string{"u1"}, nil, registry.noteAuditDropped)
+	if err != nil {
+		t.Fatalf("创建 writer 失败：%v", err)
+	}
+	_ = writer.Close()
+	if registry.auditDropped() {
+		t.Fatal("尚未发生丢弃")
+	}
+	writer.submit(auditRecord{user: "u1", inboundTag: "in", network: "tcp", host: "example.invalid", port: 443, up: 100, down: 200})
+	if !registry.auditDropped() {
+		t.Fatal("向已关闭的 writer 投递被静默丢弃了：这条记录既进不了文件也写不出 gap 行，必须留下信号")
+	}
+}
+
+// TestAuditMaxTotalBytesHasADefault 覆盖默认值：不设即无界增长。
+func TestAuditMaxTotalBytesHasADefault(t *testing.T) {
+	options := AccessLogOptions{Directory: t.TempDir()}
+	if err := options.normalize(); err != nil {
+		t.Fatalf("normalize 失败：%v", err)
+	}
+	if options.MaxTotalBytes <= 0 {
+		t.Fatalf("max_total_bytes 必须有正的默认值，实际 %d——为 0 时 enforceTotalCap 直接返回，"+
+			"已轮转的文件永远不删", options.MaxTotalBytes)
+	}
+	if options.MaxTotalBytes < options.MaxBytes {
+		t.Fatalf("默认的 max_total_bytes %d 小于 max_bytes %d", options.MaxTotalBytes, options.MaxBytes)
 	}
 }

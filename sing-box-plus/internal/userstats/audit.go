@@ -62,7 +62,10 @@ type auditWriter struct {
 	records chan auditRecord
 
 	droppedWrite atomic.Uint64
-	lastDropLog  time.Time // 只由 writer goroutine 访问
+	// onDropped 在「连 gap 行都写不出去」时通知 registry 置粘滞位。用回调而不是持有
+	// registry 引用：writer 的生命周期短于 registry，反向持有会让耦合方向变反。
+	onDropped   func()
+	lastDropLog time.Time // 只由 writer goroutine 访问
 
 	// 队列满时我们**知道**是谁的记录被丢了，因此丢弃数按身份计，
 	// gap 行落进那个人的文件而不是笼统记在一处。
@@ -91,7 +94,7 @@ type auditWriter struct {
 //
 // identities 是配置里已知的全部计费身份，只用于启动期的文件名碰撞检查；
 // 文件本身按需惰性创建——从未产生过成功访问的身份不该凭空多出一个空文件。
-func newAuditWriter(nodeID string, runtimeID string, options AccessLogOptions, identities []string, logger log.ContextLogger) (*auditWriter, error) {
+func newAuditWriter(nodeID string, runtimeID string, options AccessLogOptions, identities []string, logger log.ContextLogger, onDropped func()) (*auditWriter, error) {
 	if err := checkAuditDirectory(options.Directory); err != nil {
 		return nil, err
 	}
@@ -108,6 +111,7 @@ func newAuditWriter(nodeID string, runtimeID string, options AccessLogOptions, i
 		options:   options,
 		exclude:   exclude,
 		logger:    logger,
+		onDropped: onDropped,
 		records:   make(chan auditRecord, options.QueueSize),
 		dropped:   make(map[string]uint64),
 		files:     make(map[string]*auditFile),
@@ -167,8 +171,13 @@ func (w *auditWriter) submit(record auditRecord) {
 		return
 	}
 	// SIGHUP 会重建 services[] 实例：旧 writer 关闭后仍可能收到在途连接的投递，
-	// 此时静默丢弃而不是往无人消费的 channel 里堆。
+	// 此时不能往无人消费的 channel 里堆。但也不能静默丢——这条记录既进不了文件，
+	// 也写不出 ev=gap 行，是证据链上一个没有任何痕迹的洞。计入粘滞的 audit_dropped，
+	// 让它至少在快照里留下信号（该位不进 unhealthy，不会因此停掉计费）。
 	if w.closed.Load() {
+		if w.onDropped != nil {
+			w.onDropped()
+		}
 		return
 	}
 	select {
