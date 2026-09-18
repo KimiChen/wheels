@@ -1,0 +1,421 @@
+<!doctype html>
+<!--
+  proxy-manager 控制台 · 静态原型
+
+  一页一个文件，一个左侧链接对应一个真实 URL——这与 M4 的服务端渲染形态一致。
+  外壳（顶栏 / 侧栏 / 页脚 / 对话框）在各页重复，因为原型没有构建步骤；
+  真实实现由服务端渲染一次，不存在这份重复。
+
+  数据全部是假的。凡是字节口径的数字都写成十进制字符串（C3），
+  页面只做格式化，不做数值运算。
+
+  样式与脚本暂时相对引用同仓的 web-standard-kit；M4 打包时按 §5 的口径
+  vendored 进 assets/ 随二进制发布。需经 HTTP 打开（相对路径），不要用 file://。
+-->
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>设置 · proxy-manager 控制台</title>
+    <script src="assets/theme.js"></script>
+    <link rel="stylesheet" href="../../web-standard-kit/style.css" />
+    <link rel="stylesheet" href="assets/console.css" />
+    <script src="../../web-standard-kit/script.js" defer></script>
+    <script src="assets/app.js" defer></script>
+    <script src="assets/api.js" defer></script>
+  </head>
+  <body data-principal="admin">
+    <a class="wsk-skip-link" href="#main-content">跳到主要内容</a>
+
+    <svg class="wsk-icon-sprite" aria-hidden="true">
+      <defs>
+        <symbol id="sun" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="4" />
+          <path
+            d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.66 6.34l1.41-1.41"
+          />
+        </symbol>
+        <symbol id="system" viewBox="0 0 24 24">
+          <rect x="2" y="3" width="20" height="14" rx="2" />
+          <path d="M8 21h8M12 17v4" />
+        </symbol>
+        <symbol id="moon" viewBox="0 0 24 24">
+          <path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8Z" />
+        </symbol>
+        <symbol id="check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6" /></symbol>
+        <symbol id="info" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="10" />
+          <path d="M12 16v-4M12 8h.01" />
+        </symbol>
+        <symbol id="warning" viewBox="0 0 24 24">
+          <path
+            d="m21.73 18-8-14a2 2 0 0 0-3.46 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"
+          />
+          <path d="M12 9v4M12 17h.01" />
+        </symbol>
+        <symbol id="x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12" /></symbol>
+        <symbol id="sort" viewBox="0 0 24 24">
+          <path d="m7 9 5-5 5 5M7 15l5 5 5-5" />
+        </symbol>
+        <symbol id="folder" viewBox="0 0 24 24">
+          <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />
+        </symbol>
+        <symbol id="clock" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" />
+        </symbol>
+        <symbol id="lock" viewBox="0 0 24 24">
+          <rect x="3" y="11" width="18" height="11" rx="2" />
+          <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+        </symbol>
+      </defs>
+    </svg>
+
+    <header class="wsk-topbar">
+      <div class="wsk-brand">
+        <span class="wsk-brand-mark" aria-hidden="true">PM</span>
+        <span class="wsk-brand-copy"><strong>proxy-manager</strong></span>
+      </div>
+      <div class="wsk-button-row">
+        <!--
+          原型专用：切换视角。真实控制台没有这个控件——主体由服务端按会话决定，
+          前端拿不到的数据根本不会出现在响应里。
+        -->
+        <span class="wsk-badge wsk-warning"
+          ><span class="wsk-dot"></span>演示环境</span
+        >
+        <div class="pm-principal-switch" data-js-only>
+          <label class="wsk-sr-only" for="principal">以什么身份查看（原型）</label>
+          <div class="wsk-select-wrap">
+            <select class="wsk-select" id="principal" data-principal-select>
+              <option value="admin" selected>管理员</option>
+              <option value="user">普通用户</option>
+            </select>
+          </div>
+        </div>
+        <button
+          class="wsk-button wsk-secondary"
+          type="button"
+          data-toast="原型页面不执行退出。"
+          data-js-only
+        >
+          退出
+        </button>
+      </div>
+      <button
+        class="wsk-icon-button"
+        type="button"
+        data-theme-toggle
+        data-js-only
+        aria-label="主题：跟随系统，切换到浅色"
+        title="主题：跟随系统，切换到浅色"
+      >
+        <svg class="wsk-icon wsk-theme-system" aria-hidden="true">
+          <use href="#system"></use>
+        </svg>
+        <svg class="wsk-icon wsk-theme-sun" aria-hidden="true">
+          <use href="#sun"></use>
+        </svg>
+        <svg class="wsk-icon wsk-theme-moon" aria-hidden="true">
+          <use href="#moon"></use>
+        </svg>
+      </button>
+    </header>
+
+    <main id="main-content" tabindex="-1">
+      <div class="wsk-reference-shell">
+        <aside>
+          <details class="pm-nav-disclosure" open>
+            <summary><span>导航</span><span class="pm-nav-current">当前页面</span></summary>
+          <nav class="wsk-reference-nav" aria-label="应用导航">
+            <div class="wsk-reference-brand">
+              <strong>控制台</strong><span>PROXY MANAGER</span>
+            </div>
+            <!--
+              导航按任务分组。普通用户仅保留个人中心，分组标题复用页头的小标，
+              与页头的小标是同一套语言。
+            -->
+            <p class="wsk-panel-title" data-roles="admin user">个人中心</p>
+            <div class="wsk-reference-links">
+              <a href="me.html" data-roles="admin user">我的订阅</a>
+              <a href="me-usage.html" data-roles="admin user">我的用量</a>
+              <!-- 跟随 §4.8 的全局开关：审计关闭时这一项整个不存在，
+                   而不是显示成「无权访问」——没有记录可看和不让你看是两回事。 -->
+              <a href="me-audit.html" data-roles="admin user">我的出站目标</a>
+            </div>
+
+            <p class="wsk-panel-title" data-roles="admin">运行监控</p>
+            <div class="wsk-reference-links">
+              <a href="overview.html" data-roles="admin">总览</a>
+              <a href="nodes.html" data-roles="admin">节点</a>
+              <a href="alerts.html" data-roles="admin">告警</a>
+            </div>
+            <p class="wsk-panel-title" data-roles="admin">用户与用量</p>
+            <div class="wsk-reference-links">
+              <a href="usage.html" data-roles="admin">用量趋势</a>
+              <a href="users.html" data-roles="admin">用户列表</a>
+            </div>
+            <p class="wsk-panel-title" data-roles="admin">系统管理</p>
+            <div class="wsk-reference-links">
+              <a href="settings.html" data-roles="admin">设置</a>
+            </div>
+          </nav>
+          </details>
+        </aside>
+
+        <div class="wsk-reference-content">
+          <!--
+            常驻反馈位。操作结果、降级通道状态、通知连续失败的红条都落在这里，
+            而不是散在各页各自的位置——出问题时人只需要看一个地方。
+          -->
+          <div
+            class="wsk-alert wsk-warning pm-global-notice"
+            role="status"
+            aria-live="polite"
+            data-roles="admin"
+          >
+            <svg class="wsk-icon" aria-hidden="true"><use href="#warning"></use></svg>
+            <div>
+              <strong>fr-01 采集连续失败，已停止入账并把该节点额度置零</strong>
+              <p>
+                没有新鲜且已结算的健康快照时不得刷新正额度（C33）；通道可用时下发全零表。
+                <a href="alerts.html">查看告警 →</a>
+              </p>
+            </div>
+          </div>
+
+          <div class="wsk-page">
+            <div class="wsk-page-head" id="settings">
+              <div>
+                <p class="wsk-panel-title">SETTINGS</p>
+                <h1 tabindex="-1">设置</h1>
+                <p>配置用户默认授权、身份登录、采集策略与数据保留。</p>
+              </div>
+            </div>
+
+            <section class="wsk-section" aria-labelledby="settings-title" data-tabs>
+              <div class="wsk-section-head">
+                <h2 id="settings-title">配置</h2>
+              </div>
+              <div class="wsk-tab-list" role="tablist" aria-label="设置分组">
+                <button id="tab-access" type="button" role="tab" aria-controls="panel-access" aria-selected="true">用户与授权</button>
+                <button id="tab-im" type="button" role="tab" aria-controls="panel-im" aria-selected="false" tabindex="-1">IM 凭据</button>
+                <button id="tab-collect" type="button" role="tab" aria-controls="panel-collect" aria-selected="false" tabindex="-1">采集与配额</button>
+                <button id="tab-retention" type="button" role="tab" aria-controls="panel-retention" aria-selected="false" tabindex="-1">审计保留期</button>
+              </div>
+
+              <div class="wsk-tab-panel" id="panel-access" role="tabpanel" aria-labelledby="tab-access" tabindex="0">
+                <div class="pm-role-grid wsk-mt-5">
+                  <div class="wsk-panel"><p class="wsk-panel-title">ADMIN</p><h3>管理员</h3><p class="wsk-help wsk-mt-2">管理节点、用户、配额、发布与审计，同时可使用自己的订阅。</p></div>
+                  <div class="wsk-panel"><p class="wsk-panel-title">USER</p><h3>普通用户</h3><p class="wsk-help wsk-mt-2">登录后自动获得默认节点，只查看自己的订阅、节点和用量。</p></div>
+                </div>
+                <div class="wsk-panel wsk-mt-5">
+                  <div class="wsk-section-head"><h3>新用户默认节点组</h3><span class="wsk-badge wsk-success">自动授权已开启</span></div>
+                  <p class="wsk-help">首次登录自动分配下列节点的计费身份并生成订阅。节点不可用时显示开通进度，账号仍为普通用户。</p>
+                  <fieldset class="pm-default-nodes">
+                    <legend class="wsk-sr-only">默认授权节点（示例配置）</legend>
+                    <label><input type="checkbox" name="default-nodes" value="hk-01" checked />hk-01</label>
+                    <label><input type="checkbox" name="default-nodes" value="us-01" checked />us-01</label>
+                    <label><input type="checkbox" name="default-nodes" value="jp-01" />jp-01</label>
+                  </fieldset>
+                  <button class="wsk-button" type="button" data-write data-js-only data-toast="静态原型：配置尚未连接服务器，本次选择未保存。">保存默认授权</button>
+                </div>
+              </div>
+
+              <div class="wsk-tab-panel" id="panel-im" role="tabpanel" aria-labelledby="tab-im" tabindex="0" hidden>
+                <div class="wsk-alert wsk-warning wsk-mt-2">
+                  <svg class="wsk-icon" aria-hidden="true"><use href="#warning"></use></svg>
+                  <div>
+                    <strong>企业微信「企业可信 IP」绑死主控出口 IP</strong>
+                    <p>
+                      必须<strong>先</strong>配可信域名或接收消息 URL，<strong>再</strong>配可信 IP，
+                      否则返回 <code>60020</code>。多出口或动态 NAT 必须提前登记全部出口地址；
+                      失配时 IM 登录会整体失效——本地应急管理员是这条风险的唯一出口。
+                    </p>
+                  </div>
+                </div>
+                <div class="wsk-form-grid wsk-mt-5">
+                  <div class="wsk-field">
+                    <label class="wsk-label" for="feishu-app">飞书 app_id</label>
+                    <input class="wsk-control" id="feishu-app" type="text" value="cli_••••••••••••" readonly />
+                    <p class="wsk-help">凭据只有 管理员 能改。tenant_access_token 集中缓存并提前刷新。</p>
+                  </div>
+                  <div class="wsk-field">
+                    <label class="wsk-label" for="wecom-corp">企业微信 corpid</label>
+                    <input class="wsk-control" id="wecom-corp" type="text" value="ww••••••••••••" readonly />
+                    <p class="wsk-help">网页登录只用 snsapi_base，不用 snsapi_privateinfo。</p>
+                  </div>
+                  <div class="wsk-field wsk-wide">
+                    <label class="wsk-label" for="egress-ip">已登记出口 IP</label>
+                    <input class="wsk-control" id="egress-ip" type="text" value="（示例：全部出口地址，含备用线路）" readonly />
+                    <p class="wsk-help">出口 IP 是一等配置项，与节点侧的上一跳 admission 同源管理（§10 R5）。</p>
+                  </div>
+                </div>
+              </div>
+
+              <div class="wsk-tab-panel" id="panel-collect" role="tabpanel" aria-labelledby="tab-collect" tabindex="0" hidden>
+                <div class="wsk-alert wsk-info wsk-mt-2">
+                  <svg class="wsk-icon" aria-hidden="true"><use href="#info"></use></svg>
+                  <div>
+                    <strong>额度是全局统一的，没有「套餐」这个概念（D21）</strong>
+                    <p>
+                      所有人同一个月度额度、同一个自然月周期。
+                      <strong>改这里对本周期立即生效</strong>——额度是参数，账本记的是用量，
+                      「剩余 = 额度 − 本周期已用」跟着重算即可。
+                      调高 300 → 500 GiB，已用 320 GiB 的人从「已用尽」变回「剩余 180 GiB」；
+                      调低 300 → 100 GiB，已用 150 GiB 的人将在节点收到新额度后被闸断。
+                    </p>
+                  </div>
+                </div>
+                <div class="wsk-form-grid wsk-mt-5">
+                  <div class="wsk-field">
+                    <label class="wsk-label" for="monthly-quota">每月额度（全员统一）</label>
+                    <input class="wsk-control" id="monthly-quota" type="text" value="300 GiB" data-pm-bytes="monthly_bytes" readonly />
+                    <p class="wsk-help">
+                      322,122,547,200 字节。超出后新连接被拒；已建立的连接仍受剩余额度约束直到结束。
+                    </p>
+                    <div class="wsk-alert wsk-warning wsk-mt-2">
+                      <svg class="wsk-icon" aria-hidden="true"><use href="#warning"></use></svg>
+                      <div>
+                        <strong>调低可能让部分用户用尽额度，保存前先确认名单</strong>
+                        <p>
+                          按当前已结算用量，改成 100 GiB 预计会闸断 <strong>2 人</strong>（wangwei、kimi）；后续流量可能增加人数。
+                          调高不需要这一步——它只会放宽。<br />
+                          另外：<strong>调高不会让已经断掉的连接自己回来</strong>，
+                          节点侧只是重新允许新连接，用户需要自己重连。
+                        </p>
+                      </div>
+                    </div>
+                    <p class="wsk-help wsk-mt-2">
+                      保存后<strong>立即采集、结算并下发</strong>，不等下一个定时周期；改动落审计。
+                      节点确认前显示“已保存，节点待生效”。采集失败时显示原因并重试，可连通的节点会尝试安全置零。
+                    </p>
+                  </div>
+                  <div class="wsk-field">
+                    <!-- D21：改额度立即生效，但「生效」要到每个节点确认才算数。
+                         只要还有节点没应用，就不能显示「全部已生效」——这块是那句话的落点。 -->
+                    <span class="wsk-label">下发收敛状态</span>
+                    <p class="wsk-help">
+                      修订号 <strong data-pm="revision">—</strong>
+                      · 最后修改 <span data-pm="updated_by">—</span>
+                      <span data-pm="updated_at">—</span>
+                      · 全部已生效 <strong data-pm="fully_applied">—</strong>
+                    </p>
+                    <div class="wsk-status-list wsk-mt-2" data-pm-collection="quota-nodes">
+                      <div data-table-empty hidden><span data-pm-empty-text>暂无数据</span></div>
+                      <template data-pm-template>
+                        <div>
+                          <span data-pm="node_id"></span>
+                          <strong data-pm="status"></strong>
+                        </div>
+                      </template>
+                    </div>
+                    <p class="wsk-help wsk-mt-2" data-pm="overcommit_note">—</p>
+                  </div>
+                  <div class="wsk-field">
+                    <label class="wsk-label" for="cycle">计费周期</label>
+                    <input class="wsk-control" id="cycle" type="text" value="自然月（UTC 存储，按展示时区分桶）" readonly />
+                    <p class="wsk-help">统一额度下不再需要 per-user 周期锚点，周期也随之统一。</p>
+                  </div>
+                  <div class="wsk-field">
+                    <label class="wsk-label" for="interval">采集周期</label>
+                    <input class="wsk-control" id="interval" type="text" value="60s（提频时 10s）" readonly />
+                    <p class="wsk-help">提频触发条件有两个：池将尽，或任一节点被自己的分配额挡住。</p>
+                  </div>
+                  <div class="wsk-field">
+                    <label class="wsk-label" for="floor">每节点地板</label>
+                    <input class="wsk-control" id="floor" type="text" value="64 MiB（软约束）" readonly />
+                    <p class="wsk-help">预算低于 N × floor 时地板失效，退化为探测额度。</p>
+                  </div>
+                  <div class="wsk-field">
+                    <label class="wsk-label" for="startup">节点 startup_action</label>
+                    <div class="wsk-select-wrap">
+                      <select class="wsk-select" id="startup">
+                        <option selected>deny（受限节点必须）</option>
+                        <option>allow（节点侧默认值）</option>
+                      </select>
+                    </div>
+                    <p class="wsk-help">
+                      <strong>节点侧默认是 allow</strong>：重启后尚未收到配额表就无限放行。
+                      受限节点必须显式配成 deny（C12）。
+                    </p>
+                  </div>
+                  <div class="wsk-field">
+                    <label class="wsk-label" for="first-snapshot">首快照策略</label>
+                    <div class="wsk-select-wrap">
+                      <select class="wsk-select" id="first-snapshot">
+                        <option selected>baseline（只建基线）</option>
+                        <option>include（首次增量 = 当前累计）</option>
+                      </select>
+                    </div>
+                    <p class="wsk-help">无默认值：配置缺省即启动失败（C8）。</p>
+                  </div>
+                </div>
+              </div>
+
+              <div class="wsk-tab-panel" id="panel-retention" role="tabpanel" aria-labelledby="tab-retention" tabindex="0" hidden>
+                <div class="wsk-alert wsk-info wsk-mt-2">
+                  <svg class="wsk-icon" aria-hidden="true"><use href="#info"></use></svg>
+                  <div>
+                    <strong>这一页与计费设置无关</strong>
+                    <p>
+                      审计保留期与数据范围单独说明。管理员可按用户查看；普通用户在审计启用时可查看自己的出站目标。
+                      记录按文件大小归档，归档时间不固定。
+                    </p>
+                  </div>
+                </div>
+                <div class="wsk-status-list wsk-mt-5">
+                  <div><span>原始快照 payload<small>终态 + 宽限期后清理</small></span><strong>14 天</strong></div>
+                  <div><span>只追加账本<small>按审计要求</small></span><strong>365 天</strong></div>
+                  <div><span>小时缓存</span><strong>180 天</strong></div>
+                  <div><span>日缓存</span><strong>730 天</strong></div>
+                </div>
+              </div>
+            </section>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <footer class="wsk-footer">
+      <div class="wsk-footer-inner">
+        <div class="wsk-footer-legal"><span>proxy-manager · 静态原型 / 示例数据</span></div>
+        <a
+          class="wsk-footer-link"
+          href="https://github.com/KimiChen/wheels/tree/main/web-standard-kit"
+          target="_blank"
+          rel="noopener noreferrer"
+          >web-standard-kit</a
+        >
+      </div>
+    </footer>
+
+    <dialog class="wsk-dialog" data-roles="admin" id="revoke-dialog" aria-labelledby="revoke-title">
+      <div class="wsk-dialog-head">
+        <h2 id="revoke-title">吊销订阅 token</h2>
+        <button class="wsk-icon-button" type="button" data-dialog-close aria-label="关闭" title="关闭">
+          <svg class="wsk-icon" aria-hidden="true"><use href="#x"></use></svg>
+        </button>
+      </div>
+      <div class="wsk-dialog-body">
+        <p>用户 <strong>kimi</strong> 的订阅地址将立即失效。</p>
+        <div class="wsk-alert wsk-danger wsk-mt-5">
+          <svg class="wsk-icon" aria-hidden="true"><use href="#warning"></use></svg>
+          <div>
+            <strong>该用户所有已导入的客户端会静默失效</strong>
+            <p>他们不会收到任何提示，只会发现节点全部消失。吊销前请先通知本人。</p>
+          </div>
+        </div>
+      </div>
+      <div class="wsk-dialog-foot">
+        <button class="wsk-button wsk-secondary" type="button" data-dialog-close>取消</button
+        ><button class="wsk-button" type="button" data-dialog-close data-toast="原型页面不执行吊销。" data-js-only>
+          确认吊销
+        </button>
+      </div>
+    </dialog>
+
+    <div class="wsk-toast-region" id="toast-region" aria-live="polite"></div>
+  </body>
+</html>

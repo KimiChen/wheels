@@ -1,0 +1,31 @@
+# 跨仓库契约的 §2.2 三元组：节点实现 commit + 协议版本 + 对应链路的 fixture 摘要。
+#
+# 三者缺一不可（docs/integration-contract.md §2.2）：
+# 只记版本号不够——同一个版本号下 fixture 可能已经变了；
+# 只记 commit 也不够——它不能告诉你主控当时按哪份 fixture 验的。
+#
+# 这份锁由 tests/m0/fixture_lock.rs 强制。上游一改，用例就红，
+# 修复方式是**核对变化并更新本文件**，不是在主控里加一个兼容分支。
+
+[node]
+repo = "sing-box-plus"
+# 最近一次改动下面 [consumed] 里任一文件的提交。
+implementation_commit = "fbc29ae73d90e712e8a1005de664a8a95b333d98"
+# 以 internal/userstats/snapshot.go 的 Go 常量为准，不以任何 README 为准。
+schema_version = 3
+snapshot_path = "/v3/snapshot"
+quota_path = "/v3/quota"
+checked_at = "2026-09-18"
+
+# 计量与配额链路应消费的文件（docs/integration-contract.md §3 第一、二行）。
+[consumed]
+"tests/fixtures.py" = "2f9fc44f6687cb35a1dd4bf60e76cdbe127594588fd5d0258976fdf91d61e0c9"
+"tests/settlement_model.py" = "e032b764b8759896cc6e6c12b54292a6f0281610bc0111f7859b91ef743878d8"
+"scripts/http_unix.py" = "84dea8be311398062c8a64fe52a19945499a70b170e16d8f438d008a15939805"
+"internal/userstats/snapshot.go" = "3fc6f7d31f214b2802d5a2aab80bcb9771033c41e860ecf603320f2b0b4c076a"
+"internal/userstats/quota_endpoint.go" = "daf43d82b4e94126c299c98615b59579fc7152e3ac009a2ef8774143ffd5f302"
+"internal/userstats/quota.go" = "453a12ea5626b9b1f1028997d4dc1f9695f61f9c56296940b1f26a887791b1ff"
+
+[export]
+# scripts/export-node-fixtures.py 的完整输出。上游改了样例形状，这一条先变。
+document_sha256 = "c8e573c382fa0dfd4cf47c423aa6c4cd48c59b0d33534de12d75eff8952d8f31"

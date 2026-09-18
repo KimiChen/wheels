@@ -1,0 +1,32 @@
+[package]
+name = "proxy-manager-agent"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT"
+description = "装在节点上的薄进程：只认预定义命令，经 mTLS 代理本机 UDS"
+
+# 名字刻意写全（README §4.2）：它装在同时跑着 sing-box-plus / shadowsocks-rust /
+# 转发链的节点上，运维在 systemctl 或 ps 里必须一眼看出这个进程归谁。
+#
+# 依赖刻意很少。这个二进制跑在节点上，它多一个依赖就是数据面多一份攻击面。
+# 没有数据库、没有 HTTP 框架、没有签发器——签发是离线 workspace 的事。
+[lib]
+name = "proxy_manager_agent"
+path = "src/lib.rs"
+
+[[bin]]
+name = "proxy-manager-agent"
+path = "src/main.rs"
+
+[dependencies]
+proxy-manager-wire = { path = "../wire" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "io-util", "sync", "signal"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

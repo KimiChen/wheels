@@ -1,0 +1,106 @@
+[workspace]
+members = ["agent", "wire"]
+
+[package]
+name = "proxy-manager"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT"
+description = "sing-box-plus 节点的采集、结算、配额与控制台主控"
+repository = "https://github.com/KimiChen/wheels/tree/main/sing-box-plus-manager"
+readme = "README.md"
+
+# 选型已定（README §5、D8、D9），不要在这里重开：
+# Rust + axum + sqlx/SQLite 单写者 + rustls/ring，单二进制 + systemd，前端无构建步骤。
+#
+# 依赖按里程碑加入，不预先声明用不到的 crate——未使用的依赖只会拖慢构建，
+# 并让「这个里程碑到底实现了什么」变得看不出来。加 TLS 时必须保持
+# `default-features = false, features = ["ring", ...]`：一旦让 aws-lc-rs 进来，
+# 就会连带拉入 cmake/nasm，破坏 D9 的单 provider 前提。
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"                                    # 快照 wire 解析；整数走 u64 通道，不经 f64
+toml = "0.8"                                        # 配置解析
+thiserror = "2"
+anyhow = "1"
+sha2 = "0.10"                                       # 批次 ID、payload 摘要、输入摘要锁定
+hex = "0.4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "io-util", "sync", "fs", "signal"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
+# 与 agent 共享的合同：封闭命令集、应用层 HMAC、精确 leaf 授信。只有一份定义。
+proxy-manager-wire = { path = "wire" }
+# 双 CA PKI（M1）。全栈单一 ring provider——一旦让 aws-lc-rs 进来就会连带拉入
+# cmake/nasm，破坏 D9 的单 provider 前提，所以每一处都写死 default-features = false。
+rcgen = { version = "0.13", default-features = false, features = ["ring", "pem", "crypto", "x509-parser"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls-pemfile = "2"
+rustls-pki-types = { version = "1", features = ["std"] }
+x509-parser = "0.16"
+time = { version = "0.3", features = ["macros", "formatting", "parsing"] }
+rand = "0.8"
+clap = { version = "4", features = ["derive"] }
+# HTTP API 与静态资源（M4）。axum 0.8 走 hyper 1.x，无需额外 TLS——
+# 控制台绑回环，公网访问经本机反代。
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio", "matched-path"] }
+tower = "0.5"
+argon2 = "0.5"                                      # break-glass 口令哈希（入口属于 M5）
+
+# 集成测试用的依赖。集成测试是独立 crate，用不到 [dependencies] 里的条目，
+# 需要的必须在这里再声明一次。
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "io-util", "sync"] }
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+hex = "0.4"
+toml = "0.8"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
+proxy-manager-wire = { path = "wire" }
+# 集成测试驱动**真实的** agent 服务端代码，不在测试里重写一遍分发逻辑。
+proxy-manager-agent = { path = "agent" }
+rcgen = { version = "0.13", default-features = false, features = ["ring", "pem", "crypto", "x509-parser"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls-pki-types = { version = "1", features = ["std"] }
+x509-parser = "0.16"
+# M4 的 API 用例直接驱动 router（tower::oneshot），不起网络也不开端口。
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+time = { version = "0.3", features = ["macros", "parsing"] }
+
+# 崩溃注入点。默认关闭：生产二进制里不该有只为测试存在的钩子。
+# 集成测试用 `--features crash-points` 单独构建一个子进程去跑。
+[features]
+crash-points = []
+
+[[bin]]
+name = "proxy-manager"
+path = "src/main.rs"
+
+[lib]
+name = "proxy_manager"
+path = "src/lib.rs"
+
+# 单一集成测试二进制：夹具（tests/m0/fake_node.rs）只编译一次，
+# 各故障矩阵以模块形式挂在它下面。
+[[test]]
+name = "m0"
+path = "tests/m0.rs"
+
+[[test]]
+name = "m1"
+path = "tests/m1.rs"
+
+[[test]]
+name = "m2"
+path = "tests/m2.rs"
+
+[[test]]
+name = "m4"
+path = "tests/m4.rs"

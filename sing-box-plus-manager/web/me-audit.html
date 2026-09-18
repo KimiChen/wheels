@@ -1,0 +1,326 @@
+<!doctype html>
+<!--
+  proxy-manager 控制台 · 静态原型
+
+  一页一个文件，一个左侧链接对应一个真实 URL——这与 M4 的服务端渲染形态一致。
+  外壳（顶栏 / 侧栏 / 页脚 / 对话框）在各页重复，因为原型没有构建步骤；
+  真实实现由服务端渲染一次，不存在这份重复。
+
+  数据全部是假的。凡是字节口径的数字都写成十进制字符串（C3），
+  页面只做格式化，不做数值运算。
+
+  样式与脚本暂时相对引用同仓的 web-standard-kit；M4 打包时按 §5 的口径
+  vendored 进 assets/ 随二进制发布。需经 HTTP 打开（相对路径），不要用 file://。
+-->
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>我的出站目标 · proxy-manager 控制台</title>
+    <script src="assets/theme.js"></script>
+    <link rel="stylesheet" href="../../web-standard-kit/style.css" />
+    <link rel="stylesheet" href="assets/console.css" />
+    <script src="../../web-standard-kit/script.js" defer></script>
+    <script src="assets/app.js" defer></script>
+    <script src="assets/api.js" defer></script>
+  </head>
+  <body data-principal="user">
+    <a class="wsk-skip-link" href="#main-content">跳到主要内容</a>
+
+    <svg class="wsk-icon-sprite" aria-hidden="true">
+      <defs>
+        <symbol id="sun" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="4" />
+          <path
+            d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.66 6.34l1.41-1.41"
+          />
+        </symbol>
+        <symbol id="system" viewBox="0 0 24 24">
+          <rect x="2" y="3" width="20" height="14" rx="2" />
+          <path d="M8 21h8M12 17v4" />
+        </symbol>
+        <symbol id="moon" viewBox="0 0 24 24">
+          <path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8Z" />
+        </symbol>
+        <symbol id="check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6" /></symbol>
+        <symbol id="info" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="10" />
+          <path d="M12 16v-4M12 8h.01" />
+        </symbol>
+        <symbol id="warning" viewBox="0 0 24 24">
+          <path
+            d="m21.73 18-8-14a2 2 0 0 0-3.46 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"
+          />
+          <path d="M12 9v4M12 17h.01" />
+        </symbol>
+        <symbol id="x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12" /></symbol>
+        <symbol id="sort" viewBox="0 0 24 24">
+          <path d="m7 9 5-5 5 5M7 15l5 5 5-5" />
+        </symbol>
+        <symbol id="folder" viewBox="0 0 24 24">
+          <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />
+        </symbol>
+        <symbol id="clock" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" />
+        </symbol>
+        <symbol id="lock" viewBox="0 0 24 24">
+          <rect x="3" y="11" width="18" height="11" rx="2" />
+          <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+        </symbol>
+      </defs>
+    </svg>
+
+    <header class="wsk-topbar">
+      <div class="wsk-brand">
+        <span class="wsk-brand-mark" aria-hidden="true">PM</span>
+        <span class="wsk-brand-copy"><strong>proxy-manager</strong></span>
+      </div>
+      <div class="wsk-button-row">
+        <!--
+          原型专用：切换视角。真实控制台没有这个控件——主体由服务端按会话决定，
+          前端拿不到的数据根本不会出现在响应里。
+        -->
+        <span class="wsk-badge wsk-warning"
+          ><span class="wsk-dot"></span>演示环境</span
+        >
+        <div class="pm-principal-switch" data-js-only>
+          <label class="wsk-sr-only" for="principal">以什么身份查看（原型）</label>
+          <div class="wsk-select-wrap">
+            <select class="wsk-select" id="principal" data-principal-select>
+              <option value="admin">管理员</option>
+              <option value="user" selected>普通用户</option>
+            </select>
+          </div>
+        </div>
+        <button
+          class="wsk-button wsk-secondary"
+          type="button"
+          data-toast="原型页面不执行退出。"
+          data-js-only
+        >
+          退出
+        </button>
+      </div>
+      <button
+        class="wsk-icon-button"
+        type="button"
+        data-theme-toggle
+        data-js-only
+        aria-label="主题：跟随系统，切换到浅色"
+        title="主题：跟随系统，切换到浅色"
+      >
+        <svg class="wsk-icon wsk-theme-system" aria-hidden="true">
+          <use href="#system"></use>
+        </svg>
+        <svg class="wsk-icon wsk-theme-sun" aria-hidden="true">
+          <use href="#sun"></use>
+        </svg>
+        <svg class="wsk-icon wsk-theme-moon" aria-hidden="true">
+          <use href="#moon"></use>
+        </svg>
+      </button>
+    </header>
+
+    <main id="main-content" tabindex="-1">
+      <div class="wsk-reference-shell">
+        <aside>
+          <details class="pm-nav-disclosure" open>
+            <summary><span>导航</span><span class="pm-nav-current">当前页面</span></summary>
+          <nav class="wsk-reference-nav" aria-label="应用导航">
+            <div class="wsk-reference-brand">
+              <strong>控制台</strong><span>PROXY MANAGER</span>
+            </div>
+            <!--
+              导航按任务分组。普通用户仅保留个人中心，分组标题复用页头的小标，
+              与页头的小标是同一套语言。
+            -->
+            <p class="wsk-panel-title" data-roles="admin user">个人中心</p>
+            <div class="wsk-reference-links">
+              <a href="me.html" data-roles="admin user">我的订阅</a>
+              <a href="me-usage.html" data-roles="admin user">我的用量</a>
+              <!-- 跟随 §4.8 的全局开关：审计关闭时这一项整个不存在，
+                   而不是显示成「无权访问」——没有记录可看和不让你看是两回事。 -->
+              <a href="me-audit.html" data-roles="admin user">我的出站目标</a>
+            </div>
+
+            <p class="wsk-panel-title" data-roles="admin">运行监控</p>
+            <div class="wsk-reference-links">
+              <a href="overview.html" data-roles="admin">总览</a>
+              <a href="nodes.html" data-roles="admin">节点</a>
+              <a href="alerts.html" data-roles="admin">告警</a>
+            </div>
+            <p class="wsk-panel-title" data-roles="admin">用户与用量</p>
+            <div class="wsk-reference-links">
+              <a href="usage.html" data-roles="admin">用量趋势</a>
+              <a href="users.html" data-roles="admin">用户列表</a>
+            </div>
+            <p class="wsk-panel-title" data-roles="admin">系统管理</p>
+            <div class="wsk-reference-links">
+              <a href="settings.html" data-roles="admin">设置</a>
+            </div>
+          </nav>
+          </details>
+        </aside>
+
+        <div class="wsk-reference-content">
+          <!--
+            常驻反馈位。操作结果、降级通道状态、通知连续失败的红条都落在这里，
+            而不是散在各页各自的位置——出问题时人只需要看一个地方。
+          -->
+          <div
+            class="wsk-alert wsk-warning pm-global-notice"
+            role="status"
+            aria-live="polite"
+            data-roles="admin"
+          >
+            <svg class="wsk-icon" aria-hidden="true"><use href="#warning"></use></svg>
+            <div>
+              <strong>fr-01 采集连续失败，已停止入账并把该节点额度置零</strong>
+              <p>
+                没有新鲜且已结算的健康快照时不得刷新正额度（C33）；通道可用时下发全零表。
+                <a href="alerts.html">查看告警 →</a>
+              </p>
+            </div>
+          </div>
+
+          <div class="wsk-page">
+            <div class="wsk-page-head" id="me-audit">
+              <div>
+                <p class="wsk-panel-title">MY DESTINATIONS</p>
+                <h1 tabindex="-1">我的出站目标</h1>
+                <p>
+                  你的流量去过哪些目标。<strong>这不是浏览历史</strong>——记的是域名或
+                  IP + 端口，不含路径、参数与内容。
+                </p>
+              </div>
+              <span class="wsk-badge">近 7 天</span>
+            </div>
+
+            <div class="wsk-alert wsk-info">
+              <svg class="wsk-icon" aria-hidden="true"><use href="#info"></use></svg>
+              <div>
+                <strong>这一页展示什么</strong>
+                <p>
+                  <strong>展示</strong>：域名或 IP、端口、记录时间与次数。节点不采集网址路径、请求参数或内容。<br />
+                  节点另有连接流量与时长记录，<strong>本页不展示</strong>。<br />
+                  TCP 需成功双向传输；UDP 成功发送过数据即可记录，不要求回包。
+                  记录在连接关闭后写出，握手即断或只发不收的 TCP 不会出现。
+                </p>
+              </div>
+            </div>
+
+            <section class="wsk-section" aria-labelledby="me-audit-list">
+              <div class="wsk-section-head">
+                <h2 id="me-audit-list">目标列表</h2>
+                <div class="wsk-button-row">
+                  <fieldset class="wsk-segmented">
+                    <legend class="wsk-sr-only">时间范围</legend>
+                    <label><input type="radio" name="audit-range" value="24h" /><span>近 24 小时</span></label
+                    ><label><input type="radio" name="audit-range" value="7d" checked /><span>近 7 天</span></label
+                    ><label><input type="radio" name="audit-range" value="30d" /><span>近 30 天</span></label>
+                  </fieldset>
+                </div>
+              </div>
+
+              <div class="wsk-alert wsk-warning">
+                <svg class="wsk-icon" aria-hidden="true"><use href="#clock"></use></svg>
+                <div>
+                  <strong>仅显示已归档记录，归档时间不固定</strong>
+                  <p>
+                    每个身份的记录文件达到大小阈值后才会归档。使用较少时，可能数天或更久仍未归档。
+                    查不到记录不代表没有访问；列表中的最新时间也不表示此前记录已全部收齐。
+                  </p>
+                </div>
+              </div>
+
+              <div class="wsk-table-wrap wsk-mt-5">
+                <table class="wsk-table">
+                  <caption class="wsk-sr-only">我的出站目标</caption>
+                  <thead>
+                    <tr>
+                      <th scope="col">目标</th>
+                      <th scope="col">端口</th>
+                      <th scope="col">首次记录</th>
+                      <th scope="col">最近记录</th>
+                      <th scope="col">次数</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <th scope="row">www.example.com</th>
+                      <td>443</td><td>09-11 08:22</td><td>09-17 19:04</td><td class="wsk-tok-number">1,284</td>
+                    </tr>
+                    <tr>
+                      <th scope="row">api.example.org</th>
+                      <td>443</td><td>09-12 10:05</td><td>09-17 18:51</td><td class="wsk-tok-number">906</td>
+                    </tr>
+                    <tr>
+                      <th scope="row">cdn.example.net</th>
+                      <td>443</td><td>09-11 08:23</td><td>09-17 17:30</td><td class="wsk-tok-number">412</td>
+                    </tr>
+                    <tr>
+                      <th scope="row">203.0.113.7</th>
+                      <td>22</td><td>09-15 14:02</td><td>09-16 09:41</td><td class="wsk-tok-number">18</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+
+            <section class="wsk-section" aria-labelledby="me-audit-gap">
+              <div class="wsk-section-head">
+                <h3 id="me-audit-gap">证据链缺口</h3>
+              </div>
+              <div class="wsk-alert wsk-warning">
+                <svg class="wsk-icon" aria-hidden="true"><use href="#warning"></use></svg>
+                <div>
+                  <strong>09-14 03:10 — 03:40 这段有缺口</strong>
+                  <p>
+                    该时间窗内节点的审计写入失败过，这段的记录可能不完整。
+                    照常展示已有的部分并明确标注——<strong>不会把缺号换算成「丢了多少次」</strong>，
+                    那是把未知说成已知。
+                  </p>
+                </div>
+              </div>
+            </section>
+
+            <section class="wsk-section" aria-labelledby="me-audit-why">
+              <div class="wsk-section-head">
+                <h3 id="me-audit-why">看到不认识的目标怎么办</h3>
+              </div>
+              <div class="wsk-panel">
+                <p class="wsk-help">
+                  这一页最有用的地方在这里：<strong>只有你认得出哪些目标是陌生的</strong>。
+                  管理员看一列域名看不出异常，你一眼就能发现「我没访问过这个」。
+                  如果出现明显不是你的目标，很可能你的订阅地址已经泄露给了别人——
+                  请立刻联系管理员吊销并重发。
+                </p>
+                <p class="wsk-help wsk-mt-5">
+                  每条记录都会先核验是否属于你，再限定到<strong>你持有该身份的时间段</strong>。
+                  其他入口的同名身份、曾属于别人的记录，以及无法确认归属的时间段都会排除。
+                </p>
+              </div>
+            </section>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <footer class="wsk-footer">
+      <div class="wsk-footer-inner">
+        <div class="wsk-footer-legal"><span>proxy-manager · 静态原型 / 示例数据</span></div>
+        <a
+          class="wsk-footer-link"
+          href="https://github.com/KimiChen/wheels/tree/main/web-standard-kit"
+          target="_blank"
+          rel="noopener noreferrer"
+          >web-standard-kit</a
+        >
+      </div>
+    </footer>
+
+    <div class="wsk-toast-region" id="toast-region" aria-live="polite"></div>
+  </body>
+</html>

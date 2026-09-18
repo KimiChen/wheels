@@ -19,7 +19,7 @@ HTTP/1.1-over-Unix-stream，每连接单请求单响应，禁 keep-alive 与 que
 错误一律返回固定对象，并与快照共用同一个 schema 版本常量：
 
 ```json
-{"schema_version": 2, "error": {"code": 404}}
+{"schema_version": 3, "error": {"code": 404}}
 ```
 
 | code | 触发条件 |
@@ -41,7 +41,7 @@ HTTP/1.1-over-Unix-stream，每连接单请求单响应，禁 keep-alive 与 que
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "node_id": "node-example-01",
   "runtime_id": "0123456789abcdef0123456789abcdef",
   "started_at_unix_ms": 1787587200000,
@@ -100,7 +100,7 @@ HTTP/1.1-over-Unix-stream，每连接单请求单响应，禁 keep-alive 与 que
 不带版本段，不推进 `sequence`。`health` 三位任一为真时返回 503：
 
 ```json
-{"schema_version": 2, "status": "ok"}
+{"schema_version": 3, "status": "ok"}
 ```
 
 ## `PUT /v3/quota`
@@ -110,7 +110,7 @@ HTTP/1.1-over-Unix-stream，每连接单请求单响应，禁 keep-alive 与 que
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "node_id": "node-example-01",
   "runtime_id": "0123456789abcdef0123456789abcdef",
   "epoch": 137,
@@ -125,7 +125,7 @@ HTTP/1.1-over-Unix-stream，每连接单请求单响应，禁 keep-alive 与 que
 - `epoch` 单调递增；`≤` 已接受值返回 409。
 - `node_id` / `runtime_id` 必须逐字节相同，否则 409。**进程重启后的 409 是信号不是噪声**：
   额度是纯内存的，重启即全部解封，collector 必须按新 `runtime_id` 立即重推。
-- 成功返回 `{"schema_version": 2, "epoch": …, "applied": …}`。
+- 成功返回 `{"schema_version": 3, "epoch": …, "applied": …}`。
 
 命令行：
 

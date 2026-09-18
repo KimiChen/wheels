@@ -1,0 +1,40 @@
+# proxy-manager 主控配置示例（README §5）。
+# 真实配置放 /etc/proxy-manager/server.toml；本文件只含 RFC 保留段示例值。
+#
+# 字节量一律写**十进制字符串**：TOML 整数是有符号 64 位，而额度口径是 u64（C3、C31）。
+
+[listen]
+# 结构化 HTTP API 与 Web 控制台。绑在回环，公网访问经本机反代。
+api = "127.0.0.1:8173"
+
+[storage]
+# SQLite 单写者（D8）。WAL 可用于并发读，但不增加写入者数量。
+path = "/var/lib/proxy-manager/proxy-manager.db"
+busy_timeout_ms = 5000
+
+[collect]
+# 目标采集周期。提频时会缩短到 min_interval_secs，API 显示实际采集间隔（README §4.5）。
+interval_secs = 60
+min_interval_secs = 10
+# 正额度请求发送前检查快照新鲜度，默认目标采集周期的两倍（README §4.5 下发纪律 3）。
+snapshot_max_age_secs = 120
+# 节点时钟偏移容忍上限。超出即归桶回落到 received_at 并告警（C27）。
+# 节点必须启用 NTP：慢约两分钟会让 SS-2022 的时间戳防重放把**整节点**打成不可用。
+max_clock_skew_secs = 120
+
+[quota]
+# 额度与周期都是全局的（D21）：所有人同一个月度额度、同一个自然月周期。
+# 没有 per-user 套餐，因此这里只有一个值。改额度对本周期立即生效。
+monthly_bytes = "322122547200"   # 300 GiB
+# 日桶按这个展示时区的日历日计算（data-model.md §6）。
+# 改展示时区必须完整重建日缓存。
+display_timezone = "Asia/Shanghai"
+
+[alerts]
+# 通知降级通道与限频属于 M5，这里只保留占位键，解析时校验但不使用。
+enabled = false
+
+[im]
+# 飞书 / 企业微信只做两件事：告警与日报推送、扫码登录与通讯录 RBAC（README §4.9、§4.10）。
+# 主控**不暴露任何 IM 事件回调端点**（D5）。实现属于 M5。
+enabled = false
