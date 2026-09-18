@@ -158,6 +158,66 @@ class DocsPresenceTest(unittest.TestCase):
         self.assertIn("logrotate", operations)
 
 
+class OptionDocumentationTest(unittest.TestCase):
+    """每个配置项都必须在 README §4.6.1 的全表里，反之亦然。
+
+    加这条检查之前，有七个键（socket_group、socket_mode、read_timeout、write_timeout、
+    max_concurrency、max_request_bytes、queue_size）在 README 与 docs/ 里**零出现**——
+    它们被声明、被校验、生效，却无处可查。而 stale_after 更糟：它在 README 里有，
+    但 docs/OPERATIONS.md 推荐 `stale_action: deny` 时从不提它，照着配出来的配置
+    连 check 都过不去（options.go 对 deny && stale_after == 0 硬失败）。
+
+    纯文本的「关键字出现过吗」挡不住这类问题：一个键可以出现在某段散文里
+    而依然没人说得清它的默认值和约束。所以这里绑定的是一张**表**，
+    双向严格相等——少写一个键会红，写了一个不存在的键也会红。
+    """
+
+    TABLE_HEADING = "#### 4.6.1 配置项全表"
+    OPTION_STRUCTS = ("Options", "AccessLogOptions", "QuotaControlOptions")
+
+    def documented_keys(self):
+        readme = read("README.md")
+        start = readme.index(self.TABLE_HEADING)
+        # 表止于下一个同级或更高级标题，不要吃进 §4.7。
+        rest = readme[start + len(self.TABLE_HEADING):]
+        end = rest.index("\n### ")
+        return set(re.findall(r"^\| `([a-z_]+)` \|", rest[:end], re.M))
+
+    def declared_keys(self):
+        structs = go_struct_tags("internal/userstats/options.go")
+        keys = set()
+        for name in self.OPTION_STRUCTS:
+            self.assertIn(name, structs, f"options.go 中找不到结构体 {name}")
+            keys |= structs[name]
+        return keys
+
+    def test_table_and_options_match_exactly(self):
+        declared, documented = self.declared_keys(), self.documented_keys()
+        self.assertTrue(documented, "README §4.6.1 的表没解析出任何键")
+        self.assertEqual(
+            declared - documented, set(),
+            "以下配置项已实现但不在 README §4.6.1 的全表里",
+        )
+        self.assertEqual(
+            documented - declared, set(),
+            "README §4.6.1 的全表里有 options.go 中不存在的键",
+        )
+
+    def test_deny_requires_stale_after_is_documented_where_deny_is_recommended(self):
+        """哪里提 stale_action: deny，哪里就得提 stale_after。
+
+        OPERATIONS.md 曾把 deny 描述成一个可选项而只字不提 stale_after，
+        照做得到的配置连 check 都过不去——这是文档把人送进死路的那一类错误，
+        不是措辞问题。
+        """
+        for name in ("OPERATIONS.md",):
+            text = read(f"docs/{name}")
+            if "stale_action" in text:
+                # 用 assertTrue 而不是 assertIn：后者失败时会把整篇文档打进报错里。
+                self.assertTrue("stale_after" in text,
+                                f"{name} 提到了 stale_action 却没提 stale_after")
+
+
 class DeadOptionTest(unittest.TestCase):
     """用户配置里出现的键，必须真的被读取。
 
