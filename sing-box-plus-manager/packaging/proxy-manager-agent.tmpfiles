@@ -1,0 +1,8 @@
+# agent 的材料目录。
+#
+# 0700 且属主是 agent 自己：里面是 agent 的 HMAC key 与 server leaf 私钥。
+# **绝不能对 sbpd 组可读**——那等于让数据面用户拿到 agent 的身份，
+# 一个被攻陷的 plus 就能冒充 agent 伪造快照，正好把威胁模型要建立的边界反过来。
+# 这也是为什么这套材料不搭 `update-network.py` 的车：
+# 那个执行器把 /etc/sing-box-plus-deploy/ 下的一切 chown 成 root:sbpd 0640。
+d /etc/proxy-manager-agent 0700 root root -

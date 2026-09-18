@@ -1,0 +1,14 @@
+# 主控的配置、数据与 PKI 材料目录。
+#
+# 三个目录三种属主，刻意不合并：
+#
+#  - /etc/proxy-manager       root 写、服务只读。配置是运维的东西，服务改不得。
+#  - /var/lib/proxy-manager   服务独占 0700。SQLite 账本、WAL 与会话密钥都在这里，
+#                             它进一致性备份（R3），别人不该能读。
+#  - /etc/proxy-manager/pki   0700 且属主是服务：里面有主控的客户端私钥与 CA。
+#                             父目录 0750 root:proxy-manager 让服务穿得进来。
+#
+# 这里不建 /run 目录：主控绑的是 TCP 回环，没有 UNIX socket。
+d /etc/proxy-manager      0750 root          proxy-manager -
+d /etc/proxy-manager/pki  0700 proxy-manager proxy-manager -
+d /var/lib/proxy-manager  0700 proxy-manager proxy-manager -

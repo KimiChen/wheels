@@ -1,0 +1,67 @@
+[Unit]
+Description=sing-box-plus-manager node agent
+Documentation=https://github.com/KimiChen/wheels/tree/main/sing-box-plus-manager
+After=network-online.target
+Wants=network-online.target
+# 只要 After，**不要 Requires / PartOf / BindsTo**。
+#
+# agent 连不上 socket 时会自己退避重试；而把它绑在 plus 的生命周期上，
+# 等于让一个观测组件有能力连坐数据面。这条链路的整个前提是
+# 「计量出问题不该影响转发」。
+After=sing-box-plus-deploy-plus.service
+
+[Service]
+Type=simple
+
+# **以 root 运行，这是一次有记录的取舍（D31），不是偷懒。**
+#
+# plus 的 /run/sing-box-plus-deploy 是 0700 sbpd:sbpd，两个 socket 是 0600 sbpd:sbpd，
+# 而 `socket_group` 在 sing-box-plus 0.1.0 里是死代码（options.go 声明、全树无引用）。
+# 于是让一个独立用户读得到 socket 只有一条路：把 `socket_mode` 改成 0660、
+# 把 unit 的 RuntimeDirectoryMode 改成 0750——**后者是 unit 变更，要重启 plus**。
+#
+# 本轮的硬约束是「原 ss 服务不动」，所以选 root。代价写明：
+# 它与 packaging/README.md 里 C18/C28 的权限分层纪律相抵，
+# agent 因此拥有远超它所需的权限。降权的条件已经具备（见同名 .sysusers），
+# 等下一次 plus 重启窗口一并做。
+User=root
+Group=root
+UMask=0077
+ExecStart=/usr/local/bin/proxy-manager-agent /etc/proxy-manager-agent/agent.toml
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=15s
+
+# 同 plus：崩溃是预期路径，而内存里有 agent 的 HMAC key 与 TLS 私钥。
+LimitCORE=0
+
+NoNewPrivileges=true
+
+# **PrivateTmp=false，不是笔误。**
+#
+# 这是 C28 的具体形态：只访问本机 socket 的辅助 unit 若开了 PrivateTmp，
+# 私有 /tmp 会把宿主机上的 socket 藏起来，症状是「服务起来了但连不上」，
+# 而那和权限不足长得一模一样。
+PrivateTmp=false
+
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+# **不要声明 RuntimeDirectory=sing-box-plus-deploy。**
+#
+# plus 的 unit 是 RuntimeDirectoryPreserve=no，那个目录的生命周期绑在它身上。
+# agent 若声明同名目录，会抢走属主，并在 agent 停止时把目录删掉——
+# 等于用一个观测组件把数据面的 socket 目录端掉。
+ReadOnlyPaths=/etc/proxy-manager-agent /etc/sing-box-plus-deploy
+ReadWritePaths=/run/sing-box-plus-deploy
+
+[Install]
+WantedBy=multi-user.target

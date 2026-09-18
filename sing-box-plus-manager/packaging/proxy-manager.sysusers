@@ -1,0 +1,7 @@
+# 主控自己的服务账号。
+#
+# 主控**不需要**任何节点侧的组：它只对外发起 mTLS 连接、只写自己的库与日志，
+# 不碰 sing-box-plus 的 socket。真正需要分组穿越的是节点侧的 agent
+# （见 proxy-manager-agent.sysusers），两者不要混为一谈。
+u proxy-manager - "sing-box-plus-manager controller"
+g proxy-manager -

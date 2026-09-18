@@ -1,0 +1,11 @@
+# 节点侧 agent 的服务账号。
+#
+# **当前部署并不用它**：agent 跑 root（见 proxy-manager-agent.service 的长注释）。
+# 这份文件先写好，等哪天 plus 有了重启窗口、`socket_mode` 改成 0660 之后，
+# 降权就只是改 unit 的两行 + 装这份 sysusers。
+#
+# `sbpd` 是 sing-box-plus 那套部署自己建的组，这里只加入、不创建——
+# 它的 gid 四台各不相同（999/994/995/996），由那一侧的安装器决定。
+u proxy-manager-agent - "sing-box-plus-manager node agent"
+g proxy-manager-agent -
+m proxy-manager-agent sbpd
