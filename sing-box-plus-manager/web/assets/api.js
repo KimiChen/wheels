@@ -227,6 +227,11 @@
         toggle(".pm-subscription-address", sub.enabled);
         toggle("[data-pm-copy]", sub.enabled);
         toggle("[data-pm-no-identity]", sub.enabled && !sub.identity);
+        // 徽标说的是状态，不是装饰。**没有地址就不许说「有效」**，
+        // 「0 条入口可用」也不该顶着一个绿勾——那两种写法都会让人
+        // 把一次真实的缺失读成「页面没加载出来」，然后反复刷新。
+        toggle("[data-pm-sub-valid]", sub.enabled && !!sub.url);
+        toggle("[data-pm-entry-badge]", sub.enabled && sub.entry_count > 0);
       },
     },
 
@@ -312,12 +317,28 @@
   //
   // **只复制看起来像地址的东西**：原型模式下那一格是脱敏占位符，
   // 复制它会得到一串圆点，而用户会把它粘进客户端然后说「订阅坏了」。
-  // 失败也要说话——`navigator.clipboard` 在非安全上下文里直接不存在。
+  //
+  // **失败要留一条能走的路。** `navigator.clipboard.writeText` 会在非安全上下文里
+  // 根本不存在，也会在权限被拒时抛 NotAllowedError（企业策略、无痕窗口、
+  // 自动化环境都会）。那时只说一句「请手动选中复制」是不够的——
+  // 那一格是一串 64 位十六进制，手工拖选很容易少选一头，
+  // 而少选一头得到的是一个看起来对、导进去 404 的地址。所以替他选好。
+  //
+  // **判据是「有没有跑在真实模式下」，不是「这串字符像不像 URL」。**
+  // 第一版写的是 `text.startsWith("http")`，它挡不住原型页面里那个脱敏占位符
+  // ——`https://<控制台域名>/sub/Proxy-••••.yaml` 也是以 http 开头的，
+  // 于是点一下就把一串圆点复制走了，而它看起来完全像个地址。
+  // 这是在浏览器里真跑一遍才发现的：读代码时那个判断看着是对的。
   document.addEventListener("click", async (event) => {
     const button = event.target.closest?.("[data-pm-copy]");
     if (!button) return;
-    const text = document.querySelector(button.dataset.pmCopy)?.textContent?.trim() ?? "";
-    if (!text.startsWith("http")) {
+    if (document.body.dataset.pmMode !== "live") {
+      window.wsk?.showToast?.("这是原型页面，上面的地址是示例。", "warning");
+      return;
+    }
+    const node = document.querySelector(button.dataset.pmCopy);
+    const text = node?.textContent?.trim() ?? "";
+    if (!/^https:\/\/[^\s<>\u2022]+$/.test(text)) {
       window.wsk?.showToast?.("还没有可复制的订阅地址。", "warning");
       return;
     }
@@ -326,9 +347,20 @@
       window.wsk?.showToast?.("订阅地址已复制。请勿转发给他人。");
     } catch {
       // 不把地址写进任何日志——它是凭据。
-      window.wsk?.showToast?.("复制失败，请手动选中复制。", "danger");
+      selectText(node);
+      window.wsk?.showToast?.("这台设备不允许自动复制，已替你选中，按 Ctrl/Cmd+C。", "warning");
     }
   });
+
+  function selectText(node) {
+    if (!node) return;
+    const selection = window.getSelection?.();
+    if (!selection) return;
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
 
   function renderCollection(name, items, emptyText) {
     const container = document.querySelector(`[data-pm-collection="${name}"]`);
