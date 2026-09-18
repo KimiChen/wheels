@@ -1,0 +1,42 @@
+[Unit]
+Description=sing-box-plus-manager controller
+Documentation=https://github.com/KimiChen/wheels/tree/main/sing-box-plus-manager
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=proxy-manager
+Group=proxy-manager
+UMask=0077
+ExecStart=/usr/local/bin/proxy-manager run /etc/proxy-manager
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+
+# 崩溃是预期路径（Restart=on-failure），而进程内存里有会话密钥、节点 HMAC key
+# 与主控的 TLS 私钥。一次 core dump 会把它们全写到盘上。
+# 这与四台节点上加 LimitCORE=0 是同一条理由。
+LimitCORE=0
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+# 需要 AF_INET/AF_INET6：绑回环给反代，以及向四台节点发起 mTLS。
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+StateDirectory=proxy-manager
+StateDirectoryMode=0700
+ReadOnlyPaths=/etc/proxy-manager
+ReadWritePaths=/var/lib/proxy-manager
+
+[Install]
+WantedBy=multi-user.target
