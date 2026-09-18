@@ -27,6 +27,13 @@ const MAX_HEAD_BYTES: usize = 64 * 1024;
 /// 连接超时。总超时由调用方给，连接这一段取两者较小值。
 const MAX_CONNECT_SECS: u64 = 3;
 
+/// 一条已建立的字节流：要么是 TLS，要么是回环上的裸 TCP。
+///
+/// 用 trait object 而不是泛型：这条路径只有一个调用点，
+/// 单态化出两份一模一样的代码没有收益。
+trait Transport: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
+impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> Transport for T {}
+
 #[derive(Debug)]
 pub struct HttpsResponse {
     pub status: u16,
@@ -55,18 +62,55 @@ pub struct Endpoint {
     pub port: u16,
     /// 含前导 `/` 的请求目标（path + 可选 query）。
     pub target: String,
+    /// 这一跳是否走 TLS。**只有回环地址可以为 `false`**（见 [`Endpoint::parse`]）。
+    pub tls: bool,
 }
 
+/// 回环主机名。只有这几个名字允许明文。
+///
+/// 写成闭集而不是「解析出来是不是回环地址」：后者要做 DNS 解析，
+/// 而一个能被 DNS 影响的安全判定不叫安全判定。
+const LOOPBACK_HOSTS: &[&str] = &["127.0.0.1", "localhost"];
+
 impl Endpoint {
-    /// 解析一个 URL。**只接受 https**，且拒绝 userinfo。
+    /// 解析一个 URL。**非回环一律要求 https**，且拒绝 userinfo。
     ///
     /// 不引 url crate：这里只要能拆一个我们自己配置里的固定地址。
     /// 拒绝 userinfo 是因为 `https://evil.com@real.com/` 这种写法在肉眼读配置时
     /// 极易看反，而它在这里没有任何正当用途。
+    ///
+    /// # 为什么回环可以是 `http://`
+    ///
+    /// README §4.9 加固 5 写的是「出站调用硬化：**限定 HTTPS**」。那条规则的意图
+    /// 是**一次性 token 不得明文穿过网络**，不是「TLS 这个词必须出现」。
+    /// 到 `127.0.0.1` 的一跳不穿过任何网络，意图完整保留。
+    ///
+    /// 需要它的理由是被现场逼出来的，不是为了方便：
+    /// `account.xmpaoyou.com` **只支持 TLS 1.2**，且协商出来的是
+    /// `ECDHE-RSA-AES256-SHA384`——一个 **CBC** 套件。逐个试过 rustls/ring 实际
+    /// 提供的全部五个 TLS 1.2 AEAD 套件（`ECDHE-{RSA,ECDSA}-AES{128,256}-GCM-*`
+    /// 与 `ECDHE-RSA-CHACHA20-POLY1305`），**对端全部拒绝**。
+    /// rustls 按设计不实现 CBC 套件（Lucky13/BEAST 那一家），所以它
+    /// **在任何配置下都连不上这个端点**——这不是调参能解决的事。
+    ///
+    /// 于是把这一跳的 TLS 交给本机 nginx（它有 openssl）：
+    /// 主控 → `http://127.0.0.1:8444/…` → nginx → `https://account.xmpaoyou.com/…`。
+    ///
+    /// **代价写明**：中间多了一个进程能看见明文 token。它与主控同机同信任域，
+    /// 且 nginx 本来就是主控唯一的对外入口，所以不新增信任方；
+    /// 但那个 location 必须 `access_log off`，理由与回调路径完全一样。
+    ///
+    /// 正确的长期修法是让上游开一个 AEAD 套件——那是一条**上游请求**，
+    /// 不是在主控里长一个 TLS 兼容层（那会撞上 D9 的单一 ring provider）。
     pub fn parse(url: &str) -> Result<Self, HttpsError> {
-        let rest = url
-            .strip_prefix("https://")
-            .ok_or_else(|| HttpsError::BadUrl("必须是 https://".into()))?;
+        let (rest, tls) = match url.strip_prefix("https://") {
+            Some(rest) => (rest, true),
+            None => (
+                url.strip_prefix("http://")
+                    .ok_or_else(|| HttpsError::BadUrl("必须是 https:// 或 http://".into()))?,
+                false,
+            ),
+        };
         // 先把 query 与 fragment 切掉，再找路径分隔符。
         // 不这么做，`https://host?x=1` 会把整段 `host?x=1` 当成 authority，
         // 于是 `rsplit_once(':')` 之后拿到一个荒唐的主机名——而它在启动校验时
@@ -96,12 +140,18 @@ impl Endpoint {
             Some((host, port)) => {
                 (host, port.parse::<u16>().map_err(|_| HttpsError::BadUrl("端口不是整数".into()))?)
             }
-            None => (authority, 443u16),
+            None => (authority, if tls { 443u16 } else { 80u16 }),
         };
         if host.is_empty() || port == 0 {
             return Err(HttpsError::BadUrl("主机名或端口为空".into()));
         }
-        Ok(Endpoint { host: host.to_string(), port, target })
+        // **这一条是整个放宽的边界。** 松掉它就等于把加固 5 整条删掉。
+        if !tls && !LOOPBACK_HOSTS.contains(&host) {
+            return Err(HttpsError::BadUrl(format!(
+                "{host} 不是回环地址，必须用 https://：一次性 token 不得明文穿过网络"
+            )));
+        }
+        Ok(Endpoint { host: host.to_string(), port, target, tls })
     }
 }
 
@@ -145,10 +195,6 @@ pub async fn post_form(
 }
 
 async fn post_form_inner(endpoint: &Endpoint, body: String) -> Result<HttpsResponse, HttpsError> {
-    let server_name = rustls_pki_types::ServerName::try_from(endpoint.host.clone())
-        .map_err(|e| HttpsError::BadUrl(format!("{:?} 不是合法主机名：{e}", endpoint.host)))?;
-    let connector = tokio_rustls::TlsConnector::from(client_config());
-
     let connect_timeout = Duration::from_secs(MAX_CONNECT_SECS);
     let tcp = tokio::time::timeout(
         connect_timeout,
@@ -157,10 +203,22 @@ async fn post_form_inner(endpoint: &Endpoint, body: String) -> Result<HttpsRespo
     .await
     .map_err(|_| HttpsError::Timeout)?
     .map_err(|e| HttpsError::Transport(format!("连接失败：{e}")))?;
-    let mut tls = connector
-        .connect(server_name, tcp)
-        .await
-        .map_err(|e| HttpsError::Transport(format!("TLS 握手失败：{e}")))?;
+
+    let mut stream: Box<dyn Transport> = if endpoint.tls {
+        let server_name = rustls_pki_types::ServerName::try_from(endpoint.host.clone())
+            .map_err(|e| HttpsError::BadUrl(format!("{:?} 不是合法主机名：{e}", endpoint.host)))?;
+        let connector = tokio_rustls::TlsConnector::from(client_config());
+        Box::new(
+            connector
+                .connect(server_name, tcp)
+                .await
+                .map_err(|e| HttpsError::Transport(format!("TLS 握手失败：{e}")))?,
+        )
+    } else {
+        // 回环明文。`Endpoint::parse` 已经保证非回环地址到不了这里。
+        Box::new(tcp)
+    };
+    let tls = &mut stream;
 
     // `Connection: close` 让我们可以读到 EOF 为止；但对端仍可能用 chunked，
     // 所以下面两种编码都要认。
