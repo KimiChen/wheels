@@ -3,6 +3,8 @@ package userstats
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -288,5 +290,39 @@ func TestCheckReloadInvariant(t *testing.T) {
 		if err := CheckReloadInvariant(base, next); err == nil {
 			t.Fatalf("重载改变 %s 应被拒绝", name)
 		}
+	}
+}
+
+// TestExampleConfigPassesValidation 把随仓库发布的示例配置真正喂给校验器。
+//
+// 示例是运维直接拷贝改造的东西，它的结构漂移会一路传到生产。tests/test_docs_consistency.py
+// 只对它做 JSON 层面的断言（inbound 类型、两个 socket 不同路径等），碰不到 Validate 里
+// 那几十条规则——键名写错、层级放错、必填项缺失，在那份检查下全是绿的。
+//
+// 占位凭据按类型换成语法合法的假值：本用例考的是结构，不是凭据。三个 PSK 必须互不相同，
+// 否则会撞上 uPSK 冲突检查，那样就变成在测替换逻辑而不是在测示例。
+func TestExampleConfigPassesValidation(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "config", "server.example.json"))
+	if err != nil {
+		t.Fatalf("读取示例配置失败：%v", err)
+	}
+	text := string(raw)
+	for placeholder, replacement := range map[string]string{
+		"REPLACE_WITH_BASE64_16_BYTE_IPSK":      "AAAAAAAAAAAAAAAAAAAAAA==",
+		"REPLACE_WITH_BASE64_16_BYTE_UPSK_1":    "AQAAAAAAAAAAAAAAAAAAAA==",
+		"REPLACE_WITH_BASE64_16_BYTE_UPSK_2":    "AgAAAAAAAAAAAAAAAAAAAA==",
+		"REPLACE_WITH_YOUR_REALITY_PRIVATE_KEY": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+	} {
+		if !strings.Contains(text, placeholder) {
+			t.Fatalf("示例配置里找不到占位符 %s：替换表已过期", placeholder)
+		}
+		text = strings.ReplaceAll(text, placeholder, replacement)
+	}
+	options, err := decodeOptions(t, text)
+	if err != nil {
+		t.Fatalf("示例配置解码失败：%v", err)
+	}
+	if _, err = Validate(options); err != nil {
+		t.Fatalf("示例配置未通过校验：%v", err)
 	}
 }
