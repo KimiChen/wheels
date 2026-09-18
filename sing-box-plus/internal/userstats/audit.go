@@ -206,21 +206,23 @@ func (w *auditWriter) loop() {
 	}
 }
 
-// Close 的关闭序：有界等待 → 排空 channel → 逐文件 Flush + Sync → 每个打开的文件各写一条
-// stop 行。数据 channel 永不 close，否则在途的 Close() 投递会 panic 并打掉进程（纪律 13）。
+// Close 的关闭序：排空 channel → 逐文件 Flush + Sync → 每个打开的文件各写一条 stop 行。
+// 数据 channel 永不 close，否则在途的 Close() 投递会 panic 并打掉进程（纪律 13）。
+//
+// 排空是非阻塞的：到这里写入协程已经退出（上面等过 w.stopped），channel 里只剩已投递的
+// 存量，取空即止。此处曾有一个 2 秒期限，但同一个 select 里的 default 分支让它永远不会
+// 被选中——它是死代码。删掉而不是「修好」：去掉 default 会让每次 SIGHUP 与每次关闭都
+// 阻塞在一个已经没人再写入的 channel 上，最长两秒。
 func (w *auditWriter) Close() error {
 	w.stopOnce.Do(func() {
 		w.closed.Store(true)
 		close(w.done)
 		<-w.stopped
-		deadline := time.After(2 * time.Second)
 	drain:
 		for {
 			select {
 			case record := <-w.records:
 				w.writeRecord(record)
-			case <-deadline:
-				break drain
 			default:
 				break drain
 			}
