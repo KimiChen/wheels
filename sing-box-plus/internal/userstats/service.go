@@ -188,6 +188,17 @@ func (s *Service) handleSnapshotRoute(req *request) (int, []byte) {
 			return statusInternalServerError, mustJSON(newErrorBody(statusInternalServerError))
 		}
 		return statusOK, body
+	case "/v3/quota_status":
+		// 附加路由：未知路径此前恒为 404，因此新增它不影响任何既有客户端。
+		// 与 /healthz 一样不推进 sequence。
+		if req.method != "GET" {
+			return statusMethodNotAllowed, mustJSON(newErrorBody(statusMethodNotAllowed))
+		}
+		body, err := marshalJSONLine(s.registry.QuotaStatus())
+		if err != nil {
+			return statusInternalServerError, mustJSON(newErrorBody(statusInternalServerError))
+		}
+		return statusOK, body
 	case "/healthz":
 		if req.method != "GET" {
 			return statusMethodNotAllowed, mustJSON(newErrorBody(statusMethodNotAllowed))
