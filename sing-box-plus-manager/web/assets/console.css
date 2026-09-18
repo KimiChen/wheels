@@ -191,6 +191,14 @@ svg[role="img"] { max-width: 100%; }
   .pm-login .wsk-page { padding: 28px 16px; }
   .pm-login .wsk-auth-card { padding: 26px; }
 }
+/* 登录页：服务端在 <body> 上盖 data-pm-sso="on|off"（src/web/mod.rs::stamp_sso）。
+   纯 CSS 切换而不是 JS：这是一条**服务端事实**，不该等一个脚本跑完才显示正确，
+   也不该在禁用脚本时显示错。
+   未盖属性时（直接打开文件的原型模式）两者都按 HTML 里的默认值走：
+   链接可见、缺失提示带 hidden。 */
+body[data-pm-sso="off"] [data-pm-sso-link] { display: none; }
+body[data-pm-sso="off"] [data-pm-sso-missing][hidden] { display: flex; }
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; animation: none !important; }
 }

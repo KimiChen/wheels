@@ -108,10 +108,26 @@ fn sha256_hex(value: &str) -> String {
     hex::encode(Sha256::digest(value.as_bytes()))
 }
 
-/// 会话 ID 的 HMAC 证明用的 key（§4.9 加固 4）。首次使用时生成并落库。
+/// 会话 ID 的 HMAC 证明用的 key（§4.9 加固 4）。
 async fn proof_key(store: &Store) -> Result<proxy_manager_wire::sign::HmacKey> {
+    server_secret(store, SECRET_NAME).await
+}
+
+/// 预生成会话证明用的那把 key。见 `sso::warm_secrets`。
+pub async fn warm_proof_key(store: &Store) -> Result<()> {
+    proof_key(store).await.map(|_| ())
+}
+
+/// 按名字取一把服务端密钥，首次使用时生成并落库。
+///
+/// 放库里而不是配置文件：它要随库一起进一致性备份（R3），
+/// 而且与会话表同生共死——单独丢一个都会让所有会话失效。
+///
+/// **每种用途一把 key。** 一把 key 用在两处，就意味着其中一处的分析结论
+/// 不能独立成立；而域分隔串只能减轻这件事，不能消除它。
+pub async fn server_secret(store: &Store, name: &str) -> Result<proxy_manager_wire::sign::HmacKey> {
     if let Some(row) = sqlx::query("SELECT secret_hex FROM server_secrets WHERE name = ?")
-        .bind(SECRET_NAME)
+        .bind(name)
         .fetch_optional(store.readers())
         .await?
     {
@@ -125,14 +141,14 @@ async fn proof_key(store: &Store) -> Result<proxy_manager_wire::sign::HmacKey> {
         "INSERT INTO server_secrets(name, secret_hex, created_at) VALUES (?, ?, ?) \
          ON CONFLICT(name) DO NOTHING",
     )
-    .bind(SECRET_NAME)
+    .bind(name)
     .bind(key.to_hex())
     .bind(bucket::to_rfc3339(OffsetDateTime::now_utc()))
     .execute(txn.conn())
     .await?;
     txn.commit().await?;
     let row = sqlx::query("SELECT secret_hex FROM server_secrets WHERE name = ?")
-        .bind(SECRET_NAME)
+        .bind(name)
         .fetch_one(store.readers())
         .await?;
     proxy_manager_wire::sign::HmacKey::from_hex(&row.get::<String, _>(0))
@@ -149,7 +165,26 @@ fn proof_of(key: &proxy_manager_wire::sign::HmacKey, session_id: &str) -> String
     key.tag(&message)
 }
 
-/// 签发一个会话。**给 provider 调**——M5 的飞书 / 企业微信 / break-glass 都走这里。
+/// 成员事实的有效窗口。`None` 表示这个 provider 不依赖任何上游事实。
+///
+/// 窗口长度是**「上游撤权最迟多久被发现」**，所以它由那个 provider
+/// 到底有没有可刷新的事实源决定：
+///
+/// - `local`：break-glass 本地账号，没有上游，也就没有事实可刷。
+/// - `paoyou`：泡游只有一次性的 `check-token`，**没有按账号查状态的接口**，
+///   所以窗口只能等于会话本身——续不了的东西没有 TTL 可言。
+///   代价记在 D27：泡游侧停用一个人，最迟要到会话过期才生效。
+///   名单内的角色与档位调整不受此限，那部分每请求从配置现解析。
+/// - `feishu` / `wecom`：有 API 可查成员，按 D13 的 60 秒。
+fn member_fact_window(provider: &str, session_ttl: Duration) -> Option<Duration> {
+    match provider {
+        "local" => None,
+        "paoyou" => Some(session_ttl),
+        _ => Some(Duration::seconds(MEMBER_FACT_TTL_SECS)),
+    }
+}
+
+/// 签发一个会话。**给 provider 调**——泡游 SSO / break-glass 都走这里。
 pub async fn create(
     store: &Store,
     user_id: i64,
@@ -161,14 +196,9 @@ pub async fn create(
     let now = OffsetDateTime::now_utc();
     let expires_at = now + ttl;
 
-    // 只有 IM provider 才需要成员事实；`local` 不依赖上游。
-    let fact = if provider == "local" {
-        (None, None)
-    } else {
-        (
-            Some(bucket::to_rfc3339(now)),
-            Some(bucket::to_rfc3339(now + Duration::seconds(MEMBER_FACT_TTL_SECS))),
-        )
+    let fact = match member_fact_window(provider, ttl) {
+        Some(window) => (Some(bucket::to_rfc3339(now)), Some(bucket::to_rfc3339(now + window))),
+        None => (None, None),
     };
 
     let mut txn = store.begin_immediate().await?;
@@ -210,7 +240,11 @@ pub async fn create(
 ///
 /// **不缓存最终授权结论**（D13）。规则文件与 TTL 内的成员事实可以缓存，
 /// 结论不行——缓存结论就等于本地撤销要等缓存过期才生效。
-pub async fn resolve(store: &Store, cookie_value: &str) -> ApiResult<Subject> {
+pub async fn resolve(
+    store: &Store,
+    cookie_value: &str,
+    roster: &crate::sso::roster::Roster,
+) -> ApiResult<Subject> {
     let (session_id, proof) = cookie_value.split_once('.').ok_or_else(ApiError::unauthenticated)?;
     if session_id.len() != 64 || !session_id.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(ApiError::unauthenticated());
@@ -225,7 +259,8 @@ pub async fn resolve(store: &Store, cookie_value: &str) -> ApiResult<Subject> {
 
     let row = sqlx::query(
         "SELECT s.session_pk, s.user_id, s.provider, s.expires_at, s.revoked_at, \
-                s.member_fact_expires_at, s.last_seen_at, u.login_name, u.role, u.status \
+                s.member_fact_expires_at, s.last_seen_at, u.login_name, u.role, u.status, \
+                u.feishu_fs_id \
          FROM sessions s JOIN users u ON u.user_id = s.user_id \
          WHERE s.session_id_sha256 = ?",
     )
@@ -271,8 +306,19 @@ pub async fn resolve(store: &Store, cookie_value: &str) -> ApiResult<Subject> {
         return Err(ApiError::forbidden());
     }
     // 求值角色。角色只来自服务端，客户端声明什么都不看。
-    let role = Role::parse(&row.get::<String, _>(8))
-        .ok_or_else(|| ApiError::internal("用户角色不合法"))?;
+    //
+    // **从配置里的成员名单现解析，不读 `users.role`。** 那一列是登录时同步过去的
+    // 展示缓存；把它当授权依据，效果就是「把人从名单里删掉之后，他还能一直用到
+    // 下次登录」——而撤权恰恰是这条链路上最不能等的一件事（D27）。
+    //
+    // `local` 是唯一的例外：break-glass 账号不在名单里，它存在的理由正是
+    // 名单那条路走不通的时候还能进得来（README §4.9）。
+    let login_name: String = row.get(7);
+    let role = if provider == "local" {
+        Role::parse(&row.get::<String, _>(8)).ok_or_else(|| ApiError::internal("用户角色不合法"))?
+    } else {
+        roster.grade(&login_name, row.get::<Option<String>, _>(10).as_deref()).role
+    };
 
     // last_seen_at 节流写：单写者库上每请求一次写会把队列占满。
     if let Some(last_seen) = bucket::parse_rfc3339(&row.get::<String, _>(6)) {
@@ -281,7 +327,7 @@ pub async fn resolve(store: &Store, cookie_value: &str) -> ApiResult<Subject> {
         }
     }
 
-    Ok(Subject { session_pk, user_id: row.get(1), login_name: row.get(7), role, provider })
+    Ok(Subject { session_pk, user_id: row.get(1), login_name, role, provider })
 }
 
 async fn touch(store: &Store, session_pk: i64, now: OffsetDateTime) -> Result<()> {

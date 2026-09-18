@@ -91,30 +91,28 @@
               使用企业账号登录，统一管理你的订阅、节点与用量。
             </p>
 
-            <button
-              class="wsk-button wsk-auth-submit wsk-mt-5"
-              type="button"
-              data-toast="原型页面未连接身份提供方。"
-              data-js-only
-            >
-              飞书扫码登录
-            </button>
-            <p class="wsk-help wsk-mt-2">
-              授权码经浏览器重定向，仅取最小只读 scope。
+            <!-- 真实入口。服务端在 <body> 上盖 data-pm-sso，
+                 没配 [sso] 时这条链接会 404，所以那时页面把它换成说明。 -->
+            <a class="wsk-button wsk-auth-submit wsk-mt-5" href="/auth/sso/login" data-pm-sso-link>
+              泡游账号登录
+            </a>
+            <p class="wsk-help wsk-mt-2" data-pm-sso-link>
+              跳转到泡游 SSO 完成登录；回来时只取账号名与飞书标识。
+              <strong>不取手机号与头像</strong>——主控不需要也不存这些字段。
             </p>
 
-            <button
-              class="wsk-button wsk-secondary wsk-auth-submit wsk-mt-5"
-              type="button"
-              data-toast="原型页面未连接身份提供方。"
-              data-js-only
-            >
-              企业微信扫码登录
-            </button>
-            <p class="wsk-help wsk-mt-2">
-              <code>snsapi_base</code> 静默授权，只取 <code>userid</code>；
-              不取头像与手机号——主控不需要也不存这些字段。
-            </p>
+            <div class="wsk-alert wsk-warning wsk-mt-5" data-pm-sso-missing hidden>
+              <svg class="wsk-icon" aria-hidden="true">
+                <use href="#warning"></use>
+              </svg>
+              <div>
+                <strong>尚未配置 SSO</strong>
+                <p>
+                  服务端没有 <code>[sso]</code> 配置段，登录入口未挂载。
+                  它依赖对外域名、回调地址与出口 IP 登记——这些不在主控仓库里。
+                </p>
+              </div>
+            </div>
 
             <p class="wsk-help wsk-mt-5">
               普通用户首次登录即获得默认节点访问，直接进入个人中心。
@@ -130,26 +128,30 @@
           <div>
             <div class="wsk-panel">
               <p class="wsk-panel-title">部署提示</p>
-              <h2>企业微信需要先配可信 IP</h2>
+              <h2>登录能不能用，取决于三件仓库外的事</h2>
               <p class="wsk-help wsk-mt-2">
-                自建应用必须先设置可信域名或接收消息服务器 URL，再配置企业可信 IP；
-                否则调接口返回 <code>60020</code>。这条把主控的<strong>出口 IP</strong>
-                绑成了一等配置项（§10 R5）。
+                主控绑回环，对外域名由反代决定；回调地址要拼得出来，
+                会话 cookie 带 <code>__Host-</code> 前缀因而必须走 HTTPS。
+                任一项没落实，登录都会以「登录成功但立刻又没登录」的形式失败。
               </p>
               <div class="wsk-status-list wsk-mt-5">
                 <div>
-                  <span>飞书应用凭据<small>tenant_access_token 有效期 2 小时</small></span>
-                  <strong class="wsk-success-text">已配置</strong>
+                  <span>对外基址<small>sso.public_base_url，必须 https</small></span>
+                  <strong class="wsk-success-text">见配置</strong>
                 </div>
                 <div>
-                  <span>企业微信可信 IP<small>当前出口地址已登记</small></span>
-                  <strong class="wsk-success-text">已配置</strong>
+                  <span>回调地址<small>基址 + /auth/sso/callback</small></span>
+                  <strong class="wsk-success-text">自动拼出</strong>
                 </div>
                 <div>
-                  <span>群机器人降级通道<small>凭据失效时的兜底</small></span>
-                  <strong class="wsk-success-text">可用</strong>
+                  <span>出口 IP 登记<small>上游是否要求白名单，待确认</small></span>
+                  <strong>待确认</strong>
                 </div>
               </div>
+              <p class="wsk-help wsk-mt-5">
+                飞书 / 企业微信的直连 OAuth 属于 README §7 的 M5 另一半，尚未实现。
+                本系统的实名身份由泡游侧承载。
+              </p>
             </div>
 
             <details class="wsk-panel wsk-mt-5">
@@ -157,9 +159,13 @@
                 <strong>本地应急管理员</strong>
               </summary>
               <p class="wsk-help wsk-mt-2">
-                默认禁用。存在的理由很具体：企业微信可信 IP 一旦因主控换 IP 而失配，
-                IM 登录会整体失效，那时不能把所有人锁在门外。
+                默认禁用。存在的理由很具体：上游 SSO 一旦因回调域名、出口 IP 或
+                对端故障而不可用，登录会整体失效，那时不能把所有人锁在门外。
                 启用需改配置文件，登录后强制二次确认。
+              </p>
+              <p class="wsk-help wsk-mt-2">
+                注意它与其他人的区别：<strong>本地应急管理员的角色取自数据库</strong>，
+                不走成员名单——名单那条路走不通正是它存在的场景。
               </p>
               <div class="wsk-alert wsk-warning wsk-mt-5">
                 <svg class="wsk-icon" aria-hidden="true">

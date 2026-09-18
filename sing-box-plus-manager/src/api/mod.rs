@@ -10,6 +10,7 @@
 //!   确需运算时用 `BigInt`，禁止 `Number` 参与字节运算。
 //! - **时间是 RFC 3339（UTC）**。
 
+pub mod auth;
 pub mod error;
 pub mod routes;
 pub mod session;
@@ -34,11 +35,38 @@ pub struct AppState {
     /// 节点配置。**不从库里读**：失败开放的签字（C12）的事实来源是配置文件，
     /// 复制进库就会多出一处可以与配置漂移的副本。
     pub nodes: Arc<Vec<NodeConfig>>,
+    /// 泡游 SSO。`None` 表示没配 `[sso]` 段——那时登录端点不挂载。
+    /// 同样是配置即事实来源：成员名单在这里面，每请求求值一次（D27）。
+    pub sso: Option<crate::sso::Sso>,
+    /// 没配 SSO 时求值用的空名单。**所有人都是普通用户**，不是所有人都是管理员——
+    /// 认证代码的失败模式是沉默地放行，空名单最容易被误当成「还没配，先都放行」。
+    empty_roster: Arc<crate::sso::roster::Roster>,
 }
 
 impl AppState {
     pub fn node(&self, node_id: &str) -> Option<&NodeConfig> {
         self.nodes.iter().find(|n| n.node_id == node_id)
+    }
+
+    /// 本次求值要用的成员名单。**每请求取一次，不缓存结论。**
+    ///
+    /// 配了 SSO 时它从磁盘重读（按 mtime + inode 缓存内容），于是改名单
+    /// 下一个请求即生效；**读不出来就失败关闭**——授权源缺失、损坏或非法时
+    /// 整个认证请求失败，不退回上一份好的名单（§4.9）。
+    /// 退回看起来更友好，含义却是「有人把某人从名单里删掉、同时手滑写坏了
+    /// 文件，于是那个人继续有权限」。
+    pub fn roster(&self) -> ApiResult<std::sync::Arc<crate::sso::roster::Roster>> {
+        match &self.sso {
+            Some(sso) => sso.roster().map_err(|error| {
+                tracing::error!(%error, "读取成员名单失败：本次授权判定失败关闭（P1）");
+                ApiError::new(
+                    crate::api::error::ApiCode::MemberFactStale,
+                    "授权源不可读：认证依赖不可用",
+                )
+            }),
+            // 没配 SSO 时是空名单：所有人都是普通用户，break-glass 走 users.role。
+            None => Ok(self.empty_roster.clone()),
+        }
     }
 }
 
@@ -50,7 +78,8 @@ impl FromRequestParts<AppState> for Subject {
         let cookies = parts.headers.get(header::COOKIE).and_then(|value| value.to_str().ok());
         let raw = session::cookie_value(cookies, session::SESSION_COOKIE)
             .ok_or_else(ApiError::unauthenticated)?;
-        session::resolve(&state.store, raw).await
+        let roster = state.roster()?;
+        session::resolve(&state.store, raw, &roster).await
     }
 }
 
@@ -74,9 +103,15 @@ impl FromRequestParts<AppState> for WriteSubject {
     }
 }
 
-pub fn router(store: Arc<Store>, nodes: Arc<Vec<NodeConfig>>) -> Router {
-    let state = AppState { store, nodes };
-    Router::new()
+pub fn router(
+    store: Arc<Store>,
+    nodes: Arc<Vec<NodeConfig>>,
+    sso: Option<crate::sso::Sso>,
+) -> Router {
+    let sso_enabled = sso.is_some();
+    let state =
+        AppState { store, nodes, sso, empty_roster: Arc::new(crate::sso::roster::Roster::empty()) };
+    let router = Router::new()
         // 自身健康与指标。**不需要认证**——它们不返回任何业务数据。
         .route("/healthz", get(routes::healthz))
         .route("/readyz", get(routes::readyz))
@@ -99,6 +134,20 @@ pub fn router(store: Arc<Store>, nodes: Arc<Vec<NodeConfig>>) -> Router {
         // 404 会被读成「打错了」，而真相是「这个能力还没开」。
         .route("/api/v1/subscriptions/{user_id}", get(routes::subscriptions_not_enabled))
         .route("/api/v1/me/audit/access", get(routes::audit_not_enabled))
+        // 退出。**是写操作**，所以走 CSRF 双提交——否则第三方页面可以把人踢下线。
+        .route("/api/v1/auth/logout", axum::routing::post(auth::logout));
+
+    // 登录入口只在配好 `[sso]` 时才存在。没配就是 404 而不是一个会 500 的按钮：
+    // SSO 依赖对外域名、回调地址与出口 IP 这些主控仓库之外的事实。
+    let router = if sso_enabled {
+        router
+            .route("/auth/sso/login", get(auth::login))
+            .route(crate::sso::state::CALLBACK_PATH, get(auth::callback))
+    } else {
+        router
+    };
+
+    router
         // 页面与静态资源。放 fallback 上：API 路由优先，剩下的交给 web 层。
         // **一页一个 URL**，所以这里没有 hash 路由，越权在服务端就能拦住。
         .fallback(crate::web::serve_page)
@@ -125,10 +174,11 @@ async fn private_cache_headers(
 pub async fn serve(
     store: Arc<Store>,
     nodes: Arc<Vec<NodeConfig>>,
+    sso: Option<crate::sso::Sso>,
     listener: tokio::net::TcpListener,
     shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> std::io::Result<()> {
-    let app = router(store, nodes);
+    let app = router(store, nodes, sso);
     let mut shutdown = shutdown;
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {

@@ -161,7 +161,15 @@ pub async fn serve_page(
         return (StatusCode::NOT_FOUND, "Not Found").into_response();
     };
     if *visibility == Visibility::Public {
-        return html_response(page_body(name).unwrap_or_default().to_string(), StatusCode::OK);
+        let body = page_body(name).unwrap_or_default();
+        // 登录页要知道服务端到底有没有挂载 SSO：没挂载时那个按钮会 404，
+        // 而「点了没反应」是最难自查的一种故障。让服务端直说，不让页面去猜。
+        let body = if name == "login.html" {
+            stamp_sso(body, state.sso.is_some())
+        } else {
+            body.to_string()
+        };
+        return html_response(body, StatusCode::OK);
     }
 
     let subject = resolve_subject(&state, &headers).await;
@@ -207,13 +215,37 @@ fn stamp(body: &'static str, role: Role) -> String {
 /// 认证页面都必须带这个锚点，`stamp` 才有落点。
 pub const BODY_ANCHOR: &str = "<body data-principal=";
 
+/// 登录页的锚点。它是 Public 页，不经 [`stamp`]，所以单独有一个。
+pub const LOGIN_ANCHOR: &str = "<body class=\"pm-login\"";
+
+/// 把「服务端有没有配 SSO」盖进登录页。
+///
+/// 盖的是事实，不是样式：没配时那个 `/auth/sso/login` 链接是 404，
+/// 页面据此把它换成一句说明。前端自己探测不出这件事——
+/// 它只能点一次然后看见 404，而那对使用者毫无信息量。
+pub fn stamp_sso(body: &'static str, enabled: bool) -> String {
+    let Some(start) = body.find(LOGIN_ANCHOR) else {
+        // 锚点缺失由 `tests/m4/assets.rs` 机械拦住；运行时退回原文。
+        return body.to_string();
+    };
+    format!(
+        "{}<body class=\"pm-login\" data-pm-sso=\"{}\"{}",
+        &body[..start],
+        if enabled { "on" } else { "off" },
+        &body[start + LOGIN_ANCHOR.len()..]
+    )
+}
+
 async fn resolve_subject(
     state: &crate::api::AppState,
     headers: &axum::http::HeaderMap,
 ) -> Option<Subject> {
     let cookies = headers.get(header::COOKIE).and_then(|value| value.to_str().ok());
     let raw = crate::api::session::cookie_value(cookies, crate::api::session::SESSION_COOKIE)?;
-    crate::api::session::resolve(&state.store, raw).await.ok()
+    // 名单读不出来时 `roster()` 是 Err——这里同样当成「没有主体」。
+    // 页面层本就把一切失败折成跳登录页，而失败关闭的语义在 API 层已经强制过了。
+    let roster = state.roster().ok()?;
+    crate::api::session::resolve(&state.store, raw, &roster).await.ok()
 }
 
 fn html_response(body: String, status: StatusCode) -> Response {

@@ -58,14 +58,39 @@ CREATE TABLE quota_groups (
 -- 默认值在建号事务里从 quota_settings.default_group 取成具体值。
 CREATE TABLE users (
     user_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    -- 上游账号名。**大小写敏感**（README §4.9），也是建号的幂等键。
     login_name  TEXT NOT NULL UNIQUE,
     display_name TEXT NOT NULL,
+    -- `role` 与 `quota_group` 都是**展示缓存**，不是授权依据。
+    --
+    -- 授权每请求从配置里的成员名单现解析（D27）：库里这两列只在登录与
+    -- reconcile 时同步，供控制台与 CLI 显示。把它们当成真相的后果是
+    -- 「改了名单要等下次登录才生效」，而撤权恰恰是最不能等的那件事。
     role        TEXT NOT NULL CHECK(role IN ('admin', 'user')),
     quota_group TEXT NOT NULL REFERENCES quota_groups(group_name),
     status      TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'disabled')),
+    -- 身份档案（README §4.9）：provider + 外部标识 + 显示名。
+    -- **不存手机号、头像 URL**——上游 check-token 会返回它们，主控明确丢弃。
+    --
+    -- 「外部标识」在这里占两列而不是一列，因为泡游给了两个：
+    -- `login_name`（账号名，同时是建号幂等键）与 `feishu_fs_id`。
+    -- §4.9 那句「只存三个字段」说的是**不存哪些**（手机号、头像、部门树），
+    -- 不是「外部标识只许有一个」——两个标识都参与名单匹配（D27）。
+    auth_provider TEXT CHECK(auth_provider IS NULL
+                             OR auth_provider IN ('paoyou', 'feishu', 'wecom', 'local')),
+    -- 泡游返回的字段名叫 `wxwork_id`（企业微信），实际装的是**飞书 fs_id**。
+    -- 本列按实测语义命名，不按上游字段名命名（README §4.9 的明文纪律）。
+    --
+    -- 可空：接入说明写明「账号未关联用户或未设置飞书标识时返回空字符串」，
+    -- 所以它**不能**当身份主键，只作关联用。空字符串一律规范化成 NULL——
+    -- 否则两个都没设飞书标识的人会在唯一索引上撞车。
+    feishu_fs_id TEXT CHECK(feishu_fs_id IS NULL OR length(feishu_fs_id) > 0),
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL
 ) STRICT;
+
+-- SQLite 的唯一索引允许多个 NULL，正是这里要的：没有飞书标识的人互不冲突。
+CREATE UNIQUE INDEX idx_users_feishu_fs_id ON users(feishu_fs_id) WHERE feishu_fs_id IS NOT NULL;
 
 -- 计费槽位注册表：节点 / inbound / 身份名 → 业务用户。
 --

@@ -9,11 +9,13 @@
 
 mod nodes;
 mod server;
+mod sso;
 
 pub use nodes::{FirstSnapshotPolicy, NodeConfig, NodeQuotaControl, QuotaAction};
 pub use server::{
     AlertsConfig, CollectConfig, ImConfig, ListenConfig, QuotaConfig, ServerConfig, StorageConfig,
 };
+pub use sso::{SsoConfig, DEFAULT_QUOTA_GROUP, QUOTA_GROUPS};
 
 use std::path::Path;
 

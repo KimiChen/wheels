@@ -51,6 +51,81 @@ enum Command {
         #[command(subcommand)]
         command: LedgerCommand,
     },
+
+    /// 用户：开通、改档、按名单对齐。
+    ///
+    /// 与控制台的 HTTP handler 调**同一套库函数**。做成 CLI 的理由很具体：
+    /// SSO 要依赖对外域名、回调地址与出口 IP 这些主控仓库之外的事实，
+    /// 任何一项没谈妥，登录就进不来。开通流程不该被那些事卡住。
+    User {
+        #[command(subcommand)]
+        command: UserCommand,
+    },
+
+    /// SSO：按配置里的成员名单对齐库里的展示缓存。
+    Sso {
+        #[command(subcommand)]
+        command: SsoCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum UserCommand {
+    /// 列出已知用户，并标出**名单现在怎么判**。
+    ///
+    /// 两列可能不一致：库里那两列是上次登录时的快照，名单是当下的事实。
+    /// 不一致不影响授权（那是每请求现解析的），影响的是控制台上显示的内容。
+    List {
+        #[arg(long, default_value = "/etc/proxy-manager")]
+        config_dir: PathBuf,
+    },
+    /// 给一个用户开通身份：从 D11 的账号池里认领一个，落到全部启用配额的节点。
+    ///
+    /// **幂等**：已经有的直接返回，不再消耗一个名额。
+    Grant {
+        #[arg(long, default_value = "/etc/proxy-manager")]
+        config_dir: PathBuf,
+        /// 登录名（泡游账号名，大小写敏感）。
+        #[arg(long)]
+        account: String,
+        /// 操作者。必填并落进审计——这是一次影响他人的操作。
+        #[arg(long)]
+        actor: String,
+    },
+    /// 把一个用户换到另一档额度。
+    ///
+    /// 走 D21 的预览/确认纪律：**调低必须 `--confirm`**，调高不要求。
+    Tier {
+        #[arg(long, default_value = "/etc/proxy-manager")]
+        config_dir: PathBuf,
+        #[arg(long)]
+        account: String,
+        #[arg(long, value_parser = ["normal", "advanced", "manage", "admin"])]
+        group: String,
+        #[arg(long)]
+        actor: String,
+        /// 看过预览之后再加它。不加时只打印预览，**不提交**。
+        #[arg(long, default_value_t = false)]
+        confirm: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum SsoCommand {
+    /// 按名单对齐库里的 `role` 与 `quota_group`。
+    ///
+    /// 不加 `--apply` 只打印差异。角色直接同步（它只是展示缓存）；
+    /// **档位走审计路径**，所以调低同样要 `--confirm`。
+    Reconcile {
+        #[arg(long, default_value = "/etc/proxy-manager")]
+        config_dir: PathBuf,
+        #[arg(long)]
+        actor: String,
+        #[arg(long, default_value_t = false)]
+        apply: bool,
+        #[arg(long, default_value_t = false)]
+        confirm: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -209,6 +284,10 @@ async fn run(command: Command) -> anyhow::Result<ExitCode> {
         Command::Runtime { command } => runtime_command(command).await,
 
         Command::Ledger { command } => ledger_command(command).await,
+
+        Command::User { command } => user_command(command).await,
+
+        Command::Sso { command } => sso_command(command).await,
     }
 }
 
@@ -267,6 +346,39 @@ async fn run_service(config_dir: &std::path::Path) -> anyhow::Result<ExitCode> {
         }
     }
 
+    // 泡游 SSO。整段 `[sso]` 缺省即不启用——那时控制台只剩 break-glass 那条路，
+    // 所以要在启动日志里点名，而不是让人从「登录按钮 404」去反推。
+    let sso = match &config.server.sso {
+        Some(settings) => {
+            // 名单的事实来源是这个文件本身，每请求按 mtime + inode 重读；
+            // 这里只是把路径记下来，并在启动时先读一次好点名。
+            let sso = proxy_manager::sso::Sso::new_with_source(
+                settings,
+                &config_dir.join("server.toml"),
+            )?;
+            // 两把服务端密钥在这里就生成好：回调路径上第一次取 key 会写库，
+            // 而那一步发生在校验 state **之前**（加固 3 要求「无任何写入地校验」）。
+            proxy_manager::sso::warm_secrets(&store).await?;
+            let roster = sso.roster()?;
+            if roster.admin_count() == 0 {
+                // 一个没有任何管理员的名单意味着**谁都改不了配置**，
+                // 而它看起来和配好了完全一样。这是必须响的一条。
+                tracing::error!("[sso].admins 是空的：登录进来的人全部是普通用户，无人可管理");
+            }
+            tracing::info!(
+                admins = roster.admin_count(),
+                callback = %settings.callback_url(),
+                session_ttl_secs = settings.session_ttl_secs,
+                "泡游 SSO 已启用"
+            );
+            Some(sso)
+        }
+        None => {
+            tracing::warn!("没有配置 [sso]：登录入口不挂载，控制台只剩 break-glass");
+            None
+        }
+    };
+
     // HTTP API 与控制台。绑回环；公网访问经本机反代（§5）。
     let nodes = std::sync::Arc::new(config.nodes.clone());
     let listener = tokio::net::TcpListener::bind(&config.server.listen.api).await?;
@@ -275,6 +387,7 @@ async fn run_service(config_dir: &std::path::Path) -> anyhow::Result<ExitCode> {
     let api = tokio::spawn(proxy_manager::api::serve(
         store.clone(),
         nodes,
+        sso,
         listener,
         shutdown_rx.clone(),
     ));
@@ -615,6 +728,213 @@ fn pki_command(command: PkiCommand) -> anyhow::Result<ExitCode> {
             let removed = pki::revoke_from_bundle(&bundle, &spki)?;
             println!("已从 {} 移除 {removed} 张 leaf。", bundle.display());
             println!("提醒：reload 顺序是**先节点后主控**——反过来会把自己关在门外。");
+            Ok(ExitCode::SUCCESS)
+        }
+    }
+}
+
+// ============ 用户与 SSO 子命令 ============
+
+/// 名单（授权的事实来源）与库（展示缓存）都要，所以两个子命令都先开这一份。
+async fn open_with_roster(
+    config_dir: &std::path::Path,
+) -> anyhow::Result<(proxy_manager::store::Store, proxy_manager::sso::roster::Roster)> {
+    let (config, store) = open_store(config_dir).await?;
+    let roster = match &config.server.sso {
+        Some(settings) => proxy_manager::sso::roster::Roster::from_config(settings),
+        // 没配 SSO 时是空名单：所有人都是普通用户。
+        // **不是**「所有人都是管理员」——认证代码的失败模式是沉默地放行。
+        None => proxy_manager::sso::roster::Roster::empty(),
+    };
+    Ok((store, roster))
+}
+
+async fn user_id_of(store: &proxy_manager::store::Store, account: &str) -> anyhow::Result<i64> {
+    use sqlx::Row;
+    let row = sqlx::query("SELECT user_id FROM users WHERE login_name = ?")
+        .bind(account)
+        .fetch_optional(store.readers())
+        .await?;
+    // 大小写敏感（§4.9）。找不到时把这一点说出来——
+    // 「查无此人」和「大小写写错了」在命令行上长得一模一样。
+    row.map(|row| row.get::<i64, _>(0)).ok_or_else(|| {
+        anyhow::anyhow!("没有账号 {account:?}（登录名大小写敏感；本人登录过一次才会建号）")
+    })
+}
+
+async fn user_command(command: UserCommand) -> anyhow::Result<ExitCode> {
+    match command {
+        UserCommand::List { config_dir } => {
+            use sqlx::Row;
+            let (store, roster) = open_with_roster(&config_dir).await?;
+            let rows = sqlx::query(
+                "SELECT login_name, display_name, role, quota_group, status, feishu_fs_id \
+                 FROM users ORDER BY login_name",
+            )
+            .fetch_all(store.readers())
+            .await?;
+            if rows.is_empty() {
+                println!("还没有任何用户：第一个人登录一次就会建号。");
+                return Ok(ExitCode::SUCCESS);
+            }
+            println!(
+                "{:<20} {:<16} {:<10} {:<10} {:<8} 名单判定",
+                "登录名", "显示名", "角色", "档位", "状态"
+            );
+            let mut drift = 0usize;
+            for row in rows {
+                let login_name: String = row.get(0);
+                let fs_id: Option<String> = row.get(5);
+                let grade = roster.grade(&login_name, fs_id.as_deref());
+                let role: String = row.get(2);
+                let group: String = row.get(3);
+                let same = role == grade.role.as_str() && group == grade.quota_group;
+                if !same {
+                    drift += 1;
+                }
+                println!(
+                    "{:<20} {:<16} {:<10} {:<10} {:<8} {}",
+                    login_name,
+                    row.get::<String, _>(1),
+                    role,
+                    group,
+                    row.get::<String, _>(4),
+                    if same {
+                        "一致".to_string()
+                    } else {
+                        format!("{}/{}", grade.role.as_str(), grade.quota_group)
+                    }
+                );
+            }
+            if drift > 0 {
+                // 只是展示缓存对不上，**授权已经按名单在走了**。说清楚免得被当成越权。
+                println!(
+                    "\n{drift} 人的库内缓存与名单不一致。授权不受影响（每请求按名单现解析），\n                     受影响的只有控制台显示。跑 `proxy-manager sso reconcile` 对齐。"
+                );
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+
+        UserCommand::Grant { config_dir, account, actor } => {
+            let (store, _) = open_with_roster(&config_dir).await?;
+            let user_id = user_id_of(&store, &account).await?;
+            let claim = proxy_manager::identity::claim_for_user(&store, user_id, &actor).await?;
+            if claim.newly_claimed {
+                println!("已开通：{account} → 身份 {}", claim.identity_name);
+            } else {
+                // 幂等不是「没生效」，说清楚免得有人重跑到池子见底。
+                println!("{account} 早已开通：身份 {}（本次未消耗名额）", claim.identity_name);
+            }
+            println!("覆盖节点：{}", claim.nodes.join(", "));
+            Ok(ExitCode::SUCCESS)
+        }
+
+        UserCommand::Tier { config_dir, account, group, actor, confirm } => {
+            let (store, _) = open_with_roster(&config_dir).await?;
+            user_id_of(&store, &account).await?;
+            let scope = proxy_manager::quota::settings::Scope::UserGroup {
+                login_name: account.clone(),
+                new_group: group.clone(),
+            };
+            let cycle = proxy_manager::quota::cycle_key(time::OffsetDateTime::now_utc());
+            let preview = proxy_manager::quota::settings::preview(&store, &scope, &cycle).await?;
+            println!(
+                "{account} → {group}：{} → {} 字节（{}）",
+                preview.current_monthly_bytes,
+                preview.new_monthly_bytes,
+                if preview.is_reduction { "调低" } else { "调高" }
+            );
+            // 名单是对**这一刻的已结算用量**成立的，所以核验时刻必须打出来：
+            // 后续流量仍可能增加用尽的人数。
+            println!(
+                "预计被闸断 {} 人（新增 {}，解出 {}），用量核验于 {}",
+                preview.will_be_blocked.len(),
+                preview.newly_blocked.len(),
+                preview.newly_unblocked.len(),
+                preview.usage_verified_at
+            );
+            if !confirm {
+                println!("这是预览。确认无误后加 --confirm 提交。");
+                return Ok(ExitCode::from(2));
+            }
+            let applied =
+                proxy_manager::quota::settings::apply(&store, &scope, &actor, &cycle, true).await?;
+            println!(
+                "已提交：revision {}，待下发节点 {}",
+                applied.revision,
+                applied.nodes.join(", ")
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+    }
+}
+
+async fn sso_command(command: SsoCommand) -> anyhow::Result<ExitCode> {
+    match command {
+        SsoCommand::Reconcile { config_dir, actor, apply, confirm } => {
+            let (store, roster) = open_with_roster(&config_dir).await?;
+            let plan = proxy_manager::sso::plan_reconcile(&store, &roster).await?;
+            if plan.is_empty() {
+                println!("库内缓存与名单一致，无需对齐。");
+                return Ok(ExitCode::SUCCESS);
+            }
+            for rebind in &plan {
+                if rebind.role_changed() {
+                    println!(
+                        "{}：角色 {} → {}",
+                        rebind.login_name,
+                        rebind.from_role,
+                        rebind.to_role.as_str()
+                    );
+                }
+                if rebind.group_changed() {
+                    println!(
+                        "{}：档位 {} → {}",
+                        rebind.login_name, rebind.from_group, rebind.to_group
+                    );
+                }
+            }
+            if !apply {
+                println!("\n这是预览。加 --apply 执行；其中调低档位还需要 --confirm。");
+                return Ok(ExitCode::from(2));
+            }
+
+            let cycle = proxy_manager::quota::cycle_key(time::OffsetDateTime::now_utc());
+            let mut blocked = 0usize;
+            for rebind in &plan {
+                if rebind.role_changed() {
+                    // 角色只是展示缓存，直接同步。
+                    proxy_manager::sso::sync_role(&store, rebind.user_id, rebind.to_role).await?;
+                }
+                if rebind.group_changed() {
+                    let scope = proxy_manager::quota::settings::Scope::UserGroup {
+                        login_name: rebind.login_name.clone(),
+                        new_group: rebind.to_group.clone(),
+                    };
+                    // 改档位是一次影响他人的操作（D21）：走同一套预览/确认与审计。
+                    match proxy_manager::quota::settings::apply(
+                        &store, &scope, &actor, &cycle, confirm,
+                    )
+                    .await
+                    {
+                        Ok(applied) => println!(
+                            "{}：档位已改，revision {}",
+                            rebind.login_name, applied.revision
+                        ),
+                        Err(error) => {
+                            // 调低未确认落在这里。**不中断整轮**：
+                            // 其余人的对齐是好的，为一条没确认的调低把它们一起丢掉
+                            // 只会让人再跑一遍、再看一遍同样的输出。
+                            blocked += 1;
+                            println!("{}：跳过（{error}）", rebind.login_name);
+                        }
+                    }
+                }
+            }
+            if blocked > 0 {
+                println!("\n{blocked} 人因需要确认而跳过：看过上面的预览后加 --confirm 重跑。");
+                return Ok(ExitCode::from(2));
+            }
             Ok(ExitCode::SUCCESS)
         }
     }

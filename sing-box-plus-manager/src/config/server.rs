@@ -17,6 +17,13 @@ pub struct ServerConfig {
     pub alerts: AlertsConfig,
     #[serde(default)]
     pub im: ImConfig,
+    /// 泡游 SSO 登录（M5）。**整段缺省即不启用**——那时控制台只剩 break-glass。
+    ///
+    /// 写了就必须写对：下面的 validate 会对它逐项下钻，不存在「反正没开所以不校验」
+    /// 的中间态。一份写错了但暂时没生效的配置，会在某天有人把它接上的那一刻才炸，
+    /// 而那时写配置的人已经不在现场了。
+    #[serde(default)]
+    pub sso: Option<crate::config::SsoConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -155,6 +162,13 @@ impl ServerConfig {
                 "§4.5",
                 "collect.snapshot_max_age_secs 必须为正：它是正额度请求的新鲜度门禁",
             ));
+        }
+        // **必须显式下钻。** `ServerConfig::validate` 不会自动递归到子结构体，
+        // 而 `[alerts]` / `[im]` 恰好没有任何校验，所以照抄它们的写法会得到一段
+        // 「写了 validate 但从不运行」的代码。对照组是 `NodeConfig::validate`，
+        // 它是显式调 `NodeQuotaControl::validate` 的。
+        if let Some(sso) = &self.sso {
+            sso.validate()?;
         }
         if self.quota.display_timezone.is_empty() {
             return Err(Error::invalid_config(
