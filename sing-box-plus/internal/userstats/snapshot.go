@@ -77,6 +77,9 @@ func (r *Registry) Snapshot() (*Snapshot, error) {
 	if r.validationOnly {
 		return nil, E.New("校验用 registry 不提供快照")
 	}
+	r.snapshotMu.Lock()
+	defer r.snapshotMu.Unlock()
+
 	snapshot := &Snapshot{
 		SchemaVersion:   SchemaVersion,
 		NodeID:          r.nodeID,
