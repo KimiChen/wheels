@@ -1,0 +1,48 @@
+# scripts/verify.sh 第三轮（无抑制 -race）的排除清单。
+#
+# 第三轮的目的是让 tests/race-suppressions.txt 无法掩盖本项目自身的竞争。
+# 抑制文件只覆盖上游 route.(*NetworkManager) 的三个符号，其触发条件是构造 box.New——
+# 所以需要排除的正是**在测试进程内构造 Box 的用例**，其余一律进入该轮。
+#
+# 实现上用 `go test -skip`，即真正的补集：新增的测试默认进入无抑制轮，除非在此登记。
+# 方向是对的——忘记登记会让该轮变红，而不是悄悄少跑一批断言。旧实现用 `-run` 白名单，
+# 名字写错会被 go test 静默匹配为零个用例；2026-09 就有三个不存在的名字躺在清单里，
+# 那一轮实际只跑了七个用例。因此 verify.sh 现在断言每个被排除的名字确实存在。
+#
+# 本清单由实测得出，不是静态推断——静态扫函数体会漏掉经二级辅助函数（如 contractServer
+# → startServer）构造 Box 的用例。重新生成的方法：
+#
+#   go test -race -count=1 -tags "$(production_build_tags)" ./internal/userstats/ 2>&1 \
+#     | sed -n 's/^--- FAIL: //p' | sed 's/ .*//' | sort -u
+#
+# [all]   在所有平台上都存在的用例；verify.sh 断言每个名字确实存在。
+# [linux] 带 //go:build linux 的用例；仅在 GOOS=linux 时断言存在。
+
+[all]
+TestAuditMinimalGate                     # audit_integration_test.go → startServer
+TestAuditNoRecordForHandshakeOnly        # audit_integration_test.go → startServer
+TestExcludedTrafficStillBilled           # audit_integration_test.go → startServer
+TestFilterStampLandsWithFirstRealRecord  # audit_integration_test.go → startServer
+TestCounterUnwrapWithStackedTrackers     # reload_test.go → box.New
+TestDrainRejectsNewConnectionsAndWaits   # reload_test.go → restartBox
+TestReloadEnvelopeInvariance             # reload_test.go → restartBox
+TestExporterConcurrencyLimit             # exporter_test.go → contractServer → startServer
+TestExporterSlowClientTimesOut           # exporter_test.go → startServer
+TestHealthzDoesNotAdvanceSequence        # contract_test.go → contractServer → startServer
+TestQuotaEndpointFailClosed              # contract_test.go → startServer
+TestSnapshotRoutes                       # contract_test.go → contractServer → startServer
+TestSnapshotShape                        # contract_test.go → contractServer → startServer
+TestQuotaIsolation                       # quota_integration_test.go → startServer
+TestQuotaOvershootBoundedByOneChunk      # quota_integration_test.go → startServer
+TestQuotaRejectedConnectionStillDials    # quota_integration_test.go → startServer
+TestShadowsocksByteOracle                # integration_test.go → startServer
+TestShadowsocksUDPCounted                # integration_test.go → startServer
+TestShadowsocksUDPLargePayload           # integration_test.go → startServer
+TestVLESSByteOracleLarge                 # integration_test.go → startServer
+TestVLESSByteOracleTCP                   # integration_test.go → startServer
+TestVLESSUDPCounted                      # integration_test.go → startServer
+TestVisionByteOracle                     # vision_test.go → startServer；该用例在 -race 下自行跳过，此处为防御性登记
+
+[linux]
+TestSpliceByteOracle                     # splice_linux_test.go → startServer
+TestSpliceQuotaEnforcement               # splice_linux_test.go → startServer
