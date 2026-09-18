@@ -24,9 +24,15 @@ import (
 )
 
 // 三个变量由构建脚本以 -X 注入；未注入时显示 unknown，使「忘了注入」可见而不是伪装成正常。
+//
+// OverlayCommit 是本叠加层的 git commit。没有它，产物只能说清自己基于哪个上游版本，
+// 说不清是从本项目的哪个源码状态构建的——manifest 里也没有这个字段，而 -buildvcs=false
+// 又去掉了 Go 自带的 VCS 戳记。不开 -buildvcs：本仓库是 monorepo，vcs.revision 会随
+// 其他子项目的提交变化，既误归因又破坏可复现。
 var (
 	Version        = "unknown"
 	UpstreamCommit = "unknown"
+	OverlayCommit  = "unknown"
 )
 
 var commandVersion = &cobra.Command{
@@ -65,7 +71,9 @@ func printVersion(cmd *cobra.Command, args []string) {
 	}
 	// C.Version 由构建脚本从 upstream.lock 读取后以跨 module 的 -X 注入；
 	// wrapper module 里没有 sing-box 的 git 树，不注入时它会打印 unknown（README §4.7）。
-	output := "sing-box-plus version " + Version + "\n" +
+	// 叠加层 commit 并进第一行而不是新增一行：§4.7 把版本输出钉成固定四行，
+	// 而 -n 仍只打印裸 Version，因此脚本不受影响。
+	output := "sing-box-plus version " + Version + " (" + shortCommit(OverlayCommit) + ")\n" +
 		"Upstream: sing-box " + C.Version + " (" + shortCommit(UpstreamCommit) + ")\n" +
 		"Environment: " + runtime.Version() + " " + runtime.GOOS + "/" + runtime.GOARCH + "\n" +
 		"Tags: " + tags + "\n"

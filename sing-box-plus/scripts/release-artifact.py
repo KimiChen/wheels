@@ -143,11 +143,14 @@ def command_manifest(args: argparse.Namespace) -> int:
             }
         )
     manifest = {
-        "schema_version": 1,
+        # schema 2 相对 1 只多了 overlay_commit。少了它，被签名的那个对象无法说清
+        # 产物出自本项目的哪个源码状态——而签名的全部意义正是把产物绑到可追溯的源码上。
+        "schema_version": 2,
         "project": "sing-box-plus",
         "version": args.version,
         "upstream_tag": args.upstream_tag,
         "upstream_commit": args.upstream_commit,
+        "overlay_commit": args.overlay_commit,
         "prepared_tree_sha256": args.prepared_tree_sha256,
         "build_tags": args.build_tags,
         "go_version": args.go_version,
@@ -162,8 +165,8 @@ def command_manifest(args: argparse.Namespace) -> int:
 
 def command_verify_manifest(args: argparse.Namespace) -> int:
     manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
-    if manifest.get("schema_version") != 1:
-        raise ArtifactError("manifest schema_version 不是 1")
+    if manifest.get("schema_version") != 2:
+        raise ArtifactError("manifest schema_version 不是 2")
     directory = args.manifest.parent
     for artifact in manifest["artifacts"]:
         path = directory / artifact["name"]
@@ -198,6 +201,7 @@ def main(argv: list[str]) -> int:
     manifest.add_argument("--version", required=True)
     manifest.add_argument("--upstream-tag", required=True)
     manifest.add_argument("--upstream-commit", required=True)
+    manifest.add_argument("--overlay-commit", required=True)
     manifest.add_argument("--prepared-tree-sha256", required=True)
     manifest.add_argument("--build-tags", required=True)
     manifest.add_argument("--go-version", required=True)
