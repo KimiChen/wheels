@@ -27,6 +27,7 @@ const (
 	statusConflict            = 409
 	statusTooManyRequests     = 429
 	statusInternalServerError = 500
+	statusServiceUnavailable  = 503
 	statusVersionNotSupported = 505
 )
 
@@ -40,6 +41,7 @@ var statusText = map[int]string{
 	statusPayloadTooLarge:     "Payload Too Large",
 	statusTooManyRequests:     "Too Many Requests",
 	statusInternalServerError: "Internal Server Error",
+	statusServiceUnavailable:  "Service Unavailable",
 	statusVersionNotSupported: "HTTP Version Not Supported",
 }
 
@@ -184,9 +186,19 @@ func (s *udsServer) handleConn(conn net.Conn) {
 }
 
 func (s *udsServer) readRequest(reader *bufio.Reader) (*request, int) {
+	// consumed 累计请求行与全部头部的字节数。
+	//
+	// 不累计的话，max_request_bytes 对无请求体的那一路（统计口）完全失效：下面会在
+	// 校验体积之前就提前返回，于是实际上界变成「请求行 8 KiB + 最多 65 行 × 8 KiB」，
+	// 是配置里那个 64 KiB 的八倍——而该选项就摆在随仓库发布的示例配置里。
+	consumed := 0
 	line, status := readLimitedLine(reader, maxRequestLineBytes)
 	if status != statusOK {
 		return nil, status
+	}
+	consumed += len(line) + 2 // 计入 CRLF
+	if consumed > s.limits.maxRequestBytes {
+		return nil, statusPayloadTooLarge
 	}
 	parts := strings.Split(line, " ")
 	if len(parts) != 3 {
@@ -213,6 +225,10 @@ func (s *udsServer) readRequest(reader *bufio.Reader) (*request, int) {
 		headerLine, headerStatus := readLimitedLine(reader, maxHeaderLineBytes)
 		if headerStatus != statusOK {
 			return nil, headerStatus
+		}
+		consumed += len(headerLine) + 2
+		if consumed > s.limits.maxRequestBytes {
+			return nil, statusPayloadTooLarge
 		}
 		if headerLine == "" {
 			break

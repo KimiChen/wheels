@@ -235,6 +235,13 @@ func (o *QuotaControlOptions) normalize() error {
 			return E.New("user_stats.quota_control.", name, " 只接受 allow 或 deny，实际：", value)
 		}
 	}
+	// deny 配上默认的 stale_after=0 会让闸断彻底失效：admit 里的判定要求 staleAfter > 0。
+	// 运维选 deny 正是为了「控制面失联后不再放行」，拿到的却是放行——这是 fail-closed
+	// 被静默翻成 fail-open。不给默认值而是硬失败：给了默认值，生效策略就在配置里看不见了。
+	if o.StaleAction == string(QuotaActionDeny) && time.Duration(o.StaleAfter) == 0 {
+		return E.New("user_stats.quota_control.stale_action=deny 必须同时设置 stale_after，" +
+			"否则陈旧判定永不触发")
+	}
 	if time.Duration(o.StaleAfter) < 0 {
 		return E.New("user_stats.quota_control.stale_after 不能为负")
 	}

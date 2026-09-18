@@ -193,7 +193,10 @@ func (s *Service) handleSnapshotRoute(req *request) (int, []byte) {
 		}
 		// /healthz 不推进 sequence。
 		if s.registry.unhealthy() {
-			return 503, mustJSON(healthBody{SchemaVersion: SchemaVersion, Status: "unhealthy"})
+			// 用常量而非字面量：statusText 里没有 503 时，writeResponse 会落到
+			// 默认分支写出「HTTP/1.1 503 Unknown」——偏偏这是运维最常 grep 的那个码。
+			return statusServiceUnavailable,
+				mustJSON(healthBody{SchemaVersion: SchemaVersion, Status: "unhealthy"})
 		}
 		return statusOK, mustJSON(healthBody{SchemaVersion: SchemaVersion, Status: "ok"})
 	default:
