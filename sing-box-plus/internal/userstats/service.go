@@ -95,7 +95,8 @@ func (s *Service) Start(stage adapter.StartStage) error {
 func (s *Service) attach() error {
 	if s.options.AccessLog != nil {
 		audit, err := newAuditWriter(s.registry.NodeID(), s.registry.RuntimeID(),
-			*s.options.AccessLog, s.registry.Identities(), s.logger)
+			*s.options.AccessLog, s.registry.Identities(), s.logger,
+			s.registry.noteAuditDropped)
 		if err != nil {
 			return err
 		}

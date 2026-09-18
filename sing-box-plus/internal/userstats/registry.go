@@ -91,9 +91,16 @@ type Registry struct {
 
 	quota quotaState
 
-	audit        atomic.Pointer[auditWriter]
-	fatalHandler atomic.Pointer[func(error)]
-	draining     atomic.Bool
+	audit atomic.Pointer[auditWriter]
+	// auditDroppedSticky 跨 writer 生命周期保留 audit_dropped。
+	//
+	// 该位的文档承诺是「该 runtime 余下时间粘滞」，而 writer 每次 SIGHUP 都会重建：
+	// 只读当前 writer 的计数器，这个位会跟着清零，承诺不成立。同一处也解决另一半——
+	// SIGHUP 期间投给已关闭 writer 的记录是静默丢弃的：不写 ev=gap 行（写不进去了），
+	// 也不增加任何计数，于是证据链上那个洞连信号都没有。
+	auditDroppedSticky atomic.Bool
+	fatalHandler       atomic.Pointer[func(error)]
+	draining           atomic.Bool
 }
 
 // NewRegistry 创建进程级 registry 并就地捕获信封字段。
@@ -161,12 +168,16 @@ func (r *Registry) Reconcile(specs []InboundSpec, startup bool) error {
 			}
 			r.inbounds[spec.Tag] = record
 		}
-		record.inboundType = spec.Type
-		record.listen = spec.Listen
-		record.listenPort = spec.ListenPort
 		record.active.Store(true)
 
 		record.mu.Lock()
+		// 这三个字段与 users 同受 record.mu 保护。此前它们在锁外赋值，而 Snapshot
+		// 经 sortedInbounds 拿到指针后同样在锁外读——撕裂的 string 头是崩溃而不只是
+		// 读到旧值。当前进程内走不到（run 循环总是先 Close 再 Reconcile），但那是个
+		// 既未写明也未强制的不变量，而 Reconcile 是导出方法。
+		record.inboundType = spec.Type
+		record.listen = spec.Listen
+		record.listenPort = spec.ListenPort
 		seenUser := make(map[string]struct{}, len(spec.Users))
 		for _, name := range spec.Users {
 			seenUser[name] = struct{}{}
@@ -225,6 +236,13 @@ func (r *Registry) Reconcile(specs []InboundSpec, startup bool) error {
 }
 
 // countActiveLineagesLocked 只数 active 的血统，用于 max_identities。
+// spec 在 record.mu 的读锁下取出三个可变的 inbound 描述字段。
+func (record *inboundRecord) spec() (inboundType string, listen string, listenPort uint16) {
+	record.mu.RLock()
+	defer record.mu.RUnlock()
+	return record.inboundType, record.listen, record.listenPort
+}
+
 func (r *Registry) countActiveLineagesLocked() int {
 	var total int
 	for _, record := range r.inbounds {
@@ -373,8 +391,21 @@ func (r *Registry) unhealthy() bool {
 // droppedWrite 只增不减，所以这一位天然粘滞，与另外三位一致：置位后该 runtime 余下时间保持为真，
 // 清除它的唯一方式是重启进程，这样运维不会因为「刚才那一下已经过去了」而漏掉证据链缺口。
 func (r *Registry) auditDropped() bool {
+	if r.auditDroppedSticky.Load() {
+		return true
+	}
 	writer := r.auditWriterRef()
-	return writer != nil && writer.droppedWrite.Load() > 0
+	if writer != nil && writer.droppedWrite.Load() > 0 {
+		// 记进粘滞位，使它不随 writer 一起消失。
+		r.auditDroppedSticky.Store(true)
+		return true
+	}
+	return false
+}
+
+// noteAuditDropped 由审计侧在「连 gap 行都写不出去」时调用，直接置粘滞位。
+func (r *Registry) noteAuditDropped() {
+	r.auditDroppedSticky.Store(true)
 }
 
 // BeginDrain 进入排空状态：拒绝新的计费连接，已有连接继续跑完。

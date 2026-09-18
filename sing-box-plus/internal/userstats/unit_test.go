@@ -563,3 +563,59 @@ func TestQuotaAndAuditAttachBeforeListenersBind(t *testing.T) {
 		}
 	}
 }
+
+// TestReconcileAndSnapshotAreRaceFree 让 Reconcile 与 Snapshot 真正并发。
+//
+// Reconcile 此前在锁外写 inbound 的 type/listen/listen_port，而 Snapshot 经
+// sortedInbounds 拿到指针后同样在锁外读。进程内当前走不到——run 循环总是先 Close
+// 再 Reconcile——但那是个既未写明也未强制的不变量，而两者都是导出方法。
+// 撕裂的 string 头是崩溃，不只是读到旧值。裸 registry 直接并发调用即可复现。
+func TestReconcileAndSnapshotAreRaceFree(t *testing.T) {
+	registry, err := NewRegistry("node-race", 32)
+	if err != nil {
+		t.Fatalf("创建 registry 失败：%v", err)
+	}
+	if err = registry.Reconcile([]InboundSpec{{
+		Tag: "in", Type: "vless", Listen: "127.0.0.1", ListenPort: 1, Users: []string{"u1"},
+	}}, true); err != nil {
+		t.Fatalf("初始对账失败：%v", err)
+	}
+
+	stop := make(chan struct{})
+	var workers sync.WaitGroup
+	workers.Add(2)
+	go func() {
+		defer workers.Done()
+		for round := 0; ; round++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			kind, listen := "vless", "127.0.0.1"
+			if round%2 == 1 {
+				kind, listen = "shadowsocks", "127.0.0.2"
+			}
+			_ = registry.Reconcile([]InboundSpec{{
+				Tag: "in", Type: kind, Listen: listen,
+				ListenPort: uint16(1 + round%2), Users: []string{"u1"},
+			}}, false)
+		}
+	}()
+	go func() {
+		defer workers.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if _, snapErr := registry.Snapshot(); snapErr != nil {
+				return
+			}
+		}
+	}()
+	time.Sleep(200 * time.Millisecond)
+	close(stop)
+	workers.Wait()
+}

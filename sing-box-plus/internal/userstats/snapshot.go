@@ -103,11 +103,12 @@ func (r *Registry) Snapshot() (*Snapshot, error) {
 		Inbounds: []SnapshotInbound{},
 	}
 	for _, record := range r.sortedInbounds() {
+		inboundType, listen, listenPort := record.spec()
 		item := SnapshotInbound{
 			Tag:         record.tag,
-			Type:        record.inboundType,
-			Listen:      record.listen,
-			ListenPort:  record.listenPort,
+			Type:        inboundType,
+			Listen:      listen,
+			ListenPort:  listenPort,
 			Generation:  record.generation,
 			Active:      record.active.Load(),
 			TCPSessions: record.tcpSessions.Load(),

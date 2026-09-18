@@ -31,6 +31,10 @@ const (
 	// 沿用 256 MiB 会让一个身份半年才轮转一次，等于纪律 9/10 在生产上从不触发。
 	defaultAuditMaxBytes     = 16 * 1024 * 1024
 	defaultAuditMaxOpenFiles = 256
+	// max_total_bytes 必须有默认值：不设即 enforceTotalCap 直接返回，已轮转的文件
+	// 永远不删，启用 access_log 就等于让磁盘无界增长。这与本项目其余部分「默认安全」
+	// 的姿态相反，而它恰恰是唯一一处会写盘的路径。
+	defaultAuditMaxTotalBytes = 2 * 1024 * 1024 * 1024
 
 	// maxUnixPathBytes 取两个平台里更严格的那个，使同一份配置在 Linux 与 darwin 上行为一致。
 	// 定义在这里而不是 listen_unix.go：后者带 //go:build unix，而本文件无 build tag，
@@ -195,7 +199,13 @@ func (o *AccessLogOptions) normalize() error {
 	if o.MaxBytes < 64*1024 {
 		return E.New("user_stats.access_log.max_bytes 过小")
 	}
-	if o.MaxTotalBytes != 0 && o.MaxTotalBytes < o.MaxBytes {
+	if o.MaxTotalBytes == 0 {
+		o.MaxTotalBytes = defaultAuditMaxTotalBytes
+	}
+	if o.MaxTotalBytes < 0 {
+		return E.New("user_stats.access_log.max_total_bytes 不得为负")
+	}
+	if o.MaxTotalBytes < o.MaxBytes {
 		return E.New("user_stats.access_log.max_total_bytes 必须不小于 max_bytes")
 	}
 	if o.FlushIntervalMs == 0 {
