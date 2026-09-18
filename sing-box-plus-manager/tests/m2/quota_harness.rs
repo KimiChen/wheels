@@ -143,12 +143,22 @@ impl Stack {
             .unwrap();
             use sqlx::Row;
             let user_id: i64 = row.get(0);
-            sqlx::query("UPDATE runtime_identities SET user_id = ? WHERE runtime_identity_id = ?")
-                .bind(user_id)
-                .bind(identity.runtime_identity_id)
-                .execute(txn.conn())
-                .await
-                .unwrap();
+            // 归属落在**槽位**上，不落在 runtime_identities 上——后者按 runtime 键，
+            // 节点一重启就没了。槽位行由结算发现并登记为 free，这里把它移到 claimed。
+            let changed = sqlx::query(
+                "UPDATE identity_routes SET user_id = ?, state = 'claimed', claimed_at = ? \
+                  WHERE node_id = ? AND inbound_tag = ? AND identity_name = ? AND state = 'free'",
+            )
+            .bind(user_id)
+            .bind("2026-09-18T00:00:00Z")
+            .bind(NODE)
+            .bind(&identity.inbound_tag)
+            .bind(&identity.name)
+            .execute(txn.conn())
+            .await
+            .unwrap()
+            .rows_affected();
+            assert_eq!(changed, 1, "槽位应当由结算登记为 free：{}", identity.name);
             mapping.insert(identity.name.clone(), user_id);
         }
         txn.commit().await.unwrap();

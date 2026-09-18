@@ -24,6 +24,7 @@ pub mod collect;
 pub mod config;
 pub mod crash;
 pub mod error;
+pub mod identity;
 pub mod im;
 pub mod ledger;
 pub mod pki;

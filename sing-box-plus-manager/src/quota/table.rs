@@ -39,11 +39,19 @@ pub async fn current_identities(
     node_id: &str,
     runtime_id: &str,
 ) -> Result<Vec<NodeIdentity>> {
+    // 归属从**槽位**取，不从 runtime_identities 取：后者按 runtime 键，
+    // 节点一重启归属就没了。退役槽位仍保留 user_id（退役不解绑），
+    // 所以要把 state 一起读出来，在这里就把它的归属抹掉——它既不该拿到
+    // 主人的额度，也不该参与该主人在本节点的份额切分。
     let rows = sqlx::query(
-        "SELECT i.runtime_identity_id, s.inbound_tag, i.identity_name, i.user_id \
+        "SELECT i.runtime_identity_id, s.inbound_tag, i.identity_name, \
+                rt.user_id, coalesce(rt.state, 'free') \
          FROM runtime_identities i \
          JOIN runtime_services s ON s.runtime_service_id = i.runtime_service_id \
          JOIN node_runtimes r ON r.runtime_pk = i.runtime_pk \
+         LEFT JOIN identity_routes rt \
+                ON rt.node_id = r.node_id AND rt.inbound_tag = s.inbound_tag \
+               AND rt.identity_name = i.identity_name \
          WHERE r.node_id = ? AND r.runtime_id = ? \
          ORDER BY s.inbound_tag, i.identity_name",
     )
@@ -53,11 +61,14 @@ pub async fn current_identities(
     .await?;
     Ok(rows
         .into_iter()
-        .map(|row| NodeIdentity {
-            runtime_identity_id: row.get(0),
-            inbound_tag: row.get(1),
-            name: row.get(2),
-            user_id: row.get(3),
+        .map(|row| {
+            let state: String = row.get(4);
+            NodeIdentity {
+                runtime_identity_id: row.get(0),
+                inbound_tag: row.get(1),
+                name: row.get(2),
+                user_id: if state == "claimed" { row.get(3) } else { None },
+            }
         })
         .collect())
 }
