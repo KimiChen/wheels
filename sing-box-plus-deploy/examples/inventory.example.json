@@ -1,0 +1,148 @@
+{
+  "version": 1,
+  "nodes": {
+    "edge": {
+      "nat": {
+        "ingress_interface": "eth0",
+        "source_nat": {
+          "mode": "masquerade"
+        },
+        "forwards": [
+          {
+            "name": "direct",
+            "listen_port": 25001,
+            "protocols": [
+              "tcp",
+              "udp"
+            ],
+            "target": {
+              "host": "192.0.2.10",
+              "port": 24000
+            }
+          },
+          {
+            "name": "chain",
+            "listen_port": 25002,
+            "protocols": [
+              "tcp",
+              "udp"
+            ],
+            "target": {
+              "host": "192.0.2.20",
+              "port": 25002
+            }
+          }
+        ]
+      },
+      "reserved_listeners": [
+        {
+          "host": "0.0.0.0",
+          "port": 19000,
+          "protocols": [
+            "tcp",
+            "udp"
+          ]
+        }
+      ]
+    },
+    "entry": {
+      "listeners": [
+        {
+          "name": "chain-entry",
+          "mode": "forward",
+          "listen": {
+            "host": "0.0.0.0",
+            "port": 25002
+          },
+          "protocols": [
+            "tcp",
+            "udp"
+          ],
+          "allowed_sources": [
+            "192.0.2.1"
+          ],
+          "chain": {
+            "host": "192.0.2.30",
+            "port": 25002,
+            "tls": {
+              "ca_file": "/etc/sing-box-plus-deploy/tls/ca.pem",
+              "server_name": "relay.example"
+            }
+          }
+        }
+      ]
+    },
+    "relay": {
+      "listeners": [
+        {
+          "name": "relay",
+          "mode": "relay",
+          "listen": {
+            "host": "0.0.0.0",
+            "port": 25002
+          },
+          "protocols": [
+            "tcp"
+          ],
+          "allowed_sources": [
+            "192.0.2.20"
+          ],
+          "target": {
+            "host": "127.0.0.1",
+            "port": 25102
+          },
+          "tls": {
+            "cert_file": "/etc/sing-box-plus-deploy/tls/server.crt",
+            "key_file": "/etc/sing-box-plus-deploy/tls/server.key"
+          }
+        },
+        {
+          "name": "next-bridge",
+          "mode": "forward",
+          "listen": {
+            "host": "127.0.0.1",
+            "port": 25102
+          },
+          "protocols": [
+            "tcp",
+            "udp"
+          ],
+          "chain": {
+            "host": "192.0.2.40",
+            "port": 25002,
+            "tls": {
+              "ca_file": "/etc/sing-box-plus-deploy/tls/ca.pem",
+              "server_name": "exit.example"
+            }
+          }
+        }
+      ]
+    },
+    "exit": {
+      "listeners": [
+        {
+          "name": "relay",
+          "mode": "relay",
+          "listen": {
+            "host": "0.0.0.0",
+            "port": 25002
+          },
+          "protocols": [
+            "tcp"
+          ],
+          "allowed_sources": [
+            "192.0.2.30"
+          ],
+          "target": {
+            "host": "127.0.0.1",
+            "port": 24000
+          },
+          "tls": {
+            "cert_file": "/etc/sing-box-plus-deploy/tls/server.crt",
+            "key_file": "/etc/sing-box-plus-deploy/tls/server.key"
+          }
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,10 @@
+.env
+inventory*.json
+!examples/inventory.example.json
+output/
+dist/
+__pycache__/
+*.pyc
+*.pem
+*.key
+*.crt
