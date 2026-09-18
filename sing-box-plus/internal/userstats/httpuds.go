@@ -45,6 +45,10 @@ var statusText = map[int]string{
 	statusVersionNotSupported: "HTTP Version Not Supported",
 }
 
+// overflowWriteTimeout 只用于 429 的写出。刻意远短于 write_timeout：
+// 这条路径上的对端已经被判定为超额，不值得为它占住一个协程数秒。
+const overflowWriteTimeout = 200 * time.Millisecond
+
 const (
 	maxRequestLineBytes = 8 * 1024
 	maxHeaderCount      = 64
@@ -111,7 +115,17 @@ func (s *udsServer) acceptLoop() {
 			s.fatal(errors.New(s.name + " accept 循环 panic"))
 		}
 	}()
-	var consecutiveFailures int
+	// 失败阈值按时间窗而不是连续次数。
+	//
+	// 原实现是「连续 8 次」，退避总计 280 毫秒——一次进程级的瞬时 EMFILE 就足以让统计口
+	// 判定致命并让整个进程退出。而在当前部署下，每次非计划重启都会让控制器把旧实例
+	// 未核销的预留永久转成债务，所以每一条 fatal 路径都有明码标价。
+	// 真正该致命的是「持续失败」，时间窗才描述得了它。
+	const failureWindow = 30 * time.Second
+	const failuresInWindow = 20
+	const maxBackoff = time.Second
+	var failures int
+	var windowStart time.Time
 	for {
 		conn, err := s.listener.Accept()
 		if err != nil {
@@ -120,20 +134,35 @@ func (s *udsServer) acceptLoop() {
 				return
 			default:
 			}
-			consecutiveFailures++
-			if consecutiveFailures >= 8 {
+			now := time.Now()
+			if windowStart.IsZero() || now.Sub(windowStart) > failureWindow {
+				windowStart, failures = now, 0
+			}
+			failures++
+			if failures >= failuresInWindow {
 				s.fatal(err)
 				return
 			}
-			time.Sleep(time.Duration(consecutiveFailures) * 10 * time.Millisecond)
+			backoff := time.Duration(failures) * 10 * time.Millisecond
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+			time.Sleep(backoff)
 			continue
 		}
-		consecutiveFailures = 0
+		windowStart, failures = time.Time{}, 0
 		select {
 		case s.slots <- struct{}{}:
 		default:
 			// 并发上限：立即以 429 拒绝，不排队。429 与连接被直接关闭对采集端而言
 			// 都是「可重试且不得入账」（README §5.1）。
+			//
+			// 写出用独立的短期限而不是 write_timeout：这条路径上的对端已被判定为超额，
+			// 不值得为它把 accept 占住数秒。实测小响应会被内核发送缓冲区直接吃下，
+			// 所以「不读的客户端卡住 accept」需要对端接收缓冲区也已填满才成立——
+			// socket 是 0600，只有本机采集账号够得着，属自伤范畴，因此不值得为它
+			// 引入一条异步写出路径（那会让部分对端拿到裸关连接而不是 429）。
+			_ = conn.SetWriteDeadline(time.Now().Add(overflowWriteTimeout))
 			s.writeResponse(conn, statusTooManyRequests, mustJSON(newErrorBody(statusTooManyRequests)))
 			_ = conn.Close()
 			continue

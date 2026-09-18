@@ -1,6 +1,7 @@
 package userstats
 
 import (
+	"errors"
 	"io"
 	"net"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -270,5 +272,68 @@ func TestServiceUnavailableHasItsReasonPhrase(t *testing.T) {
 	got := firstLine(roundTrip(t, path, "GET /healthz HTTP/1.1\r\n\r\n"))
 	if got != "HTTP/1.1 503 Service Unavailable" {
 		t.Fatalf("状态行应带正确的原因短语，实际：%q", got)
+	}
+}
+
+// flakyListener 让 Accept 先返回若干次瞬时错误，之后一直阻塞。
+type flakyListener struct {
+	net.Listener
+	mu        sync.Mutex
+	remaining int
+	block     chan struct{}
+}
+
+func (l *flakyListener) Accept() (net.Conn, error) {
+	l.mu.Lock()
+	if l.remaining > 0 {
+		l.remaining--
+		l.mu.Unlock()
+		return nil, errors.New("临时的 accept 失败")
+	}
+	l.mu.Unlock()
+	<-l.block
+	return nil, net.ErrClosed
+}
+
+// TestTransientAcceptFailuresDoNotKillTheProcess 覆盖致命预算。
+//
+// 原实现是「连续 8 次即致命」，退避总计 280 毫秒——一次进程级的瞬时 EMFILE 就足以让
+// 统计口判定致命并让整个进程退出。而在当前部署下每次非计划重启都要永久扣掉一笔额度，
+// 所以这条路径有明码标价。改成时间窗后，稀疏的瞬时失败不应触发致命。
+//
+// 这条同时是 fatal 回调的首个用例：此前全仓 _test.go 对它零引用，而它正是
+// §4.6 第 5 条「统计失效即进程失败退出」的执行者。
+func TestTransientAcceptFailuresDoNotKillTheProcess(t *testing.T) {
+	path := sockPath(shortTempDir(t), "flaky.sock")
+	base, err := listenUnix(path, 0o600, "")
+	if err != nil {
+		t.Fatalf("绑定失败：%v", err)
+	}
+	listener := &flakyListener{Listener: base, remaining: 10, block: make(chan struct{})}
+
+	var fatalCount atomic.Int64
+	server := newUDSServer("flaky", listener, serverLimits{
+		readTimeout: time.Second, writeTimeout: time.Second,
+		maxConcurrency: 2, maxRequestBytes: 4096,
+	}, func(*request) (int, []byte) { return statusOK, nil }, nil,
+		func(error) { fatalCount.Add(1) })
+	server.Serve()
+	t.Cleanup(func() {
+		close(listener.block)
+		_ = server.Close()
+	})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		listener.mu.Lock()
+		done := listener.remaining == 0
+		listener.mu.Unlock()
+		if done {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := fatalCount.Load(); got != 0 {
+		t.Fatalf("10 次瞬时 accept 失败不应触发致命，实际触发 %d 次", got)
 	}
 }
