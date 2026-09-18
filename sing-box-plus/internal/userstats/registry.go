@@ -67,6 +67,18 @@ type Registry struct {
 
 	sequence atomic.Uint64
 
+	// snapshotMu 把「取序号」与「读计数」绑成一次原子动作。
+	//
+	// 两者若不成对，两个并发 GET /v3/snapshot 可以产出 seq 小而计数大的一份：
+	// A 先取到 seq=5，B 随后取到 seq=6 并先读完计数，A 再读时计数已经涨了。
+	// 结算方按 seq 排序后会看到计数回退，据 §5.1 的单调性约束 fail-closed——
+	// 对着一个完全正确的进程停止入账。
+	//
+	// 注意不能改成「把 nextSequence 挪到最后」：那样两个读者可以按一种顺序读计数、
+	// 按相反顺序取序号，同样的倒序照旧成立，而且连序列化都没有了。只有互斥能给出
+	// 结算方假定的那一对。控制面每 15 秒一次，互斥的代价可以忽略。
+	snapshotMu sync.Mutex
+
 	counterOverflow      atomic.Bool
 	sequenceOverflow     atomic.Bool
 	identityLimitReached atomic.Bool

@@ -191,6 +191,18 @@ func (r *Registry) ApplyQuotaTable(epoch uint64, entries []QuotaEntry) (applied 
 	r.quota.apply.Lock()
 	defer r.quota.apply.Unlock()
 
+	// epoch 单调性必须在锁内判定，且这里是唯一判定处。
+	//
+	// 曾经它在端点里做：读 accepted/epoch 时不持锁，而本函数要到下面才加锁、
+	// 到最后才存 epoch。于是两个并发 PUT（max_concurrency 默认 8）拿着 epoch 5 与 6
+	// 可以双双通过预检，再以任意顺序进来——6 先落、5 后落时，5 会把每个 cell 覆盖成旧值
+	// 并把 epoch 存回 5，而两个请求都得到 200。对一个有限额度池来说，这是节点应用了
+	// 比控制器意图**更大**的一张表。
+	if r.quota.accepted.Load() && epoch <= r.quota.epoch.Load() {
+		r.quota.rejectedByEpoch.Add(1)
+		return 0, nil, errStaleEpoch
+	}
+
 	// 第一遍：全部解析并校验，任何一条不认识就整份拒绝，不写入任何 cell。
 	type resolvedEntry struct {
 		user      *userRecord

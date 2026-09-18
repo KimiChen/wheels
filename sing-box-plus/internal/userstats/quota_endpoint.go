@@ -3,11 +3,16 @@ package userstats
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 
 	E "github.com/sagernet/sing/common/exceptions"
 )
 
-var errUnknownLineage = E.New("全量表包含当前配置中不存在的计费身份")
+var (
+	errUnknownLineage = E.New("全量表包含当前配置中不存在的计费身份")
+	// errStaleEpoch 由 ApplyQuotaTable 在锁内判定后返回，映射为 409。
+	errStaleEpoch = E.New("epoch 不大于已接受值")
+)
 
 // quotaRequest 是 PUT /v3/quota 的请求体。
 //
@@ -68,11 +73,6 @@ func (s *Service) handleQuotaRoute(req *request) (int, []byte) {
 	if payload.Epoch == 0 {
 		return statusBadRequest, mustJSON(newErrorBody(statusBadRequest))
 	}
-	// epoch 单调递增，≤ 已接受值即整份丢弃，用于抵抗乱序重投。
-	if s.registry.quota.accepted.Load() && payload.Epoch <= s.registry.quota.epoch.Load() {
-		s.registry.quota.rejectedByEpoch.Add(1)
-		return statusConflict, mustJSON(newErrorBody(statusConflict))
-	}
 	for _, entry := range payload.Entries {
 		if err := validateToken("entries[].inbound_tag", entry.InboundTag); err != nil {
 			return statusBadRequest, mustJSON(newErrorBody(statusBadRequest))
@@ -86,6 +86,10 @@ func (s *Service) handleQuotaRoute(req *request) (int, []byte) {
 	}
 
 	applied, unknown, err := s.registry.ApplyQuotaTable(payload.Epoch, payload.Entries)
+	if errors.Is(err, errStaleEpoch) {
+		// epoch 单调递增，≤ 已接受值即整份丢弃，用于抵抗乱序重投。
+		return statusConflict, mustJSON(newErrorBody(statusConflict))
+	}
 	if err != nil {
 		if s.logger != nil {
 			s.logger.Warn("拒绝配额全量表：", err, " 未知身份=", unknown)
