@@ -1,0 +1,24 @@
+# 全仓敏感物扫描。
+#
+# **刻意不挂在 on.push 上。** 2026-09-19 接上全仓范围时，它当场报出 10 处真实命中
+# （两处生产域名、一处入口机内网地址、两处已推送的内网地址），一处误报都没有。
+# 在这些清干净之前挂 push，等于让每一次推送都是红的——而一个永远红的门禁，
+# 三天之内就会被人加上 `|| true`。这正是本仓库上一次门禁失效的确切走法。
+#
+# 所以先按手动与每夜跑，把清单交给人。等命中归零，把下面的 schedule 换成
+# on.push 即可，那是两行的改动。
+name: sensitive
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '43 19 * * *'
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: 全仓敏感物扫描
+        run: bash scripts/check-sensitive.sh

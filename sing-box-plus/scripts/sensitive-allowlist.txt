@@ -6,6 +6,13 @@
 #            不做陈旧检查——即使当前无人使用也允许保留。
 # [public]   真实的公网分配。每一条都必须在仓库中至少命中一次，否则扫描失败：
 #            这让清单无法随代码删改腐烂成一张永久豁免，也逼迫新增条目时说明来由。
+#
+# [domain-reserved] RFC 2606/6761 的文档与保留域名，同 [reserved]，不做陈旧检查。
+# [domain]          真实域名。条目覆盖自身与全部子域（github.com 覆盖 api.github.com），
+#                   并与 [public] 一样做陈旧检查。
+#
+# AGENTS.md 把「域名」列在必须脱敏的第一位，而本扫描器在 2026-09-19 之前
+# 一个字符都不查——那次推送前审计发现的四处泄露里有三处是域名。
 
 [reserved]
 0.0.0.0/32        # 未指定地址，配置里表示监听全部接口
@@ -24,3 +31,57 @@
 74.125.0.0/16     # Google 公开分配，同上
 142.250.0.0/15    # Google 公开分配，同上
 172.217.0.0/16    # Google 公开分配，同上
+
+[domain-reserved]
+example.com       # RFC 2606 文档域名，示例配置与测试夹具用
+
+[domain]
+# —— Go 模块路径与工具链。它们出现在 import、go.mod 与构建脚本里，不是基础设施引用。
+github.com        # 上游 sing-box 与全部 Go 依赖的模块路径
+githubusercontent.com  # 文档中的 raw 链接
+githubassets.com  # 访问审计排除名单里的 GitHub 静态资源
+ghcr.io           # 容器镜像仓库，文档引用
+golang.org        # Go 标准工具链、x/ 仓库与 google.golang.org 模块路径
+google.cn         # Go 校验和数据库镜像 sum.golang.google.cn
+go.uber.org       # Go 依赖模块路径
+go4.org           # Go 依赖模块路径
+gonum.org         # Go 依赖模块路径
+go.opentelemetry.io    # Go 依赖模块路径
+lukechampine.com  # Go 依赖模块路径（blake3）
+sing-box.sagernet.org  # 上游项目主页，UPSTREAM_BASELINE 引用
+goproxy.cn        # 构建脚本中的模块代理
+pythonhosted.org  # Python 依赖来源，文档引用
+nuget.org         # 访问审计排除名单里的包管理器
+
+# —— §4.8 访问审计的默认排除名单。它们是「已知服务的遥测与 CDN」，
+#    排除的理由写在 docs/ACCESS_AUDIT.md：代理层再记一条也不增加溯源能力。
+apple.com         # Apple 遥测与服务
+cdn-apple.com     # Apple CDN
+apple-cloudkit.com     # Apple 服务
+icloud.com        # Apple 服务
+google.com        # Google 服务与遥测
+googleapis.com    # Google API
+googleusercontent.com  # Google 用户内容
+googlevideo.com   # Google 视频 CDN
+google-analytics.com   # Google 遥测
+googleadservices.com   # Google 广告
+googletagmanager.com   # Google 遥测
+gstatic.com       # Google 静态资源
+gvt2.com          # Google 更新服务
+doubleclick.net   # Google 广告
+microsoft.com     # Microsoft 遥测与服务
+trafficmanager.net     # Azure 流量管理
+applicationinsights.azure.com  # Azure 遥测
+exp-tas.com       # Microsoft 实验平台
+vsassets.io       # Visual Studio 资源
+vscode-cdn.net    # VS Code CDN
+cloudflare.com    # Cloudflare 服务与连通性检查
+cloudflareinsights.com # Cloudflare 遥测
+cursor.com        # 编辑器遥测
+launchdarkly.com  # 特性开关服务遥测
+twimg.com         # Twitter 图片 CDN
+zcode-ai.com      # 生产语料中的未知小站，ACCESS_AUDIT.md 用它举「不该排除」的例
+
+# —— 测试夹具。故意构造的「看起来像但不是」的域名，用于证明后缀匹配不被绕过。
+evilgithub.com    # 证明 github.com 的后缀匹配不会误命中 evilgithub.com
+attacker.net      # 证明 github.com.attacker.net 不被当成 github.com
