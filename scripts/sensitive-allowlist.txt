@@ -1,0 +1,187 @@
+# 仓库根的敏感物允许清单（全仓范围）。
+#
+# 与 sing-box-plus/scripts/sensitive-allowlist.txt 的关系：那份只管自己的子树，
+# 是该项目 verify.sh 的一环；这份管整个仓库。两份各自独立、各自做陈旧检查。
+#
+# 它存在的理由：2026-09-19 推送前的一次审计发现，104 个待推文件里有 71 个
+# 从未被任何检查看过——扫描范围一直钉在 sing-box-plus 子树上。
+#
+# **本清单的 [reserved] 刻意不含 RFC 1918 私有网段。** 在一个公开仓库里，
+# 10/8 与 172.16/12 恰恰是真实内网拓扑的藏身之处：那次审计里
+# 入口机地址就是以「私有网段，无害」的姿态混在 packaging 说明里的。
+# 真正无害的是 RFC 5737 文档网段与回环。
+#
+# 段的含义见 sing-box-plus/scripts/sensitive-scan.py 的注释。
+
+[reserved]
+0.0.0.0/32        # 未指定地址
+127.0.0.0/8       # 回环
+192.0.2.0/24      # RFC 5737 TEST-NET-1
+198.51.100.0/24   # RFC 5737 TEST-NET-2
+203.0.113.0/24    # RFC 5737 TEST-NET-3
+198.18.0.0/15     # RFC 2544 基准网段，上游 fake-ip 默认使用
+
+[public]
+1.1.1.0/24        # Cloudflare 公共解析器
+8.8.8.0/24        # Google 公共解析器
+# 以下逐个地址登记，不写成网段。写 10.0.0.0/8 会一次放行整个私有空间——
+# 那正是本清单开头说要关掉的口子，而这里要放行的只是几个写死的示例值。
+1.2.3.4/32        # sub2api-plus 前端 i18n 的示例地址
+5.6.0.0/32        # 同上
+10.0.0.0/32       # 同上：i18n 里作为网段基址出现，不是主机地址
+192.168.1.100/32  # 同上
+172.16.0.0/32     # 网段基址，出现在 docker-compose 与子树允许清单文件自身
+192.168.0.0/32    # 同上
+172.19.0.1/32     # sing-box-routing 的 docker 网桥网关
+52.0.56.137/32    # ip-certd 文档与用例里的示例地址
+114.114.114.114/32 # 中国公共 DNS，shadowsocks-rust-plus 文档引用
+160.79.104.0/24   # Anthropic 公布的出口网段，sing-box-routing 的规则数据
+104.23.251.120/32 # Cloudflare 公开分配，sub2api-plus 用例里的示例来源地址
+3.29.87.78/32     # 公开分配，sub2api-plus 前端展示的示例端点
+17.253.0.0/16     # Apple 公开分配，访问审计排除名单
+74.125.0.0/16     # Google 公开分配，同上
+142.250.0.0/15    # Google 公开分配，同上
+172.217.0.0/16    # Google 公开分配，同上
+
+[domain-exclude]
+sing-box-routing/rules/   # 路由规则的载荷就是域名清单，逐条登记毫无意义
+sing-box-routing/tests/   # 同上，用例数据即域名
+
+[domain-reserved]
+example.com       # RFC 2606 文档域名
+
+[domain]
+# —— AI 与模型服务的公开 API 端点（sub2api-plus 的上游供应商）
+api.openai.com                             # sub2api-plus 的上游供应商
+chatgpt.com                                # sub2api-plus 的上游供应商
+api.anthropic.com                          # sub2api-plus 的上游供应商
+claude.ai                                  # sub2api-plus 的上游供应商
+api.x.ai                                   # sub2api-plus 的上游供应商
+cli-chat-proxy.grok.com                    # sub2api-plus 的上游供应商
+api.moonshot.cn                            # sub2api-plus 的上游供应商
+api.kimi.com                               # sub2api-plus 的上游供应商
+api.minimax.io                             # sub2api-plus 的上游供应商
+api.minimaxi.com                           # sub2api-plus 的上游供应商
+bigmodel.cn                                # sub2api-plus 的上游供应商
+opencode.ai                                # sub2api-plus 的上游供应商
+api.sub2api.com                            # sub2api-plus 的上游供应商
+
+# —— 证书、DNS 与连通性检查（ip-certd 与各项目的网络自检）
+letsencrypt.org                            # ip-certd 与各项目的网络自检
+cloudflare-dns.com                         # ip-certd 与各项目的网络自检
+detectportal.firefox.com                   # ip-certd 与各项目的网络自检
+api.ipify.org                              # ip-certd 与各项目的网络自检
+api64.ipify.org                            # ip-certd 与各项目的网络自检
+icanhazip.com                              # ip-certd 与各项目的网络自检
+ifconfig.me                                # ip-certd 与各项目的网络自检
+www.tcptest.cn                             # ip-certd 与各项目的网络自检
+
+# —— CDN、包管理与前端资源（构建与页面引用）
+cdn.jsdelivr.net                           # 构建与页面引用
+unpkg.com                                  # 构建与页面引用
+registry.npmjs.org                         # 构建与页面引用
+registry.npmmirror.com                     # 构建与页面引用
+crates.io                                  # 构建与页面引用
+docs.rs                                    # 构建与页面引用
+entgo.io                                   # 构建与页面引用
+json.schemastore.org                       # 构建与页面引用
+gofrp.org                                  # 构建与页面引用
+gost.run                                   # 构建与页面引用
+nginx.org                                  # 构建与页面引用
+www.sqlite.org                             # 构建与页面引用
+dev.mysql.com                              # 构建与页面引用
+www.slimframework.com                      # 构建与页面引用
+
+# —— 腾讯云验证码与云服务（sub2api-plus 的验证码接入）
+turing.captcha.qcloud.com                  # sub2api-plus 的验证码接入
+turing.captcha.gtimg.com                   # sub2api-plus 的验证码接入
+cloudcache.tencentcs.com                   # sub2api-plus 的验证码接入
+rce.tencentrio.com                         # sub2api-plus 的验证码接入
+www.tycaptcha.com                          # sub2api-plus 的验证码接入
+cloud.tencent.com                          # sub2api-plus 的验证码接入
+console.tencentcloud.com                   # sub2api-plus 的验证码接入
+www.tencentcloud.com                       # sub2api-plus 的验证码接入
+
+# —— 支付、通知与第三方登录（各项目的外部集成）
+checkout.airwallex.com                     # 各项目的外部集成
+checkout-demo.airwallex.com                # 各项目的外部集成
+static.airwallex.com                       # 各项目的外部集成
+static-demo.airwallex.com                  # 各项目的外部集成
+resend.com                                 # 各项目的外部集成
+api.dingtalk.com                           # 各项目的外部集成
+login.dingtalk.com                         # 各项目的外部集成
+connect.linux.do                           # 各项目的外部集成
+gmail.com                                  # 各项目的外部集成
+byteoversea.com                            # 各项目的外部集成
+beian.miit.gov.cn                          # 各项目的外部集成
+
+# —— 许可证与规范文本里的链接（LICENSE、README 与 HTML 头部）
+www.gnu.org                                # LICENSE、README 与 HTML 头部
+fsf.org                                    # LICENSE、README 与 HTML 头部
+www.apache.org                             # LICENSE、README 与 HTML 头部
+www.w3.org                                 # LICENSE、README 与 HTML 头部
+opencollective.com                         # LICENSE、README 与 HTML 头部
+
+# —— 占位符与误报（保留在清单里并写明缘由，比让门禁天天红更诚实）
+your-domain.com                            # 文档里的占位符
+example.org                                # RFC 2606 文档域名的另一顶级域
+cdn.example.net                            # 同上
+test.com                                   # 测试夹具
+evil.com                                   # 测试夹具：故意构造的恶意域名
+real.com                                   # 测试夹具
+row.work                                   # 误报：Vue 模板表达式 {{ row.work }}，.work 顶级域与属性名撞了
+host.docker.internal                       # Docker 提供的特殊主机名，不是外部域名
+
+# —— 以下与 sing-box-plus 子树清单重合：Go 模块路径、审计排除名单、测试夹具。
+#    两份清单各自独立，重复是有意的——子树那份要能脱离本仓单独成立。
+# —— Go 模块路径与工具链。它们出现在 import、go.mod 与构建脚本里，不是基础设施引用。
+github.com        # 上游 sing-box 与全部 Go 依赖的模块路径
+githubusercontent.com  # 文档中的 raw 链接
+githubassets.com  # 访问审计排除名单里的 GitHub 静态资源
+ghcr.io           # 容器镜像仓库，文档引用
+golang.org        # Go 标准工具链、x/ 仓库与 google.golang.org 模块路径
+google.cn         # Go 校验和数据库镜像 sum.golang.google.cn
+go.uber.org       # Go 依赖模块路径
+go4.org           # Go 依赖模块路径
+gonum.org         # Go 依赖模块路径
+go.opentelemetry.io    # Go 依赖模块路径
+lukechampine.com  # Go 依赖模块路径（blake3）
+sing-box.sagernet.org  # 上游项目主页，UPSTREAM_BASELINE 引用
+goproxy.cn        # 构建脚本中的模块代理
+pythonhosted.org  # Python 依赖来源，文档引用
+nuget.org         # 访问审计排除名单里的包管理器
+# —— §4.8 访问审计的默认排除名单。它们是「已知服务的遥测与 CDN」，
+#    排除的理由写在 docs/ACCESS_AUDIT.md：代理层再记一条也不增加溯源能力。
+apple.com         # Apple 遥测与服务
+cdn-apple.com     # Apple CDN
+apple-cloudkit.com     # Apple 服务
+icloud.com        # Apple 服务
+google.com        # Google 服务与遥测
+googleapis.com    # Google API
+googleusercontent.com  # Google 用户内容
+googlevideo.com   # Google 视频 CDN
+google-analytics.com   # Google 遥测
+googleadservices.com   # Google 广告
+googletagmanager.com   # Google 遥测
+gstatic.com       # Google 静态资源
+gvt2.com          # Google 更新服务
+doubleclick.net   # Google 广告
+microsoft.com     # Microsoft 遥测与服务
+trafficmanager.net     # Azure 流量管理
+applicationinsights.azure.com  # Azure 遥测
+exp-tas.com       # Microsoft 实验平台
+vsassets.io       # Visual Studio 资源
+vscode-cdn.net    # VS Code CDN
+cloudflare.com    # Cloudflare 服务与连通性检查
+cloudflareinsights.com # Cloudflare 遥测
+cursor.com        # 编辑器遥测
+launchdarkly.com  # 特性开关服务遥测
+twimg.com         # Twitter 图片 CDN
+zcode-ai.com      # 生产语料中的未知小站，ACCESS_AUDIT.md 用它举「不该排除」的例
+# —— 测试夹具。故意构造的「看起来像但不是」的域名，用于证明后缀匹配不被绕过。
+evilgithub.com    # 证明 github.com 的后缀匹配不会误命中 evilgithub.com
+attacker.net      # 证明 github.com.attacker.net 不被当成 github.com
+# —— 根扫描独有的补充
+40example.com                              # 误报：URL 编码的 %40（@）与 example.com 粘连
+example..com                               # 误报：patch 文件里的双点，不是主机名
+
