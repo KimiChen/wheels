@@ -330,12 +330,22 @@ func (r *Registry) auditWriterRef() *auditWriter {
 }
 
 // configureQuota 由 user_stats 实例在 Start 时按配置启用 §4.9 的闸断链路。
-func (r *Registry) configureQuota(options QuotaControlOptions) {
-	r.quota.enabled = true
-	r.quota.startupAction = QuotaAction(options.StartupAction)
-	r.quota.staleAction = QuotaAction(options.StaleAction)
-	r.quota.staleAfter = time.Duration(options.StaleAfter)
-	r.quota.reconnectThrottle = time.Duration(options.ReconnectThrottle)
+func (r *Registry) configureQuota(options *QuotaControlOptions) {
+	if options == nil {
+		// 无条件安装一份策略：否则移除 quota_control 之后 enabled 会一直停在 true。
+		// 当前这条走不到——CheckReloadInvariant 不允许把 quota 路径改成空——属防御性写法，
+		// 不要据此新增不变量：新增就必须同步改 update-network-remote.py 的 RELOAD_INVARIANTS，
+		// 否则编排会计划一次节点随后拒绝的 reload，却报告 runtime_preserved: true。
+		r.quota.policy.Store(&quotaPolicy{startupAction: QuotaActionAllow, staleAction: QuotaActionAllow})
+		return
+	}
+	r.quota.policy.Store(&quotaPolicy{
+		enabled:           true,
+		startupAction:     QuotaAction(options.StartupAction),
+		staleAction:       QuotaAction(options.StaleAction),
+		staleAfter:        time.Duration(options.StaleAfter),
+		reconnectThrottle: time.Duration(options.ReconnectThrottle),
+	})
 }
 
 // SetFatalHandler 注册致命错误回调，由自有 main 提供：exporter 意外退出、panic 或连续 accept()
