@@ -87,14 +87,9 @@ impl SsoConfig {
     }
 
     pub fn validate(&self) -> Result<()> {
-        // 登录页与对外基址是**浏览器**要访问的，必须 https，没有例外。
         require_https(&self.login_url, "sso.login_url")?;
+        require_https(&self.check_token_url, "sso.check_token_url")?;
         require_https(&self.public_base_url, "sso.public_base_url")?;
-        // 换取身份是**主控自己**发起的一跳，允许指向本机回环——
-        // 具体边界与理由见 `sso::http::Endpoint::parse`。
-        // 这里只做形状校验，回环与否由那边判，免得两处规则各写一份然后分家。
-        crate::sso::http::Endpoint::parse(&self.check_token_url)
-            .map_err(|e| Error::invalid_config("§4.9", format!("sso.check_token_url：{e}")))?;
         if self.public_base_url.contains('?') || self.public_base_url.contains('#') {
             return Err(Error::invalid_config(
                 "§4.9",

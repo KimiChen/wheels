@@ -19,40 +19,6 @@ fn 只接受https() {
     }
 }
 
-/// **回环可以走 http，别的一律不行。**
-///
-/// 加固 5 的原话是「限定 HTTPS」，而那条规则的意图是**一次性 token 不得明文
-/// 穿过网络**。到 `127.0.0.1` 的一跳不穿过任何网络，意图完整保留。
-///
-/// 需要它的理由是现场逼出来的：上游 `account.xmpaoyou.com` 只支持 TLS 1.2 的
-/// **CBC** 套件，逐个试过 rustls/ring 的全部五个 AEAD 套件都被拒——
-/// rustls 按设计不实现 CBC，所以它在任何配置下都连不上。
-/// TLS 那一跳因此交给本机 nginx。
-#[test]
-fn 回环允许http而别的主机不允许() {
-    let loopback = Endpoint::parse("http://127.0.0.1:8444/api/sso/check-token").unwrap();
-    assert!(!loopback.tls, "回环这一跳不该走 TLS");
-    assert_eq!(loopback.port, 8444);
-    assert!(Endpoint::parse("http://localhost:8444/x").is_ok());
-    assert!(Endpoint::parse("http://[::1]:8444/x").is_err(), "IPv6 字面量本就不接受");
-
-    // **反向：任何非回环主机都必须是 https。** 这一条是整个放宽的边界，
-    // 松掉它就等于把加固 5 整条删掉。
-    for bad in [
-        "http://account.xmpaoyou.com/api/sso/check-token",
-        "http://10.0.0.1/x",
-        "http://192.168.1.1:8444/x",
-        "http://example.com/x",
-    ] {
-        let error = Endpoint::parse(bad).unwrap_err();
-        assert!(matches!(error, HttpsError::BadUrl(_)), "{bad:?} 本不该通过");
-        assert!(error.to_string().contains("明文"), "错误要说清为什么：{error}");
-    }
-    // https 仍然默认 443，http 默认 80——别把两个默认值搞混。
-    assert_eq!(Endpoint::parse("https://a.example.com/x").unwrap().port, 443);
-    assert!(Endpoint::parse("https://a.example.com/x").unwrap().tls);
-}
-
 /// `https://evil.com@real.com/` 这种写法在肉眼读配置时极易看反，
 /// 而它在这条路径上没有任何正当用途。
 #[test]
