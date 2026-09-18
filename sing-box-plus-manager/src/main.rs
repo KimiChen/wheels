@@ -116,6 +116,36 @@ enum UserCommand {
         #[arg(long)]
         reason: String,
     },
+    /// 显示某人的订阅地址。没有就发一条。
+    ///
+    /// token 是从 `(user_id, generation)` **派生**的，不是存起来的——
+    /// 所以这条命令随时能再算一次同一个地址，而明文一个字节都没落过库。
+    ///
+    /// **输出里有凭据**：那个地址等于这个人的全部节点与密码。
+    /// 不要贴进群、不要进工单（D10、§4.7）。
+    Subscription {
+        #[arg(long, default_value = "/etc/proxy-manager")]
+        config_dir: PathBuf,
+        #[arg(long)]
+        account: String,
+    },
+    /// 吊销某人的订阅，并**立刻发一条新的**。
+    ///
+    /// 吊销之后那个人所有已导入的客户端会在下一次更新时失败，
+    /// 而且他不会收到任何通知——所以要 `--confirm`。
+    /// 这是运维动作，不是用户自助（§4.7：自助轮换整个不做）。
+    ReissueSubscription {
+        #[arg(long, default_value = "/etc/proxy-manager")]
+        config_dir: PathBuf,
+        #[arg(long)]
+        account: String,
+        #[arg(long)]
+        actor: String,
+        #[arg(long)]
+        reason: String,
+        #[arg(long, default_value_t = false)]
+        confirm: bool,
+    },
     /// 把一个用户换到另一档额度。
     ///
     /// 走 D21 的预览/确认纪律：**调低必须 `--confirm`**，调高不要求。
@@ -408,10 +438,20 @@ async fn run_service(config_dir: &std::path::Path) -> anyhow::Result<ExitCode> {
     let listener = tokio::net::TcpListener::bind(&config.server.listen.api).await?;
     let local = listener.local_addr()?;
     tracing::info!(listen = %local, "API 就绪");
+    if let Some(settings) = &config.server.subscription {
+        tracing::info!(
+            entries = settings.entries.len(),
+            base = %settings.public_base_url,
+            "订阅已启用"
+        );
+    } else {
+        tracing::warn!("没有配置 [subscription]：/sub/… 不挂载，用户拿不到客户端配置");
+    }
     let api = tokio::spawn(proxy_manager::api::serve(
         store.clone(),
         nodes,
         sso,
+        config.server.subscription.clone(),
         listener,
         shutdown_rx.clone(),
     ));
@@ -857,6 +897,49 @@ async fn user_command(command: UserCommand) -> anyhow::Result<ExitCode> {
             let (store, _) = open_with_roster(&config_dir).await?;
             let count = proxy_manager::identity::retire(&store, &identity, &actor, &reason).await?;
             println!("已退役 {identity}：{count} 个槽位（全部节点）。**不可复用。**");
+            Ok(ExitCode::SUCCESS)
+        }
+
+        UserCommand::Subscription { config_dir, account } => {
+            let (store, _) = open_with_roster(&config_dir).await?;
+            let user_id = user_id_of(&store, &account).await?;
+            let config = proxy_manager::config::Config::load_dir(&config_dir)?;
+            let Some(settings) = &config.server.subscription else {
+                anyhow::bail!("没有配置 [subscription]：订阅未启用");
+            };
+            let issued = proxy_manager::subscription::issue_for_user(&store, user_id).await?;
+            let identity = proxy_manager::subscription::claimed_identity(&store, user_id).await?;
+            println!("账号   : {account}");
+            println!("身份   : {}", identity.as_deref().unwrap_or("(还没有分配)"));
+            println!("订阅   : {}", settings.subscription_url(&issued.plaintext));
+            println!(
+                "状态   : {}",
+                if issued.newly_created { "本次新发" } else { "已有，重算出同一个" }
+            );
+            println!();
+            println!("这个地址等于这个人的全部节点与密码。**不要贴进群、不要进工单。**");
+            Ok(ExitCode::SUCCESS)
+        }
+
+        UserCommand::ReissueSubscription { config_dir, account, actor, reason, confirm } => {
+            let (store, _) = open_with_roster(&config_dir).await?;
+            let user_id = user_id_of(&store, &account).await?;
+            if !confirm {
+                println!("将吊销 {account} 现有的订阅并发一条新的。");
+                println!("**他所有已导入的客户端会在下一次更新时失败，而且不会收到通知。**");
+                println!("确认无误后加 --confirm。");
+                return Ok(ExitCode::from(2));
+            }
+            let config = proxy_manager::config::Config::load_dir(&config_dir)?;
+            let Some(settings) = &config.server.subscription else {
+                anyhow::bail!("没有配置 [subscription]：订阅未启用");
+            };
+            let revoked = proxy_manager::subscription::revoke_for_user(&store, user_id).await?;
+            let issued = proxy_manager::subscription::issue_for_user(&store, user_id).await?;
+            tracing::info!(account = %account, actor = %actor, reason = %reason, revoked,
+                           "订阅已重发");
+            println!("已吊销 {revoked} 条，新地址：");
+            println!("{}", settings.subscription_url(&issued.plaintext));
             Ok(ExitCode::SUCCESS)
         }
 

@@ -14,6 +14,7 @@ pub mod auth;
 pub mod error;
 pub mod routes;
 pub mod session;
+pub mod sub;
 pub mod trend;
 
 use std::sync::Arc;
@@ -38,6 +39,10 @@ pub struct AppState {
     /// 泡游 SSO。`None` 表示没配 `[sso]` 段——那时登录端点不挂载。
     /// 同样是配置即事实来源：成员名单在这里面，每请求求值一次（D27）。
     pub sso: Option<crate::sso::Sso>,
+    /// 订阅配置。`None` 表示没配 `[subscription]`——那时 `/sub/…` 不挂载。
+    pub subscription: Option<Arc<crate::config::SubscriptionConfig>>,
+    /// 凭据文件的热源。与名单同一条纪律：按 mtime 重读，读不出来失败关闭。
+    credentials: Option<Arc<crate::subscription::CredentialSource>>,
     /// 没配 SSO 时求值用的空名单。**所有人都是普通用户**，不是所有人都是管理员——
     /// 认证代码的失败模式是沉默地放行，空名单最容易被误当成「还没配，先都放行」。
     empty_roster: Arc<crate::sso::roster::Roster>,
@@ -46,6 +51,14 @@ pub struct AppState {
 impl AppState {
     pub fn node(&self, node_id: &str) -> Option<&NodeConfig> {
         self.nodes.iter().find(|n| n.node_id == node_id)
+    }
+
+    /// 订阅凭据。**读不出来就失败关闭**——调用方返回 503 而不是空订阅。
+    pub fn credentials(&self) -> crate::Result<Arc<crate::config::Credentials>> {
+        let Some(source) = &self.credentials else {
+            return Err(crate::Error::invalid_config("§4.7", "没有配置 [subscription]"));
+        };
+        source.load()
     }
 
     /// 本次求值要用的成员名单。**每请求取一次，不缓存结论。**
@@ -107,10 +120,22 @@ pub fn router(
     store: Arc<Store>,
     nodes: Arc<Vec<NodeConfig>>,
     sso: Option<crate::sso::Sso>,
+    subscription: Option<crate::config::SubscriptionConfig>,
 ) -> Router {
     let sso_enabled = sso.is_some();
-    let state =
-        AppState { store, nodes, sso, empty_roster: Arc::new(crate::sso::roster::Roster::empty()) };
+    let credentials = subscription
+        .as_ref()
+        .map(|c| Arc::new(crate::subscription::CredentialSource::new(&c.credentials_path)));
+    let subscription_enabled = subscription.is_some();
+    let subscription = subscription.map(Arc::new);
+    let state = AppState {
+        store,
+        nodes,
+        sso,
+        subscription,
+        credentials,
+        empty_roster: Arc::new(crate::sso::roster::Roster::empty()),
+    };
     let router = Router::new()
         // 自身健康与指标。**不需要认证**——它们不返回任何业务数据。
         .route("/healthz", get(routes::healthz))
@@ -147,6 +172,11 @@ pub fn router(
         router
     };
 
+    // 订阅端点**不在 `/api/v1` 下**，不认会话、只认 token（§4.7）。
+    // 客户端是定时拉的，带不了 cookie，也不该带。
+    let router =
+        if subscription_enabled { router.route("/sub/{name}", get(sub::serve)) } else { router };
+
     router
         // 页面与静态资源。放 fallback 上：API 路由优先，剩下的交给 web 层。
         // **一页一个 URL**，所以这里没有 hash 路由，越权在服务端就能拦住。
@@ -175,10 +205,11 @@ pub async fn serve(
     store: Arc<Store>,
     nodes: Arc<Vec<NodeConfig>>,
     sso: Option<crate::sso::Sso>,
+    subscription: Option<crate::config::SubscriptionConfig>,
     listener: tokio::net::TcpListener,
     shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> std::io::Result<()> {
-    let app = router(store, nodes, sso);
+    let app = router(store, nodes, sso, subscription);
     let mut shutdown = shutdown;
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {

@@ -22,6 +22,7 @@ const PARTS: &[(&str, &str)] = &[
     ("04_quota", include_str!("../../schema/04_quota.sql")),
     ("05_rollup", include_str!("../../schema/05_rollup.sql")),
     ("06_session", include_str!("../../schema/06_session.sql")),
+    ("07_subscription", include_str!("../../schema/07_subscription.sql")),
 ];
 
 /// 期望的表集合。与 `schema/` 下的 DDL 手工对齐，
@@ -46,6 +47,7 @@ pub const EXPECTED_TABLES: &[&str] = &[
     "snapshot_batches",
     "snapshot_payloads",
     "sso_used_states",
+    "subscription_tokens",
     "usage_cycle_totals",
     "usage_ledger",
     "usage_lifetime_totals",

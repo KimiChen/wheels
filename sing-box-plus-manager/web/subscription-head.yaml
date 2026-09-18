@@ -1,0 +1,78 @@
+# Clash Verge (Mihomo) 个性化订阅模板；凭据仅在服务端响应阶段注入。
+
+mixed-port: 7890
+allow-lan: false
+bind-address: 127.0.0.1
+mode: rule
+log-level: info
+external-controller: 127.0.0.1:9090
+secret: ""
+unified-delay: true
+tcp-concurrent: true
+find-process-mode: strict
+
+profile:
+  store-selected: true
+  store-fake-ip: false
+
+sniffer:
+  enable: true
+  sniff:
+    HTTP:
+      ports:
+        - 80
+        - 8080-8880
+      override-destination: true
+    TLS:
+      ports:
+        - 443
+        - 8443
+    QUIC:
+      ports:
+        - 443
+        - 8443
+
+# GeoIP/GeoSite 数据源 (GitHub)
+# GeoIP MetaCubeX(202 KiB) 是 lite 版，只保留少量常用分类，比如 CN、JP、GOOGLE、CLOUDFLARE、NETFLIX、TELEGRAM 等.
+# GeoIP Loyalsoldier(19.7 MiB) 是完整国家/地区库，包含 US、HK、TW、DE、FR 等大量国家码，但是体积大了接近 100 倍。
+# GeoSite MetaCubeX(4.01 MiB) CATEGORY-ADS-ALL 只有约 900 条。
+# GeoSite Loyalsoldier(9.93 MiB) 的 CATEGORY-ADS-ALL 巨大，约 16.6 万条。
+
+geo-auto-update: true
+geo-update-interval: 24
+geodata-mode: true
+geox-url:
+  geoip: "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip-lite.dat"
+  geosite: "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geosite.dat"
+  mmdb: "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/country-lite.mmdb"
+  # geoip: "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"
+  # geosite: "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat"
+
+tun:
+  enable: true
+  stack: system
+  auto-route: true
+  mtu: 1400
+  dns-hijack:
+    - any:53
+
+# DNS
+dns:
+  enable: true
+  listen: 0.0.0.0:53
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.1/16
+  fake-ip-filter:
+    - "geosite:cn"
+    - "*.lan"
+    - "*.local"
+    - "*.paoyou.*"
+    - "*.kimi.pub"
+    - "dns.msftncsi.com"
+    - "www.msftncsi.com"
+    - "www.msftconnecttest.com"
+  nameserver:
+      - 223.5.5.5
+      - 119.29.29.29
+
+# 固定代理

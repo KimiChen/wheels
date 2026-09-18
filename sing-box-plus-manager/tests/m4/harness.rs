@@ -103,7 +103,19 @@ impl Api {
         std::fs::write(path, "这不是 TOML {{{").unwrap();
     }
 
+    /// 带订阅的 Api：写一份凭据文件（0600）与入口清单。
+    pub async fn with_subscription(admins: &[&str], identities: &[&str]) -> Self {
+        Api::build_full(Some(server_toml_with(admins, &[])), Some(identities.to_vec())).await
+    }
+
     async fn build(server_toml: Option<String>) -> Self {
+        Api::build_full(server_toml, None).await
+    }
+
+    async fn build_full(
+        server_toml: Option<String>,
+        subscription_identities: Option<Vec<&str>>,
+    ) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let config = StorageConfig { path: dir.path().join("pm.db"), busy_timeout_ms: 5_000 };
         let store = Arc::new(Store::open(&config).await.unwrap());
@@ -123,7 +135,47 @@ impl Api {
             }
             None => (None, None),
         };
-        let router = proxy_manager::api::router(store.clone(), Arc::new(Vec::new()), sso);
+        // 订阅：凭据文件必须 0600，否则 CredentialSource 会拒绝读它。
+        let subscription = subscription_identities.map(|identities| {
+            let creds = dir.path().join("credentials.toml");
+            let mut text = String::from(
+                "method = \"2022-blake3-aes-128-gcm\"\nipsk = \"dGVzdC1pcHNr\"\n[upsk]\n",
+            );
+            for (index, name) in identities.iter().enumerate() {
+                text.push_str(
+                    &format!("{name} = \"dXBzay17aW5kZXh9\"\n")
+                        .replace("{index}", &index.to_string()),
+                );
+            }
+            std::fs::write(&creds, text).unwrap();
+            std::fs::set_permissions(&creds, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+                .unwrap();
+            proxy_manager::config::SubscriptionConfig {
+                public_base_url: "https://pm.example.com".into(),
+                credentials_path: creds,
+                groups: vec![proxy_manager::config::ProxyGroup {
+                    name: "手动选择".into(),
+                    icon: None,
+                    proxies: vec!["HK".into(), "JP".into(), "DIRECT".into()],
+                }],
+                entries: vec![
+                    proxy_manager::config::Entry {
+                        name: "HK".into(),
+                        host: "203.0.113.1".into(),
+                        port: 65002,
+                        node_id: "node-a".into(),
+                    },
+                    proxy_manager::config::Entry {
+                        name: "JP".into(),
+                        host: "203.0.113.2".into(),
+                        port: 65003,
+                        node_id: "node-a".into(),
+                    },
+                ],
+            }
+        });
+        let router =
+            proxy_manager::api::router(store.clone(), Arc::new(Vec::new()), sso, subscription);
         Api { _dir: Some(dir), store, router, sso_path }
     }
 

@@ -19,6 +19,7 @@
 //! | [`api`] / [`web`] | M4 | 已实现：结构化 API、会话/CSRF、12 页控制台 |
 //! | [`sso`] | M5 | 已实现：泡游 SSO 登录与成员名单（D27–D30） |
 //! | [`im`] | M5 | **未实现**：告警与日报（§4.10）仍是设计文档 |
+//! | [`subscription`] | M6 | 已实现：token 与 `ss://` 订阅；Clash/sing-box 产物未做 |
 //!
 //! 这张表曾经整张落后于代码——五个模块都标着「未实现」而它们早已各有上千行。
 //! 它没有任何自动校验，所以改模块时要顺手改它。
@@ -36,6 +37,7 @@ pub mod pki;
 pub mod quota;
 pub mod sso;
 pub mod store;
+pub mod subscription;
 pub mod web;
 
 pub use error::{Error, Result};

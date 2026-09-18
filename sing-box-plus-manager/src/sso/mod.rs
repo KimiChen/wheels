@@ -160,6 +160,9 @@ pub struct LoggedIn {
     /// 本次登录后这个人持有的计费槽位。`None` 表示领取失败（见 `complete_login`），
     /// 那是一次**容量**问题，登录本身仍然是成功的。
     pub claim: Option<crate::identity::Claim>,
+    /// 订阅 token。`newly_created = false` 时 `plaintext` 是空的——
+    /// 明文只在创建时存在一次，之后连主控自己都取不回来。
+    pub subscription: Option<crate::subscription::IssuedToken>,
     pub session: IssuedSession,
 }
 
@@ -292,6 +295,16 @@ pub async fn complete_login(
             }
         };
 
+    // 订阅 token：与领取同样是「登录即有」的一部分（§4.7 首次登录时创建）。
+    // 同样**不阻断登录**——发不出 token 的人仍然能进控制台看自己的状态。
+    let subscription = match crate::subscription::issue_for_user(store, user_id).await {
+        Ok(issued) => Some(issued),
+        Err(error) => {
+            tracing::error!(login_name = %identity.account, %error, "发订阅 token 失败（P2）");
+            None
+        }
+    };
+
     let session = session::create(store, user_id, PROVIDER, session_ttl).await?;
     Ok(LoggedIn {
         user_id,
@@ -300,6 +313,7 @@ pub async fn complete_login(
         quota_group: grade.quota_group,
         quota_group_changed_from,
         claim,
+        subscription,
         session,
     })
 }
