@@ -142,10 +142,20 @@ pub async fn list_nodes(
             "first_snapshot": row.get::<String, _>(3),
             "quota_enabled": row.get::<i64, _>(4) == 1,
             "status": row.get::<String, _>(5),
+            // C12：缺额度信息时是否放行。取自配置而不是库——签字的事实来源只有一处。
+            "fail_open": fail_open_view(&state, &node_id),
             "runtimes": node_runtimes(&state, &node_id).await?,
         }));
     }
     Ok(Json(json!({ "nodes": nodes, "next_cursor": Value::Null })))
+}
+
+/// 节点的失败开放状态。`null` 表示失败关闭；否则带上运维签下的理由。
+fn fail_open_view(state: &AppState, node_id: &str) -> Value {
+    match state.node(node_id).and_then(|node| node.fail_open_reason()) {
+        Some(reason) => json!({ "acknowledged_reason": reason }),
+        None => Value::Null,
+    }
 }
 
 pub async fn get_node(
@@ -171,6 +181,7 @@ pub async fn get_node(
         "first_snapshot": row.get::<String, _>(3),
         "quota_enabled": row.get::<i64, _>(4) == 1,
         "status": row.get::<String, _>(5),
+        "fail_open": fail_open_view(&state, &node_id),
         "runtimes": node_runtimes(&state, &node_id).await?,
     })))
 }

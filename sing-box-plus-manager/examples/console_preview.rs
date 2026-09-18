@@ -55,7 +55,7 @@ async fn main() -> anyhow::Result<()> {
     println!("普通用户带着自己的 cookie 打开 /nodes.html 应当是 403，而不是一张藏起来的管理页\n");
 
     let (_tx, rx) = tokio::sync::watch::channel(false);
-    proxy_manager::api::serve(store.clone(), listener, rx).await?;
+    proxy_manager::api::serve(store.clone(), std::sync::Arc::new(Vec::new()), listener, rx).await?;
     Ok(())
 }
 

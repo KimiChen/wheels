@@ -25,11 +25,21 @@ use axum::Router;
 
 use crate::api::error::{ApiError, ApiResult};
 use crate::api::session::Subject;
+use crate::config::NodeConfig;
 use crate::store::Store;
 
 #[derive(Clone)]
 pub struct AppState {
     pub store: Arc<Store>,
+    /// 节点配置。**不从库里读**：失败开放的签字（C12）的事实来源是配置文件，
+    /// 复制进库就会多出一处可以与配置漂移的副本。
+    pub nodes: Arc<Vec<NodeConfig>>,
+}
+
+impl AppState {
+    pub fn node(&self, node_id: &str) -> Option<&NodeConfig> {
+        self.nodes.iter().find(|n| n.node_id == node_id)
+    }
 }
 
 /// 从 cookie 解出主体。**每请求求值**（D13），不缓存结论。
@@ -64,8 +74,8 @@ impl FromRequestParts<AppState> for WriteSubject {
     }
 }
 
-pub fn router(store: Arc<Store>) -> Router {
-    let state = AppState { store };
+pub fn router(store: Arc<Store>, nodes: Arc<Vec<NodeConfig>>) -> Router {
+    let state = AppState { store, nodes };
     Router::new()
         // 自身健康与指标。**不需要认证**——它们不返回任何业务数据。
         .route("/healthz", get(routes::healthz))
@@ -114,10 +124,11 @@ async fn private_cache_headers(
 /// 起 HTTP 服务。绑回环；公网访问经本机反代（§5）。
 pub async fn serve(
     store: Arc<Store>,
+    nodes: Arc<Vec<NodeConfig>>,
     listener: tokio::net::TcpListener,
     shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> std::io::Result<()> {
-    let app = router(store);
+    let app = router(store, nodes);
     let mut shutdown = shutdown;
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {

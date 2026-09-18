@@ -236,11 +236,27 @@ async fn run_service(config_dir: &std::path::Path) -> anyhow::Result<ExitCode> {
         anyhow::bail!("nodes.toml 里没有可采集的节点");
     }
 
+    // 失败开放的节点在启动日志里点名一次（C12）。配置里签过字不等于运行时没人再看见它。
+    for node in &config.nodes {
+        if let Some(reason) = node.fail_open_reason() {
+            tracing::warn!(
+                node_id = %node.node_id, reason = %reason,
+                "该节点缺额度信息时放行：重启到下一次成功下发之间不受限"
+            );
+        }
+    }
+
     // HTTP API 与控制台。绑回环；公网访问经本机反代（§5）。
+    let nodes = std::sync::Arc::new(config.nodes.clone());
     let listener = tokio::net::TcpListener::bind(&config.server.listen.api).await?;
     let local = listener.local_addr()?;
     tracing::info!(listen = %local, "API 就绪");
-    let api = tokio::spawn(proxy_manager::api::serve(store.clone(), listener, shutdown_rx.clone()));
+    let api = tokio::spawn(proxy_manager::api::serve(
+        store.clone(),
+        nodes,
+        listener,
+        shutdown_rx.clone(),
+    ));
 
     tokio::signal::ctrl_c().await?;
     tracing::info!("收到停止信号，等待在途采集结束");

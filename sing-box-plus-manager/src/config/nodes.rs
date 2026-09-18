@@ -58,6 +58,16 @@ pub struct NodeQuotaControl {
     pub startup_action: QuotaAction,
     pub stale_after_secs: u32,
     pub stale_action: QuotaAction,
+    /// 失败开放的签字。两个动作里只要有一个不是 `deny`，这里就必须写明理由。
+    ///
+    /// C12 原本硬性要求两个动作都是 `deny`。放宽它是一次有意的产品决定：额度的
+    /// 定位是观察每个用户的用量而不是强制封顶，让控制面成为转发链路上的单点
+    /// 与这个定位不相称。但代价是真实的——额度是纯内存的，进程重启即丢失，
+    /// `allow` 意味着重启到下一次成功下发之间所有人都不受限——所以它不能是
+    /// 某个 TOML 字段被顺手改掉的副产品，也不能只有读配置的人知道。
+    /// 这个字段会经 `GET /api/v1/nodes` 显示在控制台节点页上。
+    #[serde(default)]
+    pub fail_open_acknowledged: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -150,24 +160,32 @@ impl NodeConfig {
     pub fn quota_enabled(&self) -> bool {
         self.quota_control.as_ref().is_some_and(|q| q.enabled)
     }
+
+    /// 该节点在缺额度信息时是否放行，以及运维给出的理由。
+    ///
+    /// 返回 `None` 表示失败关闭。给 API 用：这个状态必须在控制台上看得见，
+    /// 而不是只存在于某台机器的 TOML 里。
+    pub fn fail_open_reason(&self) -> Option<&str> {
+        let quota = self.quota_control.as_ref()?;
+        if !quota.enabled || !quota.fails_open() {
+            return None;
+        }
+        quota.fail_open_acknowledged.as_deref()
+    }
 }
 
 impl NodeQuotaControl {
+    /// 缺额度信息时是否放行：启动窗口或控制面失联，任一为 `allow` 即是。
+    pub fn fails_open(&self) -> bool {
+        self.startup_action != QuotaAction::Deny || self.stale_action != QuotaAction::Deny
+    }
+
     fn validate(&self, node_id: &str) -> Result<()> {
         if !self.enabled {
             return Ok(());
         }
-        // C12：受限节点必须 startup_action = deny。
-        if self.startup_action != QuotaAction::Deny {
-            return Err(Error::invalid_config(
-                "C12",
-                format!(
-                    "节点 {node_id} 启用了配额但 startup_action 不是 deny：额度是纯内存的，\
-                     进程重启即丢失，allow 会让重启到下一次成功下发之间所有人都是无限额度"
-                ),
-            ));
-        }
-        // C33 / README §4.5：stale_after 与 stale_action 必须显式且为 deny。
+        // C33 / README §4.5：过期期限必须显式，这一条与失败开放与否无关——
+        // 没有期限就不存在「过期」这个事件，stale_action 写什么都不会发生。
         if self.stale_after_secs == 0 {
             return Err(Error::invalid_config(
                 "C12",
@@ -176,10 +194,30 @@ impl NodeQuotaControl {
                 ),
             ));
         }
-        if self.stale_action != QuotaAction::Deny {
+
+        // C12：原本硬性要求两个动作都是 deny，现放宽为「可以失败开放，但必须签字」。
+        // 拒绝的不再是 allow 本身，而是**没人为它负责**。
+        let acknowledged = self.fail_open_acknowledged.as_deref().unwrap_or("").trim();
+        if self.fails_open() && acknowledged.is_empty() {
             return Err(Error::invalid_config(
                 "C12",
-                format!("节点 {node_id} 启用了配额但 stale_action 不是 deny"),
+                format!(
+                    "节点 {node_id} 启用了配额，但 startup_action/stale_action 中有 allow 而没有 \
+                     fail_open_acknowledged：额度是纯内存的，进程重启即丢失，allow 会让重启到\
+                     下一次成功下发之间所有人都是无限额度。要这么配就写明理由，它会显示在控制台节点页上"
+                ),
+            ));
+        }
+        // 反过来也要挡：两个动作都是 deny 却留着签字，说明有人改回了失败关闭
+        // 但没清掉理由。留着它会让下一个人以为这台仍然是失败开放的，
+        // 或者在改回 allow 时以为已经有人评估过了。
+        if !self.fails_open() && !acknowledged.is_empty() {
+            return Err(Error::invalid_config(
+                "C12",
+                format!(
+                    "节点 {node_id} 两个动作都是 deny 却留着 fail_open_acknowledged：\
+                     承认一个不存在的状态会误导下一个读配置的人，改回失败关闭时要一并删掉它"
+                ),
             ));
         }
         Ok(())

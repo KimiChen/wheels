@@ -27,11 +27,17 @@ agent_spki_sha256 = "00000000000000000000000000000000000000000000000000000000000
 materials_dir = "/etc/proxy-manager/materials/node-example-01"
 
 [node.quota_control]
-# 受限节点必须配置 startup_action = "deny"（C12）：额度是纯内存的，进程重启即丢失，
-# 重启后没有额度表时按这个动作处置。
+# 额度是纯内存的，进程重启即丢失；重启后还没有额度表时按 startup_action 处置。
 enabled = true
 startup_action = "deny"
 # stale_after / stale_action 必须显式配置。stale_action 仅阻止过期后的**新连接**，
 # 不能替代已有连接的额度回收；停推本身不会把已下发的限额变成无限额度。
 stale_after_secs = 600
 stale_action = "deny"
+
+# C12：上面两个动作里只要有一个是 "allow"，就必须在这里写明理由，否则拒绝启动；
+# 反过来，两个都是 "deny" 时留着这一行也会被拒——承认一个不存在的状态会误导下一个人。
+# 失败开放的代价是真实的：重启到下一次成功下发之间，该节点上所有身份都不受限，
+# 包括池中未分配的身份。签下的理由会经 GET /api/v1/nodes 显示在控制台节点页上。
+#
+# fail_open_acknowledged = "额度用于观察用量，不接受控制面成为转发链路上的单点"
