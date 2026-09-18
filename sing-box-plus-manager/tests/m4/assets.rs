@@ -26,6 +26,31 @@ fn front_end_never_converts_bytes_to_float() {
     assert!(source.contains("BigInt("), "api.js 必须用 BigInt 解析字节");
 }
 
+/// 复制按钮必须**先确认自己跑在真实模式下**，不能只判「这串字符像不像 URL」。
+///
+/// 原型页面里那一格是脱敏占位符 `https://<控制台域名>/sub/Proxy-••••.yaml`，
+/// 而它同样以 `https://` 开头。第一版的判据是 `text.startsWith("http")`，
+/// 于是点一下就把一串圆点复制走了——复制成功的提示照常弹出，
+/// 而那串东西看起来完全像个地址，直到粘进客户端才发现不对。
+///
+/// **这个 bug 是在浏览器里真跑一遍才发现的**：读代码时那个判断看着是对的。
+/// 所以这里用文本锁住，与 `front_end_never_converts_bytes_to_float` 同一条纪律。
+#[test]
+fn copy_button_requires_live_mode() {
+    let (script, _) = proxy_manager::web::asset("assets/api.js").expect("api.js 必须嵌进二进制");
+    assert!(
+        script.contains("dataset.pmMode !== \"live\""),
+        "复制处理器不再判 live 模式：原型页面上的脱敏占位符会被当成地址复制走"
+    );
+    // 上面那条的前提：页面里确实有一个以 https:// 开头的脱敏占位符。
+    // 占位符哪天换成别的写法，这条断言先红，提醒人重看那个判据。
+    let html = proxy_manager::web::page_body("me.html").expect("me.html 必须嵌进二进制");
+    assert!(
+        html.contains('\u{2022}'),
+        "me.html 里的示例地址不再用掩码字符：请重新确认复制按钮的判据还成立"
+    );
+}
+
 /// CSP 是 `script-src 'self'`（§4.11），所以页面里**不能有内联脚本体**。
 ///
 /// 内联脚本被 CSP 挡掉时页面不会报错到用户面前，只是那段逻辑静默不执行。

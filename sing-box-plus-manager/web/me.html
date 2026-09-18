@@ -225,7 +225,7 @@
                   用量合并计入本周期额度。
                 </p>
               </div>
-              <span class="wsk-badge wsk-success"
+              <span class="wsk-badge wsk-success" data-pm-entry-badge
                 ><span class="wsk-dot"></span><span data-pm="entry_count">7</span> 条入口可用</span
               >
             </div>
@@ -234,7 +234,9 @@
               <div class="wsk-section-head">
                 <h2 id="me-sub">订阅地址</h2>
                 <div class="wsk-button-row">
-                  <span class="wsk-badge wsk-success">有效</span>
+                  <!-- 只有真的有地址时才说「有效」。没有地址还亮着绿徽标，
+                       会让人以为是页面没加载出来，然后反复刷新。 -->
+                  <span class="wsk-badge wsk-success" data-pm-sub-valid>有效</span>
                   <button
                     class="wsk-button wsk-secondary"
                     type="button"
