@@ -65,8 +65,11 @@ CREATE TABLE runtime_identities (
               AND generation <= '18446744073709551615'),
     -- active 可在快照间切换，但切换不创建新基线、不重置累计值（C2、C9）。
     active           INTEGER NOT NULL CHECK(active IN (0, 1)),
-    -- 首次确认后不可修改、清空或删除重建（data-model.md §10 不变量）。
-    user_id          INTEGER REFERENCES users(user_id),
+    -- 这里曾经有一个 user_id。它是错的地方：本表按 (node_id, runtime_id) 键，
+    -- 节点一重启就生成全新的行，写在这里的归属会**静默全部丢失**，
+    -- 于是 bump_cycle 不再被调用、所有身份在下一轮推送里掉到零额度。
+    -- 归属改由 identity_routes 承担——那张表按 (节点, inbound, 身份名) 键，
+    -- 跨重启存活。读取方一律 join 过去。
     first_seen_at    TEXT NOT NULL,
     last_seen_at     TEXT NOT NULL,
     UNIQUE(runtime_service_id, identity_name, generation)
@@ -80,7 +83,11 @@ CREATE TABLE runtime_identities (
 -- 不用节点墙钟单独决定；存疑时归属留空并标 clock_ambiguous，**不猜**。
 CREATE TABLE identity_assignment_events (
     event_id   INTEGER PRIMARY KEY AUTOINCREMENT,
-    runtime_identity_id INTEGER NOT NULL REFERENCES runtime_identities(runtime_identity_id),
+    -- 指向**槽位**而不是某个 runtime 下的身份行：一个用户可以跨四次重启持有同一个
+    -- 槽位，而 runtime_identity_id 每次重启都是新的，NOT NULL 指向它根本表达不了这件事。
+    route_id   INTEGER NOT NULL REFERENCES identity_routes(route_id),
+    -- 当时观察到的那一行，留作审计关联；可空，因为事件本身不依赖它。
+    runtime_identity_id INTEGER REFERENCES runtime_identities(runtime_identity_id),
     user_id    INTEGER REFERENCES users(user_id),
     state      TEXT NOT NULL
         CHECK(state IN ('assigned', 'unassigned', 'unmapped', 'clock_ambiguous')),
@@ -93,6 +100,5 @@ CREATE TABLE identity_assignment_events (
 
 CREATE INDEX idx_node_runtimes_node ON node_runtimes(node_id, window_state);
 CREATE INDEX idx_runtime_identities_runtime ON runtime_identities(runtime_pk, identity_name);
-CREATE INDEX idx_runtime_identities_user ON runtime_identities(user_id);
-CREATE INDEX idx_assignment_events_identity
-    ON identity_assignment_events(runtime_identity_id, effective_from);
+CREATE INDEX idx_assignment_events_route
+    ON identity_assignment_events(route_id, effective_from);

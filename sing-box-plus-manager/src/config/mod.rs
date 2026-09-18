@@ -98,19 +98,7 @@ pub(crate) fn validate_token(field: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-/// 解析十进制字符串形式的 u64 字节量。
-///
-/// 配置里的字节量不写 TOML 整数：TOML 整数是**有符号 64 位**，而额度口径是 u64（C3）。
-/// 现在的默认额度远没到 `2^63`，但「现在放得下」不是把口径写窄的理由——
-/// `docs/integration-contract.md` §4 记的就是一次「照着当时能跑的值写死」的代价。
-pub(crate) fn parse_u64_bytes(field: &str, value: &str) -> Result<u64> {
-    if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
-        return Err(Error::invalid_config(
-            "C3",
-            format!("{field} 必须是纯十进制数字串，实际 {value:?}"),
-        ));
-    }
-    value
-        .parse::<u64>()
-        .map_err(|_| Error::invalid_config("C3", format!("{field} 超出 u64 范围：{value}")))
-}
+// 这里曾经有一个 parse_u64_bytes，供配置里的 quota.monthly_bytes 用。
+// 分档之后（定案第三条）配置里不再有任何字节量字段，它随之没有调用方。
+// C3「字节量走十进制字符串」这条纪律仍然成立，只是载体换成了 API 的
+// parse_bytes 与 quota_groups 的定宽文本列，用例在 tests/m4/api.rs。

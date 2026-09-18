@@ -67,19 +67,63 @@ CREATE TABLE users (
     updated_at  TEXT NOT NULL
 ) STRICT;
 
--- 当前映射规则：节点 / inbound / 身份名 → 业务用户。
+-- 计费槽位注册表：节点 / inbound / 身份名 → 业务用户。
+--
+-- **这是归属的唯一落点，而且它是持久的。** 归属不能写在 runtime_identities 上：
+-- 那张表按 (node_id, runtime_id) 键，节点一重启就生成全新的行，
+-- 写在那里的归属会**静默全部丢失**——推送失败很响，账目失败完全无声。
+--
 -- 与 identity_assignment_events 是两张表、两种语义，不要合并（data-model.md §8）：
 -- 这张表是「现在归谁」，那张表是「历史上归过谁」。
+--
+-- 行由**结算**发现并以 free 登记（见 ledger/settle.rs 第 4 步），
+-- 因此注册表的内容永远来自节点实际上报的东西，不可能与节点现实漂移。
+-- 结算只负责发现，从不移动状态；移动状态只发生在认领与退役事务里。
 CREATE TABLE identity_routes (
     route_id    INTEGER PRIMARY KEY AUTOINCREMENT,
     node_id     TEXT NOT NULL REFERENCES nodes(node_id),
     inbound_tag TEXT NOT NULL,
     identity_name TEXT NOT NULL,
-    user_id     INTEGER NOT NULL REFERENCES users(user_id),
+    -- free → claimed → retired，**单向**。retired 永不回到 free（定案第一条）：
+    -- 复用前必须更换 uPSK，而那要改节点配置并 reload；不换就直接复用，
+    -- 前一个持有者存在客户端里的凭据会去花下一个人的额度。
+    --
+    -- 单向性还有一个附带好处：槽位与用户的绑定因此是单调的，
+    -- 「同一个槽位在周期中途换了主人、增量该拆给谁」这个问题在数据层就不存在。
+    state       TEXT NOT NULL CHECK(state IN ('free', 'claimed', 'retired')),
+    -- 归属**写一次就不变**：claimed 与 retired 都保留它。
+    -- 退役不解绑——撤权是额度置零而不是删除凭据（定案第二条），
+    -- 退役后到达的字节确实是那个人产生的，置空会把真实尾账变成无主字节。
+    user_id     INTEGER REFERENCES users(user_id),
+    -- 认领时用来证明「四向全零」的那份**已结算**快照（D11 §4.6：用观察代替相信配置）。
+    -- 留下它，是为了让「认领前那一小段可能的流量」这个敞口事后可核，而不只是被断言。
+    --
+    -- 记 runtime_id 而不是 runtime_pk：它是自然键，不需要外键（node_runtimes
+    -- 建在 02，而本文件在 01，被引用者必须先建），读起来也直接对得上节点上报的值。
+    claim_fence_runtime_id TEXT
+        CHECK(claim_fence_runtime_id IS NULL OR length(claim_fence_runtime_id) = 32),
+    claim_fence_sequence   TEXT COLLATE BINARY
+        CHECK(claim_fence_sequence IS NULL OR (typeof(claim_fence_sequence) = 'text'
+              AND length(claim_fence_sequence) = 20
+              AND claim_fence_sequence NOT GLOB '*[^0-9]*'
+              AND claim_fence_sequence <= '18446744073709551615')),
+    claimed_at  TEXT,
+    retired_at  TEXT,
     created_at  TEXT NOT NULL,
     -- 不同入口的同名身份不合并：唯一键必须带 inbound_tag。
-    UNIQUE(node_id, inbound_tag, identity_name)
+    UNIQUE(node_id, inbound_tag, identity_name),
+    -- state 与 user_id 必须自洽，否则「无主的 claimed」能被写进来。
+    CHECK((state = 'free'  AND user_id IS NULL     AND claimed_at IS NULL)
+       OR (state <> 'free' AND user_id IS NOT NULL AND claimed_at IS NOT NULL)),
+    CHECK((state = 'retired') = (retired_at IS NOT NULL))
 ) STRICT;
+
+-- D17：同一用户在同一节点上只能有一个**在用**身份。
+-- 没有这条，assemble 会走 split_identities 把他在该节点的额度切成两半，
+-- 而这个错在观测上看不出来——PUT 照样 200，表也照样是全量的。
+CREATE UNIQUE INDEX idx_identity_routes_active_per_user
+    ON identity_routes(node_id, user_id) WHERE state = 'claimed';
+CREATE INDEX idx_identity_routes_free ON identity_routes(node_id, state, route_id);
 
 -- 原本这里还有 default_node_groups 与 user_node_grants，用来表达「某个用户能用哪些节点」。
 -- 两张都没被写过，而且在当前形态下是纯粹的间接层：开通就是在**所有**启用配额的节点上

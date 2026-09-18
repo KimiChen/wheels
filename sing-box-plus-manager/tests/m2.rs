@@ -26,5 +26,7 @@ mod quota_harness;
 mod allocation;
 #[path = "m2/dispatch.rs"]
 mod dispatch;
+#[path = "m2/identity_pool.rs"]
+mod identity_pool;
 #[path = "m2/settings.rs"]
 mod settings;

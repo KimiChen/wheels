@@ -519,6 +519,15 @@ async fn settle_in_txn(
         for user in &inbound.users {
             let identity_id =
                 upsert_runtime_identity(conn, runtime.runtime_pk, service_id, user, &now).await?;
+            // 顺带把槽位登记为 free。注册表因此永远来自节点**实际上报**的内容，
+            // 不可能与节点现实漂移；而 free 不授予任何东西，assemble 会给它零额度。
+            //
+            // `DO NOTHING` 是承重的：结算只负责**发现**，绝不移动槽位状态。
+            // 用 DO UPDATE 会让一次普通采集把 claimed 打回 free。
+            // 用**结算正在处理的** node_id，不用快照体里的那个：两者不一致时
+            // `receive` 只记安全日志不拒绝（settle.rs 里对 envelope 的处理），
+            // 而槽位必须落在真实存在的节点上，否则外键会在这里炸。
+            register_slot(conn, node_id, &inbound.tag, &user.name, &now).await?;
             observed.insert(
                 (inbound.tag.clone(), inbound.generation, user.name.clone(), user.generation),
                 identity_id,
@@ -626,13 +635,17 @@ async fn settle_in_txn(
     let hour = bucket::to_rfc3339(bucket::hour_bucket(accounting_at));
     let cycle_key = cycle_key(accounting_at);
 
+    // 归属一次查全，不在下面的循环里逐条查：301 个身份时那是每批 301 次往返，
+    // 而且发生在写事务内。
+    let owners = slot_owners(conn, runtime.runtime_pk).await?;
+
     // 步骤 8（后半）：只写**非零增量**的账本行。
     let mut ledger_rows = 0usize;
     for (identity_id, delta) in &deltas {
         if delta.is_zero() {
             continue;
         }
-        let user_id = identity_user(conn, *identity_id).await?;
+        let user_id = owners.get(identity_id).copied().flatten();
         let hash = canonical::source_event_hash(node_id, runtime_id, sequence, delta);
         sqlx::query(
             "INSERT INTO usage_ledger(\
@@ -887,12 +900,54 @@ async fn load_cursors(
     Ok(out)
 }
 
-async fn identity_user(conn: &mut SqliteConnection, identity_id: i64) -> Result<Option<i64>> {
-    Ok(sqlx::query("SELECT user_id FROM runtime_identities WHERE runtime_identity_id = ?")
-        .bind(identity_id)
-        .fetch_one(&mut *conn)
-        .await?
-        .get(0))
+/// 把某个 runtime 下的身份行映射到**槽位归属**。
+///
+/// 归属的落点是 `identity_routes`（跨重启存活），不是 `runtime_identities`
+/// （每次重启重建）。退役槽位保留 user_id：退役不解绑，退役后到达的字节
+/// 确实是那个人产生的，置空会把真实尾账变成无主字节。
+async fn slot_owners(
+    conn: &mut SqliteConnection,
+    runtime_pk: i64,
+) -> Result<BTreeMap<i64, Option<i64>>> {
+    let rows = sqlx::query(
+        "SELECT i.runtime_identity_id, rt.user_id \
+         FROM runtime_identities i \
+         JOIN runtime_services s ON s.runtime_service_id = i.runtime_service_id \
+         JOIN node_runtimes n ON n.runtime_pk = i.runtime_pk \
+         LEFT JOIN identity_routes rt \
+                ON rt.node_id = n.node_id AND rt.inbound_tag = s.inbound_tag \
+               AND rt.identity_name = i.identity_name \
+         WHERE i.runtime_pk = ?",
+    )
+    .bind(runtime_pk)
+    .fetch_all(&mut *conn)
+    .await?;
+    Ok(rows.into_iter().map(|row| (row.get(0), row.get(1))).collect())
+}
+
+/// 把观察到的身份登记为 free 槽位。已存在即原样保留。
+///
+/// `DO NOTHING` 不是省事：结算只负责发现，移动状态只发生在认领与退役事务里。
+/// 换成 DO UPDATE，一次普通采集就会把 claimed 打回 free。
+async fn register_slot(
+    conn: &mut SqliteConnection,
+    node_id: &str,
+    inbound_tag: &str,
+    identity_name: &str,
+    now: &str,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO identity_routes(node_id, inbound_tag, identity_name, state, created_at) \
+         VALUES (?, ?, ?, 'free', ?) \
+         ON CONFLICT(node_id, inbound_tag, identity_name) DO NOTHING",
+    )
+    .bind(node_id)
+    .bind(inbound_tag)
+    .bind(identity_name)
+    .bind(now)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
 }
 
 async fn bump_lifetime(
@@ -929,14 +984,19 @@ async fn bump_lifetime(
 
     if current.is_some() {
         sqlx::query(
+            // `coalesce(user_id, ?)`：首次已知归属时补上，之后不再改动。
+            // 缺了它，一条在认领**之前**就建出来的 lifetime 行会永久停在 NULL，
+            // 而 `GET /users/{id}/usage` 读的正是这张表——它会一直少报，
+            // 并且没有任何地方报错。
             "UPDATE usage_lifetime_totals SET tcp_uplink_bytes = ?, tcp_downlink_bytes = ?, \
-             udp_uplink_bytes = ?, udp_downlink_bytes = ?, updated_at = ? \
-             WHERE runtime_identity_id = ?",
+             udp_uplink_bytes = ?, udp_downlink_bytes = ?, user_id = coalesce(user_id, ?), \
+             updated_at = ? WHERE runtime_identity_id = ?",
         )
         .bind(totals[0].encode())
         .bind(totals[1].encode())
         .bind(totals[2].encode())
         .bind(totals[3].encode())
+        .bind(user_id)
         .bind(now)
         .bind(identity_id)
         .execute(&mut *conn)

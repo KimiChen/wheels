@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::config::parse_u64_bytes;
 use crate::error::{Error, Result};
 
 #[derive(Debug, Clone, Deserialize)]
