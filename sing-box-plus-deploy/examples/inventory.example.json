@@ -5,7 +5,8 @@
       "nat": {
         "ingress_interface": "eth0",
         "source_nat": {
-          "mode": "masquerade"
+          "mode": "snat",
+          "address": "192.0.2.1"
         },
         "forwards": [
           {
@@ -16,7 +17,7 @@
               "udp"
             ],
             "target": {
-              "host": "192.0.2.10",
+              "host": "192.0.2.40",
               "port": 24000
             }
           },
@@ -43,7 +44,12 @@
             "udp"
           ]
         }
-      ]
+      ],
+      "metadata": {
+        "address": "192.0.2.1",
+        "role": "entry",
+        "note": "入口机：只做 DNAT，不运行 GOST。"
+      }
     },
     "entry": {
       "listeners": [
@@ -70,7 +76,12 @@
             }
           }
         }
-      ]
+      ],
+      "metadata": {
+        "address": "192.0.2.20",
+        "role": "terminal",
+        "note": "链首。"
+      }
     },
     "relay": {
       "listeners": [
@@ -116,7 +127,12 @@
             }
           }
         }
-      ]
+      ],
+      "metadata": {
+        "address": "192.0.2.30",
+        "role": "terminal",
+        "note": "中间跳，带回环桥接。"
+      }
     },
     "exit": {
       "listeners": [
@@ -141,6 +157,21 @@
             "cert_file": "/etc/sing-box-plus-deploy/tls/server.crt",
             "key_file": "/etc/sing-box-plus-deploy/tls/server.key"
           }
+        }
+      ],
+      "metadata": {
+        "address": "192.0.2.40",
+        "role": "terminal",
+        "note": "链尾。"
+      },
+      "reserved_listeners": [
+        {
+          "host": "0.0.0.0",
+          "port": 24000,
+          "protocols": [
+            "tcp",
+            "udp"
+          ]
         }
       ]
     }

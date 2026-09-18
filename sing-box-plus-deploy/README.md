@@ -2,7 +2,7 @@
 
 用 Python 标准库把私有主机清单渲染为独立的 GOST、nftables 和 systemd 配置。用于让新单跳转发、转发链与现有代理并行运行。
 
-当前只提供本地配置生成，不连接服务器，不下载二进制，不创建证书，不管理 sing-box 用户、凭据或订阅。示例只使用文档保留地址和 example 域名；真实 inventory、证书、密钥和输出应留在私有运维仓库。
+当前只提供本地配置生成，不连接服务器，不下载二进制，不创建证书，不管理 sing-box 用户、凭据或订阅。示例只使用文档保留地址和 example 域名；真实 inventory、证书、密钥和输出应留在私有运维仓库。`examples/` 下的身份池示例只用于说明外部执行器读入的数据形状，本工具不读取它。
 
 ## 使用
 
@@ -101,8 +101,42 @@ NAT 更新应执行新服务的 reload。停止 NAT 的 oneshot 服务会保留�
 
 此工具不会检查证书有效期、服务器端口实际占用、云防火墙、既有 NAT 端口或端到端连通性。部署执行器必须在应用前检查这些状态，并保存备份；应用后分别验证新链 TCP/UDP 和旧入口仍可用。
 
+## 部署案例
+
+[多地区转发链](docs/CASE_MULTI_REGION_CHAIN.md) 记录了一次与旧系统并行上线的真实部署：
+5 个节点、3 条深度递增的转发链、4 条 NAT 单跳入口，以及 1 条指向旧代理服务的入口，
+附当天的验证方式、结论，以及这些检查各自没有证明什么。
+
+对应清单可直接渲染：
+
+~~~bash
+python3 sbpd.py render \
+  --inventory examples/inventory.case-multi-region-chain.json \
+  --output output/case
+~~~
+
+案例中的地址与节点名已脱敏，端口号、监听器名称与网卡名保留真实取值；理由见文档开头的脱敏说明。
+
+## examples 目录
+
+| 文件 | 用途 |
+| --- | --- |
+| `inventory.example.json` | 最小示例：单跳、转发链与回环桥接 |
+| `inventory.case-multi-region-chain.json` | 上述部署案例的脱敏清单 |
+| `identity-pool.example.json` | 合成身份池，说明外部执行器读入的形状与规模；本工具不读取 |
+| `make_identity_pool.py` | 身份池生成器，固定种子可复现 |
+
+身份池里的 300 条凭据全部是合成值，且标记直接写在字面量里：密码一律以 `NOTAREAL` 开头，
+UUID 一律以 `deadbeef` 开头。它们的长度与格式与真实凭据一致（24 字符 base64、规范 UUIDv4），
+但由种子 `20260918` 的伪随机数生成器产生——刻意不用 `secrets`，因为公开示例里的凭据必须
+*不可用*，而可复现恰好使「这份文件确实是合成的」可以靠重跑比对来证明：
+
+~~~bash
+python3 examples/make_identity_pool.py | diff examples/identity-pool.example.json -
+~~~
+
 ## 验证与参考
 
-单元测试覆盖端口重叠、旧监听保留、未知字段、TLS 验证、固定目标 Relay、NAT 规则范围、输出目录隔离和失败前不写入文件。示例清单包含单跳和带回环桥接的多节点转发链。
+单元测试分两个模块。`tests/test_sbpd.py` 覆盖渲染器本身：端口重叠、旧监听保留、未知字段、TLS 验证、固定目标 Relay、NAT 规则范围、输出目录隔离和失败前不写入文件。`tests/test_examples.py` 覆盖已提交的示例：每份清单都能校验并渲染、渲染结果与拓扑相符、白名单确实放行了上游、示例不会被 `.gitignore` 静默吞掉，以及**全部 IPv4 必须落在文档保留段**——脱敏因此是一条可执行的校验，而不是注释里的嘱咐。
 
 GOST 官方文档确认支持 [JSON 配置](https://gost.run/en/getting-started/configuration-overview/)，并提供 [Relay 固定目标转发](https://gost.run/en/tutorials/protocols/relay/)、[来源白名单](https://gost.run/en/concepts/admission/) 和 [MTLS 通道](https://gost.run/en/reference/dialers/mtls/) 说明。

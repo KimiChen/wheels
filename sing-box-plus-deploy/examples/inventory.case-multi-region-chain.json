@@ -1,0 +1,672 @@
+{
+  "version": 1,
+  "metadata": {
+    "case": "multi-region-chain",
+    "doc": "docs/CASE_MULTI_REGION_CHAIN.md",
+    "deployed": "2026-09-18",
+    "status": "脱敏副本：可以直接渲染，不可以直接部署",
+    "sanitized_addresses": "所有 IPv4 均为 RFC 5737 文档保留地址，不指向任何真实主机，请勿扫描或连接。分段方式保留了真实部署的一个事实：region-a 与 region-b 同属一个服务商网段，region-c 与 region-d 各自独立。第四段按拓扑位置递增，这种整齐编号本身就说明它们是构造的。",
+    "sanitized_names": "节点名与 TLS server_name 均为中性占位名。真实节点名、主机名与账号名按仓库约定不进入公开仓库。",
+    "sanitized_credentials": "本文件不含任何凭据。TLS 只以 /etc/sing-box-plus-deploy/ 下的路径出现，证书与私钥内容不在本仓库；sing-box 的用户、密码与订阅不由本工具管理，因此这里既没有真实值也没有假值。",
+    "kept_verbatim": "端口号、监听器名称与 ingress_interface 保留真实取值。它们不是凭据，而是复现设计意图所必需的结构信息——「入口端口号即链路编号」是读懂这份配置的唯一助记线索。",
+    "external_targets": {
+      "198.51.100.99": "本工具范围之外的既有 SOCKS5 服务，保留它是为了证明新入口可以指向旧目标而完全不动旧 NAT 表。"
+    }
+  },
+  "nodes": {
+    "entry": {
+      "metadata": {
+        "address": "192.0.2.50",
+        "egress_address": "192.0.2.51",
+        "role": "entry",
+        "note": "入口机：只做单跳 DNAT，不运行 GOST，因此没有 listeners。",
+        "egress_note": "本机出网经上游 NAT 转换为 egress_address，下游 allowed_sources 必须写出网地址；写本机网卡地址会被 admission 拒绝——这是本拓扑最容易踩的坑。"
+      },
+      "nat": {
+        "ingress_interface": "enp3s0f0",
+        "source_nat": {
+          "mode": "masquerade"
+        },
+        "forwards": [
+          {
+            "name": "entry-65001",
+            "listen_port": 65001,
+            "protocols": [
+              "tcp"
+            ],
+            "target": {
+              "host": "198.51.100.99",
+              "port": 19998
+            }
+          },
+          {
+            "name": "entry-65002",
+            "listen_port": 65002,
+            "protocols": [
+              "tcp",
+              "udp"
+            ],
+            "target": {
+              "host": "198.51.100.11",
+              "port": 64999
+            }
+          },
+          {
+            "name": "entry-65003",
+            "listen_port": 65003,
+            "protocols": [
+              "tcp",
+              "udp"
+            ],
+            "target": {
+              "host": "198.51.100.12",
+              "port": 64999
+            }
+          },
+          {
+            "name": "entry-65004",
+            "listen_port": 65004,
+            "protocols": [
+              "tcp",
+              "udp"
+            ],
+            "target": {
+              "host": "203.0.113.13",
+              "port": 64999
+            }
+          },
+          {
+            "name": "entry-65005",
+            "listen_port": 65005,
+            "protocols": [
+              "tcp",
+              "udp"
+            ],
+            "target": {
+              "host": "203.0.113.14",
+              "port": 64999
+            }
+          },
+          {
+            "name": "entry-65011",
+            "listen_port": 65011,
+            "protocols": [
+              "tcp",
+              "udp"
+            ],
+            "target": {
+              "host": "198.51.100.11",
+              "port": 65011
+            }
+          },
+          {
+            "name": "entry-65012",
+            "listen_port": 65012,
+            "protocols": [
+              "tcp",
+              "udp"
+            ],
+            "target": {
+              "host": "198.51.100.11",
+              "port": 65012
+            }
+          },
+          {
+            "name": "entry-65013",
+            "listen_port": 65013,
+            "protocols": [
+              "tcp",
+              "udp"
+            ],
+            "target": {
+              "host": "198.51.100.11",
+              "port": 65013
+            }
+          }
+        ]
+      }
+    },
+    "region-a": {
+      "metadata": {
+        "address": "198.51.100.11",
+        "role": "terminal",
+        "note": "链首：把 65011/65012/65013 原样转发到 region-b 的同号 relay，本机不承担这三条链的落地。本机 64999 上另有 sing-box，由 entry-65002 直接 NAT 到达，不经过 GOST。",
+        "reserved_note": "reserved_listeners 是本工具不生成、但主机上已经在听的端口：19999 与 64999 属于旧系统与本机 sing-box，64911-64913 与 64922-64923 是旧转发链的入口与回环桥接。写进来，新监听的重叠检查才有意义。"
+      },
+      "listeners": [
+        {
+          "name": "entry-65011",
+          "mode": "forward",
+          "listen": {
+            "host": "0.0.0.0",
+            "port": 65011
+          },
+          "protocols": [
+            "tcp",
+            "udp"
+          ],
+          "chain": {
+            "host": "198.51.100.12",
+            "port": 65011,
+            "tls": {
+              "ca_file": "/etc/sing-box-plus-deploy/tls/ca.crt",
+              "server_name": "region-b.example"
+            }
+          },
+          "allowed_sources": [
+            "192.0.2.51",
+            "127.0.0.1"
+          ]
+        },
+        {
+          "name": "entry-65012",
+          "mode": "forward",
+          "listen": {
+            "host": "0.0.0.0",
+            "port": 65012
+          },
+          "protocols": [
+            "tcp",
+            "udp"
+          ],
+          "chain": {
+            "host": "198.51.100.12",
+            "port": 65012,
+            "tls": {
+              "ca_file": "/etc/sing-box-plus-deploy/tls/ca.crt",
+              "server_name": "region-b.example"
+            }
+          },
+          "allowed_sources": [
+            "192.0.2.51",
+            "127.0.0.1"
+          ]
+        },
+        {
+          "name": "entry-65013",
+          "mode": "forward",
+          "listen": {
+            "host": "0.0.0.0",
+            "port": 65013
+          },
+          "protocols": [
+            "tcp",
+            "udp"
+          ],
+          "chain": {
+            "host": "198.51.100.12",
+            "port": 65013,
+            "tls": {
+              "ca_file": "/etc/sing-box-plus-deploy/tls/ca.crt",
+              "server_name": "region-b.example"
+            }
+          },
+          "allowed_sources": [
+            "192.0.2.51",
+            "127.0.0.1"
+          ]
+        }
+      ],
+      "reserved_listeners": [
+        {
+          "host": "0.0.0.0",
+          "port": 19999,
+          "protocols": [
+            "tcp",
+            "udp"
+          ]
+        },
+        {
+          "host": "0.0.0.0",
+          "port": 64911,
+          "protocols": [
+            "tcp",
+            "udp"
+          ]
+        },
+        {
+          "host": "0.0.0.0",
+          "port": 64912,
+          "protocols": [
+            "tcp",
+            "udp"
+          ]
+        },
+        {
+          "host": "0.0.0.0",
+          "port": 64913,
+          "protocols": [
+            "tcp",
+            "udp"
+          ]
+        },
+        {
+          "host": "0.0.0.0",
+          "port": 64922,
+          "protocols": [
+            "tcp",
+            "udp"
+          ]
+        },
+        {
+          "host": "0.0.0.0",
+          "port": 64923,
+          "protocols": [
+            "tcp",
+            "udp"
+          ]
+        },
+        {
+          "host": "0.0.0.0",
+          "port": 64999,
+          "protocols": [
+            "tcp",
+            "udp"
+          ]
+        }
+      ]
+    },
+    "region-b": {
+      "metadata": {
+        "address": "198.51.100.12",
+        "role": "terminal",
+        "note": "出口兼转接：65011 直接落到本机 sing-box；65012/65013 落到回环桥接后继续转发到 region-c。",
+        "reserved_note": "reserved_listeners 是本工具不生成、但主机上已经在听的端口：19999 与 64999 属于旧系统与本机 sing-box，64911-64913 与 64922-64923 是旧转发链的入口与回环桥接。写进来，新监听的重叠检查才有意义。"
+      },
+      "listeners": [
+        {
+          "name": "relay-65011",
+          "mode": "relay",
+          "listen": {
+            "host": "0.0.0.0",
+            "port": 65011
+          },
+          "protocols": [
+            "tcp"
+          ],
+          "allowed_sources": [
+            "198.51.100.11",
+            "127.0.0.1"
+          ],
+          "target": {
+            "host": "127.0.0.1",
+            "port": 64999
+          },
+          "tls": {
+            "cert_file": "/etc/sing-box-plus-deploy/tls/server.crt",
+            "key_file": "/etc/sing-box-plus-deploy/tls/server.key"
+          }
+        },
+        {
+          "name": "relay-65012",
+          "mode": "relay",
+          "listen": {
+            "host": "0.0.0.0",
+            "port": 65012
+          },
+          "protocols": [
+            "tcp"
+          ],
+          "allowed_sources": [
+            "198.51.100.11",
+            "127.0.0.1"
+          ],
+          "target": {
+            "host": "127.0.0.1",
+            "port": 65022
+          },
+          "tls": {
+            "cert_file": "/etc/sing-box-plus-deploy/tls/server.crt",
+            "key_file": "/etc/sing-box-plus-deploy/tls/server.key"
+          }
+        },
+        {
+          "name": "relay-65013",
+          "mode": "relay",
+          "listen": {
+            "host": "0.0.0.0",
+            "port": 65013
+          },
+          "protocols": [
+            "tcp"
+          ],
+          "allowed_sources": [
+            "198.51.100.11",
+            "127.0.0.1"
+          ],
+          "target": {
+            "host": "127.0.0.1",
+            "port": 65023
+          },
+          "tls": {
+            "cert_file": "/etc/sing-box-plus-deploy/tls/server.crt",
+            "key_file": "/etc/sing-box-plus-deploy/tls/server.key"
+          }
+        },
+        {
+          "name": "bridge-c",
+          "mode": "forward",
+          "listen": {
+            "host": "127.0.0.1",
+            "port": 65022
+          },
+          "protocols": [
+            "tcp",
+            "udp"
+          ],
+          "chain": {
+            "host": "203.0.113.13",
+            "port": 65012,
+            "tls": {
+              "ca_file": "/etc/sing-box-plus-deploy/tls/ca.crt",
+              "server_name": "region-c.example"
+            }
+          }
+        },
+        {
+          "name": "bridge-d",
+          "mode": "forward",
+          "listen": {
+            "host": "127.0.0.1",
+            "port": 65023
+          },
+          "protocols": [
+            "tcp",
+            "udp"
+          ],
+          "chain": {
+            "host": "203.0.113.13",
+            "port": 65013,
+            "tls": {
+              "ca_file": "/etc/sing-box-plus-deploy/tls/ca.crt",
+              "server_name": "region-c.example"
+            }
+          }
+        }
+      ],
+      "reserved_listeners": [
+        {
+          "host": "0.0.0.0",
+          "port": 19999,
+          "protocols": [
+            "tcp",
+            "udp"
+          ]
+        },
+        {
+          "host": "0.0.0.0",
+          "port": 64911,
+          "protocols": [
+            "tcp",
+            "udp"
+          ]
+        },
+        {
+          "host": "0.0.0.0",
+          "port": 64912,
+          "protocols": [
+            "tcp",
+            "udp"
+          ]
+        },
+        {
+          "host": "0.0.0.0",
+          "port": 64913,
+          "protocols": [
+            "tcp",
+            "udp"
+          ]
+        },
+        {
+          "host": "0.0.0.0",
+          "port": 64922,
+          "protocols": [
+            "tcp",
+            "udp"
+          ]
+        },
+        {
+          "host": "0.0.0.0",
+          "port": 64923,
+          "protocols": [
+            "tcp",
+            "udp"
+          ]
+        },
+        {
+          "host": "0.0.0.0",
+          "port": 64999,
+          "protocols": [
+            "tcp",
+            "udp"
+          ]
+        }
+      ]
+    },
+    "region-c": {
+      "metadata": {
+        "address": "203.0.113.13",
+        "role": "terminal",
+        "note": "出口兼转接：65012 直接落地；65013 落到回环桥接后继续转发到 region-d。",
+        "reserved_note": "reserved_listeners 是本工具不生成、但主机上已经在听的端口：19999 与 64999 属于旧系统与本机 sing-box，64911-64913 与 64922-64923 是旧转发链的入口与回环桥接。写进来，新监听的重叠检查才有意义。"
+      },
+      "listeners": [
+        {
+          "name": "relay-65012",
+          "mode": "relay",
+          "listen": {
+            "host": "0.0.0.0",
+            "port": 65012
+          },
+          "protocols": [
+            "tcp"
+          ],
+          "allowed_sources": [
+            "198.51.100.12",
+            "127.0.0.1"
+          ],
+          "target": {
+            "host": "127.0.0.1",
+            "port": 64999
+          },
+          "tls": {
+            "cert_file": "/etc/sing-box-plus-deploy/tls/server.crt",
+            "key_file": "/etc/sing-box-plus-deploy/tls/server.key"
+          }
+        },
+        {
+          "name": "relay-65013",
+          "mode": "relay",
+          "listen": {
+            "host": "0.0.0.0",
+            "port": 65013
+          },
+          "protocols": [
+            "tcp"
+          ],
+          "allowed_sources": [
+            "198.51.100.12",
+            "127.0.0.1"
+          ],
+          "target": {
+            "host": "127.0.0.1",
+            "port": 65023
+          },
+          "tls": {
+            "cert_file": "/etc/sing-box-plus-deploy/tls/server.crt",
+            "key_file": "/etc/sing-box-plus-deploy/tls/server.key"
+          }
+        },
+        {
+          "name": "bridge-d",
+          "mode": "forward",
+          "listen": {
+            "host": "127.0.0.1",
+            "port": 65023
+          },
+          "protocols": [
+            "tcp",
+            "udp"
+          ],
+          "chain": {
+            "host": "203.0.113.14",
+            "port": 65013,
+            "tls": {
+              "ca_file": "/etc/sing-box-plus-deploy/tls/ca.crt",
+              "server_name": "region-d.example"
+            }
+          }
+        }
+      ],
+      "reserved_listeners": [
+        {
+          "host": "0.0.0.0",
+          "port": 19999,
+          "protocols": [
+            "tcp",
+            "udp"
+          ]
+        },
+        {
+          "host": "0.0.0.0",
+          "port": 64911,
+          "protocols": [
+            "tcp",
+            "udp"
+          ]
+        },
+        {
+          "host": "0.0.0.0",
+          "port": 64912,
+          "protocols": [
+            "tcp",
+            "udp"
+          ]
+        },
+        {
+          "host": "0.0.0.0",
+          "port": 64913,
+          "protocols": [
+            "tcp",
+            "udp"
+          ]
+        },
+        {
+          "host": "0.0.0.0",
+          "port": 64922,
+          "protocols": [
+            "tcp",
+            "udp"
+          ]
+        },
+        {
+          "host": "0.0.0.0",
+          "port": 64923,
+          "protocols": [
+            "tcp",
+            "udp"
+          ]
+        },
+        {
+          "host": "0.0.0.0",
+          "port": 64999,
+          "protocols": [
+            "tcp",
+            "udp"
+          ]
+        }
+      ]
+    },
+    "region-d": {
+      "metadata": {
+        "address": "203.0.113.14",
+        "role": "terminal",
+        "note": "链尾：只有一个 relay，target 是本机 sing-box，没有任何 chain。",
+        "reserved_note": "reserved_listeners 是本工具不生成、但主机上已经在听的端口：19999 与 64999 属于旧系统与本机 sing-box，64911-64913 与 64922-64923 是旧转发链的入口与回环桥接。写进来，新监听的重叠检查才有意义。"
+      },
+      "listeners": [
+        {
+          "name": "relay-65013",
+          "mode": "relay",
+          "listen": {
+            "host": "0.0.0.0",
+            "port": 65013
+          },
+          "protocols": [
+            "tcp"
+          ],
+          "allowed_sources": [
+            "203.0.113.13",
+            "127.0.0.1"
+          ],
+          "target": {
+            "host": "127.0.0.1",
+            "port": 64999
+          },
+          "tls": {
+            "cert_file": "/etc/sing-box-plus-deploy/tls/server.crt",
+            "key_file": "/etc/sing-box-plus-deploy/tls/server.key"
+          }
+        }
+      ],
+      "reserved_listeners": [
+        {
+          "host": "0.0.0.0",
+          "port": 19999,
+          "protocols": [
+            "tcp",
+            "udp"
+          ]
+        },
+        {
+          "host": "0.0.0.0",
+          "port": 64911,
+          "protocols": [
+            "tcp",
+            "udp"
+          ]
+        },
+        {
+          "host": "0.0.0.0",
+          "port": 64912,
+          "protocols": [
+            "tcp",
+            "udp"
+          ]
+        },
+        {
+          "host": "0.0.0.0",
+          "port": 64913,
+          "protocols": [
+            "tcp",
+            "udp"
+          ]
+        },
+        {
+          "host": "0.0.0.0",
+          "port": 64922,
+          "protocols": [
+            "tcp",
+            "udp"
+          ]
+        },
+        {
+          "host": "0.0.0.0",
+          "port": 64923,
+          "protocols": [
+            "tcp",
+            "udp"
+          ]
+        },
+        {
+          "host": "0.0.0.0",
+          "port": 64999,
+          "protocols": [
+            "tcp",
+            "udp"
+          ]
+        }
+      ]
+    }
+  }
+}

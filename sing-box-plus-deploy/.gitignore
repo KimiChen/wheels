@@ -1,6 +1,7 @@
 .env
 inventory*.json
 !examples/inventory.example.json
+!examples/inventory.case-multi-region-chain.json
 output/
 dist/
 __pycache__/
