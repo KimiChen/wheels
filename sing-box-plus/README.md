@@ -35,11 +35,11 @@ TCP/UDP × 上下行四个累计值、明确的重启边界、可幂等采集，
 （§5.1 的基线键以 `node_id` 打头，否则 inbound tag 命名空间会跨实现串号）。两者的 SS 配置
 纪律是同构的：固定 EIH method、要求具名用户、禁止与各自的动态管理面并存。
 
-两者的快照可由三重标志区分，并列生效：本项目是 `GET /v3/snapshot` 与 `schema_version: 2`
+两者的快照可由三重标志区分，并列生效：本项目是 `GET /v3/snapshot` 与 `schema_version: 3`
 （`shadowsocks-rust-plus` 是 `/v1/snapshot` 与 `1`），两者使用不同的 `node_id`，以及不同的 socket 路径。
 误指到本项目的旧采集器会先在路由上拿到 404，即使直接打到 `/v3/snapshot` 也会在版本号处硬失败——
 `shadowsocks-rust-plus` 的三个校验器都硬编码要求 `schema_version == 1`。因此下游若已对接该实现，
-其 `schema_version` 约束与触发器须先放开为同时接受 `2`，这是接入本项目的硬前置。
+其 `schema_version` 约束与触发器须先放开为同时接受 `3`，这是接入本项目的硬前置。
 
 **验收定义**：在钉定的上游版本上，选中的 inbound 对所有允许流量都有可验证的非空计费身份；
 四向字节 oracle 误差为 0；快照接口通过 §8 的故障矩阵；下游按 §5 差分入账时不出现漏计、
@@ -355,7 +355,7 @@ registry 由自有 main 持有（§4.7），因此它的生命周期是**进程�
 
 ### 4.5 快照接口契约
 
-快照 schema 的 `schema_version` 固定为 `2`，路由为 `GET /v3/snapshot`。结算语义——基线键结构、
+快照 schema 的 `schema_version` 固定为 `3`，路由为 `GET /v3/snapshot`。结算语义——基线键结构、
 差分规则、health 闸门、错误码表与资源上限——与 `shadowsocks-rust-plus` 逐条同构，只是字段按
 sing-box 的词汇命名。
 
@@ -372,7 +372,7 @@ sing-box 的词汇命名。
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "node_id": "node-example-01",
   "runtime_id": "0123456789abcdef0123456789abcdef",
   "started_at_unix_ms": 1787587200000,
@@ -433,7 +433,7 @@ camelCase 只出现在受外部规范约束的面（SSM 遵 SIP008、Clash API �
 “只有 `2022-blake3-aes-*` 具名多用户形态在运行”由 §4.6 第 2 条保证，采集端不得从 `type` 反推。
 
 `listen` / `listen_port` 取自 inbound 配置的同名字段（`option/inbound.go:80-81`），是**配置值而非
-实际绑定结果**。上游 `listen` 是纯 host（`*badoption.Addr`），端口是独立键，因此 v2 拆成两个平级键
+实际绑定结果**。上游 `listen` 是纯 host（`*badoption.Addr`），端口是独立键，因此 v3 拆成两个平级键
 而不是合成 `host:port`——合成串属“同名异形”，拿快照对照配置必然误读，且 IPv6 还要方括号消歧。
 配置省略 `listen` 时上游按 `127.0.0.1` 绑定而非 `0.0.0.0`，快照必须按同一默认补齐后输出。
 上游不给回读实际绑定的路径（`listener` 字段在 `*vless.Inbound` 与 `*shadowsocks.MultiInbound` 上均
@@ -463,7 +463,7 @@ camelCase 只出现在受外部规范约束的面（SSM 遵 SIP008、Clash API �
 固定两条路由——`GET /v3/snapshot`（被接受时即推进 `sequence`）与 `GET /healthz`（不带版本段，
 200/503，不推进 `sequence`）。**路径版本号与 `schema_version` 同步推进**：本项目不提供
 `/v1/snapshot`，请求该路径返回 404，使误配的采集器立即失败，而不是读到半兼容的 body。
-错误一律返回固定 `{"schema_version": 2, "error": {"code": …}}` 对象，错误码取值表与 `shadowsocks-rust-plus` 一致
+错误一律返回固定 `{"schema_version": 3, "error": {"code": …}}` 对象，错误码取值表与 `shadowsocks-rust-plus` 一致
 （400/404/405/408/413/429/500/505）——错误码与字段命名正交，复用不产生冲突。
 `/healthz`、全部错误 body 与快照必须**共用同一个 schema 版本常量**，由契约测试逐条断言，
 不得出现 1/2 混用。
@@ -878,7 +878,7 @@ splice/direct 快路径。`Close()` 只向有界 channel 投递，由单个 writ
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "node_id": "node-example-01",
   "runtime_id": "0123456789abcdef0123456789abcdef",
   "epoch": 137,
@@ -896,7 +896,7 @@ splice/direct 快路径。`Close()` 只向有界 channel 投递，由单个 writ
   前若干条：全量表本应与进程读的是同一份配置真相，对不上说明控制面与数据面已经不一致，
   静默忽略会让运维误以为额度已生效。collector 应在下一轮快照看到新 lineage 后重推。
 - 未出现在 `entries[]` 中的 lineage 视为**无限额度**——全量表是“限额清单”而非“用户清单”。
-- 成功返回 200 与 `{"schema_version": 2, "epoch": …, "applied": …}`；错误码复用 §4.5 的取值表，
+- 成功返回 200 与 `{"schema_version": 3, "epoch": …, "applied": …}`；错误码复用 §4.5 的取值表，
   另加 409。响应体与快照、`/healthz` 共用同一个 schema 版本常量。
 - socket 默认 `0600`，绑定前的父目录、符号链接、旧 socket 与 inode 替换检查与 §4.5 同款；
   同样不得直接映射为公网监听。
@@ -923,7 +923,7 @@ splice/direct 快路径。`Close()` 只向有界 channel 投递，由单个 writ
    那个窗口里其他用户会被按 `startup_action` 整体误判。逐 lineage diff 亦可，但不得出现中间态。
 3. **闸断状态不得写进快照的 `active`。** `active` 在 §4.3 第 1 条里的语义是“配置中是否还存在该身份”，
    由每次重载后的配置对账切换；把闸断复用到该字段，采集端会把“超额被封”读成“用户已删除”。
-   首期闸断状态**完全不进快照**——名单是 collector 自己下发的，它本就知道。这样 v2 schema 一个字节
+   首期闸断状态**完全不进快照**——名单是 collector 自己下发的，它本就知道。这样 v3 schema 一个字节
    不动，D3 不受影响。将来若要暴露，按 §4.5 的纪律新加字段并提升 `schema_version`，
    不得塞进 `health` 的三键闭集。
 4. **闸断只能实施在 CountFunc 内，不能写在包装层的 `Read` / `Write` 里。** 三条上游事实决定了这一点
@@ -1022,7 +1022,7 @@ node_id + inbounds[].tag + inbounds[].generation + users[].name + users[].genera
 - `sequence` 前进但**四向累计值**倒退 → 失败关闭并告警，不得猜测并继续收费。单调性约束**只**适用于
   四个 `*_bytes` 与 `sequence`；`tcp_sessions` / `udp_sessions` 是瞬时 gauge（正常排空时会降到 0），
   不参与差分、不进基线、不触发回退告警；
-- `health` 任一项为真、`schema_version` 不为 `2`、`Content-Length` 不符或 JSON 截断 → 拒绝入账；
+- `health` 任一项为真、`schema_version` 不为 `3`、`Content-Length` 不符或 JSON 截断 → 拒绝入账；
 - HTTP 429 与连接被直接关闭视为**可重试且不得入账**；其余非 200 一律拒绝入账；
 - 首次看到新 `runtime_id` 时必须显式选择 `baseline`（只建基线，降低重复风险）或 `include`
   （首次累计全部计入，降低漏记风险），不得留作隐式行为。
@@ -1089,7 +1089,7 @@ node_id + inbounds[].tag + inbounds[].generation + users[].name + users[].genera
 | 配置与失败关闭 | §4.6 全部 11 条校验路径与错误信息（含 SS 特化校验、SSM 两层互斥、上游账本互斥、重载不变量） | 是 | 1–2 人周 |
 | UDS exporter | schema、安全加固、资源上限、监督与故障注入 | 是 | 2–3 人周 |
 | 协议与性能验证 | Vision direct 切换、mux、XUDP/UoT、SS-2022 EIH 四向、UDP batch、bench/pprof | 是 | 3–5 人周 |
-| 参考 collector 与契约测试 | 复用 `http_unix.py` 的 HTTP/UDS 传输层与 `settlement_model.py` 的周期/幂等算法骨架（两者的核心逻辑与 schema 正交），按 v2 重写字段校验与 fixture（合计约 300 行）；**参考 collector 从零实现**——`shadowsocks-rust-plus` 的 `mock_collector.py` 是审计导出协议的采集器，与快照接口无关 | 是 | 1.5–2.5 人周 |
+| 参考 collector 与契约测试 | 复用 `http_unix.py` 的 HTTP/UDS 传输层与 `settlement_model.py` 的周期/幂等算法骨架（两者的核心逻辑与 schema 正交），按 v3 重写字段校验与 fixture（合计约 300 行）；**参考 collector 从零实现**——`shadowsocks-rust-plus` 的 `mock_collector.py` 是审计导出协议的采集器，与快照接口无关 | 是 | 1.5–2.5 人周 |
 | 可复现发布与签名 | 两次独立构建、manifest、detached 签名与验签 | 是 | 1–2 人周 |
 | 文档与运维手册 | `docs/` 六件套 | 是 | 1–2 人周 |
 | 重载对账与排空 | 每次重载按新配置对账 `active`/tombstone、drain 阶段与排空超时策略（§4.4） | 否 | 1–2 人周 |
@@ -1128,11 +1128,11 @@ shadowsocks-2022 + dns + `hijack-dns` 路由规则的配置全部解析通过，
 | `scripts/verify.sh` | `go vet`、`go test -race ./...`、lint、敏感信息扫描，以及复制文件与钉定版本的 diff 漂移门禁（§4.7） |
 | `scripts/build-linux-release.sh` | 两次独立路径构建逐字节一致才产出 manifest + SHA-256 |
 | `scripts/sign-release.sh` / `verify-release.sh` | detached 签名与验签，私钥离线保管 |
-| `scripts/user-stats-client.py` | 带 v2 schema 与健康校验的快照读取客户端。**HTTP/UDS 传输层不复制第二份**：唯一实现在 `scripts/http_unix.py`，`tests/http_unix.py` 是按文件路径装载的再导出 shim。参考实现那两份副本靠门禁维持一致，本项目从结构上消除漂移，`tests/test_http_unix.py` 断言 `request` 的定义位置落在唯一实现里 |
+| `scripts/user-stats-client.py` | 带 v3 schema 与健康校验的快照读取客户端。**HTTP/UDS 传输层不复制第二份**：唯一实现在 `scripts/http_unix.py`，`tests/http_unix.py` 是按文件路径装载的再导出 shim。参考实现那两份副本靠门禁维持一致，本项目从结构上消除漂移，`tests/test_http_unix.py` 断言 `request` 的定义位置落在唯一实现里 |
 | `scripts/quota-client.py` | 配额下发客户端：读取一份 `remaining_bytes` 清单后 `PUT /v3/quota`，含 `epoch` 维护与 409 重推 |
 | `scripts/soak.sh` | 里程碑 5 的长跑采集循环；结束后用 `reference_collector.py --report` 输出四项判据 |
 | `tests/race-suppressions.txt` | 只抑制上游 `route.NetworkManager` 的已知竞争；`verify.sh` 另跑一遍不带抑制的纯单元用例，使它无法掩盖本项目自身的竞争 |
-| `tests/reference_collector.py` | 参考 collector：取快照 → v2 校验 → 差分 → 幂等落地本地账本；范围**不含** outbox、mTLS 与重试（属下游控制面）。`shadowsocks-rust-plus` 无对应物可搬，须从零实现 |
+| `tests/reference_collector.py` | 参考 collector：取快照 → v3 校验 → 差分 → 幂等落地本地账本；范围**不含** outbox、mTLS 与重试（属下游控制面）。`shadowsocks-rust-plus` 无对应物可搬，须从零实现 |
 | `scripts/quota-client.py` | 配额下发客户端：读取一份 `remaining_bytes` 清单后 `PUT /v3/quota`，含 `epoch` 维护与 409 重推。与 `scripts/user-stats-client.py` 共用同一份 HTTP/UDS 解析代码，受同一条一致性门禁约束 |
 | `packaging/` | 复用上游 `release/config/sing-box.service`、`sing-box.sysusers`，追加 `RuntimeDirectory=` 承载 UDS 与 `Restart=on-failure`；上游无 tmpfiles 模板，需自建 |
 | `config/server.example.json` | 脱敏的最小可用配置，含 `user_stats` 全字段与默认值 |
@@ -1149,7 +1149,7 @@ shadowsocks-2022 + dns + `hijack-dns` 路由规则的配置全部解析通过，
 | 1 | 冻结基线与骨架 | `upstream.lock` 已记录 tag/commit/`prepared_tree_sha256`；两次独立构建 SHA-256 相同；`version` 显示钉定版本（该版本由构建脚本从 `upstream.lock` 读取后以 `-X …constant.Version` 注入，未注入时会打印 `unknown`）；tag 清单按 §9.1 定值并写入 `.env.example`；`docs/UPSTREAM_BASELINE.md` 落库 |
 | 2 | 观测 PoC | 回环 VLESS Reality/Vision 与 Shadowsocks-2022 EIH 多用户 TCP+UDP 字节 oracle 差 = 0 的报告；复现并记录 ServiceName 覆写、静态白名单与重载丢数三项边界 |
 | 3 | 四向 tracker / registry | `go test -race` 全绿，含 `New → AppendTracker → Start` 全路径与“`Start` 后追加必被 `-race` 报出竞争”的负向用例；四向 oracle 误差 = 0；Linux amd64 真实 splice 用例覆盖；多 tracker 叠加 unwrap 断言通过；§4.6 十一条失败关闭路径全部有用例 |
-| 4 | UDS exporter | 权限 / 符号链接 / inode 替换 / 超限 / 慢客户端故障用例通过；exporter 异常退出导致进程失败退出；v2 契约测试全绿（对 §4.5 的快照与映射表逐字段断言），参考 collector 在 §8 故障矩阵下无漏计、无重复入账 |
+| 4 | UDS exporter | 权限 / 符号链接 / inode 替换 / 超限 / 慢客户端故障用例通过；exporter 异常退出导致进程失败退出；v3 契约测试全绿（对 §4.5 的快照与映射表逐字段断言），参考 collector 在 §8 故障矩阵下无漏计、无重复入账 |
 | 5 | 长跑与结算验证 | staging 连续运行 ≥ 7 天：负增量 = 0、未知 runtime = 0、`sequence` 重复 = 0、unhealthy 快照全部被拒；§5.3 计划重启流程演练无缺口、无重复 |
 | 6 | 可发布版本 | §8 故障矩阵与性能三组对照报告归档；可复现发布包与签名验签通过；`docs/OPERATIONS.md` 含部署、采集、重启屏障与回滚步骤 |
 
@@ -1163,7 +1163,7 @@ shadowsocks-2022 + dns + `hijack-dns` 路由规则的配置全部解析通过，
 | 1 冻结基线与骨架 | ✅ | `upstream.lock` 记录 tag/commit/`prepared_tree_sha256`；verify 重新准备源码树后复算一致；`version` 输出四行且显示 `v1.14.0 (0b8995879f29)`；生产 tag 集写入 `.env.example` |
 | 2 观测 PoC | ✅（部分） | VLESS 与 SS-2022 EIH 多用户 TCP+UDP 四向 oracle 误差 = 0（`integration_test.go`）；Vision 链路小往返 4/4 与 100×64KiB 精确相等（`vision_test.go`）。**未做**：`with_v2ray_api` 的 PoC 集构建，以及 ServiceName 覆写与静态白名单两项边界的复现记录 |
 | 3 四向 tracker / registry | ✅ | `go test -race` 全绿（darwin/arm64 **与 Debian 13 / x86_64 native**）；含「`Start()` 后追加必被 -race 报出竞争」的负向用例（子进程执行）；多 tracker 叠加 unwrap 断言通过；§4.6 校验路径 23 例；真实 splice 的字节 oracle 与 splice 上的配额闸断在 Linux 实跑通过 |
-| 4 UDS exporter | ✅ | 权限 / 符号链接 / 旧 socket / 超限 / 版本 / 方法 / query 故障用例通过；v2 契约逐字段断言；参考 collector 在故障矩阵下无漏计、无重复入账 |
+| 4 UDS exporter | ✅ | 权限 / 符号链接 / 旧 socket / 超限 / 版本 / 方法 / query 故障用例通过；v3 契约逐字段断言；参考 collector 在故障矩阵下无漏计、无重复入账 |
 | 5 长跑与结算验证 | ✅（带保留） | **7 天 7 小时连续运行完成**（2026-09-07 00:32 ~ 09-14 17:44，真实用户流量）：10 453 轮采集、10 453 次额度下发、合计入账 19.2 GiB，**四项判据（负增量 / 未知 runtime / 重复 sequence / unhealthy 入账）全为 0**。审计侧 65 747 条记录、0 半行、0 事件行、0 混入他人、`seq` 逐文件连续。保留项见 §7.1 末段：跨两个构建、流量不均。轮转与纪律 9/10 已于 09-15 单独验证（见 `docs/UPSTREAM_BASELINE.md`）|
 | 6 可发布版本 | ⬜（部分） | 可复现构建已在裸机上实跑：linux/amd64 与 linux/arm64 各两次独立构建逐字节一致，产出 manifest + SHA256SUMS；跨机签名→验签演练通过，篡改一个字节即验签失败；三组性能对照见 `docs/PERFORMANCE.md`。**未做**：用真实离线私钥签名、带负载机的端到端性能验收、法务评审 |
 
@@ -1243,12 +1243,12 @@ Shadowsocks 与 wrapper 形态的特化补充：
 - SIGHUP 重载时改 `node_id` 或 `listen_path`：重载被拒、旧实例继续转发、`runtime_id` 与四向累计值
   均不变、UDS 路径不变（M3）；
 - 配置校验拒绝 `listen_port` 缺省或为 0（M3）；
-- v2 快照与 §4.5 逐字段一致：必填键齐全、类型与 u64 边界、`inbounds` 按 `tag` 再 `generation` /
+- v3 快照与 §4.5 逐字段一致：必填键齐全、类型与 u64 边界、`inbounds` 按 `tag` 再 `generation` /
   `users` 按 `name` 再 `generation` 的稳定字节序排序、`health` 为三键闭集（M4）；
 - 快照的 `listen` 必须能被 `netip.ParseAddr` 解析（即不含 `:port`），`listen_port` 在 `1..=65535`；
   配置省略 `listen` 时快照输出 `127.0.0.1`（M4）；
-- `/healthz` 与全部错误响应体的 `schema_version` 与快照一致为 `2`，全套响应不出现 1/2 混用（M4）；
-- `GET /v1/snapshot` 返回 404，且 body 的 `schema_version` 为 `2`（M4）；
+- `/healthz` 与全部错误响应体的 `schema_version` 与快照一致为 `3`，全套响应不出现跨版本混用（M4）；
+- `GET /v1/snapshot` 返回 404，且 body 的 `schema_version` 为 `3`（M4）；
 - 共存回归：`shadowsocks-rust-plus` 的校验器对本项目快照整份拒绝且不入账，钉死并存窗口内旧
   collector 误指到本项目节点时必然失败（M4）。
 
@@ -1262,7 +1262,7 @@ Shadowsocks 与 wrapper 形态的特化补充：
 - 全量表换页无中间态：推送与转发并发进行时，未出现在 `entries[]` 中的 lineage 全程不被闸断
   （纪律 2）（M3）；
 - 热路径无回归：闸断开启与关闭两组对照，回调内无额外分配、无锁竞争（纪律 1）（M6）；
-- 快照不受污染：闸断前后两个用户的 `active` 均不变、`health` 三位不变、`schema_version` 仍为 `2`
+- 快照不受污染：闸断前后两个用户的 `active` 均不变、`health` 四位不变、`schema_version` 仍为 `3`
   （纪律 3）（M4）；
 - 控制端点失败关闭：`node_id` / `runtime_id` 不符、`epoch` 回退或持平、`entries[]` 含未知 lineage、
   超大请求体、非 `PUT` 方法、带 query，逐项返回对应错误码，且**不改变**任何已生效额度（M4）；
@@ -1425,7 +1425,7 @@ sing-box 的 LICENSE 是 GPL v3-or-later 的授权声明段，并附带“衍生
 | --- | --- | --- | --- |
 | D1 | overlay 形态 | **零补丁 wrapper**：独立 module + 自有 main，不改上游源码（2026-09-05 在 v1.14.0 上实证） | §4.7 |
 | D2 | 首期协议范围 | **VLESS + Shadowsocks**（仅 `2022-blake3-aes-128-gcm` / `-aes-256-gcm` 的 `users[]` 具名多用户）；拒绝单用户、legacy AEAD、relay、`managed: true`，并与 SSM API 互斥。其余协议按 §2.4 逐个验证后追加 | §1、§2.4、§4.6 |
-| D3 | 快照 schema | **自有 v2**：`schema_version = 2`、路由 `GET /v3/snapshot`，容器与标识按 sing-box 命名（`inbounds[]`/`tag`/`type`，`listen` + `listen_port`），不设 `identity_kind`，`health` 三位。结算语义与 `shadowsocks-rust-plus` 同构，其参考校验器须分叉重写 | §1、§4.5、§5.1、§6 |
+| D3 | 快照 schema | **自有 v3**：`schema_version = 3`、路由 `GET /v3/snapshot`，容器与标识按 sing-box 命名（`inbounds[]`/`tag`/`type`，`listen` + `listen_port`），不设 `identity_kind`，`health` 四位。结算语义与 `shadowsocks-rust-plus` 同构，其参考校验器须分叉重写 | §1、§4.5、§5.1、§6 |
 | D4 | 构建 tag 裁剪 | **生产集 = `with_utls` + `badlinkname` + 自有 `with_user_stats`**；上游默认集其余 15 项全砍（含 `with_quic`、`tfogo_checklinkname0`）。裁 tag 不等于隔离上游账本 | §9.1、§4.6 第 7/8 条 |
 | D5 | 热用户增删接口 | **不提供**：快照 socket 只读，用户变更走受控重启或 SIGHUP 重载。§4.9 的配额控制端点是另一个只写 socket，只改额度、不改用户集，不构成对本条的改判 | §4.3、§5.3、§4.9 |
 | D6 | 进程崩溃丢尾账 | **接受**（与 `shadowsocks-rust-plus` 一致）：纯内存 registry，尾账按未闭合窗口审计，不引入 WAL | §1、§4.4、§5.3、§12 |
@@ -1444,7 +1444,7 @@ D1 的实证覆盖：独立 module 构建（含最小 tag 集与 linux/amd64 交
 
 | # | 已定取值 | 重新评估时点 | 触发条件 |
 | --- | --- | --- | --- |
-| D3 | 自有 v2 schema | 首个下游接入方上线后 | 出现现有字段无法表达的计量维度；届时按 §4.5 的命名纪律追加字段并提升 `schema_version` |
+| D3 | 自有 v3 schema | 首个下游接入方上线后 | 出现现有字段无法表达的计量维度；届时按 §4.5 的命名纪律追加字段并提升 `schema_version` |
 | D5 | 不提供热用户增删接口 | 里程碑 6 之后 | 运维反馈“每次改用户都要重载”不可接受，或 §2.4 追加的协议缺少等价的受控重启路径 |
 | D6 | 接受进程崩溃丢尾账 | 里程碑 5 长跑结束 | staging ≥ 7 天实测的未闭合窗口频次与字节量超出业务容忍。改判即引入 WAL 或持久计量数据面 |
 | D7 | 同进程 JSONL 旁路 | 首次因审计数据被追责或被要求举证时 | 出现“需要证明某条记录未被事后改写”的场景。同 uid 写入决定了数据面被攻破即可就地改写历史，这一点**没有廉价缓解**，改判意味着独立 uid 与独立进程，即参考实现那条路 |

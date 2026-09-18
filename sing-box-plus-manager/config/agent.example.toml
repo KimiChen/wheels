@@ -1,0 +1,29 @@
+# proxy-manager-agent 的配置示例（README §4.2）。
+# 真实配置放节点上的 /etc/proxy-manager-agent/agent.toml。
+# 示例值一律用 RFC 保留段。
+
+# 必须与 sing-box-plus 进程级 registry 的 node_id 逐字节相同。
+# 它进 HMAC 的 canonical 编码，所以一份请求不能被搬到另一个节点上重放。
+node_id = "node-example-01"
+
+# mTLS 监听地址。agent 是**被动**的：不主动回连、不接受任意远端命令。
+# NAT 后的节点本轮不支持——若将来需要，走反向隧道而不是让 agent 主动推数据。
+listen = "0.0.0.0:8443"
+
+# 离线签发出来的部署材料目录。节点只取这一层：
+# server-leaf.pem/.key、server-chain.pem、authorized-clients.pem、hmac.key。
+# **多一个文件都算装配出错**——多出来的往往是私钥。
+materials_dir = "/etc/proxy-manager-agent/materials"
+
+# 审计目录。只读**已轮转**文件（C23），agent 自身从不 rm。
+# 不配这一项时 audit-fetch 直接拒绝，而不是去猜一个目录。
+audit_dir = "/var/log/sing-box-plus/access"
+
+[sockets]
+# 两个 socket 权限档次不同，**不许合并**（C18）：
+# 快照是只读档，配额是写档——会改变转发行为。
+# agent 需要主组 + 补充组才能同时穿过两档权限（C28），缺一即启动失败。
+# 只访问本机 socket 的辅助 unit 还必须 PrivateTmp=false，
+# 否则私有 /tmp 会隐藏宿主机 socket。
+snapshot = "/run/sing-box-plus/user_stats.sock"
+quota = "/run/sing-box-plus/user_stats_quota.sock"

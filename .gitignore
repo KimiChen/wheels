@@ -141,3 +141,10 @@ vite.config.js
 frontend/coverage/
 aicodex
 output/
+
+# sing-box-plus-manager 的前端第三方库必须**随仓库提交**：
+# README §5 定了「无构建步骤、无包管理器，第三方库以 vendored 形式连同许可证发布」，
+# 而这些文件是用 include_str! 编进二进制的。上面那条 `vendor/` 是 Go 的约定，
+# 正好命中了这里——不破例的话，别人克隆下来第一次 cargo build 就会失败。
+!sing-box-plus-manager/web/vendor/
+!sing-box-plus-manager/web/vendor/**

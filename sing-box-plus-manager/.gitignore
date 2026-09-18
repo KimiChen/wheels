@@ -1,0 +1,27 @@
+# 生成物与依赖目录一律 ignored（仓库根 CLAUDE.md）。
+# 仓库根 .gitignore 已覆盖 target/、.env、__pycache__/、.DS_Store，这里只补本项目特有的。
+
+# 本地运行产生的数据库与 WAL 旁文件
+*.db
+*.db-wal
+*.db-shm
+/data/
+
+# 真实配置只放 /etc/proxy-manager/，仓库里只留 *.example.toml
+/config/server.toml
+/config/nodes.toml
+
+# PKI 材料绝不进 Git（README §4.2 PKI 纪律 3：这条必须是可执行门禁，不是文档里的一句嘱咐）
+# 可执行的那一半在 tests/m1/secret_gate.rs——它真的去 git 里查，不是读这份文件的文本。
+*.key
+*.pem
+*.p12
+*.pfx
+/pki/
+/ca/
+# 离线 workspace 整个盖住：里面除了 PEM 还有 serials.txt 这类产物，
+# 上面按后缀的规则管不到它们。
+/pki-workspace/
+
+# 夹具从上游导出的样例是生成物，不 checked-in（docs/integration-contract.md §2.3）
+/tests/.node-fixtures.json

@@ -1,0 +1,37 @@
+# 节点清单示例（README §5）。真实清单放 /etc/proxy-manager/nodes.toml。
+# 示例值一律用 RFC 保留段：example.com / 203.0.113.0/24。
+
+[[node]]
+# 与 sing-box-plus 进程级 registry 的 node_id 必须逐字节相同，否则配额 PUT 恒 409。
+node_id = "node-example-01"
+address = "node-01.example.com:8443"
+
+# **首快照策略必须显式写**，没有默认值：缺省即启动失败（C8）。
+#   baseline —— 首次 delta 记 0，把已有累计当作起点
+#   include  —— 首次 delta 等于当前累计值
+# 选 include 必须能证明不存在其他数据源的重复入账，不能因为计数从零开始就隐式批准。
+first_snapshot = "baseline"
+
+# 两个 socket 权限档次不同，不许合并，也不许直接映射公网（C18）。
+# agent 需要主组 + 补充组才能同时穿过两档权限（C28）。
+snapshot_socket = "/run/sing-box-plus/user_stats.sock"
+quota_socket = "/run/sing-box-plus/user_stats_quota.sock"
+
+# 授信材料指纹：带外核对后授信的 agent 服务端 leaf 的 SPKI 指纹（README §4.2）。
+# 在线信任的是**精确 leaf**，不是 intermediate。
+agent_spki_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+
+# 主控侧部署材料（离线签发出来的 deployment/controller/）。
+# 里面的 authorized-servers.pem 决定信任哪一张 leaf——它与上面那个带外核对的
+# 指纹必须指向同一张证书。私钥 0600，目录 0700。
+materials_dir = "/etc/proxy-manager/materials/node-example-01"
+
+[node.quota_control]
+# 受限节点必须配置 startup_action = "deny"（C12）：额度是纯内存的，进程重启即丢失，
+# 重启后没有额度表时按这个动作处置。
+enabled = true
+startup_action = "deny"
+# stale_after / stale_action 必须显式配置。stale_action 仅阻止过期后的**新连接**，
+# 不能替代已有连接的额度回收；停推本身不会把已下发的限额变成无限额度。
+stale_after_secs = 600
+stale_action = "deny"

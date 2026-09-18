@@ -1,0 +1,353 @@
+<!doctype html>
+<!--
+  proxy-manager 控制台 · 静态原型
+
+  一页一个文件，一个左侧链接对应一个真实 URL——这与 M4 的服务端渲染形态一致。
+  外壳（顶栏 / 侧栏 / 页脚 / 对话框）在各页重复，因为原型没有构建步骤；
+  真实实现由服务端渲染一次，不存在这份重复。
+
+  数据全部是假的。凡是字节口径的数字都写成十进制字符串（C3），
+  页面只做格式化，不做数值运算。
+
+  样式与脚本暂时相对引用同仓的 web-standard-kit；M4 打包时按 §5 的口径
+  vendored 进 assets/ 随二进制发布。需经 HTTP 打开（相对路径），不要用 file://。
+-->
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>用量趋势 · proxy-manager 控制台</title>
+    <script src="assets/theme.js"></script>
+    <link rel="stylesheet" href="../../web-standard-kit/style.css" />
+    <link rel="stylesheet" href="vendor/uplot.min.css" />
+    <link rel="stylesheet" href="assets/console.css" />
+    <script src="../../web-standard-kit/script.js" defer></script>
+    <script src="assets/app.js" defer></script>
+    <script src="vendor/uplot.iife.min.js" defer></script>
+    <script src="assets/api.js" defer></script>
+    <script src="assets/chart.js" defer></script>
+  </head>
+  <body data-principal="admin">
+    <a class="wsk-skip-link" href="#main-content">跳到主要内容</a>
+
+    <svg class="wsk-icon-sprite" aria-hidden="true">
+      <defs>
+        <symbol id="sun" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="4" />
+          <path
+            d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.66 6.34l1.41-1.41"
+          />
+        </symbol>
+        <symbol id="system" viewBox="0 0 24 24">
+          <rect x="2" y="3" width="20" height="14" rx="2" />
+          <path d="M8 21h8M12 17v4" />
+        </symbol>
+        <symbol id="moon" viewBox="0 0 24 24">
+          <path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8Z" />
+        </symbol>
+        <symbol id="check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6" /></symbol>
+        <symbol id="info" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="10" />
+          <path d="M12 16v-4M12 8h.01" />
+        </symbol>
+        <symbol id="warning" viewBox="0 0 24 24">
+          <path
+            d="m21.73 18-8-14a2 2 0 0 0-3.46 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"
+          />
+          <path d="M12 9v4M12 17h.01" />
+        </symbol>
+        <symbol id="x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12" /></symbol>
+        <symbol id="sort" viewBox="0 0 24 24">
+          <path d="m7 9 5-5 5 5M7 15l5 5 5-5" />
+        </symbol>
+        <symbol id="folder" viewBox="0 0 24 24">
+          <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />
+        </symbol>
+        <symbol id="clock" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" />
+        </symbol>
+        <symbol id="lock" viewBox="0 0 24 24">
+          <rect x="3" y="11" width="18" height="11" rx="2" />
+          <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+        </symbol>
+      </defs>
+    </svg>
+
+    <header class="wsk-topbar">
+      <div class="wsk-brand">
+        <span class="wsk-brand-mark" aria-hidden="true">PM</span>
+        <span class="wsk-brand-copy"><strong>proxy-manager</strong></span>
+      </div>
+      <div class="wsk-button-row">
+        <!--
+          原型专用：切换视角。真实控制台没有这个控件——主体由服务端按会话决定，
+          前端拿不到的数据根本不会出现在响应里。
+        -->
+        <span class="wsk-badge wsk-warning"
+          ><span class="wsk-dot"></span>演示环境</span
+        >
+        <div class="pm-principal-switch" data-js-only>
+          <label class="wsk-sr-only" for="principal">以什么身份查看（原型）</label>
+          <div class="wsk-select-wrap">
+            <select class="wsk-select" id="principal" data-principal-select>
+              <option value="admin" selected>管理员</option>
+              <option value="user">普通用户</option>
+            </select>
+          </div>
+        </div>
+        <button
+          class="wsk-button wsk-secondary"
+          type="button"
+          data-toast="原型页面不执行退出。"
+          data-js-only
+        >
+          退出
+        </button>
+      </div>
+      <button
+        class="wsk-icon-button"
+        type="button"
+        data-theme-toggle
+        data-js-only
+        aria-label="主题：跟随系统，切换到浅色"
+        title="主题：跟随系统，切换到浅色"
+      >
+        <svg class="wsk-icon wsk-theme-system" aria-hidden="true">
+          <use href="#system"></use>
+        </svg>
+        <svg class="wsk-icon wsk-theme-sun" aria-hidden="true">
+          <use href="#sun"></use>
+        </svg>
+        <svg class="wsk-icon wsk-theme-moon" aria-hidden="true">
+          <use href="#moon"></use>
+        </svg>
+      </button>
+    </header>
+
+    <main id="main-content" tabindex="-1">
+      <div class="wsk-reference-shell">
+        <aside>
+          <details class="pm-nav-disclosure" open>
+            <summary><span>导航</span><span class="pm-nav-current">当前页面</span></summary>
+          <nav class="wsk-reference-nav" aria-label="应用导航">
+            <div class="wsk-reference-brand">
+              <strong>控制台</strong><span>PROXY MANAGER</span>
+            </div>
+            <!--
+              导航按任务分组。普通用户仅保留个人中心，分组标题复用页头的小标，
+              与页头的小标是同一套语言。
+            -->
+            <p class="wsk-panel-title" data-roles="admin user">个人中心</p>
+            <div class="wsk-reference-links">
+              <a href="me.html" data-roles="admin user">我的订阅</a>
+              <a href="me-usage.html" data-roles="admin user">我的用量</a>
+              <!-- 跟随 §4.8 的全局开关：审计关闭时这一项整个不存在，
+                   而不是显示成「无权访问」——没有记录可看和不让你看是两回事。 -->
+              <a href="me-audit.html" data-roles="admin user">我的出站目标</a>
+            </div>
+
+            <p class="wsk-panel-title" data-roles="admin">运行监控</p>
+            <div class="wsk-reference-links">
+              <a href="overview.html" data-roles="admin">总览</a>
+              <a href="nodes.html" data-roles="admin">节点</a>
+              <a href="alerts.html" data-roles="admin">告警</a>
+            </div>
+            <p class="wsk-panel-title" data-roles="admin">用户与用量</p>
+            <div class="wsk-reference-links">
+              <a href="usage.html" data-roles="admin">用量趋势</a>
+              <a href="users.html" data-roles="admin">用户列表</a>
+            </div>
+            <p class="wsk-panel-title" data-roles="admin">系统管理</p>
+            <div class="wsk-reference-links">
+              <a href="settings.html" data-roles="admin">设置</a>
+            </div>
+          </nav>
+          </details>
+        </aside>
+
+        <div class="wsk-reference-content">
+          <!--
+            常驻反馈位。操作结果、降级通道状态、通知连续失败的红条都落在这里，
+            而不是散在各页各自的位置——出问题时人只需要看一个地方。
+          -->
+          <div
+            class="wsk-alert wsk-warning pm-global-notice"
+            role="status"
+            aria-live="polite"
+            data-roles="admin"
+          >
+            <svg class="wsk-icon" aria-hidden="true"><use href="#warning"></use></svg>
+            <div>
+              <strong>fr-01 采集连续失败，已停止入账并把该节点额度置零</strong>
+              <p>
+                没有新鲜且已结算的健康快照时不得刷新正额度（C33）；通道可用时下发全零表。
+                <a href="alerts.html">查看告警 →</a>
+              </p>
+            </div>
+          </div>
+
+          <div class="wsk-page">
+            <div class="wsk-page-head" id="usage">
+              <div>
+                <p class="wsk-panel-title">TRAFFIC</p>
+                <h1 tabindex="-1">用量趋势</h1>
+                <p>
+                  时间桶是<strong>估算值</strong>：时间精度取决于实际成功采集间隔，异常中断窗口需另行核对。
+                </p>
+              </div>
+              <span class="wsk-badge"><code>time_bucket_estimated = true</code></span>
+            </div>
+
+            <section class="wsk-section" aria-labelledby="usage-chart">
+              <div class="wsk-section-head">
+                <h2 id="usage-chart">趋势</h2>
+                <span class="wsk-badge">UTC 整点桶 · 半开区间</span>
+              </div>
+
+              <div class="wsk-toolbar wsk-mb-3" data-js-only>
+                <fieldset class="wsk-segmented">
+                  <legend class="wsk-sr-only">时间范围</legend>
+                  <label><input type="radio" name="range" value="24h" checked /><span>近 24 小时</span></label
+                  ><label><input type="radio" name="range" value="7d" /><span>近 7 天</span></label
+                  ><label><input type="radio" name="range" value="30d" /><span>近 30 天</span></label>
+                </fieldset>
+                <fieldset class="wsk-segmented">
+                  <legend class="wsk-sr-only">粒度</legend>
+                  <label><input type="radio" name="grain" value="hour" checked /><span>按小时</span></label
+                  ><label><input type="radio" name="grain" value="day" /><span>按天</span></label>
+                </fieldset>
+                <div class="wsk-filter">
+                  <label class="wsk-sr-only" for="usage-node">节点</label>
+                  <div class="wsk-select-wrap">
+                    <select class="wsk-select" id="usage-node">
+                      <option>全部节点</option>
+                      <option>hk-01</option>
+                      <option>jp-01</option>
+                      <option>la-01</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+
+              <div class="wsk-panel">
+                <!-- uPlot 的宿主。图例即 tooltip，文案由 chart.js 从服务端返回的
+                     十进制字符串回查，不是把画图用的浮点当精确流量值。 -->
+                <div data-pm-chart aria-label="四向流量趋势"></div>
+                <p class="wsk-alert wsk-danger wsk-mt-2" data-pm-chart-notice hidden></p>
+                <p class="wsk-help wsk-mt-2">
+                  图表用 vendored uPlot（MIT，<code>vendor/</code>，随二进制发布，运行时不走 CDN）。
+                  两条纪律：<strong>tooltip 用服务端返回的十进制字符串格式化</strong>，
+                  以及<strong>请求序号门禁</strong>——晚到的旧响应不得覆盖新选择。
+                  空桶显式画成 0，中间没有流量的那段不会被压没。
+                </p>
+              </div>
+            </section>
+
+            <section class="wsk-section" aria-labelledby="usage-detail">
+              <div class="wsk-section-head">
+                <h3 id="usage-detail">明细</h3>
+                <span class="wsk-badge">小时粒度范围上限 31 天（API 层强制）</span>
+              </div>
+              <div class="wsk-table-wrap">
+                <table class="wsk-table" data-pm-collection="usage-detail">
+                  <caption class="wsk-sr-only">四向流量明细</caption>
+                  <thead>
+                    <tr>
+                      <th scope="col">时间桶（UTC）</th>
+                      <th scope="col">TCP 上行</th>
+                      <th scope="col">TCP 下行</th>
+                      <th scope="col">UDP 上行</th>
+                      <th scope="col">UDP 下行</th>
+                      <th scope="col">合计</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <th scope="row">2026-09-17 10:00</th>
+                      <td class="wsk-tok-number">8,402,117</td>
+                      <td class="wsk-tok-number">91,003,882</td>
+                      <td class="wsk-tok-number">402,118</td>
+                      <td class="wsk-tok-number">1,887,004</td>
+                      <td class="wsk-tok-number">101,695,121</td>
+                    </tr>
+                    <tr>
+                      <th scope="row">2026-09-17 11:00</th>
+                      <td class="wsk-tok-number">12,884,901</td>
+                      <td class="wsk-tok-number">140,223,117</td>
+                      <td class="wsk-tok-number">884,210</td>
+                      <td class="wsk-tok-number">2,004,776</td>
+                      <td class="wsk-tok-number">155,997,004</td>
+                    </tr>
+                    <tr>
+                      <th scope="row">2026-09-17 12:00</th>
+                      <td class="wsk-tok-number">6,113,880</td>
+                      <td class="wsk-tok-number">70,884,210</td>
+                      <td class="wsk-tok-number">318,442</td>
+                      <td class="wsk-tok-number">1,204,118</td>
+                      <td class="wsk-tok-number">78,520,650</td>
+                    </tr>
+                    <tr data-table-empty hidden>
+                      <td colspan="6" class="wsk-help" data-pm-empty-text>这段时间没有入账记录</td>
+                    </tr>
+                    <template data-pm-template>
+                      <tr data-row>
+                        <th scope="row" data-pm="bucket"></th>
+                        <td class="wsk-tok-number" data-pm-digits="tcp_uplink_bytes"></td>
+                        <td class="wsk-tok-number" data-pm-digits="tcp_downlink_bytes"></td>
+                        <td class="wsk-tok-number" data-pm-digits="udp_uplink_bytes"></td>
+                        <td class="wsk-tok-number" data-pm-digits="udp_downlink_bytes"></td>
+                        <td class="wsk-tok-number" data-pm-digits="total_bytes"></td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <footer class="wsk-footer">
+      <div class="wsk-footer-inner">
+        <div class="wsk-footer-legal"><span>proxy-manager · 静态原型 / 示例数据</span></div>
+        <a
+          class="wsk-footer-link"
+          href="https://github.com/KimiChen/wheels/tree/main/web-standard-kit"
+          target="_blank"
+          rel="noopener noreferrer"
+          >web-standard-kit</a
+        >
+      </div>
+    </footer>
+
+    <dialog class="wsk-dialog" data-roles="admin" id="revoke-dialog" aria-labelledby="revoke-title">
+      <div class="wsk-dialog-head">
+        <h2 id="revoke-title">吊销订阅 token</h2>
+        <button class="wsk-icon-button" type="button" data-dialog-close aria-label="关闭" title="关闭">
+          <svg class="wsk-icon" aria-hidden="true"><use href="#x"></use></svg>
+        </button>
+      </div>
+      <div class="wsk-dialog-body">
+        <p>用户 <strong>kimi</strong> 的订阅地址将立即失效。</p>
+        <div class="wsk-alert wsk-danger wsk-mt-5">
+          <svg class="wsk-icon" aria-hidden="true"><use href="#warning"></use></svg>
+          <div>
+            <strong>该用户所有已导入的客户端会静默失效</strong>
+            <p>他们不会收到任何提示，只会发现节点全部消失。吊销前请先通知本人。</p>
+          </div>
+        </div>
+      </div>
+      <div class="wsk-dialog-foot">
+        <button class="wsk-button wsk-secondary" type="button" data-dialog-close>取消</button
+        ><button class="wsk-button" type="button" data-dialog-close data-toast="原型页面不执行吊销。" data-js-only>
+          确认吊销
+        </button>
+      </div>
+    </dialog>
+
+    <div class="wsk-toast-region" id="toast-region" aria-live="polite"></div>
+  </body>
+</html>

@@ -22,7 +22,13 @@ packaging 里的单元用 `-C /etc/sing-box-plus`：那是配置目录模式，�
 直到下一次重启——可能是计划内的，也可能是半夜掉电之后。实测就是这么踩的，
 服务因此空转了 98 秒才被发现。
 
-额度计划、采集器配置这类文件放在别处，例如 `/etc/sing-box-plus-collector/`。
+额度计划、采集器配置这类文件放在别处，例如 `/etc/sing-box-plus-reference-collector/`。
+
+`tests/reference_collector.py` 是**参考**实现，它的 systemd 单元与目录一律带 `reference` 字样
+（`sbp-reference-collector.service` / `.timer`、`/var/lib/` 与 `/etc/` 下的
+`sing-box-plus-reference-collector/`）。不带 `reference` 的那一组名字留给正式采集器，
+参考实现不占用。**两者不得同时对同一个账本写入**：差分基线是有状态的，
+两个进程各持一份会把对方的增量算成自己的。
 只有 sing-box-plus 自己的配置能进 `-C` 指向的目录。
 
 ### 配置门禁必须用本项目的二进制
@@ -125,7 +131,7 @@ UDS 不得直接映射为公网监听。
 按自己累计的「本周期已用」算剩余额度、每轮重推、先入账再算再推：
 
 ```bash
-tests/reference_collector.py   --socket /run/sing-box-plus/user-stats.sock   --ledger /var/lib/sing-box-plus-collector   --first-snapshot baseline   --quota-socket /run/sing-box-plus/quota.sock   --quota-bytes 107374182400          # 每身份 100 GiB，四向之和
+tests/reference_collector.py   --socket /run/sing-box-plus/user-stats.sock   --ledger /var/lib/sing-box-plus-reference-collector   --first-snapshot baseline   --quota-socket /run/sing-box-plus/quota.sock   --quota-bytes 107374182400          # 每身份 100 GiB，四向之和
 ```
 
 生产上用 systemd timer 每分钟触发一次即可，不要用 `nohup` 循环——后者不扛重启。
@@ -141,7 +147,7 @@ tests/reference_collector.py   --socket /run/sing-box-plus/user-stats.sock   --l
 ```
 
 ```bash
-tests/reference_collector.py … --quota-plan /etc/sing-box-plus-collector/quota-plan.json
+tests/reference_collector.py … --quota-plan /etc/sing-box-plus-reference-collector/quota-plan.json
 ```
 
 计划文件每轮重新读取，**改额度只改这个文件即可**，不需要编辑 systemd 单元、也不需要
@@ -159,7 +165,7 @@ tests/reference_collector.py … --quota-plan /etc/sing-box-plus-collector/quota
 开新计费周期（清零已用、保留基线）：
 
 ```bash
-tests/reference_collector.py --ledger /var/lib/sing-box-plus-collector --reset-period
+tests/reference_collector.py --ledger /var/lib/sing-box-plus-reference-collector --reset-period
 ```
 
 **不要**为了「重置额度」去删账本目录：基线一并没了之后，下一次采集会把快照里的全部历史
@@ -168,8 +174,8 @@ tests/reference_collector.py --ledger /var/lib/sing-box-plus-collector --reset-p
 查看当前剩余与是否有身份已耗尽：
 
 ```bash
-python3 -c "import json;d=json.load(open('/var/lib/sing-box-plus-collector/state.json'));print(d['usage'])"
-grep quota_pushed /var/lib/sing-box-plus-collector/ledger.jsonl | tail -1
+python3 -c "import json;d=json.load(open('/var/lib/sing-box-plus-reference-collector/state.json'));print(d['usage'])"
+grep quota_pushed /var/lib/sing-box-plus-reference-collector/ledger.jsonl | tail -1
 ```
 
 ### 闸断的两点已知表现

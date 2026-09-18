@@ -1,0 +1,30 @@
+[package]
+name = "proxy-manager-wire"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT"
+description = "主控与 proxy-manager-agent 之间的共享合同：封闭命令集、应用层 HMAC、精确 leaf 授信"
+
+# 这个 crate 存在的唯一理由：**合同只能有一份定义**。
+#
+# 主控与 agent 是两个二进制，HMAC 的 canonical 编码、命令集的枚举、
+# 以及「信任哪张 leaf」的判定必须逐字节一致。把它们各写一份，
+# 就是 docs/integration-contract.md §2.3 反对的那种「两份定义总会漂移」——
+# 只不过这次漂移发生在同一个仓库内部，更难被发现。
+#
+# 依赖刻意压到最小：agent 装在节点上，不该为了一个签名函数把 sqlx / axum
+# 一起搬过去。这里没有数据库、没有 HTTP 服务端框架。
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+hmac = "0.12"                                      # 常量时间校验由 hmac 的 verify_slice 提供
+hex = "0.4"
+rand = "0.8"                                       # nonce 与 HMAC key 生成
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-pki-types = { version = "1", features = ["std"] }
+rustls-pemfile = "2"
+x509-parser = "0.16"                               # verifier 内做 EKU/SAN/有效期的结构化断言
+thiserror = "2"
+tokio = { version = "1", features = ["net", "io-util", "time", "rt", "sync", "macros"] }

@@ -1,0 +1,18 @@
+<!doctype html>
+<!--
+  原型入口。首次体验默认普通用户；已有演示角色由 app.js 恢复。
+  管理员进入总览，普通用户进入个人中心查看默认授权节点。
+-->
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="robots" content="noindex, nofollow" />
+    <script src="assets/app.js" defer></script>
+    <script src="assets/api.js" defer></script>
+    <title>proxy-manager 控制台</title>
+  </head>
+  <body data-principal="user">
+    <p><a href="me.html">进入个人中心</a></p>
+  </body>
+</html>

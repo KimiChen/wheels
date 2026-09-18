@@ -1,0 +1,194 @@
+<!doctype html>
+<!--
+  proxy-manager 控制台 · 登录页（静态原型）
+
+  单独成页而不是 index.html 的一个视图：它是未认证页面，缓存头与已登录页不同
+  （README §4.11：登录态页面 private, no-store + Vary: Cookie）。
+
+  样式与脚本暂时相对引用同仓的 web-standard-kit；M4 打包时按 §5 的口径
+  vendored 进 assets/ 随二进制发布。
+-->
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>登录 · proxy-manager</title>
+    <script src="assets/theme.js"></script>
+    <link rel="stylesheet" href="../../web-standard-kit/style.css" />
+    <link rel="stylesheet" href="assets/console.css" />
+    <script src="../../web-standard-kit/script.js" defer></script>
+    <script src="assets/app.js" defer></script>
+    <script src="assets/api.js" defer></script>
+  </head>
+  <body class="pm-login">
+    <a class="wsk-skip-link" href="#main-content">跳到主要内容</a>
+
+    <svg class="wsk-icon-sprite" aria-hidden="true">
+      <defs>
+        <symbol id="sun" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="4" />
+          <path
+            d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.66 6.34l1.41-1.41"
+          />
+        </symbol>
+        <symbol id="system" viewBox="0 0 24 24">
+          <rect x="2" y="3" width="20" height="14" rx="2" />
+          <path d="M8 21h8M12 17v4" />
+        </symbol>
+        <symbol id="moon" viewBox="0 0 24 24">
+          <path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8Z" />
+        </symbol>
+        <symbol id="lock" viewBox="0 0 24 24">
+          <rect x="3" y="11" width="18" height="11" rx="2" />
+          <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+        </symbol>
+        <symbol id="warning" viewBox="0 0 24 24">
+          <path
+            d="m21.73 18-8-14a2 2 0 0 0-3.46 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"
+          />
+          <path d="M12 9v4M12 17h.01" />
+        </symbol>
+      </defs>
+    </svg>
+
+    <header class="wsk-topbar">
+      <div class="wsk-brand">
+        <span class="wsk-brand-mark" aria-hidden="true">PM</span>
+        <span class="wsk-brand-copy"><strong>proxy-manager</strong></span>
+      </div>
+      <span class="wsk-badge wsk-warning"
+        ><span class="wsk-dot"></span>演示环境</span
+      >
+      <button
+        class="wsk-icon-button"
+        type="button"
+        data-theme-toggle
+        data-js-only
+        aria-label="主题：跟随系统，切换到浅色"
+        title="主题：跟随系统，切换到浅色"
+      >
+        <svg class="wsk-icon wsk-theme-system" aria-hidden="true">
+          <use href="#system"></use>
+        </svg>
+        <svg class="wsk-icon wsk-theme-sun" aria-hidden="true">
+          <use href="#sun"></use>
+        </svg>
+        <svg class="wsk-icon wsk-theme-moon" aria-hidden="true">
+          <use href="#moon"></use>
+        </svg>
+      </button>
+    </header>
+
+    <main id="main-content" tabindex="-1">
+      <div class="wsk-page">
+        <div class="wsk-auth-grid">
+          <div class="wsk-auth-card">
+            <p class="wsk-panel-title">SIGN IN</p>
+            <h1 tabindex="-1">欢迎回来</h1>
+            <p class="wsk-help wsk-mt-2">
+              使用企业账号登录，统一管理你的订阅、节点与用量。
+            </p>
+
+            <button
+              class="wsk-button wsk-auth-submit wsk-mt-5"
+              type="button"
+              data-toast="原型页面未连接身份提供方。"
+              data-js-only
+            >
+              飞书扫码登录
+            </button>
+            <p class="wsk-help wsk-mt-2">
+              授权码经浏览器重定向，仅取最小只读 scope。
+            </p>
+
+            <button
+              class="wsk-button wsk-secondary wsk-auth-submit wsk-mt-5"
+              type="button"
+              data-toast="原型页面未连接身份提供方。"
+              data-js-only
+            >
+              企业微信扫码登录
+            </button>
+            <p class="wsk-help wsk-mt-2">
+              <code>snsapi_base</code> 静默授权，只取 <code>userid</code>；
+              不取头像与手机号——主控不需要也不存这些字段。
+            </p>
+
+            <p class="wsk-help wsk-mt-5">
+              普通用户首次登录即获得默认节点访问，直接进入个人中心。
+              管理员进入控制台，管理节点、用户与授权设置。
+            </p>
+            <div class="pm-demo-links" data-js-only>
+              <span>体验静态原型 · 不进行真实登录或授权</span>
+              <a class="wsk-button" href="me.html" data-demo-principal="user">预览普通用户</a>
+              <a class="wsk-button wsk-secondary" href="overview.html" data-demo-principal="admin">预览管理员</a>
+            </div>
+          </div>
+
+          <div>
+            <div class="wsk-panel">
+              <p class="wsk-panel-title">部署提示</p>
+              <h2>企业微信需要先配可信 IP</h2>
+              <p class="wsk-help wsk-mt-2">
+                自建应用必须先设置可信域名或接收消息服务器 URL，再配置企业可信 IP；
+                否则调接口返回 <code>60020</code>。这条把主控的<strong>出口 IP</strong>
+                绑成了一等配置项（§10 R5）。
+              </p>
+              <div class="wsk-status-list wsk-mt-5">
+                <div>
+                  <span>飞书应用凭据<small>tenant_access_token 有效期 2 小时</small></span>
+                  <strong class="wsk-success-text">已配置</strong>
+                </div>
+                <div>
+                  <span>企业微信可信 IP<small>当前出口地址已登记</small></span>
+                  <strong class="wsk-success-text">已配置</strong>
+                </div>
+                <div>
+                  <span>群机器人降级通道<small>凭据失效时的兜底</small></span>
+                  <strong class="wsk-success-text">可用</strong>
+                </div>
+              </div>
+            </div>
+
+            <details class="wsk-panel wsk-mt-5">
+              <summary>
+                <strong>本地应急管理员</strong>
+              </summary>
+              <p class="wsk-help wsk-mt-2">
+                默认禁用。存在的理由很具体：企业微信可信 IP 一旦因主控换 IP 而失配，
+                IM 登录会整体失效，那时不能把所有人锁在门外。
+                启用需改配置文件，登录后强制二次确认。
+              </p>
+              <div class="wsk-alert wsk-warning wsk-mt-5">
+                <svg class="wsk-icon" aria-hidden="true">
+                  <use href="#warning"></use>
+                </svg>
+                <div>
+                  <strong>当前已禁用</strong>
+                  <p>启用后每次登录都会写入审计，并在控制台顶部常驻提示。</p>
+                </div>
+              </div>
+            </details>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <footer class="wsk-footer">
+      <div class="wsk-footer-inner">
+        <div class="wsk-footer-legal"><span>proxy-manager · 静态原型 / 示例数据</span></div>
+        <a
+          class="wsk-footer-link"
+          href="https://github.com/KimiChen/wheels/tree/main/web-standard-kit"
+          target="_blank"
+          rel="noopener noreferrer"
+          >web-standard-kit</a
+        >
+      </div>
+    </footer>
+
+    <div class="wsk-toast-region" id="toast-region" aria-live="polite"></div>
+  </body>
+</html>
