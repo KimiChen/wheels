@@ -530,12 +530,13 @@ async fn 管理员取得到计费身份列表() {
 /// 「没配 `[subscription]`」那一支由 `tests/m5` 的 `没配订阅时明确回未启用` 钉住。
 #[tokio::test]
 async fn 未启用的能力明确回未启用() {
-    let api = Api::new().await;
+    let api = Api::without_audit().await;
     let admin = api.admin().await;
-    let (status, body, _) = api.get("/api/v1/me/audit/access", Some(&admin)).await;
-    assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(error_code(&body), "audit_not_enabled");
-    assert_eq!(body["error"]["detail"]["milestone"], "M6");
+    for path in ["/api/v1/me/audit/access", "/api/v1/users/1/audit/access"] {
+        let (status, body, _) = api.get(path, Some(&admin)).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{path}");
+        assert_eq!(error_code(&body), "audit_not_enabled", "{path}");
+    }
 }
 
 /// 告警页接的是**已经落库的事实**：四项判据置顶。

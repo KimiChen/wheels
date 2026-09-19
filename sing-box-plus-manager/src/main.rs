@@ -572,6 +572,7 @@ async fn run_service(config_dir: &std::path::Path) -> anyhow::Result<ExitCode> {
         nodes,
         sso,
         config.server.subscription.clone(),
+        config.server.audit.clone(),
         listener,
         shutdown_rx.clone(),
     ));

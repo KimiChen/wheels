@@ -6,5 +6,7 @@
 
 pub mod filter;
 pub mod health;
+pub mod queries;
+pub mod query;
 pub mod record;
 pub mod sync;

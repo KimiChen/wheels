@@ -43,6 +43,9 @@ pub struct AppState {
     pub subscription: Option<Arc<crate::config::SubscriptionConfig>>,
     /// 凭据文件的热源。与名单同一条纪律：按 mtime 重读，读不出来失败关闭。
     credentials: Option<Arc<crate::subscription::CredentialSource>>,
+    /// 审计镜像树。`None` 表示没配 `[audit]`——那时审计端点回 `audit_not_enabled`，
+    /// **不是 403 也不是 404**：没有记录可看和不让你看是两回事（D18）。
+    pub audit: Option<Arc<crate::config::AuditConfig>>,
     /// 没配 SSO 时求值用的空名单。**所有人都是普通用户**，不是所有人都是管理员——
     /// 认证代码的失败模式是沉默地放行，空名单最容易被误当成「还没配，先都放行」。
     empty_roster: Arc<crate::sso::roster::Roster>,
@@ -121,6 +124,7 @@ pub fn router(
     nodes: Arc<Vec<NodeConfig>>,
     sso: Option<crate::sso::Sso>,
     subscription: Option<crate::config::SubscriptionConfig>,
+    audit: Option<crate::config::AuditConfig>,
 ) -> Router {
     let sso_enabled = sso.is_some();
     let credentials = subscription
@@ -134,6 +138,7 @@ pub fn router(
         sso,
         subscription,
         credentials,
+        audit: audit.map(Arc::new),
         empty_roster: Arc::new(crate::sso::roster::Roster::empty()),
     };
     let router = Router::new()
@@ -160,9 +165,15 @@ pub fn router(
         .route("/api/v1/usage/trend", get(trend::usage_trend))
         .route("/api/v1/alerts", get(routes::list_alerts))
         .route("/api/v1/subscriptions/{user_id}", get(routes::user_subscription))
-        // 出站目标审计属于 M6 的另一半，现在明确回「未启用」而不是 404——
+        // 出站目标审计。没配 `[audit]` 时回 `audit_not_enabled` 而不是 404——
         // 404 会被读成「打错了」，而真相是「这个能力还没开」。
-        .route("/api/v1/me/audit/access", get(routes::audit_not_enabled))
+        //
+        // 两条路由走**同一个函数**，只是数据主体的来源不同：`/me` 取会话主体，
+        // `/users/{id}` 取路径参数并要求管理员。C35 明写两者执行同一套过滤规则，
+        // 而写成两份的话它们会在某次改动里分家——分家的方向几乎总是管理员
+        // 那一侧更宽松。
+        .route("/api/v1/me/audit/access", get(routes::me_audit_access))
+        .route("/api/v1/users/{user_id}/audit/access", get(routes::user_audit_access))
         // 退出。**是写操作**，所以走 CSRF 双提交——否则第三方页面可以把人踢下线。
         .route("/api/v1/auth/logout", axum::routing::post(auth::logout));
 
@@ -211,10 +222,11 @@ pub async fn serve(
     nodes: Arc<Vec<NodeConfig>>,
     sso: Option<crate::sso::Sso>,
     subscription: Option<crate::config::SubscriptionConfig>,
+    audit: Option<crate::config::AuditConfig>,
     listener: tokio::net::TcpListener,
     shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> std::io::Result<()> {
-    let app = router(store, nodes, sso, subscription);
+    let app = router(store, nodes, sso, subscription, audit);
     let mut shutdown = shutdown;
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
