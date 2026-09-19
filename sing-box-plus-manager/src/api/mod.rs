@@ -178,6 +178,7 @@ pub fn router(
 
     // 订阅端点**不在 `/api/v1` 下**，不认会话、只认 token（§4.7）。
     // 客户端是定时拉的，带不了 cookie，也不该带。
+    // 文件名的前缀决定这份订阅里的节点拨哪个 host（内网 / 公网），token 两种共用。
     let router =
         if subscription_enabled { router.route("/sub/{name}", get(sub::serve)) } else { router };
 

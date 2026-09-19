@@ -135,6 +135,8 @@ svg[role="img"] { max-width: 100%; }
 .pm-login .wsk-footer { margin-left: 0; }
 .pm-login .pm-demo-links { border-top: 1px solid var(--border); padding-top: 20px; margin-top: 26px; display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .pm-demo-links > span { width: 100%; color: var(--muted); font-size: 11px; }
+.pm-subscription-entry + .pm-subscription-entry { border-top: 1px solid var(--border); padding-top: 18px; }
+.pm-subscription-entry h3 { font-size: 14px; }
 .pm-subscription-address { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: none; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; padding: 18px; font-size: 12px; }
 .pm-subscription-address .wsk-tok-string { color: var(--accent); }
 

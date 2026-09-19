@@ -677,10 +677,28 @@ async fn subscription_view(state: &AppState, user_id: i64, login_name: &str) -> 
         // 给使用者看的是文案，给运维看的是这个键——两者的处置完全不同：
         // 缺身份是容量问题，缺 uPSK 是部署问题，缺 token 是签发问题。
         "unusable_reason": reason,
-        // 客户端里显示的名字。与 `Content-Disposition` 的文件名、
-        // 订阅正文里的注释是同一个串——三处对不上时人会以为导错了订阅。
-        "profile_name": crate::subscription::render::profile_name(login_name),
-        "url": token.as_deref().map(|token| config.subscription_url(token)),
+        // **每一种拨法一条地址。** 这批入口是入口机上的 NAT 转发，
+        // 内网与公网走的是同一条规则、同一个端口、同一份凭据、**同一个 token**——
+        // 差别只有客户端拨哪个 host。所以给的是同一份订阅的两种拨法，
+        // 不是两份订阅：吊销一次两条一起失效，这正是想要的。
+        "subscriptions": config
+            .sources
+            .iter()
+            .map(|source| {
+                json!({
+                    "prefix": source.prefix,
+                    // **不回 host。** 个人端点不带连接细节（§4.11）——页面会被截图、
+                    // 会被投屏，而「公网 / 内网」这句话已经够人判断该用哪一份了。
+                    // 真要知道拨哪个地址，订阅正文里有，那是给客户端的。
+                    "note": source.note,
+                    // 客户端里显示的名字。与 `Content-Disposition` 的文件名、
+                    // 订阅正文里的注释是同一个串——三处对不上时人会以为导错了订阅。
+                    "profile_name":
+                        crate::subscription::render::profile_name(login_name, source),
+                    "url": token.as_deref().map(|token| config.subscription_url(token, source)),
+                })
+            })
+            .collect::<Vec<_>>(),
         // 身份名不是秘密，而且它是对账时唯一能把人和节点上的条目对上的东西。
         // 没有身份时是 null——那时订阅是一份明说的空配置，不是一份坏配置。
         "identity": identity,

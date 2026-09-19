@@ -244,26 +244,51 @@
             <section class="wsk-section" aria-labelledby="me-sub">
               <div class="wsk-section-head">
                 <h2 id="me-sub">订阅地址</h2>
-                <div class="wsk-button-row">
-                  <!-- 只有真的有地址时才说「有效」。没有地址还亮着绿徽标，
-                       会让人以为是页面没加载出来，然后反复刷新。 -->
-                  <span class="wsk-badge wsk-success" data-pm-sub-valid data-pm-state>有效</span>
-                  <button
-                    class="wsk-button wsk-secondary"
-                    type="button"
-                    data-pm-copy=".pm-subscription-address code"
-                    data-pm-state
-                    data-js-only
-                  >
-                    复制
-                  </button>
-                </div>
+                <!-- 只有真的能用时才说「有效」。没有地址还亮着绿徽标，
+                     会让人以为是页面没加载出来，然后反复刷新。 -->
+                <span class="wsk-badge wsk-success" data-pm-sub-valid data-pm-state>有效</span>
               </div>
               <p class="wsk-help" data-pm-sub-disabled data-pm-state hidden>
                 主控没有配置订阅出口（<code>[subscription]</code>），所以现在没有订阅地址可发。
                 这是一项服务端配置，不是你的账号问题。
               </p>
-              <pre class="wsk-code-panel pm-subscription-address" data-pm-state><code data-pm="url">https://&lt;控制台域名&gt;/sub/Proxy-<span class="wsk-tok-string">••••••••••••••••</span>.yaml</code></pre>
+              <!--
+                **一种拨法一条地址。** 这批入口在入口机上是 NAT 转发，内网地址与公网地址
+                走的是同一条规则、同一个端口、同一份凭据、**同一个 token**——
+                差别只有客户端拨哪个 host。所以这是同一份订阅的两种拨法，不是两份订阅：
+                吊销一次两条一起失效。
+                页面上不显示那两个 IP：个人端点不带连接细节（§4.11），
+                页面会被截图、会被投屏，而「公网 / 内网」这句话已经够人判断该用哪一份。
+              -->
+              <div data-pm-collection="subscriptions">
+                <!-- 这一条是示例，live 模式下由 neutralize/renderRows 整体清掉。
+                     地址故意打码：它不该看起来像一个能用的地址。 -->
+                <div class="pm-subscription-entry wsk-mt-5">
+                  <div class="wsk-section-head wsk-compact">
+                    <h3>公网</h3>
+                    <div class="wsk-button-row">
+                      <span class="wsk-badge">proxyWan-你的账号</span>
+                      <button class="wsk-button wsk-secondary" type="button"
+                              data-pm-copy-self data-js-only>复制</button>
+                    </div>
+                  </div>
+                  <pre class="wsk-code-panel pm-subscription-address"><code>https://&lt;控制台域名&gt;/sub/proxyWan-<span class="wsk-tok-string">••••••••••••••••</span>.yaml</code></pre>
+                </div>
+                <div data-table-empty hidden class="wsk-help"><span data-pm-empty-text>还没有订阅地址</span></div>
+                <template data-pm-template>
+                  <div class="pm-subscription-entry wsk-mt-5">
+                    <div class="wsk-section-head wsk-compact">
+                      <h3 data-pm="note">—</h3>
+                      <div class="wsk-button-row">
+                        <span class="wsk-badge" data-pm="profile_name">—</span>
+                        <button class="wsk-button wsk-secondary" type="button"
+                                data-pm-copy-self data-js-only>复制</button>
+                      </div>
+                    </div>
+                    <pre class="wsk-code-panel pm-subscription-address"><code data-pm="url">—</code></pre>
+                  </div>
+                </template>
+              </div>
               <p class="wsk-help wsk-mt-2">
                 <strong>这个地址本身就是凭据</strong>——拿到它的人就能用你的额度上网，
                 所以不要发进任何群，也不要贴进工单。

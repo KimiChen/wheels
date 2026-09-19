@@ -153,6 +153,19 @@ impl Api {
             proxy_manager::config::SubscriptionConfig {
                 public_base_url: "https://pm.example.com".into(),
                 credentials_path: creds,
+                // 两种到达方式，共用同一批端口与凭据——与生产同形。
+                sources: vec![
+                    proxy_manager::config::EntrySource {
+                        prefix: "proxyWan-".into(),
+                        host: "203.0.113.1".into(),
+                        note: "公网".into(),
+                    },
+                    proxy_manager::config::EntrySource {
+                        prefix: "proxyLan-".into(),
+                        host: "198.51.100.1".into(),
+                        note: "内网".into(),
+                    },
+                ],
                 groups: vec![proxy_manager::config::ProxyGroup {
                     name: "手动选择".into(),
                     icon: None,
@@ -161,13 +174,13 @@ impl Api {
                 entries: vec![
                     proxy_manager::config::Entry {
                         name: "HK".into(),
-                        host: "203.0.113.1".into(),
+                        host: None,
                         port: 65002,
                         node_id: "node-a".into(),
                     },
                     proxy_manager::config::Entry {
                         name: "JP".into(),
-                        host: "203.0.113.2".into(),
+                        host: None,
                         port: 65003,
                         node_id: "node-a".into(),
                     },
