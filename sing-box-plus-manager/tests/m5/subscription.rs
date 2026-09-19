@@ -770,12 +770,15 @@ fn 密码在yaml里必须加引号() {
             .into_iter()
             .collect(),
     };
+    // 这个夹具里的节点没有级别要求，所以全可见。级别过滤另有用例。
+    let visible = std::collections::BTreeSet::from(["n"]);
     let yaml = proxy_manager::subscription::render::clash_yaml(
         &config,
         ss_source(&config),
         &credentials,
         "slot-01",
         "proxyWan-alice",
+        &visible,
     );
     // SS2022 带 EIH 时 Clash 的 password 是 `<iPSK>:<uPSK>`。
     assert!(yaml.contains(r#"password: "a+b/c=:x+y/z=""#), "实际：{yaml}");
@@ -1185,4 +1188,62 @@ fn me页面取了几个端点就要传几样给render() {
         keys, fetched,
         "me.html 的 load 取了 {fetched} 个端点，却只往 render 传了 {keys} 样：{returned:?}"
     );
+}
+
+/// **级别不够的节点整条入口不出现，而且组成员要跟着一起消失。**
+///
+/// 这一条守的是一个会让整份订阅报废的坑：代理组里写的是入口名，
+/// 过滤掉入口却留着组员，Clash 会因为「组里引用了不存在的节点」
+/// **拒绝整份配置**——低等级用户拿到的不是「少几个节点」，是完全不能用，
+/// 而客户端只说一句「订阅格式错误」，指不到这里。
+#[test]
+fn 看不见的节点连同组成员一起消失() {
+    let config = fixture_config();
+    let credentials = proxy_manager::config::Credentials {
+        method: "2022-blake3-aes-128-gcm".into(),
+        ipsk: "aaa".into(),
+        upsk: [("slot-01".to_string(), "bbb".to_string())].into_iter().collect(),
+        uuid: Default::default(),
+    };
+    // 夹具里只有一条入口，落在节点 "n" 上。把它挡在外面。
+    let nothing = std::collections::BTreeSet::new();
+    let yaml = proxy_manager::subscription::render::clash_yaml(
+        &config,
+        ss_source(&config),
+        &credentials,
+        "slot-01",
+        "Lan-alice",
+        &nothing,
+    );
+
+    assert!(!yaml.contains("\"HK\""), "看不见的入口不该出现在 proxies 里：{yaml}");
+    // **组里也不许再提它。** 这一条才是这个用例真正在守的东西。
+    let groups = &yaml[yaml.find("\nproxy-groups:").expect("应当有代理组段")..];
+    assert!(!groups.contains("HK"), "组成员没跟着过滤掉，整份配置会被客户端拒绝：{groups}");
+    // 组不能变成空的——空组同样会让 Clash 拒绝整份配置。
+    assert!(groups.contains("DIRECT"), "过滤之后组里至少要留下一个成员：{groups}");
+}
+
+/// 反向：级别够时一切照旧，一条都不少。
+#[test]
+fn 级别够时入口与组成员都在() {
+    let config = fixture_config();
+    let credentials = proxy_manager::config::Credentials {
+        method: "2022-blake3-aes-128-gcm".into(),
+        ipsk: "aaa".into(),
+        upsk: [("slot-01".to_string(), "bbb".to_string())].into_iter().collect(),
+        uuid: Default::default(),
+    };
+    let all = std::collections::BTreeSet::from(["n"]);
+    let yaml = proxy_manager::subscription::render::clash_yaml(
+        &config,
+        ss_source(&config),
+        &credentials,
+        "slot-01",
+        "Lan-alice",
+        &all,
+    );
+    assert!(yaml.contains("  - name: \"HK\""), "{yaml}");
+    let groups = &yaml[yaml.find("\nproxy-groups:").expect("应当有代理组段")..];
+    assert!(groups.contains("HK"), "级别够就不该被过滤：{groups}");
 }

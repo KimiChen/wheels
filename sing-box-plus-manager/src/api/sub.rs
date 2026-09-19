@@ -76,7 +76,21 @@ async fn build(
     if !identity.is_empty() && !credentials.upsk.contains_key(&identity) {
         tracing::error!(identity = %identity, "凭据文件里没有这个身份的 uPSK（P1）");
     }
-    let yaml = render::clash_yaml(config, source, &credentials, &identity, &profile);
+    // 档位决定看得见哪些节点。读不出来时按最低级算——少看见几个节点是一个
+    // 看得见的故障，而按最高级算是悄悄解除限制。
+    let group = subscription::quota_group_of(&app.store, subscriber.user_id).await.unwrap_or_else(
+        |error| {
+            tracing::error!(%error, user_id = subscriber.user_id, "读不到档位：按最低级渲染");
+            "normal".to_string()
+        },
+    );
+    let visible: std::collections::BTreeSet<&str> = config
+        .entries
+        .iter()
+        .map(|entry| entry.node_id.as_str())
+        .filter(|node_id| crate::quota::level::can_see(&app.nodes, node_id, &group))
+        .collect();
+    let yaml = render::clash_yaml(config, source, &credentials, &identity, &profile, &visible);
 
     let usage = subscription::cycle_usage(&app.store, subscriber.user_id).await.unwrap_or_default();
     let expire = subscription::cycle_expire_unix().unwrap_or(0);

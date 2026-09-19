@@ -49,6 +49,12 @@ pub struct NodeConfig {
     pub materials_dir: PathBuf,
     #[serde(default)]
     pub quota_control: Option<NodeQuotaControl>,
+    /// 看得见这台节点所需的**档位级别**（`quota::level`）。缺省 0 = 人人可见。
+    ///
+    /// **它只管订阅里出不出现，不是拦截**：四台上同一个身份用的是同一份凭据，
+    /// 一个曾经拿到过地址的人照样连得上。理由与代价见 `quota::level` 的模块文档。
+    #[serde(default)]
+    pub min_level: i64,
 }
 
 #[derive(Debug, Clone, Deserialize)]

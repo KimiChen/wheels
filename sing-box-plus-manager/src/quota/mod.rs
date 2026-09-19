@@ -16,6 +16,7 @@
 pub mod allocate;
 pub mod converge;
 pub mod dispatch;
+pub mod level;
 pub mod pool;
 pub mod service;
 pub mod settings;

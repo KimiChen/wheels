@@ -30,8 +30,20 @@ pub fn clash_yaml(
     credentials: &Credentials,
     identity: &str,
     profile_name: &str,
+    visible: &std::collections::BTreeSet<&str>,
 ) -> String {
-    let (entries, groups) = (&config.entries, &config.groups);
+    // **级别不够的节点整条入口不出现**（`quota::level`）。
+    //
+    // 只管出不出现，不是拦截：四台上同一个身份用的是同一份凭据。
+    let entries: Vec<&crate::config::Entry> =
+        config.entries.iter().filter(|entry| visible.contains(entry.node_id.as_str())).collect();
+    // **组成员必须跟着一起过滤。** 代理组里写的是入口名，过滤掉入口却留着组员，
+    // Clash 会因为「组里引用了不存在的节点」**拒绝整份配置**——
+    // 低等级用户拿到的就不是「少几个节点」，而是完全不能用，
+    // 而客户端只说一句「订阅格式错误」。
+    let kept: std::collections::BTreeSet<&str> =
+        entries.iter().map(|entry| entry.name.as_str()).collect();
+    let groups = &config.groups;
     // 这种拨法要的凭据在不在。SS 要 uPSK，VLESS 要 UUID——**分开判**：
     // 凭据文件是分两次长出来的（uuid 那一半 2026-09-20 才加），
     // 一份只有 uPSK 的旧文件对内网那份订阅完全够用，不该连带把它也打成空配置。
@@ -60,7 +72,7 @@ pub fn clash_yaml(
     out.push_str(HEAD);
 
     out.push_str("\nproxies:\n");
-    for entry in entries {
+    for entry in &entries {
         // **入口名逐字复用，两种协议一模一样。** 代理组的成员写的就是这些名字，
         // 名字一变三个组与两份规则集模板都要跟着改；复用之后
         // `proxy-groups` 与 `rules` 两段在两份订阅里**逐字节相同**。
@@ -120,8 +132,21 @@ pub fn clash_yaml(
             out.push_str(&format!("    icon: {}\n", yaml_string(icon)));
         }
         out.push_str("    type: select\n    proxies:\n");
+        let mut written = 0;
         for member in &group.proxies {
+            // 入口名要在可见集合里；内置目标与组名原样放行
+            // （`validate` 已经保证组员只可能是这三类之一）。
+            let is_entry = config.entries.iter().any(|entry| entry.name == *member);
+            if is_entry && !kept.contains(member.as_str()) {
+                continue;
+            }
             out.push_str(&format!("      - {}\n", yaml_string(member)));
+            written += 1;
+        }
+        // **空组同样会让 Clash 拒绝整份配置。** 三个组现在都带 DIRECT，
+        // 所以走不到这里；但「现在都带」不是约束，加一个纯节点组就会走到。
+        if written == 0 {
+            out.push_str("      - \"DIRECT\"\n");
         }
     }
 
