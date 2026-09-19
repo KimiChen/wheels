@@ -4,5 +4,7 @@
 //! `ledger backup` 走 `VACUUM INTO`，只碰那一个 `.db` 文件，于是「用户 → 域名」
 //! 的明细天然不会被复制进每一份账本备份。
 
+pub mod filter;
 pub mod health;
+pub mod record;
 pub mod sync;
