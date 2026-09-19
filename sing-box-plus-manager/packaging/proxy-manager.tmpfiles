@@ -18,3 +18,11 @@ d /var/lib/proxy-manager  0700 proxy-manager proxy-manager -
 # 而让 root 打开一个 WAL 库会在服务停着时留下 root 拥有的 -wal/-shm，
 # 之后服务再也写不进去。手工的、动手术之前的那种备份仍然放 /root/backup。
 d /var/backups/proxy-manager 0700 proxy-manager proxy-manager -
+
+# 出站目标审计的本机镜像树，每台节点一个子目录。
+#
+# 与账本分开是刻意的（C24）：`ledger backup` 走 `VACUUM INTO`，只碰那一个 `.db`
+# 文件，于是「用户 → 域名」的明细天然不会被复制进每一份账本备份。放进
+# /var/lib/proxy-manager/ 下面就会被上面那条 0700 覆盖，但它仍然是**另一棵树**——
+# 备份与恢复都不碰它。
+d /var/lib/proxy-manager/audit 0700 proxy-manager proxy-manager -

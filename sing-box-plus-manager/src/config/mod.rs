@@ -14,7 +14,8 @@ mod subscription;
 
 pub use nodes::{FirstSnapshotPolicy, NodeConfig, NodeQuotaControl, QuotaAction};
 pub use server::{
-    AlertsConfig, CollectConfig, ImConfig, ListenConfig, QuotaConfig, ServerConfig, StorageConfig,
+    AlertsConfig, AuditConfig, CollectConfig, ImConfig, ListenConfig, QuotaConfig, ServerConfig,
+    StorageConfig,
 };
 pub use sso::{SsoConfig, DEFAULT_QUOTA_GROUP, QUOTA_GROUPS};
 pub use subscription::{Credentials, Entry, EntrySource, ProxyGroup, SubscriptionConfig};

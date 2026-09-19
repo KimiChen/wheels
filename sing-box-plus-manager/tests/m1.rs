@@ -7,7 +7,8 @@
 //! | 精确 leaf 授信的正负矩阵（跑真实握手，不只做链验证） | [`pki_matrix`] |
 //! | 签发阶段六项校验 | [`pki_issuance`] |
 //! | 密钥不进版本库——门禁而不是嘱咐 | [`secret_gate`] |
-//! | 封闭命令集、单飞、审计只读已轮转、端到端 | [`agent_contract`] |
+//! | 封闭命令集、单飞、审计列目录与按偏移读、端到端 | [`agent_contract`] |
+//! | 审计同步：轮转、偏移、说不清就停住 | [`audit_sync`] |
 //! | 结算事务 11 步与四项判据 | [`settlement`] |
 //! | 事务中途真 `kill -9` 后的自洽 | [`crash`] |
 //! | 采集调度全栈（假节点→agent→主控→账本） | [`scheduler`] |
@@ -32,6 +33,8 @@ mod secret_gate;
 
 #[path = "m1/agent_contract.rs"]
 mod agent_contract;
+#[path = "m1/audit_sync.rs"]
+mod audit_sync;
 #[path = "m1/backup.rs"]
 mod backup;
 #[path = "m1/crash.rs"]
