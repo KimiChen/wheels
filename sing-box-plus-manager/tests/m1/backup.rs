@@ -532,3 +532,69 @@ async fn 源库必须自报wal() {
     assert!(error.contains("journal_mode"), "{error}");
     assert!(error.contains("immutable"), "要点名最常见的成因：{error}");
 }
+
+/// **表名对得上，不等于结构对得上。**
+///
+/// 原来那道一致性门禁只比表名：加一列、减一列，两个方向都静默放行。
+/// 也就是说它挡得住「少一张表」，挡不住「少一列」——而后者更常见、也更难发现：
+/// 库照常打开，查询照常跑，直到某个 INSERT 撞上一个不存在的列。
+#[tokio::test]
+async fn 多出一列会被抓出来() {
+    let (ledger, _) = seeded().await;
+    let clean = verify(&ledger.store).await.unwrap();
+    assert!(clean.column_drift.is_empty(), "干净的库不该有列漂移：{:?}", clean.column_drift);
+    assert!(clean.ok());
+
+    let mut txn = ledger.store.begin_immediate().await.unwrap();
+    sqlx::query("ALTER TABLE users ADD COLUMN 顺手加的 TEXT").execute(txn.conn()).await.unwrap();
+    txn.commit().await.unwrap();
+
+    let drifted = verify(&ledger.store).await.unwrap();
+    // 表集合仍然完全一致——**旧门禁到这里就放行了**。
+    assert!(drifted.missing_tables.is_empty() && drifted.unexpected_tables.is_empty());
+    assert!(
+        drifted.column_drift.iter().any(|d| d.contains("users")),
+        "应当报 users 的列不一致：{:?}",
+        drifted.column_drift
+    );
+    assert!(!drifted.ok(), "列漂移的库不该判为自洽");
+}
+
+/// 对照用的那份指纹是**按 DDL 现建一份空库算出来的**，不是写死的常量。
+///
+/// 写常量要靠人记得同步，而那正是这道门禁本身要防的那类漂移。
+#[tokio::test]
+async fn 对照指纹来自ddl而不是常量() {
+    let expected = proxy_manager::store::schema::expected_fingerprints().await.unwrap();
+    assert_eq!(
+        expected.len(),
+        proxy_manager::store::schema::EXPECTED_TABLES.len(),
+        "现建出来的表数应当与 EXPECTED_TABLES 一致"
+    );
+    for table in proxy_manager::store::schema::EXPECTED_TABLES {
+        let text = expected.get(*table).unwrap_or_else(|| panic!("{table} 没建出来"));
+        assert!(!text.is_empty(), "{table} 的指纹是空的——PRAGMA table_info 没返回列");
+    }
+}
+
+/// **启动门禁也要认列，不只是认表名。**
+///
+/// 上面那条核的是 `verify` 报不报；这条核的是**服务起不起得来**。
+/// 两者要一致：一个「核对说不行、但照样启动」的组合，
+/// 等于把一道失败关闭的门禁降级成一条日志。
+#[tokio::test]
+async fn 列漂移会挡住启动() {
+    let (ledger, _) = seeded().await;
+    // 没漂移时重复 init 是幂等的。
+    assert!(ledger.store.init_schema().await.is_ok());
+
+    let mut txn = ledger.store.begin_immediate().await.unwrap();
+    sqlx::query("ALTER TABLE nodes ADD COLUMN 顺手加的 TEXT").execute(txn.conn()).await.unwrap();
+    txn.commit().await.unwrap();
+
+    let error = ledger.store.init_schema().await.unwrap_err().to_string();
+    assert!(error.contains("列与 DDL 不一致"), "{error}");
+    assert!(error.contains("nodes"), "要点名是哪张表：{error}");
+    // 报错里要给出下一步，而不是只说「不行」。
+    assert!(error.contains("备份"), "要说清接下来该怎么做：{error}");
+}
