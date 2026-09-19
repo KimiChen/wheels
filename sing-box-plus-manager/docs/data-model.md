@@ -51,7 +51,7 @@ node_id
 | 配置维度 | `users` | 业务用户，角色仅 admin / user；尚未映射的身份可不关联用户 |
 | 全局额度 | `quota_settings` / `quota_update_tasks` | 月度额度及 revision、逐节点待下发任务与结果；设置、审计、任务同事务提交，任务按最新 revision 收敛 |
 | 默认授权 | `default_node_groups` / `user_node_grants` | 默认节点组、首次登录分配进度及用户节点授权；唯一用户/节点键，显式撤销不被重复登录覆盖 |
-| 配置维度 | `identity_routes` | 节点 / inbound / 新身份名 → 业务用户的当前映射规则，不将不同入口的同名身份合并 |
+| 配置维度 | `identity_routes` | 节点 / 身份名 → 业务用户的当前映射规则；同节点跨入口的同名身份是**同一个**槽位（SS 与 VLESS 只是同一个名字的两种到达方式） |
 | 生命周期 | `node_runtimes` | 进程运行周期、首快照策略、批准状态、最后 sequence |
 | 生命周期 | `runtime_services` | runtime 内的 inbound generation |
 | 生命周期 | `runtime_identities` | 完整身份 generation |

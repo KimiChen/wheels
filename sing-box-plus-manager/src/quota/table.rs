@@ -15,7 +15,6 @@ use std::collections::BTreeMap;
 use sqlx::Row;
 
 use crate::error::{Error, Result};
-use crate::quota::allocate::{split_identities, NodeWeight};
 use crate::quota::wire::Quota;
 use crate::store::Store;
 
@@ -50,8 +49,7 @@ pub async fn current_identities(
          JOIN runtime_services s ON s.runtime_service_id = i.runtime_service_id \
          JOIN node_runtimes r ON r.runtime_pk = i.runtime_pk \
          LEFT JOIN identity_routes rt \
-                ON rt.node_id = r.node_id AND rt.inbound_tag = s.inbound_tag \
-               AND rt.identity_name = i.identity_name \
+                ON rt.node_id = r.node_id AND rt.identity_name = i.identity_name \
          WHERE r.node_id = ? AND r.runtime_id = ? \
          ORDER BY s.inbound_tag, i.identity_name",
     )
@@ -82,14 +80,50 @@ pub async fn current_identities(
 /// §4.6 要求身份在全部已批准 runtime 上观察到全零计数后才可分配，
 /// 那之前它不该能转发任何字节。**这不是「省略」**——省略等于无限额度。
 ///
-/// 同一用户在同一节点上的多个身份按 D17 情形 3 处理：同口径、按权重切分、
-/// **身份级不设地板**。默认全部等权重；口径不同的身份必须由调用方分成
-/// 两次调用、各自独立成池（情形 2），那时 `Σ 身份限额 = 节点分配额` 本就不成立。
+/// # 同一个人在一个节点上的多条 inbound 记录：**各发全额，不平分**
+///
+/// 一个人在一个节点上同时有 SS 与 VLESS 两条入口下的**同名**身份。它们是同一个
+/// 计费口径（字节就是字节，四向计数与周期总账都不区分协议），按 D17 情形 3 的
+/// 老口径应当平分。这里**刻意不平分**，理由与 D24 拒绝跨节点拆分逐字相同：
+/// 平分会让只用 VLESS 的人在**一半额度**处被切断，而那是没人要求过的强制行为，
+/// 且在下一轮重新分配之前一直存在。
+///
+/// ## 代价，量化
+///
+/// 节点侧的 quotaCell 挂在 `(inbound_tag, name)` 上——`ApplyQuotaTable` 里
+/// 每条 entry 解析出一个**独立的** userRecord，节点上**没有任何跨入口的合计**
+/// （`sing-box-plus/internal/userstats/quota.go`）。于是一个用户在一台节点上
+/// 同时握有两份全额，两份各自倒数。
+///
+/// **这与「每节点镜像全额」（`converge`、D24）是同一类敞口，不是新的一类。**
+/// 三条判据都相同：
+///
+/// * 成因相同——一份余额被交给 K 个互不通信的执行计数器；
+/// * 收敛机制相同——下一轮从账本重算 `剩余 = 额度 − 本周期已用`，而账本把
+///   **全部 K 个计数器**的字节收进同一行 `usage_cycle_totals`（`bump_cycle` 按
+///   user_id 求和，两条 inbound 的 runtime_identity 经 `slot_owners` 关联到同一个
+///   user）。超发的部分下一轮就被扣回去，**不累积**；
+/// * 失败方向相同——拿不到新鲜快照的节点在 `converge` 里拿 `Limited(0)`，
+///   停住的一侧是闸断而不是放行。
+///
+/// 变的只有系数：K 从 `节点数` 变成 `节点数 × 承载该名字的入口数`（本轮 4 → 8）。
+/// 上界不是 `K × 月度额度`，是
+/// `Σ over K cells of min(本周期剩余, 一轮收敛时间 × 该 cell 的线速)`。
+///
+/// ## 新增的那一条依赖
+///
+/// 没有新增敞口类别，但「一个人在一个节点上只有一个**名字**」这条从
+/// 「少给一半」升级成「再翻一倍敞口」。撑它的是
+/// `idx_identity_routes_active_per_user`，而认领的幂等短路让那条索引从来碰不到
+/// ——所以现在有一条专门绕过短路、直接写库的用例钉着它。
+///
+/// `split_identities` 因此不再有在线调用方；模块与用例保留不接线，
+/// 留给将来真的需要加权分配的那天。
 pub fn assemble(
     identities: &[NodeIdentity],
     allocations: &BTreeMap<i64, Quota>,
 ) -> Result<Vec<(String, String, Quota)>> {
-    // 先按用户分组，才能把一个用户的节点额度切给他的多个身份。
+    // 按用户分组只为取一次额度：同一个人的多条记录拿的是**同一个**值。
     let mut by_user: BTreeMap<Option<i64>, Vec<&NodeIdentity>> = BTreeMap::new();
     for identity in identities {
         by_user.entry(identity.user_id).or_default().push(identity);
@@ -102,48 +136,10 @@ pub fn assemble(
             // 没有归属、或没算出额度 → 零额度。安全方向是闸断。
             None => Quota::Limited(0),
         };
-
-        match quota {
-            // 只有**显式** Unlimited 才省略（C30）。
-            Quota::Unlimited => {
-                for identity in group {
-                    table.push((
-                        identity.inbound_tag.clone(),
-                        identity.name.clone(),
-                        Quota::Unlimited,
-                    ));
-                }
-            }
-            Quota::Limited(bytes) if group.len() == 1 => {
-                let identity = group[0];
-                table.push((
-                    identity.inbound_tag.clone(),
-                    identity.name.clone(),
-                    Quota::Limited(bytes),
-                ));
-            }
-            Quota::Limited(bytes) => {
-                // 同一用户在同一节点上的多个身份（D17 情形 3）。
-                let weights: Vec<NodeWeight> = group
-                    .iter()
-                    .map(|identity| NodeWeight {
-                        node_id: format!("{}\u{1f}{}", identity.inbound_tag, identity.name),
-                        weight: 1,
-                    })
-                    .collect();
-                let split = split_identities(bytes, &weights)?;
-                for identity in group {
-                    let key = format!("{}\u{1f}{}", identity.inbound_tag, identity.name);
-                    let share = split.get(&key).copied().ok_or_else(|| {
-                        Error::Quota("身份级切分缺少条目：组装逻辑与切分逻辑不一致".into())
-                    })?;
-                    table.push((
-                        identity.inbound_tag.clone(),
-                        identity.name.clone(),
-                        Quota::Limited(share),
-                    ));
-                }
-            }
+        // 各发全额。`Unlimited` 也照发——只有**显式** Unlimited 才在序列化时
+        // 被省略（C30，见 `QuotaRequest::build`），这里不做那个判断。
+        for identity in group {
+            table.push((identity.inbound_tag.clone(), identity.name.clone(), quota));
         }
     }
 
@@ -213,23 +209,29 @@ mod tests {
         assert_eq!(request.entries[0].name, "u2");
     }
 
+    /// 同一个人在一个节点上的多条 inbound 记录：**各拿全额**。
+    ///
+    /// 这条曾经断言的是相反的行为（`Σ 身份限额 == 节点分配额`，D17 情形 3 的等权切分）。
+    /// 改口径的理由与 D24 拒绝跨节点拆分逐字相同：平分会让只用其中一种协议的人
+    /// 在**一半额度**处被切断，而那是没人要求过的强制行为。
+    ///
+    /// 代价写在 `assemble` 的文档里：节点侧 quotaCell 挂在 `(inbound_tag, name)` 上，
+    /// 两条入口是两个互不相干的计数器，于是他同时握有两份全额。那与「每节点镜像
+    /// 全额」是同一类敞口，系数从节点数变成节点数 × 入口数，收敛靠下一轮从账本重算。
     #[test]
-    fn 同一用户多身份按等权重切分且总和不变() {
-        let identities = vec![
-            identity("in-a", "u1-a", Some(1)),
-            identity("in-b", "u1-b", Some(1)),
-            identity("in-c", "u1-c", Some(1)),
-        ];
+    fn 同一用户在一个节点上的多条入口各拿全额() {
+        // 同一个名字、两条入口——这正是 SS + VLESS 的形状。
+        let identities =
+            vec![identity("ss-in", "u1", Some(1)), identity("vless-in", "u1", Some(1))];
         let allocations = BTreeMap::from([(1i64, Quota::Limited(100))]);
         let table = assemble(&identities, &allocations).unwrap();
-        let sum: u64 = table
-            .iter()
-            .map(|(_, _, q)| match q {
-                Quota::Limited(v) => *v,
-                Quota::Unlimited => 0,
-            })
-            .sum();
-        assert_eq!(sum, 100, "同口径下 Σ 身份限额 == 节点分配额（D17 情形 3）");
+        assert_eq!(table.len(), 2);
+        assert!(
+            table.iter().all(|(_, _, q)| *q == Quota::Limited(100)),
+            "各发全额，不平分：{table:?}"
+        );
+        // 反向：退回平分的话两者各是 50，下面这条会红。
+        assert_ne!(table[0].2, Quota::Limited(50));
     }
 
     #[test]

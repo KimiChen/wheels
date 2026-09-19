@@ -155,12 +155,11 @@ impl Stack {
             // 节点一重启就没了。槽位行由结算发现并登记为 free，这里把它移到 claimed。
             let changed = sqlx::query(
                 "UPDATE identity_routes SET user_id = ?, state = 'claimed', claimed_at = ? \
-                  WHERE node_id = ? AND inbound_tag = ? AND identity_name = ? AND state = 'free'",
+                  WHERE node_id = ? AND identity_name = ? AND state = 'free'",
             )
             .bind(user_id)
             .bind("2026-09-18T00:00:00Z")
             .bind(NODE)
-            .bind(&identity.inbound_tag)
             .bind(&identity.name)
             .execute(txn.conn())
             .await

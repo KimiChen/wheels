@@ -96,6 +96,26 @@ impl Fixture {
         out
     }
 
+    /// 取 `RETURNING` 回来的 id。
+    ///
+    /// **不能用 `exec`**：它读的是 `last_insert_rowid()`，而 `ON CONFLICT DO UPDATE`
+    /// 走更新那一支时那个值根本不动——拿到的是上一次插入的 id，一个看起来完全
+    /// 正常的错号。
+    async fn fetch_id(&self, sql: &str, binds: Vec<Bind>) -> i64 {
+        let mut query = sqlx::query_scalar::<_, i64>(sql);
+        for bind in binds {
+            query = match bind {
+                Bind::Text(text) => query.bind(text),
+                Bind::Int(value) => query.bind(value),
+                Bind::Null => query.bind(None::<i64>),
+            };
+        }
+        let mut txn = self.store.begin_immediate().await.unwrap();
+        let out = query.fetch_one(txn.conn()).await.unwrap();
+        txn.commit().await.unwrap();
+        out
+    }
+
     async fn user(&self, login: &str) -> i64 {
         self.exec(
             "INSERT INTO users(login_name, display_name, role, quota_group, created_at, \
@@ -124,11 +144,18 @@ impl Fixture {
     }
 
     /// runtime 里的一个 inbound + 一个身份。`generation` 可变，用来造多 generation。
+    ///
+    /// **service 行复用**：一个 runtime 的一个 `(tag, generation)` 只有一条
+    /// `runtime_services`（那张表的唯一键就是这三列），而现实里一条 service 挂着
+    /// 几百个身份。每次新建会在第二个同 tag 的身份上撞唯一键。
     async fn identity(&self, runtime_pk: i64, inbound: &str, name: &str, generation: &str) {
         let service = self
-            .exec(
+            .fetch_id(
                 "INSERT INTO runtime_services(runtime_pk, inbound_tag, generation, inbound_type, \
-                 active, first_seen_at) VALUES (?, ?, ?, 'shadowsocks', 1, ?)",
+                 active, first_seen_at) VALUES (?, ?, ?, 'shadowsocks', 1, ?) \
+                 ON CONFLICT(runtime_pk, inbound_tag, generation) DO UPDATE \
+                 SET active = excluded.active \
+                 RETURNING runtime_service_id",
                 vec![runtime_pk.into(), inbound.into(), generation.into(), iso(T0).into()],
             )
             .await;
@@ -148,15 +175,18 @@ impl Fixture {
     }
 
     /// 一个槽位。归属落在这里，跨重启存活。
-    async fn route(&self, inbound: &str, name: &str, user_id: Option<i64>, state: &str) -> i64 {
+    ///
+    /// **没有 inbound 参数**：槽位键是 `(node_id, identity_name)`，一个名字一个槽位，
+    /// 它覆盖承载这个名字的全部入口。删掉参数而不是留着忽略，是为了让编译器把
+    /// 全部调用点列出来——SQL 是运行时检查的，留着一个被忽略的参数不会有任何提示。
+    async fn route(&self, name: &str, user_id: Option<i64>, state: &str) -> i64 {
         self.exec(
             // CHECK 要求 state 与 (user_id, claimed_at) 三者自洽：claimed 必须两者都有，
             // free 必须两者都空，retired 要么都有要么都空。
-            "INSERT INTO identity_routes(node_id, inbound_tag, identity_name, state, user_id, \
-             claimed_at, retired_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO identity_routes(node_id, identity_name, state, user_id, \
+             claimed_at, retired_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
             vec![
                 NODE.into(),
-                inbound.into(),
                 name.into(),
                 state.into(),
                 user_id.into(),
@@ -222,7 +252,7 @@ async fn 正常情况下归属解析得出来() {
     let alice = f.user("alice").await;
     let pk = f.runtime(RUN, "approved").await;
     f.identity(pk, "ss-entry", "id-01", GEN).await;
-    let route = f.route("ss-entry", "id-01", Some(alice), "claimed").await;
+    let route = f.route("id-01", Some(alice), "claimed").await;
     f.event(route, Some(alice), "assigned", T0, None).await;
 
     let mut resolver = Resolver::new(&f.store);
@@ -230,39 +260,47 @@ async fn 正常情况下归属解析得出来() {
     assert_eq!(found, Attribution::Resolved(alice));
 }
 
-/// **最容易串号的一种。**
+/// **同节点跨入口同名归同一个人，两条都查得到。**
 ///
-/// `identity_routes` 的唯一键刻意带 `inbound_tag`，所以「同一个身份名在两个入口上
-/// 分属两人」是**合法状态**。而审计文件名只由身份名编码而来，**两个入口共用同一个
-/// 文件**，文件里 A 和 B 的行是混在一起的——关联不带 `in` 的话，一个人能查到
-/// 另一个人的全部记录。
+/// 这条曾经断言的是相反的行为：`identity_routes` 的唯一键带 `inbound_tag`，
+/// 于是 `(node, inA, X)` 归 A、`(node, inB, X)` 归 B 是合法状态，而审计文件名只由
+/// 身份名编码而来、两个入口共用同一个文件，A 和 B 的行混在一起——那是最容易串号的
+/// 一种。2026-09-20 把键改成 `(node_id, identity_name)` 之后，那个状态**写不进去**了。
+///
+/// 现在一个人在一个节点上同时有 SS 与 VLESS 两条入口下的同名身份，两条都是他的，
+/// 于是那份混着两个入口的文件**本来就都是他一个人的**。
 #[tokio::test]
-async fn 同节点跨入口同名分属两人时互相查不到() {
+async fn 同节点跨入口同名归同一个人且两条都查得到() {
     let f = fixture().await;
     let alice = f.user("alice").await;
     let bob = f.user("bob").await;
     let pk = f.runtime(RUN, "approved").await;
     f.identity(pk, "ss-a", "id-01", GEN).await;
     f.identity(pk, "ss-b", "id-01", GEN).await;
-    let route_a = f.route("ss-a", "id-01", Some(alice), "claimed").await;
-    let route_b = f.route("ss-b", "id-01", Some(bob), "claimed").await;
-    f.event(route_a, Some(alice), "assigned", T0, None).await;
-    f.event(route_b, Some(bob), "assigned", T0, None).await;
+    // **一个**槽位，覆盖两条入口。再插一条就会撞唯一键——这正是新口径。
+    let route = f.route("id-01", Some(alice), "claimed").await;
+    f.event(route, Some(alice), "assigned", T0, None).await;
 
-    // 同一份文件里的两行，只有 `in` 不同。
     let mixed = vec![
-        AccessRecord { host: "alice-only.example.com".into(), ..record("ss-a", "id-01", T0 + 1) },
-        AccessRecord { host: "bob-only.example.com".into(), ..record("ss-b", "id-01", T0 + 2) },
+        AccessRecord { host: "via-ss.example.com".into(), ..record("ss-a", "id-01", T0 + 1) },
+        AccessRecord { host: "via-vless.example.com".into(), ..record("ss-b", "id-01", T0 + 2) },
     ];
 
     let mine = filter::for_user(&f.store, alice, mixed.clone()).await.unwrap();
-    assert_eq!(mine.rows.len(), 1);
-    assert_eq!(mine.rows[0].host, "alice-only.example.com");
-    assert_eq!(mine.dropped_other_owner, 1, "另一条要被算进「不是你的」");
+    assert_eq!(mine.rows.len(), 2, "两条入口的记录都是他的");
+    assert_eq!(mine.dropped_other_owner, 0);
+    // **这是整个改动最关键的一条断言。**
+    //
+    // 它钉住「LEFT JOIN 去掉 inbound_tag 之后，route 行没有被乘出两条」。
+    // 有人把那一列加回槽位表、或者顺手把 `WHERE s.inbound_tag = ?` 也删了，
+    // 这条就会红；而生产上的表现只是「页面说没有记录」——因为每条记录都成了
+    // Ambiguous，而 Ambiguous 的记录是不返回的。
+    assert_eq!(mine.dropped_ambiguous, 0, "放宽 JOIN 不得把 route 行乘出两条来");
 
+    // 反向：别人一条都查不到，而且落在「不是你的」而不是「关联不上」。
     let theirs = filter::for_user(&f.store, bob, mixed).await.unwrap();
-    assert_eq!(theirs.rows.len(), 1);
-    assert_eq!(theirs.rows[0].host, "bob-only.example.com");
+    assert!(theirs.rows.is_empty());
+    assert_eq!(theirs.dropped_other_owner, 2);
 }
 
 /// 四值关联到多行 → **不返回**，而不是取第一行。
@@ -277,7 +315,7 @@ async fn 关联不唯一时不返回而不是取第一行() {
     // 同一个 runtime、同一个 inbound tag、同一个身份名，两个 generation。
     f.identity(pk, "ss-entry", "id-01", "00000000000000000001").await;
     f.identity(pk, "ss-entry", "id-01", "00000000000000000002").await;
-    let route = f.route("ss-entry", "id-01", Some(alice), "claimed").await;
+    let route = f.route("id-01", Some(alice), "claimed").await;
     f.event(route, Some(alice), "assigned", T0, None).await;
 
     let mut resolver = Resolver::new(&f.store);
@@ -298,7 +336,7 @@ async fn 关联不到已登记lineage时不兜底() {
     let alice = f.user("alice").await;
     f.runtime(RUN, "approved").await;
     // 槽位有，但这个 runtime 下没有登记过这个身份——不能用当前映射兜底。
-    f.route("ss-entry", "id-01", Some(alice), "claimed").await;
+    f.route("id-01", Some(alice), "claimed").await;
 
     let out =
         filter::for_user(&f.store, alice, vec![record("ss-entry", "id-01", T0 + 1)]).await.unwrap();
@@ -312,7 +350,7 @@ async fn 未批准的runtime不出现在任何人的明细里() {
     let alice = f.user("alice").await;
     let pk = f.runtime(RUN, "pending").await;
     f.identity(pk, "ss-entry", "id-01", GEN).await;
-    let route = f.route("ss-entry", "id-01", Some(alice), "claimed").await;
+    let route = f.route("id-01", Some(alice), "claimed").await;
     f.event(route, Some(alice), "assigned", T0, None).await;
 
     let out =
@@ -335,7 +373,7 @@ async fn 退役之后产生的记录不归给原持有人() {
     let alice = f.user("alice").await;
     let pk = f.runtime(RUN, "approved").await;
     f.identity(pk, "ss-entry", "id-01", GEN).await;
-    let route = f.route("ss-entry", "id-01", Some(alice), "retired").await;
+    let route = f.route("id-01", Some(alice), "retired").await;
 
     let retired_at = T0 + 60_000;
     // 持有区间 [T0, retired_at)，已关闭。
@@ -360,7 +398,7 @@ async fn 持有之前产生的记录也不归给他() {
     let alice = f.user("alice").await;
     let pk = f.runtime(RUN, "approved").await;
     f.identity(pk, "ss-entry", "id-01", GEN).await;
-    let route = f.route("ss-entry", "id-01", Some(alice), "claimed").await;
+    let route = f.route("id-01", Some(alice), "claimed").await;
     let claimed_at = T0 + 60_000;
     f.event(route, Some(alice), "assigned", claimed_at, None).await;
 
@@ -382,7 +420,7 @@ async fn 换过主人的槽位按时刻各归各的() {
     let bob = f.user("bob").await;
     let pk = f.runtime(RUN, "approved").await;
     f.identity(pk, "ss-entry", "id-01", GEN).await;
-    let route = f.route("ss-entry", "id-01", Some(bob), "claimed").await;
+    let route = f.route("id-01", Some(bob), "claimed").await;
     let handover = T0 + 60_000;
     f.event(route, Some(alice), "assigned", T0, Some(handover)).await;
     f.event(route, Some(bob), "assigned", handover, None).await;
@@ -408,7 +446,7 @@ async fn 成功判据在主控侧再判一遍() {
     let alice = f.user("alice").await;
     let pk = f.runtime(RUN, "approved").await;
     f.identity(pk, "ss-entry", "id-01", GEN).await;
-    let route = f.route("ss-entry", "id-01", Some(alice), "claimed").await;
+    let route = f.route("id-01", Some(alice), "claimed").await;
     f.event(route, Some(alice), "assigned", T0, None).await;
 
     let base = record("ss-entry", "id-01", T0 + 1);
@@ -437,21 +475,26 @@ async fn 裁剪在统计之前且丢弃原因分得开() {
     let alice = f.user("alice").await;
     let bob = f.user("bob").await;
     let pk = f.runtime(RUN, "approved").await;
+    // 同一个名字挂两条入口（SS + VLESS 的形状）→ **一个**槽位，归 alice。
     f.identity(pk, "ss-a", "id-01", GEN).await;
     f.identity(pk, "ss-b", "id-01", GEN).await;
-    let route_a = f.route("ss-a", "id-01", Some(alice), "claimed").await;
-    let route_b = f.route("ss-b", "id-01", Some(bob), "claimed").await;
-    f.event(route_a, Some(alice), "assigned", T0, None).await;
-    f.event(route_b, Some(bob), "assigned", T0, None).await;
+    // 另一个名字 → 另一个槽位，归 bob。「不是你的」这一类现在只能这样造。
+    f.identity(pk, "ss-a", "id-02", GEN).await;
+    let mine = f.route("id-01", Some(alice), "claimed").await;
+    let theirs = f.route("id-02", Some(bob), "claimed").await;
+    f.event(mine, Some(alice), "assigned", T0, None).await;
+    f.event(theirs, Some(bob), "assigned", T0, None).await;
 
     let out = filter::for_user(
         &f.store,
         alice,
         vec![
-            record("ss-a", "id-01", T0 + 1),
-            record("ss-b", "id-01", T0 + 2),
-            AccessRecord { up: 1, down: 0, ..record("ss-a", "id-01", T0 + 3) },
-            record("ss-a", "id-99", T0 + 4),
+            record("ss-a", "id-01", T0 + 1), // 留
+            record("ss-a", "id-02", T0 + 2), // 不是你的
+            // 失败判据那条**骑在另一条入口上**，顺带多证一次跨入口同属：
+            // 它没被算进「不是你的」，说明 ss-b 那条也确实归 alice。
+            AccessRecord { up: 1, down: 0, ..record("ss-b", "id-01", T0 + 3) }, // 没成功
+            record("ss-a", "id-99", T0 + 4),                                    // 关联不上
         ],
     )
     .await
@@ -473,7 +516,7 @@ async fn 排序按run分段再按seq() {
         let pk = f.runtime(run, "approved").await;
         f.identity(pk, "ss-entry", "id-01", GEN).await;
     }
-    let route = f.route("ss-entry", "id-01", Some(alice), "claimed").await;
+    let route = f.route("id-01", Some(alice), "claimed").await;
     f.event(route, Some(alice), "assigned", T0, None).await;
 
     let other_run = "ffffffffffffffffffffffffffffffff";

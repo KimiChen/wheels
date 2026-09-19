@@ -315,7 +315,11 @@ pub async fn retire(
     Ok(routes.len())
 }
 
-/// 每个节点上还剩多少空闲槽位。池子只减不增，这个数要有告警线。
+/// 每个节点上还剩多少空闲**名字**。池子只减不增，这个数要有告警线。
+///
+/// 一个名字一个槽位，无论它被几条 inbound 承载——所以这个数直接就是
+/// 「还能开通几个人」。槽位键带着 inbound_tag 的那阵子它会报成 2 倍，
+/// 而 300 与 600 的差别恰好是「要不要现在准备扩容」。
 pub async fn free_slots(store: &Store) -> Result<Vec<(String, i64)>> {
     let rows = sqlx::query(
         "SELECT n.node_id, count(r.route_id) FROM nodes n \
