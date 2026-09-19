@@ -234,7 +234,13 @@
 
   const PAGES = {
     "me.html": {
-      // 两个端点：`/me` 给身份与额度，`/me/subscription` 给订阅地址。
+      // 三个端点：`/me` 给身份与额度，`/me/subscription` 给订阅地址，
+      // `/me/usage` 给按节点的公网/内网用量。
+      //
+      // **取了就要在 `load` 的返回里带上。** 少带一个的后果不是少一块内容，
+      // 而是整页报「加载失败：usage is not defined」——`render` 解构的是
+      // `load` 返回的那个对象，取到的却是 undefined。2026-09-20 加节点卡时
+      // 就是这么炸的，所以有一条用例专门数这两边对不对得上。
       // 订阅地址单独一个端点是服务端的决定（它是凭据，不该出现在每一页的
       // `/me` 响应里），页面这边照做即可。
       load: async () => {
@@ -243,9 +249,9 @@
           getJson("/me/subscription"),
           getJson("/me/usage"),
         ]);
-        return { me, sub };
+        return { me, sub, usage };
       },
-      render: ({ me, sub }) => {
+      render: ({ me, sub, usage }) => {
         // `cycle` 整个取自 `/me`——它带 `key` 与 `remaining_bytes`，
         // 而订阅端点那份只带 `Subscription-Userinfo` 要的三个数。
         // 两份都铺一遍的话，后铺的会把 `remaining_bytes` 抹成 undefined。

@@ -1147,3 +1147,38 @@ async fn 只有upsk没有uuid时本人页说不可用() {
     assert_eq!(body["usable"], false, "{body}");
     assert_eq!(body["unusable_reason"], "no_credential", "{body}");
 }
+
+/// **`load` 取了几个端点，就得往 `render` 传几样。**
+///
+/// 少传一个的后果不是少一块内容，而是**整页报「加载失败：xxx is not defined」**——
+/// `render` 解构的是 `load` 返回的那个对象，少一个键就取到 undefined，
+/// 而它随后被当成对象用。页面上一个字都没有，看起来像服务端挂了。
+///
+/// 2026-09-20 给 me.html 加节点卡时就是这么炸的：`load` 里加了
+/// `getJson("/me/usage")`，返回的却还是 `{ me, sub }`。
+/// 上线之后才被使用者撞见——既有的用例验集合名、验绑定路径，
+/// 唯独没有人数过这两边对不对得上。
+#[test]
+fn me页面取了几个端点就要传几样给render() {
+    let (script, _) = proxy_manager::web::asset("assets/api.js").unwrap();
+    let block = script
+        .split("\"me.html\": {")
+        .nth(1)
+        .expect("api.js 里没有 me.html 那一段：扫描器坏了，或者结构变了");
+    let load = block.split("render:").next().expect("me.html 那段里没有 render");
+
+    let fetched = load.matches("getJson(").count();
+    assert!(fetched >= 2, "只数出 {fetched} 个端点，扫描器多半坏了：{load}");
+
+    let returned = load
+        .rsplit("return {")
+        .next()
+        .and_then(|rest| rest.split('}').next())
+        .expect("load 里没有 `return { … }`");
+    let keys = returned.split(',').filter(|k| !k.trim().is_empty()).count();
+
+    assert_eq!(
+        keys, fetched,
+        "me.html 的 load 取了 {fetched} 个端点，却只往 render 传了 {keys} 样：{returned:?}"
+    );
+}
