@@ -107,11 +107,22 @@ pub struct NodeCollector {
     node_id: String,
     client: AgentClient,
     policy: SchedulePolicy,
+    /// 这台节点在审计树里的子目录。`None` 表示没配 `[audit]`。
+    ///
+    /// 采集器要它只为一件事：`audit_dropped` 为真时往那里追加一条旁路记录。
+    /// 那一位粘滞到 plus 重启、而 `snapshot_batches` 不存它，日志一转就没了。
+    audit_dir: Option<std::path::PathBuf>,
 }
 
 impl NodeCollector {
     pub fn new(node_id: impl Into<String>, client: AgentClient, policy: SchedulePolicy) -> Self {
-        NodeCollector { node_id: node_id.into(), client, policy }
+        NodeCollector { node_id: node_id.into(), client, policy, audit_dir: None }
+    }
+
+    /// 配了 `[audit]` 时挂上这台节点的镜像目录。
+    pub fn with_audit_dir(mut self, dir: Option<std::path::PathBuf>) -> Self {
+        self.audit_dir = dir;
+        self
     }
 
     pub fn node_id(&self) -> &str {
@@ -128,6 +139,30 @@ impl NodeCollector {
 
     pub fn policy(&self) -> &SchedulePolicy {
         &self.policy
+    }
+
+    /// 把 `audit_dropped` 记进审计树。每个 `(node, runtime)` 只记一次。
+    ///
+    /// **失败不影响入账**：这是一条旁路记录，它写不进去是审计链路的问题，
+    /// 而计费链路与审计链路完全独立（C24）。让它失败连带毁掉一次已经完成的
+    /// 结算，正好把那条独立性反过来。
+    fn note_audit_dropped(&self, runtime_id: &str) {
+        let Some(dir) = self.audit_dir.as_ref() else { return };
+        let at = OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_default();
+        match crate::audit::health::note_dropped(dir, &self.node_id, runtime_id, &at) {
+            // 只在**第一次**记的时候告警。每 60 秒一条同样的告警会把它自己淹掉，
+            // 而这一位粘滞到重启，所以后续每一次采集都会再看到它。
+            Ok(true) => tracing::warn!(
+                node_id = %self.node_id, runtime_id,
+                "audit_dropped：从此刻到这个 runtime 结束为止，这台节点的审计都不完整"
+            ),
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(node_id = %self.node_id, error = %error, "写审计缺口记录失败")
+            }
+        }
     }
 
     /// 一次采集 + 入账。可单独调用，便于测试与将来的手动采集端点。
@@ -185,12 +220,19 @@ impl NodeCollector {
         loop {
             match settle::settle_next(store, &self.node_id, &receipt.runtime_id).await {
                 Ok(SettleOutcome::Applied {
-                    ledger_rows: rows, sequence, sequence_gap, ..
+                    ledger_rows: rows,
+                    sequence,
+                    sequence_gap,
+                    audit_dropped,
+                    ..
                 }) => {
                     settled += 1;
                     ledger_rows += rows;
                     if let Some(gap) = sequence_gap {
                         tracing::warn!(node_id = %self.node_id, sequence, gap, "sequence 跳号");
+                    }
+                    if audit_dropped {
+                        self.note_audit_dropped(&receipt.runtime_id);
                     }
                 }
                 Ok(SettleOutcome::Superseded { .. }) => settled += 1,

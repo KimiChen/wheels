@@ -19,6 +19,7 @@ use super::harness::{self, DNS_NAME};
 use super::ledger_harness::{NODE, RUNTIME, STARTED_AT_MS};
 
 struct Stack {
+    audit_dir: std::path::PathBuf,
     _materials: harness::Materials,
     _dir: tempfile::TempDir,
     node: FakeNode,
@@ -76,10 +77,12 @@ async fn stack() -> Stack {
         max_clock_skew_secs: 120,
     };
 
+    let audit_dir = dir.path().join("audit").join(NODE);
     Stack {
-        collector: NodeCollector::new(NODE, client, policy),
+        collector: NodeCollector::new(NODE, client, policy).with_audit_dir(Some(audit_dir.clone())),
         store: Arc::new(store),
         node,
+        audit_dir,
         _materials: materials,
         _dir: dir,
     }
@@ -347,4 +350,81 @@ async fn 循环可以被停止信号停下() {
     tx.send(true).unwrap();
     let stopped = tokio::time::timeout(Duration::from_secs(5), handle).await;
     assert!(stopped.is_ok(), "收到停止信号后必须退出循环");
+}
+
+// ---- audit_dropped 的旁路记录 ----
+
+/// `audit_dropped` **照常入账**——把审计丢弃算进入账判据，等于让磁盘写满连带
+/// 停掉计费，那是节点侧刻意不做的。但它必须留下痕迹：这一位粘滞到 plus 重启，
+/// 而 `snapshot_batches` 根本不存它，settle 里只有一条 `tracing::warn!`，
+/// 日志一转就没了。
+#[tokio::test]
+async fn audit_dropped照常入账但会留下一条旁路记录() {
+    let stack = stack().await;
+    stack.approve(FirstSnapshot::Include).await;
+    stack.node.set_health_bit("audit_dropped", true).await;
+
+    let tick = stack.collector.tick(&stack.store).await;
+    assert!(matches!(tick, Tick::Applied { .. }), "审计有损不影响入账：{tick:?}");
+    assert!(stack.lifetime_sum().await > 0, "流量必须照常记进账本");
+
+    let records = proxy_manager::audit::health::read(&stack.audit_dir).unwrap();
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0].node_id, NODE);
+    assert_eq!(records[0].runtime_id, RUNTIME);
+    assert!(records[0].audit_dropped);
+    assert!(!records[0].at.is_empty(), "要有观察到的时刻");
+}
+
+/// 每个 `(node, runtime)` 只记一次。这一位粘滞到重启，所以之后**每一次**采集
+/// 都会再看到它——不去重的话这个文件会以每分钟一条的速度长满同样的话，
+/// 而那正好把「这里有一个缺口」淹掉。
+#[tokio::test]
+async fn 同一个runtime的审计缺口只记一次() {
+    let stack = stack().await;
+    stack.approve(FirstSnapshot::Baseline).await;
+    stack.node.set_health_bit("audit_dropped", true).await;
+
+    for round in 1..=3u64 {
+        stack
+            .node
+            .set_counter("vless-entry-01", "u_example_01", "tcp_uplink_bytes", 100 + round * 1_000)
+            .await;
+        stack.collector.tick(&stack.store).await;
+    }
+    assert_eq!(proxy_manager::audit::health::read(&stack.audit_dir).unwrap().len(), 1);
+}
+
+/// 没有这一位时不留任何记录——空文件与「有缺口」在读取端是两回事。
+#[tokio::test]
+async fn 没有审计缺口时不写任何东西() {
+    let stack = stack().await;
+    stack.approve(FirstSnapshot::Include).await;
+    stack.collector.tick(&stack.store).await;
+    assert!(proxy_manager::audit::health::read(&stack.audit_dir).unwrap().is_empty());
+    assert!(
+        !stack.audit_dir.join(proxy_manager::audit::health::FILE).exists(),
+        "连文件都不该建：一个空文件会被读成「查过了，没缺口」，而实际是「从没查过」"
+    );
+}
+
+/// 坏行跳过而不是整份失败。这个文件的作用是让缺口可见，
+/// 让一行坏数据把整份缺口记录变成不可读，正好是反的。
+#[tokio::test]
+async fn 一行坏数据不会毁掉整份缺口记录() {
+    let stack = stack().await;
+    std::fs::create_dir_all(&stack.audit_dir).unwrap();
+    let path = stack.audit_dir.join(proxy_manager::audit::health::FILE);
+    std::fs::write(&path, "{ 这不是 JSON\n").unwrap();
+
+    proxy_manager::audit::health::note_dropped(
+        &stack.audit_dir,
+        NODE,
+        "r-example",
+        "2026-09-19T07:00:00Z",
+    )
+    .unwrap();
+    let records = proxy_manager::audit::health::read(&stack.audit_dir).unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].runtime_id, "r-example");
 }
