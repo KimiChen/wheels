@@ -437,9 +437,11 @@ impl Api {
                 .await
                 .unwrap();
 
+                // 槽位不带 inbound：一个名字一个槽位。上面那段建 runtime_services
+                // 的 'ss-entry' 要留着——那是 lineage 的真相，只有槽位上那份拷贝该走。
                 sqlx::query(
-                    "INSERT INTO identity_routes(node_id, inbound_tag, identity_name, \
-                     state, created_at) VALUES (?, 'ss-entry', ?, 'free', ?)",
+                    "INSERT INTO identity_routes(node_id, identity_name, \
+                     state, created_at) VALUES (?, ?, 'free', ?)",
                 )
                 .bind(node)
                 .bind(name)

@@ -68,7 +68,7 @@ CREATE TABLE runtime_identities (
     -- 这里曾经有一个 user_id。它是错的地方：本表按 (node_id, runtime_id) 键，
     -- 节点一重启就生成全新的行，写在这里的归属会**静默全部丢失**，
     -- 于是 bump_cycle 不再被调用、所有身份在下一轮推送里掉到零额度。
-    -- 归属改由 identity_routes 承担——那张表按 (节点, inbound, 身份名) 键，
+    -- 归属改由 identity_routes 承担——那张表按 (节点, 身份名) 键，
     -- 跨重启存活。读取方一律 join 过去。
     first_seen_at    TEXT NOT NULL,
     last_seen_at     TEXT NOT NULL,

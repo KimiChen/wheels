@@ -240,8 +240,7 @@ pub async fn list_identities(
          JOIN runtime_services s ON s.runtime_service_id = i.runtime_service_id \
          JOIN node_runtimes r ON r.runtime_pk = i.runtime_pk \
          LEFT JOIN identity_routes rt \
-                ON rt.node_id = r.node_id AND rt.inbound_tag = s.inbound_tag \
-               AND rt.identity_name = i.identity_name \
+                ON rt.node_id = r.node_id AND rt.identity_name = i.identity_name \
          WHERE i.runtime_identity_id > ? ORDER BY i.runtime_identity_id LIMIT ?",
     )
     .bind(page.after.unwrap_or(0))

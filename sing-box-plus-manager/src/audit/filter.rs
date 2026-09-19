@@ -20,12 +20,17 @@
 //! 所以关联到多行时**不返回**，而不是取第一行——那正是 C35 那句
 //! 「关联不唯一则不返回」的技术成因。
 //!
-//! # 三类同名二义
+//! # 同名二义：一类**不再**是二义，两类仍然是
 //!
-//! * **同节点跨入口同名**：`identity_routes` 的唯一键刻意带 `inbound_tag`，
-//!   `(node, inA, X)` 归 A、`(node, inB, X)` 归 B 是**合法状态**；而审计文件名只由
-//!   身份名编码而来，**两个入口共用同一个文件**，文件里 A 和 B 的行是混在一起的。
-//!   这是最容易串号的一种——所以关联必须带上 `in`。
+//! * **同节点跨入口同名——不再是二义**（2026-09-20）。`identity_routes` 的唯一键
+//!   现在是 `(node_id, identity_name)`，`(node, X)` 只有一个主人；SS 与 VLESS
+//!   两条入口下的同名身份归**同一个人**。审计文件名只由身份名编码而来、两个入口
+//!   共用同一个文件，而现在那份文件里的行**本来就都是一个人的**。
+//!
+//!   关联仍然带 `in`，但**理由换了**：它选的是哪一条 `runtime_service`，
+//!   让下面那条 generation 唯一性判据仍然成立。去掉它，一次关联会同时命中
+//!   SS 与 VLESS 两条 lineage、返回两行，于是**每一条记录都判成 `Ambiguous`**——
+//!   而页面上那看起来只是「没有记录」。
 //! * **跨 runtime 名称复用**：两个 runtime 的墙钟区间可以重叠，单看 `ts` 分不开，
 //!   所以关联必须带上 `run`。
 //! * **同 runtime 内多 generation**：见上，判唯一。
@@ -153,8 +158,7 @@ impl<'a> Resolver<'a> {
              JOIN runtime_services s ON s.runtime_pk = r.runtime_pk \
              JOIN runtime_identities i ON i.runtime_service_id = s.runtime_service_id \
              LEFT JOIN identity_routes rt \
-                    ON rt.node_id = r.node_id AND rt.inbound_tag = s.inbound_tag \
-                   AND rt.identity_name = i.identity_name \
+                    ON rt.node_id = r.node_id AND rt.identity_name = i.identity_name \
              WHERE r.node_id = ? AND r.runtime_id = ? \
                AND s.inbound_tag = ? AND i.identity_name = ?",
         )
@@ -171,6 +175,10 @@ impl<'a> Resolver<'a> {
                 Lineage { route_id: rows[0].0, approved: rows[0].1 == "approved", ambiguous: false }
             }
             // 关联不唯一 -> 不返回。取第一行会把两个 generation 的记录混成一个人的。
+            //
+            // 改键之后 rt 侧被 `UNIQUE(node_id, identity_name)` 钉死为至多一行，
+            // 而 `WHERE s.inbound_tag = ?` 钉死了 service，所以**多 generation 是
+            // 这个分支现在唯一的触发源**——它不是死代码，但也只剩这一个来源。
             _ => Lineage { route_id: None, approved: false, ambiguous: true },
         };
         self.lineages.insert(cache_key, lineage.clone());

@@ -551,7 +551,7 @@ async fn settle_in_txn(
             // 用**结算正在处理的** node_id，不用快照体里的那个：两者不一致时
             // `receive` 只记安全日志不拒绝（settle.rs 里对 envelope 的处理），
             // 而槽位必须落在真实存在的节点上，否则外键会在这里炸。
-            register_slot(conn, node_id, &inbound.tag, &user.name, &now).await?;
+            register_slot(conn, node_id, &user.name, &now).await?;
             observed.insert(
                 (inbound.tag.clone(), inbound.generation, user.name.clone(), user.generation),
                 identity_id,
@@ -939,8 +939,7 @@ async fn slot_owners(
          JOIN runtime_services s ON s.runtime_service_id = i.runtime_service_id \
          JOIN node_runtimes n ON n.runtime_pk = i.runtime_pk \
          LEFT JOIN identity_routes rt \
-                ON rt.node_id = n.node_id AND rt.inbound_tag = s.inbound_tag \
-               AND rt.identity_name = i.identity_name \
+                ON rt.node_id = n.node_id AND rt.identity_name = i.identity_name \
          WHERE i.runtime_pk = ?",
     )
     .bind(runtime_pk)
@@ -953,20 +952,29 @@ async fn slot_owners(
 ///
 /// `DO NOTHING` 不是省事：结算只负责发现，移动状态只发生在认领与退役事务里。
 /// 换成 DO UPDATE，一次普通采集就会把 claimed 打回 free。
+///
+/// **它在 `for inbound → for user` 的内层循环里被调用，而槽位按名字键。**
+/// 于是同一个名字的第二条 inbound 记录（VLESS 那条）落到 `DO NOTHING` 上，
+/// 是空操作——这正是想要的：一个名字一个槽位，它覆盖承载这个名字的全部入口。
+///
+/// 不要为了「省一次 INSERT」把这次调用挪出内层循环：挪出去就得先在内存里
+/// 去重一遍名字，而 `DO NOTHING` 已经把去重做掉了，且做在唯一键上——
+/// 那是唯一一个并发情况下也成立的地方。
+///
+/// `ON CONFLICT` 的列清单必须与 UNIQUE 逐字一致（含顺序），否则 SQLite 直接报
+/// `no unique index matching`。改唯一键必改这里。
 async fn register_slot(
     conn: &mut SqliteConnection,
     node_id: &str,
-    inbound_tag: &str,
     identity_name: &str,
     now: &str,
 ) -> Result<()> {
     sqlx::query(
-        "INSERT INTO identity_routes(node_id, inbound_tag, identity_name, state, created_at) \
-         VALUES (?, ?, ?, 'free', ?) \
-         ON CONFLICT(node_id, inbound_tag, identity_name) DO NOTHING",
+        "INSERT INTO identity_routes(node_id, identity_name, state, created_at) \
+         VALUES (?, ?, 'free', ?) \
+         ON CONFLICT(node_id, identity_name) DO NOTHING",
     )
     .bind(node_id)
-    .bind(inbound_tag)
     .bind(identity_name)
     .bind(now)
     .execute(&mut *conn)

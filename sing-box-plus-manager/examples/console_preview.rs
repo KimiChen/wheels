@@ -220,8 +220,8 @@ async fn seed_trend(store: &Store, node_id: &str) -> anyhow::Result<()> {
 
     // 归属落在**槽位**上，跨重启存活。审计裁剪（C35）也是从这里取历史持有区间。
     let route_id: i64 = sqlx::query(
-        "INSERT INTO identity_routes(node_id, inbound_tag, identity_name, state, user_id, \
-         claimed_at, created_at) VALUES (?, 'ss-in', 'u_example_01', 'claimed', 2, ?, ?) \
+        "INSERT INTO identity_routes(node_id, identity_name, state, user_id, \
+         claimed_at, created_at) VALUES (?, 'u_example_01', 'claimed', 2, ?, ?) \
          RETURNING route_id",
     )
     .bind(node_id)

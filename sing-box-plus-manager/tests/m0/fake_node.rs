@@ -219,6 +219,78 @@ impl FakeNode {
         panic!("夹具里没有身份 {inbound_tag}/{user_name}");
     }
 
+    /// 把一个已有身份**原样挂到另一条 inbound 上**：同名、四向计数归零。
+    ///
+    /// 这是「一个人同时持有 SS 与 VLESS」在节点侧的样子。名字在**每条 inbound 内**
+    /// 唯一，跨 inbound 同名是合法的，节点侧的 `quotaCell` 也是按
+    /// `(inbound_tag, name)` 挂的两个互不相干的计数器。
+    ///
+    /// 计数归零有两个理由：一条刚加出来的入口本来就没跑过流量；而且
+    /// `pick_free_slot` 要求候选身份四向计数全为零，带着计数会让认领用例
+    /// 失败在与它要测的东西无关的地方。
+    pub async fn mirror_identity(
+        &self,
+        src_tag: &str,
+        dst_tag: &str,
+        dst_type: &str,
+        user_name: &str,
+    ) {
+        let mut state = self.state.lock().await;
+        let inbounds = state.snapshot["inbounds"].as_array_mut().expect("inbounds 是数组");
+        let mut copied = inbounds
+            .iter()
+            .find(|inbound| inbound["tag"].as_str() == Some(src_tag))
+            .and_then(|inbound| inbound["users"].as_array())
+            .and_then(|users| users.iter().find(|user| user["name"].as_str() == Some(user_name)))
+            .unwrap_or_else(|| panic!("夹具里没有身份 {src_tag}/{user_name}"))
+            .clone();
+        for field in
+            ["tcp_uplink_bytes", "tcp_downlink_bytes", "udp_uplink_bytes", "udp_downlink_bytes"]
+        {
+            copied[field] = serde_json::json!(0u64);
+        }
+
+        if let Some(target) =
+            inbounds.iter_mut().find(|inbound| inbound["tag"].as_str() == Some(dst_tag))
+        {
+            let users = target["users"].as_array_mut().expect("users 是数组");
+            assert!(
+                users.iter().all(|user| user["name"].as_str() != Some(user_name)),
+                "同一条 inbound 内重名会被节点侧的校验直接拒掉：{dst_tag}/{user_name}"
+            );
+            // **按序插入，不能 push。** 解析器要求 `users[]` 按 (name, generation)
+            // 的 ASCII 字节严格升序，乱序是「整份解析失败」——而结算失败在这一层
+            // 是静默的，夹具只会表现成「主控没看见这个身份」。
+            let key = |user: &serde_json::Value| {
+                (
+                    user["name"].as_str().unwrap_or_default().to_string(),
+                    user["generation"].as_u64().unwrap_or_default(),
+                )
+            };
+            let at = users.partition_point(|user| key(user) < key(&copied));
+            users.insert(at, copied);
+            return;
+        }
+
+        let listen_port = inbounds
+            .iter()
+            .filter_map(|inbound| inbound["listen_port"].as_u64())
+            .max()
+            .unwrap_or(8000)
+            + 1;
+        inbounds.push(serde_json::json!({
+            "tag": dst_tag,
+            "type": dst_type,
+            "listen": "0.0.0.0",
+            "listen_port": listen_port,
+            "generation": 1,
+            "active": true,
+            "tcp_sessions": 0,
+            "udp_sessions": 0,
+            "users": [copied],
+        }));
+    }
+
     /// 让一个已观察过的 lineage 从后续快照里消失（C25）。
     pub async fn remove_identity(&self, inbound_tag: &str, user_name: &str) {
         let mut state = self.state.lock().await;

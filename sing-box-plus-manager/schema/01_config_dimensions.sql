@@ -92,7 +92,7 @@ CREATE TABLE users (
 -- SQLite 的唯一索引允许多个 NULL，正是这里要的：没有飞书标识的人互不冲突。
 CREATE UNIQUE INDEX idx_users_feishu_fs_id ON users(feishu_fs_id) WHERE feishu_fs_id IS NOT NULL;
 
--- 计费槽位注册表：节点 / inbound / 身份名 → 业务用户。
+-- 计费槽位注册表：节点 / 身份名 → 业务用户。
 --
 -- **这是归属的唯一落点，而且它是持久的。** 归属不能写在 runtime_identities 上：
 -- 那张表按 (node_id, runtime_id) 键，节点一重启就生成全新的行，
@@ -104,10 +104,26 @@ CREATE UNIQUE INDEX idx_users_feishu_fs_id ON users(feishu_fs_id) WHERE feishu_f
 -- 行由**结算**发现并以 free 登记（见 ledger/settle.rs 第 4 步），
 -- 因此注册表的内容永远来自节点实际上报的东西，不可能与节点现实漂移。
 -- 结算只负责发现，从不移动状态；移动状态只发生在认领与退役事务里。
+--
+-- **键是 (节点, 身份名)，不带 inbound_tag。** 一个人在一个节点上同时有 SS 与
+-- VLESS 两条入口下的**同名**身份，那是同一个人、同一份归属、同一个计费口径——
+-- 两条 inbound 记录只是同一个名字的两种到达方式。一个计费身份是一个人的一个
+-- 名额，它挂在几个入口上是部署细节。
 CREATE TABLE identity_routes (
     route_id    INTEGER PRIMARY KEY AUTOINCREMENT,
     node_id     TEXT NOT NULL REFERENCES nodes(node_id),
-    inbound_tag TEXT NOT NULL,
+    -- 这里曾经有一个 inbound_tag，唯一键带着它。删掉它有两个理由。
+    --
+    -- 一、**它必然是个谎。** register_slot 在 `for inbound → for user` 的内层循环里
+    -- 调用，`ON CONFLICT … DO NOTHING` 让列里留下的是快照 inbounds[] 里**先出现的
+    -- 那一个**入口，之后永不更新。哪条入口承载这个名字，真相在 runtime_services /
+    -- runtime_identities 上，是活的；抄一份到这里只会分家。
+    --
+    -- 二、**删列是这次改动唯一能被门禁看见的部分。** table_fingerprints 只读
+    -- PRAGMA table_info，看不见 UNIQUE——把唯一键从三列改成两列对启动漂移检查
+    -- 完全隐形。留着列的话，一个旧库会顺利通过门禁，然后 register_slot 每轮结算
+    -- 报 `no unique index matching`，更坏的是 pick_free_slot 在旧库上 count 翻倍，
+    -- **池子永远空、零报错**。删列把一次隐形的 schema 变更换成一次响亮的启动失败。
     identity_name TEXT NOT NULL,
     -- free → claimed → retired，**单向**。retired 永不回到 free（定案第一条）：
     -- 复用前必须更换 uPSK，而那要改节点配置并 reload；不换就直接复用，
@@ -135,8 +151,8 @@ CREATE TABLE identity_routes (
     claimed_at  TEXT,
     retired_at  TEXT,
     created_at  TEXT NOT NULL,
-    -- 不同入口的同名身份不合并：唯一键必须带 inbound_tag。
-    UNIQUE(node_id, inbound_tag, identity_name),
+    -- 一个节点上一个名字一个槽位。该槽位天然覆盖承载这个名字的**全部**入口。
+    UNIQUE(node_id, identity_name),
     -- state 与 user_id 必须自洽，否则「无主的 claimed」能被写进来。
     -- 三种状态各自的自洽形状。
     --
@@ -157,8 +173,14 @@ CREATE TABLE identity_routes (
 ) STRICT;
 
 -- D17：同一用户在同一节点上只能有一个**在用**身份。
--- 没有这条，assemble 会走 split_identities 把他在该节点的额度切成两半，
--- 而这个错在观测上看不出来——PUT 照样 200，表也照样是全量的。
+--
+-- 它与上面那条 UNIQUE 不重复：UNIQUE 挡的是「同一个名字两行」，
+-- 这条挡的是「同一个人两个不同的名字」。
+--
+-- **2026-09-20 起它守的东西变重了。** 原来没有它，assemble 会走 split_identities
+-- 把他在该节点的额度切成两半——那是**少给**，而且在观测上看不出来（PUT 照样 200、
+-- 表照样全量）。现在 assemble 对同名的多条入口**各发全额**，于是没有它就是
+-- 「2 个名字 × 每个名字 N 条入口，份份全额」——从「省一半」变成「再翻一倍敞口」。
 CREATE UNIQUE INDEX idx_identity_routes_active_per_user
     ON identity_routes(node_id, user_id) WHERE state = 'claimed';
 CREATE INDEX idx_identity_routes_free ON identity_routes(node_id, state, route_id);

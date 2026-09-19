@@ -63,7 +63,9 @@ async fn wire_identity(api: &Api, user_id: i64, inbound: &str, identity: &str) {
     .unwrap();
     let service: i64 = sqlx::query_scalar(
         "INSERT INTO runtime_services(runtime_pk, inbound_tag, generation, inbound_type, active, \
-         first_seen_at) VALUES (?, ?, ?, 'shadowsocks', 1, ?) RETURNING runtime_service_id",
+         first_seen_at) VALUES (?, ?, ?, 'shadowsocks', 1, ?) \
+         ON CONFLICT(runtime_pk, inbound_tag, generation) DO UPDATE SET active = excluded.active \
+         RETURNING runtime_service_id",
     )
     .bind(runtime_pk)
     .bind(inbound)
@@ -86,11 +88,10 @@ async fn wire_identity(api: &Api, user_id: i64, inbound: &str, identity: &str) {
     .await
     .unwrap();
     let route: i64 = sqlx::query_scalar(
-        "INSERT INTO identity_routes(node_id, inbound_tag, identity_name, state, user_id, \
-         claimed_at, created_at) VALUES (?, ?, ?, 'claimed', ?, ?, ?) RETURNING route_id",
+        "INSERT INTO identity_routes(node_id, identity_name, state, user_id, \
+         claimed_at, created_at) VALUES (?, ?, 'claimed', ?, ?, ?) RETURNING route_id",
     )
     .bind(NODE)
-    .bind(inbound)
     .bind(identity)
     .bind(user_id)
     .bind(now)
@@ -104,6 +105,51 @@ async fn wire_identity(api: &Api, user_id: i64, inbound: &str, identity: &str) {
     )
     .bind(route)
     .bind(user_id)
+    .bind(now)
+    .bind(now)
+    .execute(txn.conn())
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+}
+
+/// 把一个已有身份原样挂到另一条 inbound 上：只补节点侧的 service/identity 行，
+/// **不碰 `identity_routes`**。
+///
+/// 槽位键是 `(node_id, identity_name)`——一个名字在一个节点上只有一行 route，
+/// 它挂在几个入口上是部署细节。想再插一行 route 来表示「第二个协议」的，
+/// 会被唯一键当场拒掉，那正是这次改动要立的规矩。
+async fn mirror_inbound(api: &Api, inbound: &str, identity: &str) {
+    let now = "2026-01-01T00:00:00Z";
+    let mut txn = api.store.begin_immediate().await.unwrap();
+    let runtime_pk: i64 = sqlx::query_scalar(
+        "SELECT runtime_pk FROM node_runtimes WHERE node_id = ? ORDER BY runtime_pk LIMIT 1",
+    )
+    .bind(NODE)
+    .fetch_one(txn.conn())
+    .await
+    .unwrap();
+    let service: i64 = sqlx::query_scalar(
+        "INSERT INTO runtime_services(runtime_pk, inbound_tag, generation, inbound_type, active, \
+         first_seen_at) VALUES (?, ?, ?, 'vless', 1, ?) \
+         ON CONFLICT(runtime_pk, inbound_tag, generation) DO UPDATE SET active = excluded.active \
+         RETURNING runtime_service_id",
+    )
+    .bind(runtime_pk)
+    .bind(inbound)
+    .bind(GEN)
+    .bind(now)
+    .fetch_one(txn.conn())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO runtime_identities(runtime_pk, runtime_service_id, identity_name, \
+         generation, active, first_seen_at, last_seen_at) VALUES (?, ?, ?, ?, 1, ?, ?)",
+    )
+    .bind(runtime_pk)
+    .bind(service)
+    .bind(identity)
+    .bind(GEN)
     .bind(now)
     .bind(now)
     .execute(txn.conn())
@@ -158,16 +204,20 @@ async fn 管理员按用户查与本人自助查结果相同() {
     let admin = api.user("root", Role::Admin, "paoyou").await;
     let alice = api.user("alice", Role::User, "paoyou").await;
     let bob = api.user("bob", Role::User, "paoyou").await;
-    // 同一个身份名在两个入口上分属两人——最容易串号的那种状态。
+    // alice 的名字同时挂在 SS 与 VLESS 两个入口上，bob 是另一个名字。
+    // 记录文件按身份名分，所以 bob 那条是「别人的名字落进了我的文件」——
+    // C35 不信文件名、按记录自己的四元组重新定归属，正是为了这种情况。
     wire_identity(&api, alice.user_id, "ss-a", "id-01").await;
-    wire_identity(&api, bob.user_id, "ss-b", "id-01").await;
+    mirror_inbound(&api, "vless-a", "id-01").await;
+    wire_identity(&api, bob.user_id, "ss-a", "id-02").await;
     let ts = now_ms() - 60_000;
     api.seed_audit(
         NODE,
         "id-01",
         &[
-            line("id-01", "ss-a", "alice-only.example.com", 1, ts, 100, 200),
-            line("id-01", "ss-b", "bob-only.example.com", 2, ts + 1, 100, 200),
+            line("id-01", "ss-a", "alice-ss.example.com", 1, ts, 100, 200),
+            line("id-01", "vless-a", "alice-vless.example.com", 2, ts + 1, 100, 200),
+            line("id-02", "ss-a", "bob-only.example.com", 3, ts + 2, 100, 200),
         ],
     );
 
@@ -176,8 +226,14 @@ async fn 管理员按用户查与本人自助查结果相同() {
     let (status, theirs, _) = api.get(&path, Some(&admin)).await;
     assert_eq!(status, StatusCode::OK, "{theirs}");
     assert_eq!(mine["rows"], theirs["rows"], "两条路径必须给出同一份行");
-    assert_eq!(hosts(&mine), vec!["alice-only.example.com"]);
+    assert_eq!(
+        hosts(&mine),
+        // 排序是「最近一次在前」，vless 那条的 ts 更大，所以它排前面。
+        vec!["alice-vless.example.com", "alice-ss.example.com"],
+        "同一个名字的两个协议都是本人的，一条都不能丢"
+    );
     assert_eq!(mine["dropped"]["dropped_other_owner"], 1, "bob 那条要被裁掉并计数");
+    assert_eq!(mine["dropped"]["dropped_ambiguous"], 0, "放宽 JOIN 不得把 route 行乘出两条来");
 }
 
 #[tokio::test]
