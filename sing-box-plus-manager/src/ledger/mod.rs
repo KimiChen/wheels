@@ -7,6 +7,7 @@
 
 pub mod bucket;
 pub mod canonical;
+pub mod payload;
 pub mod runtime;
 pub mod settle;
 

@@ -30,6 +30,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "io-util", "sync", "fs", "signal"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
+zstd = { version = "0.13", default-features = false }
 # 与 agent 共享的合同：封闭命令集、应用层 HMAC、精确 leaf 授信。只有一份定义。
 proxy-manager-wire = { path = "wire" }
 # 双 CA PKI（M1）。全栈单一 ring provider——一旦让 aws-lc-rs 进来就会连带拉入
