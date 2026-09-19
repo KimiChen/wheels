@@ -98,6 +98,94 @@ impl Store {
         })
     }
 
+    /// 为**备份**打开一份已有的库：不建库、不建表、不同步节点。
+    ///
+    /// `open_store()` 那条路径会依次做 `create_if_missing(true)` → `init_schema()`
+    /// → `sync_nodes()`——**后两件都是写**。一个备份工具在动手之前先改一遍
+    /// 被备份的对象，是把「备份」和「一次可能失败的写入」绑在了一起；
+    /// 而 `create_if_missing` 让一个打错的路径变成一个崭新的空库，
+    /// 然后它会被认认真真地备份、核对、并报告「一切正常」。
+    ///
+    /// 先试只读。WAL 的读连接需要写 `-shm`，所以服务停着又留着 `-wal` 时只读会失败——
+    /// 那时退回读写打开（SQLite 需要它来跑 WAL 恢复），但**仍然不建表、不同步**。
+    ///
+    /// **不加 `immutable=1`。** 搜「read-only database file」最容易搜到的就是它，
+    /// 而它会让 SQLite **完全忽略 WAL**：打开成功，读到的是 checkpoint 之前的旧数据，
+    /// 而且 `integrity_check` 照样报 ok。
+    pub async fn open_for_backup(path: &std::path::Path) -> Result<Self> {
+        if !path.exists() {
+            return Err(crate::error::Error::invalid_config(
+                "§5",
+                format!("{} 不存在：备份不会凭空建一个空库出来", path.display()),
+            ));
+        }
+        let base = SqliteConnectOptions::new()
+            .filename(path)
+            .create_if_missing(false)
+            .foreign_keys(true)
+            .busy_timeout(std::time::Duration::from_millis(5_000));
+        for read_only in [true, false] {
+            let options = base.clone().read_only(read_only);
+            let Ok(readers) =
+                SqlitePoolOptions::new().max_connections(2).connect_with(options.clone()).await
+            else {
+                continue;
+            };
+            let Ok(conn) = SqliteConnection::connect_with(&options).await else { continue };
+            if !read_only {
+                tracing::warn!(
+                    "只读打开失败（多半是服务停着且留着 -wal），改用读写打开做 WAL 恢复"
+                );
+            }
+            return Ok(Store {
+                readers,
+                writer: Mutex::new(Writer { conn, txn_open: false }),
+                path: path.to_path_buf(),
+            });
+        }
+        Err(crate::error::Error::invalid_config("§5", format!("打不开 {}", path.display())))
+    }
+
+    /// 备份前对**源库**的两条前置断言。
+    ///
+    /// 一、`journal_mode` 必须是 `wal`。这是一条便宜的机械 tell：
+    /// 在 URI 上加 `immutable=1` 之后，SQLite 会**完全跳过 WAL**——
+    /// 打开成功、`integrity_check` 报 ok、读到的却是 checkpoint 之前的旧数据，
+    /// 而它把 WAL 库自报成 `delete`。搜「unable to open database file」
+    /// 最容易搜到的解法就是加这个参数，而它会把备份静默降级成「只拷了主文件」。
+    /// 直接 grep 参数名抓不住等价写法（打开标志也能开 immutable），自报模式能。
+    ///
+    /// 二、SQLite 版本要够 `VACUUM INTO`（3.27）。今天链接的是 sqlx 带进来的
+    /// bundled 3.46，但**这件事今天就已经是一条没人检查的假设**——
+    /// 有人改掉 feature 就会换成系统库，而那时缺的是一条断言，不是一条注释。
+    pub async fn assert_backup_preconditions(&self) -> Result<()> {
+        use sqlx::Row as _;
+        let mode: String =
+            sqlx::query("PRAGMA journal_mode").fetch_one(&self.readers).await?.get(0);
+        if !mode.eq_ignore_ascii_case("wal") {
+            return Err(crate::error::Error::invalid_config(
+                "§10 R3",
+                format!(
+                    "源库自报 journal_mode = {mode}，而主控一律用 WAL。                     最常见的成因是连接串里带了 immutable=1——那会让 SQLite 跳过 WAL，                     备出来的是 checkpoint 之前的旧数据，而且 integrity_check 照样报 ok"
+                ),
+            ));
+        }
+        let version: String =
+            sqlx::query("SELECT sqlite_version()").fetch_one(&self.readers).await?.get(0);
+        let parts: Vec<u32> = version.split('.').map(|p| p.parse().unwrap_or(0)).collect();
+        let too_old = match parts.as_slice() {
+            [major, minor, ..] => *major < 3 || (*major == 3 && *minor < 27),
+            _ => true,
+        };
+        if too_old {
+            return Err(crate::error::Error::invalid_config(
+                "§10 R3",
+                format!("SQLite {version} 没有 VACUUM INTO（要 3.27 以上）"),
+            ));
+        }
+        Ok(())
+    }
+
     pub fn path(&self) -> &std::path::Path {
         &self.path
     }

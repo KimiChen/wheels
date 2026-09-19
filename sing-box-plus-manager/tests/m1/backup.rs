@@ -413,3 +413,122 @@ async fn 坏掉的epoch报形状不对而不是报没有() {
     // 而不是假装那条冗余的判据是被这条用例证明的。
     assert!(report.integrity.contains("CHECK"), "integrity_check 也该抓到它：{}", report.integrity);
 }
+
+/// **翻页那段代码要真的翻过页。**
+///
+/// 默认翻页是 5000 行，而用例里账本只有个位数行——于是那个 `loop` 永远只转一圈，
+/// 翻页的边界（`after` 推进、最后一页判空）在测试里从来不执行。
+/// 而它恰好是只在大库上才走到的那一段：账本是只追加的，
+/// 180-400 天之后它是这个库里行数最多的表。
+#[tokio::test]
+async fn 翻页边界真的被走到() {
+    let (ledger, _) = seeded().await;
+    // 再喂两轮，让账本至少有三行——一页一行才真的翻得动。
+    // **四个计数器都得往上走**：游标是绝对值，任何一路回退都是 C 约束里的负增量，
+    // 那一批会被拒绝，账本一行都不会多。
+    for step in [2_u64, 3] {
+        ledger
+            .ingest(
+                &Snapshot::new()
+                    .sequence(step + 1)
+                    .counter("u_example_01", "tcp_uplink_bytes", 1_000_000 * step)
+                    .counter("u_example_01", "tcp_downlink_bytes", 2_000_000 * step)
+                    .counter("u_example_01", "udp_uplink_bytes", 30_000 * step)
+                    .counter("u_example_01", "udp_downlink_bytes", 40_000 * step),
+            )
+            .await;
+    }
+    let mut txn = ledger.store.begin_immediate().await.unwrap();
+    sqlx::query("UPDATE usage_ledger SET user_id = (SELECT MIN(user_id) FROM users)")
+        .execute(txn.conn())
+        .await
+        .unwrap();
+    // 账本变了，周期总账跟着重算一遍，否则下面断言的是「对不上」而不是翻页。
+    let total: u128 = {
+        let rows = sqlx::query(
+            "SELECT tcp_uplink_bytes, tcp_downlink_bytes, udp_uplink_bytes, udp_downlink_bytes \
+               FROM usage_ledger",
+        )
+        .fetch_all(txn.conn())
+        .await
+        .unwrap();
+        rows.iter()
+            .flat_map(|row| (0..4).map(move |i| row.get::<String, _>(i)))
+            .map(|text| text.trim_start_matches('0').parse::<u128>().unwrap_or(0))
+            .sum()
+    };
+    sqlx::query("UPDATE usage_cycle_totals SET total_bytes = ?")
+        .bind(format!("{total:0>39}"))
+        .execute(txn.conn())
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+
+    let whole = verify(&ledger.store).await.unwrap();
+    assert!(whole.ok(), "夹具本身要先是自洽的：{:?}", whole.mismatches);
+
+    // 一页一行：强制把每一次边界都走一遍。
+    let paged = proxy_manager::store::verify::verify_with_page(&ledger.store, 1).await.unwrap();
+    // 翻页翻的是**账本行**，不是身份数——夹具里只有一个身份有流量。
+    let ledger_rows = ledger.ledger_rows().await;
+    assert!(ledger_rows > 1, "夹具只有 {ledger_rows} 行账本，一页一行也翻不动");
+    assert_eq!(paged.mismatches.len(), whole.mismatches.len(), "翻页改变了结论");
+    assert!(paged.ok(), "翻页之后对不上了：{:?}", paged.mismatches);
+}
+
+/// **备份不会在源库上写一个字节，也不会凭空造库。**
+///
+/// 第一版的 `ledger backup` 走 `open_store()`，那条路径依次做
+/// `create_if_missing(true)` → `init_schema()` → `sync_nodes()`——后两件都是写。
+/// 一个备份工具在动手之前先改一遍被备份的对象，是把「备份」和「一次可能失败的写入」
+/// 绑在了一起；而 `create_if_missing` 让一个打错的路径变成一个崭新的空库，
+/// 然后它会被认认真真地备份、核对、并报告「一切正常」。
+#[tokio::test]
+async fn 备份不写源库也不凭空造库() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // 路径不存在时**报错**，而且不留下任何文件。
+    let missing = dir.path().join("nope.db");
+    assert!(Store::open_for_backup(&missing).await.is_err());
+    assert!(!missing.exists(), "不该造出一个空库");
+
+    // 一个**缺表**的库：打开它不该把表建出来。
+    let empty = dir.path().join("empty.db");
+    std::fs::write(&empty, b"").unwrap();
+    let store = Store::open_for_backup(&empty).await.unwrap();
+    let report = verify(&store).await.unwrap();
+    store.close().await;
+    assert!(!report.missing_tables.is_empty(), "空库应当报缺表，而不是被悄悄建好");
+    assert!(!report.ok());
+
+    // 再打开一次，确认上一次没有顺手建表——**缺表必须还是缺表**。
+    let store = Store::open_for_backup(&empty).await.unwrap();
+    let again = verify(&store).await.unwrap();
+    store.close().await;
+    assert_eq!(again.missing_tables.len(), report.missing_tables.len(), "上一次打开建了表");
+}
+
+/// 备份前要先确认**源库自报的是 WAL**。
+///
+/// 这是抓 `immutable=1` 的机械 tell：加上那个参数之后 SQLite 会完全跳过 WAL，
+/// 打开成功、`integrity_check` 报 ok、读到的却是 checkpoint 之前的旧数据，
+/// 而它会把一个 WAL 库自报成 `delete`。直接 grep 参数名抓不住等价写法，自报模式能。
+#[tokio::test]
+async fn 源库必须自报wal() {
+    let (ledger, _) = seeded().await;
+    ledger.store.assert_backup_preconditions().await.expect("活库是 WAL，应当通过");
+
+    // 备份产物是 delete 模式——**拿它当源去再备一次，必须被挡住**。
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("backup.db");
+    sqlx::query("VACUUM INTO ?")
+        .bind(out.to_string_lossy().as_ref())
+        .execute(ledger.store.readers())
+        .await
+        .unwrap();
+    let copy = Store::open_readonly(&out).await.unwrap();
+    let error = copy.assert_backup_preconditions().await.unwrap_err().to_string();
+    copy.close().await;
+    assert!(error.contains("journal_mode"), "{error}");
+    assert!(error.contains("immutable"), "要点名最常见的成因：{error}");
+}
