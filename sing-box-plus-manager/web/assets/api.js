@@ -404,10 +404,47 @@
     return picked?.value ?? "7d";
   }
 
+  // 「最近记录」那一列的排序。
+  //
+  // **在前端排是对的，因为审计聚合行是全量返回的**（服务端不分页，
+  // `rows` 就是这段时间里的全部目标）。分页的表在前端排序才是那种
+  // 「看起来排好了、其实只排了当前这一页」的坑——那种错不报错，
+  // 而且第一页通常恰好是对的，所以没人会发现。
+  //
+  // 默认保持服务端的顺序（次数多的在前），点一下才切到按时刻排。
+  // 不默认按时刻排：那会让「我最常去哪」这个问题的答案从第一屏消失。
+  let auditState = { rows: [], data: null, order: null };
+
+  function applyAuditSort() {
+    const { rows, data, order } = auditState;
+    const sorted = order
+      ? [...rows].sort((a, b) => {
+          const left = a.last_seen ?? "";
+          const right = b.last_seen ?? "";
+          // 时刻是 RFC3339 定宽串，字典序即时间序。
+          return order === "desc" ? right.localeCompare(left) : left.localeCompare(right);
+        })
+      : rows;
+    renderCollection("audit", sorted, emptyAuditText(data));
+    const header = document.querySelector("[data-audit-sort-header]");
+    if (header) header.setAttribute("aria-sort", order === "desc" ? "descending" : order === "asc" ? "ascending" : "none");
+  }
+
+  document.addEventListener("click", (event) => {
+    if (!event.target?.closest?.("[data-audit-sort]")) return;
+    // 第一下就切到「最近的在前」——那是点这个图标的人想要的东西。
+    auditState.order = auditState.order === "desc" ? "asc" : "desc";
+    applyAuditSort();
+  });
+
   function renderAudit(data) {
     // 行是已经裁剪过的（C35 在服务端做，而且在聚合之前）。页面不再过滤，
     // 拿到什么显示什么——在这里补一层「过滤」只会造出第二套规则。
-    renderCollection("audit", data.rows ?? [], emptyAuditText(data));
+    // 重新取数时**保留当前排序**：切时间范围之后表格突然跳回默认顺序，
+    // 会让人以为自己点错了地方。
+    auditState.rows = data.rows ?? [];
+    auditState.data = data;
+    applyAuditSort();
     renderCollection("audit-gaps", data.gaps ?? [], "没有缺口");
     const gaps = (data.gaps ?? []).length > 0;
     toggle("[data-pm-state='gaps']", gaps);
