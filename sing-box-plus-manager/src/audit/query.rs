@@ -97,10 +97,33 @@ pub struct Gap {
     pub at: Option<String>,
 }
 
+/// 当时生效的排除规则。
+///
+/// **取自文件里的 `ev=filter` 行，不取自配置**——配置在节点上，主控看不到；
+/// 而 `filter` 行记的是**那些记录写下来的当时**真正生效的规则，这正是要说的东西。
+///
+/// 节点每次打开物理文件都会写一行（新建 / 轮转后 / 重启后），所以同一个时间窗里
+/// 可能出现不止一套规则。那时 `consistent` 为假，页面要说「这段时间里规则变过」
+/// 而不是挑一套显示——挑哪一套都是在替读者做一个他不知道的选择。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct Excluded {
+    pub hosts: Vec<String>,
+    pub ips: Vec<String>,
+    /// 这段时间里读到的全部 `filter` 行是否都是同一套规则。
+    pub consistent: bool,
+    /// 有没有读到过 `filter` 行。**假不等于「没有排除」**——它也可能是
+    /// 「这些记录写下来的时候文件已经打开着」。节点只在**打开文件**时写这一行，
+    /// 所以启用排除之后、下一次轮转或重启之前，老文件里不会有它。
+    pub observed: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Answer {
     pub enabled: bool,
     pub range: String,
+    /// 哪些目标**不记录**。页面必须把它说出来：不说的话，
+    /// 一个看到 294 个目标的人会以为那就是他去过的全部地方，而那是一句假话。
+    pub excluded: Excluded,
     pub rows: Vec<Row>,
     pub gaps: Vec<Gap>,
     /// `available` / `no_data` / `unavailable`。
@@ -162,6 +185,9 @@ pub async fn access(
 
     let mut records: Vec<AccessRecord> = Vec::new();
     let mut gaps: Vec<Gap> = Vec::new();
+    // 用集合而不是「记下第一套」：不同文件可能带不同规则，而那件事本身要报出来。
+    let mut rule_sets: std::collections::BTreeSet<(Vec<String>, Vec<String>)> =
+        std::collections::BTreeSet::new();
     let mut unparsed = 0usize;
     let mut unexpected_keys = 0usize;
     let mut readable_nodes = 0usize;
@@ -209,14 +235,22 @@ pub async fn access(
                 // 诊断行**没有四元组**，所以严格说它归属不到人。但它就落在这个身份的
                 // 文件里，而文件是按身份分的——把它藏起来的代价是「这段时间的记录
                 // 可能不全」这件事没人看得见。显示它，并且不声称它一定是这个人的。
-                if let Diagnostic::Gap { after, n, reason, .. } = diagnostic {
-                    gaps.push(Gap {
+                match diagnostic {
+                    Diagnostic::Gap { after, n, reason, .. } => gaps.push(Gap {
                         kind: reason,
                         node_id: node_id.clone(),
                         after_seq: Some(after),
                         n,
                         at: None,
-                    });
+                    }),
+                    // 排除规则的留痕。**排序后入集**：名单顺序对节点没有意义
+                    // （线性扫描），不排序会把「顺序不同」误报成「规则变过」。
+                    Diagnostic::Filter { mut hosts, mut ips, .. } => {
+                        hosts.sort();
+                        ips.sort();
+                        rule_sets.insert((hosts, ips));
+                    }
+                    Diagnostic::Stop { .. } => {}
                 }
             }
         }
@@ -276,9 +310,23 @@ pub async fn access(
     let archive_state =
         if rows.is_empty() && filtered.dropped_total() == 0 { "no_data" } else { "available" };
 
+    // 规则不一致时**取并集**：宁可多说几个「不记录」，也不能少说——
+    // 少说的那几个正是读者会以为「我没去过」的目标。
+    let mut excluded = Excluded { observed: !rule_sets.is_empty(), ..Excluded::default() };
+    excluded.consistent = rule_sets.len() <= 1;
+    for (hosts, ips) in &rule_sets {
+        excluded.hosts.extend(hosts.iter().cloned());
+        excluded.ips.extend(ips.iter().cloned());
+    }
+    excluded.hosts.sort();
+    excluded.hosts.dedup();
+    excluded.ips.sort();
+    excluded.ips.dedup();
+
     Ok(Answer {
         enabled: true,
         range: range.as_str().to_string(),
+        excluded,
         rows,
         gaps,
         archive_state,
@@ -296,6 +344,9 @@ fn empty(range: Range, state: &'static str) -> Answer {
     Answer {
         enabled: true,
         range: range.as_str().to_string(),
+        // 读不到任何文件时说不出排除规则——`observed: false`，页面据此闭嘴，
+        // 而不是显示一个空名单（那会被读成「什么都记录」）。
+        excluded: Excluded::default(),
         rows: Vec::new(),
         gaps: Vec::new(),
         archive_state: state,

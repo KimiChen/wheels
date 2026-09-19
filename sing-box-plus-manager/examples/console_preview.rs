@@ -310,6 +310,12 @@ fn seed_audit(root: &std::path::Path) -> anyhow::Result<()> {
 
     let mut lines = Vec::new();
     let mut seq = 0u64;
+    // 文件头的排除规则留痕。节点每次打开物理文件都写一行，页面的「有些目标我们不记录」
+    // 那一块就是从它取的——所以预览里必须有它，否则那一块永远看不到。
+    seq += 1;
+    lines.push(format!(
+        r#"{{"seq":{seq},"ev":"filter","hosts":["apple.com","github.com","google.com","microsoft.com"],"ips":["198.18.0.0/15","17.253.0.0/16"]}}"#
+    ));
     // 同一个域名来一批，让「次数」这一列有东西可排。
     for (host, source, port, hits, ago_ms) in [
         ("www.example.com", "sniff", 443u16, 37u32, 3_600_000i64),

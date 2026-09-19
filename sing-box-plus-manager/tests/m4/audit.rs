@@ -419,3 +419,109 @@ async fn 前缀相近的身份文件不会被误读() {
         api.audit_dir.join(NODE).join(proxy_manager_wire::audit::active_file_name("user00010"));
     assert!(std::fs::read_to_string(&other).unwrap().contains("queue_full"));
 }
+
+fn filter_line(seq: u64, hosts: &[&str], ips: &[&str]) -> String {
+    format!(
+        r#"{{"seq":{seq},"ev":"filter","hosts":{},"ips":{}}}"#,
+        serde_json::to_string(hosts).unwrap(),
+        serde_json::to_string(ips).unwrap()
+    )
+}
+
+/// **页面必须说得出哪些目标不记录。**
+///
+/// 不说的话，一个看到 N 个目标的人会以为那就是他去过的全部地方——而开了排除之后
+/// 那是一句假话（线上实测排掉的是 85.6%）。名单取自文件里的 `ev=filter` 行，
+/// 不取自配置：配置在节点上，主控看不到；而 filter 行记的是**那些记录写下来的
+/// 当时**真正生效的规则。
+#[tokio::test]
+async fn 排除名单从filter行取并原样返回() {
+    let api = Api::new().await;
+    let alice = api.user("alice", Role::User, "local").await;
+    wire_identity(&api, alice.user_id, "ss-entry", "id-01").await;
+    let ts = now_ms() - 60_000;
+    api.seed_audit(
+        NODE,
+        "id-01",
+        &[
+            filter_line(1, &["google.com", "apple.com"], &["198.18.0.0/15"]),
+            line("id-01", "ss-entry", "www.example.com", 2, ts, 1, 1),
+        ],
+    );
+
+    let (_, body, _) = api.get("/api/v1/me/audit/access", Some(&alice)).await;
+    let excluded = &body["excluded"];
+    assert_eq!(excluded["observed"], true);
+    assert_eq!(excluded["consistent"], true);
+    // 排序后返回，页面不必自己再排。
+    assert_eq!(excluded["hosts"], serde_json::json!(["apple.com", "google.com"]));
+    assert_eq!(excluded["ips"], serde_json::json!(["198.18.0.0/15"]));
+    // filter 行**不进**用户统计，也不算缺口。
+    assert_eq!(hosts(&body), vec!["www.example.com"]);
+    assert!(body["gaps"].as_array().unwrap().is_empty());
+}
+
+/// 名单顺序对节点没有意义（线性扫描），所以顺序不同**不算规则变过**。
+#[tokio::test]
+async fn 顺序不同不算规则变过() {
+    let api = Api::new().await;
+    let alice = api.user("alice", Role::User, "local").await;
+    wire_identity(&api, alice.user_id, "ss-entry", "id-01").await;
+    api.seed_audit(
+        NODE,
+        "id-01",
+        &[
+            filter_line(1, &["google.com", "apple.com"], &[]),
+            filter_line(2, &["apple.com", "google.com"], &[]),
+        ],
+    );
+    let (_, body, _) = api.get("/api/v1/me/audit/access", Some(&alice)).await;
+    assert_eq!(body["excluded"]["consistent"], true, "{body}");
+}
+
+/// 同一个时间窗里读到两套**不同**的规则：报出来，并取并集。
+///
+/// 挑一套显示是在替读者做一个他不知道的选择；取交集会少说几个「不记录」，
+/// 而少说的那几个正是他会以为「我没去过」的目标。
+#[tokio::test]
+async fn 规则变过时报出来并取并集() {
+    let api = Api::new().await;
+    let alice = api.user("alice", Role::User, "local").await;
+    wire_identity(&api, alice.user_id, "ss-entry", "id-01").await;
+    api.seed_audit(NODE, "id-01", &[filter_line(1, &["google.com"], &[])]);
+    api.seed_audit(
+        "node-example-02",
+        "id-01",
+        &[filter_line(1, &["apple.com"], &["17.253.0.0/16"])],
+    );
+
+    let (_, body, _) = api.get("/api/v1/me/audit/access", Some(&alice)).await;
+    assert_eq!(body["excluded"]["consistent"], false, "{body}");
+    assert_eq!(body["excluded"]["hosts"], serde_json::json!(["apple.com", "google.com"]));
+    assert_eq!(body["excluded"]["ips"], serde_json::json!(["17.253.0.0/16"]));
+}
+
+/// 没读到 `filter` 行时 `observed` 为假，**而不是返回一个空名单**。
+///
+/// 空名单会被读成「什么都记录」。而真相可能是「这些记录写下来的时候文件已经开着」——
+/// 节点只在**打开文件**时写这一行，所以启用排除之后、下一次轮转或重启之前，
+/// 老文件里不会有它。
+#[tokio::test]
+async fn 没有filter行时说不知道而不是说没有排除() {
+    let api = Api::new().await;
+    let alice = api.user("alice", Role::User, "local").await;
+    wire_identity(&api, alice.user_id, "ss-entry", "id-01").await;
+    api.seed_audit(
+        NODE,
+        "id-01",
+        &[line("id-01", "ss-entry", "www.example.com", 1, now_ms() - 1_000, 1, 1)],
+    );
+    let (_, body, _) = api.get("/api/v1/me/audit/access", Some(&alice)).await;
+    assert_eq!(body["excluded"]["observed"], false);
+    assert!(body["excluded"]["hosts"].as_array().unwrap().is_empty());
+
+    // 同一页里读不到任何文件时也是 observed=false（archive_state 已经说了原因）。
+    let bob = api.user("bob", Role::User, "local").await;
+    let (_, empty, _) = api.get("/api/v1/me/audit/access", Some(&bob)).await;
+    assert_eq!(empty["excluded"]["observed"], false);
+}
