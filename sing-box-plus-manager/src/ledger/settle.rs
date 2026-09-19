@@ -191,6 +191,13 @@ pub enum SettleOutcome {
         /// **跳号是合法的**（真实采集丢失，C26）：告警并记录缺口，
         /// 但照常按累计差值结算，**绝不对缺失时段插值**。
         sequence_gap: Option<u64>,
+        /// 这份快照报了 `audit_dropped`。**照常入账**——把审计丢弃算进入账判据
+        /// 等于让磁盘写满连带停掉计费，那是节点侧刻意不做的。
+        ///
+        /// 带出来是因为 `snapshot_batches` 不存这一位，而它粘滞到 plus 重启，
+        /// 含义是「从某一刻起到下次重启为止这台节点的审计都不完整」。
+        /// 调用方据此往审计树写一条旁路记录（`audit::health`）。
+        audit_dropped: bool,
     },
     /// 整份拒绝。留了回执，**没有推进 sequence 与游标**。
     Rejected { batch_pk: i64, reason: RejectReason },
@@ -494,7 +501,8 @@ async fn settle_in_txn(
         }
         return finish_rejected(conn, batch_pk, RejectReason::Unhealthy { bits }).await;
     }
-    if snapshot.health.audit_gap() {
+    let audit_dropped = snapshot.health.audit_gap();
+    if audit_dropped {
         // 把审计丢弃算进入账判据，等于让磁盘写满连带停掉计费——
         // 这是节点侧刻意不做的，主控也不要做回来。
         tracing::warn!(node_id, sequence, "audit_dropped 为真：审计有损，照常入账（P2 告警）");
@@ -738,7 +746,7 @@ async fn settle_in_txn(
     // 全部写完，就差 COMMIT。在这里被杀，整笔必须回滚。
     crate::crash::checkpoint(crate::crash::points::BEFORE_COMMIT);
 
-    Ok(SettleOutcome::Applied { batch_pk, sequence, ledger_rows, sequence_gap })
+    Ok(SettleOutcome::Applied { batch_pk, sequence, ledger_rows, sequence_gap, audit_dropped })
 }
 
 // ============================ 辅助 ============================

@@ -467,7 +467,10 @@ async fn run_service(config_dir: &std::path::Path) -> anyhow::Result<ExitCode> {
     for node in &config.nodes {
         let client =
             AgentClient::new(&node.node_id, &node.address, node.dns_name(), &node.materials_dir)?;
-        let collector = NodeCollector::new(&node.node_id, client, policy.clone());
+        let collector = NodeCollector::new(&node.node_id, client, policy.clone())
+            // 配了 [audit] 才挂。没配时 audit_dropped 只进日志——与从前一样，
+            // 而日志一转就没了，所以启动时会点名说没配。
+            .with_audit_dir(config.server.audit.as_ref().map(|a| a.dir.join(&node.node_id)));
         // 采集循环外面**总是**包一层下发。没开配额控制的节点在 `dispatch_round`
         // 的第一行就返回 `Disabled`——用一条运行时分支，而不是两种任务形态：
         // 两种形态意味着切换时要改的是启动代码，而不是一个配置字段。
