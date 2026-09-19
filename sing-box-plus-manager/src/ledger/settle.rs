@@ -219,7 +219,10 @@ pub async fn receive(
     received_at: OffsetDateTime,
     max_skew_secs: i64,
 ) -> Result<Option<Receipt>> {
+    // **哈希对原文算**，与存储编码无关（`schema/03_settlement.sql` 的原话）。
+    // 压缩因此对整条审计链透明：拿原始载荷做字节守恒核对这件事不受影响。
     let payload_sha256 = hex::encode(Sha256::digest(raw));
+    let (codec, stored) = crate::ledger::payload::encode(raw);
 
     // 完整校验先走一遍：它决定这条回执是 pending 还是 rejected。
     let parsed = snapshot::parse(raw);
@@ -349,13 +352,17 @@ pub async fn receive(
     let batch_pk: i64 = result.get(0);
 
     // 原文与批次在**同一事务**保存。
+    //
+    // 编码在**事务外**就算好了（见上面的 `encode`）：写入侧是单写者（D8），
+    // 把一次压缩放进持锁区间，等于让所有节点的入账排在它后面。
     sqlx::query(
         "INSERT INTO snapshot_payloads(batch_pk, codec, raw_length, payload, created_at) \
-         VALUES (?, 'identity', ?, ?, ?)",
+         VALUES (?, ?, ?, ?, ?)",
     )
     .bind(batch_pk)
+    .bind(codec)
     .bind(raw.len() as i64)
-    .bind(raw)
+    .bind(stored)
     .bind(&now)
     .execute(txn.conn())
     .await?;
@@ -451,11 +458,20 @@ async fn settle_in_txn(
         .ok_or_else(|| Error::Ledger("批次的 accounting_at 不是合法 RFC 3339".into()))?;
 
     // 从库里恢复完整快照。原文是**结算输入**，不是可选的审计附件。
-    let payload: Vec<u8> = sqlx::query("SELECT payload FROM snapshot_payloads WHERE batch_pk = ?")
-        .bind(batch_pk)
-        .fetch_one(&mut *conn)
-        .await?
-        .get(0);
+    //
+    // 两种 codec 长期共存：压缩是这一版才开的，之前的行都是 `identity`，
+    // 而**不做迁移**（D22）意味着它们就那样留着。认不出来的 codec 会失败关闭——
+    // 放行的后果是把压缩字节喂给 JSON 解析器，得到一条指向节点的「畸形快照」。
+    let row =
+        sqlx::query("SELECT codec, raw_length, payload FROM snapshot_payloads WHERE batch_pk = ?")
+            .bind(batch_pk)
+            .fetch_one(&mut *conn)
+            .await?;
+    let payload = crate::ledger::payload::decode(
+        &row.get::<String, _>(0),
+        &row.get::<Vec<u8>, _>(2),
+        row.get::<i64, _>(1),
+    )?;
     let snapshot = match snapshot::parse(&payload) {
         Ok(snapshot) => snapshot,
         Err(rejected) => {

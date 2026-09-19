@@ -531,3 +531,76 @@ async fn 连续正常采集后四项判据全为零() {
         .get(0);
     assert_eq!(ledger_sum, 19, "首快照 baseline 不写行，之后 19 轮各一行");
 }
+
+// ============ 载荷的存储编码 ============
+
+/// **落库的是压缩后的字节，而哈希仍然是对原文算的。**
+///
+/// `schema/03_settlement.sql` 的 DDL 从第一天起就写着「压缩后的原始 JSON」，
+/// `CHECK(codec IN ('identity', 'zstd'))` 也早就留好了位置，而写入侧一直硬编码成
+/// `'identity'`。代价在生产上量出来了：四台、60 秒一轮、每份约 41.7 KB，
+/// **每月约 7 GB**，而 301 个身份的计数器绝大多数是零。
+///
+/// 这条钉住三件事：确实压了、`raw_length` 记的是原文长度、以及
+/// **`payload_sha256` 没变**——最后一条是整条审计链的前提：
+/// 「用原始载荷做字节守恒核对」是证明计量在工作的唯一办法，
+/// 压缩一旦动了哈希口径，那件事就做不成了。
+#[tokio::test]
+async fn 载荷压缩落库而哈希仍对原文计算() {
+    use sha2::{Digest, Sha256};
+    use sqlx::Row;
+
+    let ledger = Ledger::new().await;
+    ledger.approve(FirstSnapshot::Baseline).await;
+    let snapshot = Snapshot::new();
+    let raw = snapshot.bytes();
+    ledger.ingest(&snapshot).await;
+
+    let row = sqlx::query(
+        "SELECT p.codec, p.raw_length, length(p.payload), b.payload_sha256 \
+           FROM snapshot_payloads p JOIN snapshot_batches b USING(batch_pk) LIMIT 1",
+    )
+    .fetch_one(ledger.store.readers())
+    .await
+    .unwrap();
+
+    assert_eq!(row.get::<String, _>(0), "zstd", "这种重复数据必须压得下去");
+    assert_eq!(row.get::<i64, _>(1), raw.len() as i64, "raw_length 记的是原文长度");
+    assert!(
+        row.get::<i64, _>(2) < row.get::<i64, _>(1),
+        "落库的字节数应当小于原文：{} vs {}",
+        row.get::<i64, _>(2),
+        row.get::<i64, _>(1)
+    );
+    // **哈希对原文**，不对存储字节。
+    assert_eq!(row.get::<String, _>(3), hex::encode(Sha256::digest(&raw)));
+}
+
+/// 压缩之后**结算照常**：解出来的必须与原文逐字节相同。
+///
+/// 这是上一条的另一半。只断言「存进去是压缩的」不够——
+/// 一个压得下去但解不回来的实现同样能让上一条变绿，
+/// 而它在生产上表现为每一条快照都被判成「畸形」，指向节点。
+#[tokio::test]
+async fn 压缩之后结算结果不变() {
+    let ledger = Ledger::new().await;
+    ledger.approve(FirstSnapshot::Baseline).await;
+    ledger.ingest(&Snapshot::new()).await;
+
+    // 期望值**从基线算出来**，不写一个魔数：baseline 记住的是样例里的绝对值，
+    // 入账的是之后的增量。写死 3070 的话，样例一改这条就变成在核对一个巧合。
+    let base = ledger.cursor("u_example_01").await.expect("baseline 应当记下游标");
+    let target = [1_000_000u64, 2_000_000, 30_000, 40_000];
+    let second = Snapshot::new()
+        .sequence(2)
+        .counter("u_example_01", "tcp_uplink_bytes", target[0])
+        .counter("u_example_01", "tcp_downlink_bytes", target[1])
+        .counter("u_example_01", "udp_uplink_bytes", target[2])
+        .counter("u_example_01", "udp_downlink_bytes", target[3]);
+    let outcome = ledger.ingest(&second).await;
+    assert!(matches!(outcome, SettleOutcome::Applied { .. }), "实际：{outcome:?}");
+
+    let expected: u128 = target.iter().map(|v| *v as u128).sum::<u128>()
+        - base.iter().map(|v| *v as u128).sum::<u128>();
+    assert_eq!(ledger.lifetime_total("u_example_01").await, expected);
+}
