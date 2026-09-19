@@ -194,12 +194,14 @@ impl Api {
                         host: "203.0.113.1".into(),
                         note: "公网".into(),
                         transport: proxy_manager::config::Transport::Vless,
+                        min_level: 0,
                     },
                     proxy_manager::config::EntrySource {
                         prefix: "proxyLan-".into(),
                         host: "198.51.100.1".into(),
                         note: "内网".into(),
                         transport: proxy_manager::config::Transport::Ss,
+                        min_level: 0,
                     },
                 ],
                 vless: Some(proxy_manager::config::VlessConfig {

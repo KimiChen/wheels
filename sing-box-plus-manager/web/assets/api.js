@@ -424,8 +424,12 @@
       ? [...rows].sort((a, b) => {
           const left = a.last_seen ?? "";
           const right = b.last_seen ?? "";
-          // 时刻是 RFC3339 定宽串，字典序即时间序。
-          return order === "desc" ? right.localeCompare(left) : left.localeCompare(right);
+          // 时刻是 RFC3339 定宽串，**直接比大小**即时间序。
+          //
+          // 不用 localeCompare：它在某些区域设置下把 `-` `:` 当成可忽略标点，
+          // 而这里比的是机器格式的时间戳，没有任何理由让它受区域设置影响。
+          const cmp = left < right ? -1 : left > right ? 1 : 0;
+          return order === "desc" ? -cmp : cmp;
         })
       : rows;
     renderCollection("audit", sorted, emptyAuditText(data));
