@@ -1110,7 +1110,15 @@ async fn user_command(command: UserCommand) -> anyhow::Result<ExitCode> {
             let identity = proxy_manager::subscription::claimed_identity(&store, user_id).await?;
             println!("账号   : {account}");
             println!("身份   : {}", identity.as_deref().unwrap_or("(还没有分配)"));
-            println!("订阅   : {}", settings.subscription_url(&issued.plaintext));
+            // **每一种到达方式都打出来。** 只打一条的话，拿到它的人会以为那就是
+            // 全部——而在内网里拨公网地址是不通的，反过来也一样。
+            for source in &settings.sources {
+                println!(
+                    "订阅 {:<12}: {}",
+                    if source.note.is_empty() { &source.prefix } else { &source.note },
+                    settings.subscription_url(&issued.plaintext, source)
+                );
+            }
             println!(
                 "状态   : {}",
                 if issued.newly_created { "本次新发" } else { "已有，重算出同一个" }
@@ -1138,7 +1146,13 @@ async fn user_command(command: UserCommand) -> anyhow::Result<ExitCode> {
             tracing::info!(account = %account, actor = %actor, reason = %reason, revoked,
                            "订阅已重发");
             println!("已吊销 {revoked} 条，新地址：");
-            println!("{}", settings.subscription_url(&issued.plaintext));
+            for source in &settings.sources {
+                println!(
+                    "  {:<12} {}",
+                    if source.note.is_empty() { &source.prefix } else { &source.note },
+                    settings.subscription_url(&issued.plaintext, source)
+                );
+            }
             Ok(ExitCode::SUCCESS)
         }
 

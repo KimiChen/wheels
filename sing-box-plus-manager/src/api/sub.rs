@@ -13,24 +13,23 @@ use axum::response::{IntoResponse, Response};
 use crate::api::AppState;
 use crate::subscription::{self, render};
 
-/// 从 `Proxy-<64位十六进制>.yaml` 里取出 token。
+/// `GET /sub/<前缀><token>.yaml`。
 ///
-/// 形状写死而不是宽松匹配：订阅地址是**用户会转发、会存进客户端**的东西，
+/// 前缀决定这份订阅里的节点拨哪个 host（内网 / 公网），token 两种拨法共用。
+///
+/// **形状写死而不是宽松匹配**：订阅地址是用户会转发、会存进客户端的东西，
 /// 一个宽松的匹配器意味着任何 `/sub/*` 都会打到数据库上。
-fn token_from(name: &str) -> Option<&str> {
-    let token = name.strip_prefix(render::PROFILE_PREFIX)?.strip_suffix(".yaml")?;
-    (token.len() == 64 && token.bytes().all(|b| b.is_ascii_hexdigit())).then_some(token)
-}
-
+/// 认不出前缀与认不出 token 一样回 404——**不给探测接口**。
 pub async fn serve(State(app): State<AppState>, Path(name): Path<String>) -> Response {
     let Some(config) = &app.subscription else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let Some(token) = token_from(&name) else {
+    let Some((source, token)) = config.source_of(&name) else {
+        tracing::debug!("订阅文件名不认识");
         return StatusCode::NOT_FOUND.into_response();
     };
     match subscription::resolve(&app.store, token).await {
-        Ok(Some(subscriber)) => build(&app, config, subscriber).await,
+        Ok(Some(subscriber)) => build(&app, config, source, subscriber).await,
         Ok(None) => {
             // 不记 token。§4.7：响应头与日志都不得含它。
             tracing::debug!("订阅 token 无效");
@@ -46,6 +45,7 @@ pub async fn serve(State(app): State<AppState>, Path(name): Path<String>) -> Res
 async fn build(
     app: &AppState,
     config: &crate::config::SubscriptionConfig,
+    source: &crate::config::EntrySource,
     subscriber: subscription::Subscriber,
 ) -> Response {
     let credentials = match app.credentials() {
@@ -72,12 +72,11 @@ async fn build(
         }
     };
 
-    let profile = render::profile_name(&subscriber.login_name);
+    let profile = render::profile_name(&subscriber.login_name, source);
     if !identity.is_empty() && !credentials.upsk.contains_key(&identity) {
         tracing::error!(identity = %identity, "凭据文件里没有这个身份的 uPSK（P1）");
     }
-    let yaml =
-        render::clash_yaml(&config.entries, &config.groups, &credentials, &identity, &profile);
+    let yaml = render::clash_yaml(config, source, &credentials, &identity, &profile);
 
     let usage = subscription::cycle_usage(&app.store, subscriber.user_id).await.unwrap_or_default();
     let expire = subscription::cycle_expire_unix().unwrap_or(0);

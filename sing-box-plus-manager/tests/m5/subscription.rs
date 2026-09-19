@@ -83,7 +83,7 @@ async fn 用token取得到自己的节点() {
     let logged_in = login(&api, "alice").await;
     let token = logged_in.subscription.unwrap().plaintext;
 
-    let (status, body, headers) = api.get_text(&format!("/sub/Proxy-{token}.yaml"), None).await;
+    let (status, body, headers) = api.get_text(&format!("/sub/proxyWan-{token}.yaml"), None).await;
     assert_eq!(status, StatusCode::OK);
 
     // 正文是 Clash / mihomo YAML——地址以 .yaml 结尾，内容就得真是 YAML。
@@ -115,15 +115,15 @@ async fn 订阅路径形状写死() {
     let token = login(&api, "alice").await.subscription.unwrap().plaintext;
 
     for bad in [
-        format!("/sub/{token}"),                     // 缺前缀与扩展名
-        format!("/sub/Proxy-{token}"),               // 缺扩展名
-        format!("/sub/{token}.yaml"),                // 缺前缀
-        format!("/sub/Proxy-{}.yaml", &token[..63]), // 短一位
-        "/sub/Proxy-....yaml".to_string(),
+        format!("/sub/{token}"),                        // 缺前缀与扩展名
+        format!("/sub/proxyWan-{token}"),               // 缺扩展名
+        format!("/sub/{token}.yaml"),                   // 缺前缀
+        format!("/sub/proxyWan-{}.yaml", &token[..63]), // 短一位
+        "/sub/proxyWan-....yaml".to_string(),
     ] {
         assert_eq!(api.get_text(&bad, None).await.0, StatusCode::NOT_FOUND, "{bad} 本不该被接受");
     }
-    assert_eq!(api.get_text(&format!("/sub/Proxy-{token}.yaml"), None).await.0, StatusCode::OK);
+    assert_eq!(api.get_text(&format!("/sub/proxyWan-{token}.yaml"), None).await.0, StatusCode::OK);
 }
 
 /// **`Subscription-Userinfo`**：Clash / mihomo 靠它显示流量与到期。
@@ -137,7 +137,7 @@ async fn 带着真实的用量与额度头() {
     let logged_in = login(&api, "alice").await;
     let token = logged_in.subscription.unwrap().plaintext;
 
-    let (_, _, headers) = api.get_text(&format!("/sub/Proxy-{token}.yaml"), None).await;
+    let (_, _, headers) = api.get_text(&format!("/sub/proxyWan-{token}.yaml"), None).await;
     let info = headers.get("subscription-userinfo").unwrap().to_str().unwrap();
     for key in ["upload=", "download=", "total=", "expire="] {
         assert!(info.contains(key), "缺 {key}：{info}");
@@ -160,9 +160,9 @@ async fn 文件名来自账号名而不是token() {
     let logged_in = login(&api, "alice").await;
     let token = logged_in.subscription.unwrap().plaintext;
 
-    let (_, _, headers) = api.get_text(&format!("/sub/Proxy-{token}.yaml"), None).await;
+    let (_, _, headers) = api.get_text(&format!("/sub/proxyWan-{token}.yaml"), None).await;
     let disposition = headers.get("content-disposition").unwrap().to_str().unwrap();
-    assert!(disposition.contains("Proxy-alice.yaml"), "实际：{disposition}");
+    assert!(disposition.contains("proxyWan-alice.yaml"), "实际：{disposition}");
     assert!(disposition.contains("filename*=UTF-8''"), "老客户端要 ASCII，新的要 RFC 5987");
     assert!(!disposition.contains(&token), "**响应头绝不含 token**：{disposition}");
 }
@@ -176,13 +176,13 @@ async fn 吊销之后立刻失效() {
     api.seed_claimable_pool(&["node-a"], &["slot-01"]).await;
     let logged_in = login(&api, "alice").await;
     let token = logged_in.subscription.unwrap().plaintext;
-    assert_eq!(api.get_text(&format!("/sub/Proxy-{token}.yaml"), None).await.0, StatusCode::OK);
+    assert_eq!(api.get_text(&format!("/sub/proxyWan-{token}.yaml"), None).await.0, StatusCode::OK);
 
     let n =
         proxy_manager::subscription::revoke_for_user(&api.store, logged_in.user_id).await.unwrap();
     assert_eq!(n, 1);
     assert_eq!(
-        api.get_text(&format!("/sub/Proxy-{token}.yaml"), None).await.0,
+        api.get_text(&format!("/sub/proxyWan-{token}.yaml"), None).await.0,
         StatusCode::NOT_FOUND,
         "吊销后立刻失效"
     );
@@ -193,11 +193,11 @@ async fn 吊销之后立刻失效() {
     assert!(reissued.newly_created);
     assert_ne!(reissued.plaintext, token, "重发必须换一个，否则吊销等于没吊");
     assert_eq!(
-        api.get_text(&format!("/sub/Proxy-{}.yaml", reissued.plaintext), None).await.0,
+        api.get_text(&format!("/sub/proxyWan-{}.yaml", reissued.plaintext), None).await.0,
         StatusCode::OK
     );
     assert_eq!(
-        api.get_text(&format!("/sub/Proxy-{token}.yaml"), None).await.0,
+        api.get_text(&format!("/sub/proxyWan-{token}.yaml"), None).await.0,
         StatusCode::NOT_FOUND,
         "旧的仍然失效"
     );
@@ -205,7 +205,7 @@ async fn 吊销之后立刻失效() {
     // 不存在的 token 与被吊销的 token **返回同一个东西**。
     let bogus = "f".repeat(64);
     assert_eq!(
-        api.get_text(&format!("/sub/Proxy-{bogus}.yaml"), None).await.0,
+        api.get_text(&format!("/sub/proxyWan-{bogus}.yaml"), None).await.0,
         StatusCode::NOT_FOUND
     );
 }
@@ -227,7 +227,7 @@ async fn 停用的账号取不到订阅() {
     txn.commit().await.unwrap();
 
     assert_eq!(
-        api.get_text(&format!("/sub/Proxy-{token}.yaml"), None).await.0,
+        api.get_text(&format!("/sub/proxyWan-{token}.yaml"), None).await.0,
         StatusCode::NOT_FOUND
     );
 }
@@ -238,7 +238,7 @@ async fn 没配订阅时端点不存在() {
     let api = Api::new().await;
     let bogus = "a".repeat(64);
     assert_eq!(
-        api.get_text(&format!("/sub/Proxy-{bogus}.yaml"), None).await.0,
+        api.get_text(&format!("/sub/proxyWan-{bogus}.yaml"), None).await.0,
         StatusCode::NOT_FOUND
     );
 }
@@ -255,7 +255,7 @@ async fn 凭据缺失时是空订阅而不是假密码() {
     let logged_in = login(&api, "alice").await;
     let token = logged_in.subscription.unwrap().plaintext;
 
-    let (status, body, _) = api.get_text(&format!("/sub/Proxy-{token}.yaml"), None).await;
+    let (status, body, _) = api.get_text(&format!("/sub/proxyWan-{token}.yaml"), None).await;
     assert_eq!(status, StatusCode::OK);
     // **明说的空配置**，不是编一个密码，也不是一份空文件。
     assert!(body.contains("proxies: []"), "实际：{body}");
@@ -289,8 +289,15 @@ async fn 本人看得到自己的订阅地址() {
     let (status, body, _) = api.get("/api/v1/me/subscription", Some(&actor(&logged_in))).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["enabled"], true);
-    assert_eq!(body["url"], format!("https://pm.example.com/sub/Proxy-{token}.yaml"));
-    assert_eq!(body["profile_name"], "Proxy-alice");
+    let subs = body["subscriptions"].as_array().expect("要有 subscriptions");
+    assert_eq!(subs.len(), 2, "两种拨法各一条：{body}");
+    assert_eq!(subs[0]["url"], format!("https://pm.example.com/sub/proxyWan-{token}.yaml"));
+    assert_eq!(subs[0]["profile_name"], "proxyWan-alice");
+    assert_eq!(subs[1]["url"], format!("https://pm.example.com/sub/proxyLan-{token}.yaml"));
+    assert_eq!(subs[1]["profile_name"], "proxyLan-alice");
+    // **两条用的是同一个 token**：它们是同一份订阅的两种拨法，不是两份订阅。
+    assert!(subs[0]["url"].as_str().unwrap().contains(&token));
+    assert!(subs[1]["url"].as_str().unwrap().contains(&token));
     assert_eq!(body["identity"], "slot-01");
     assert_eq!(body["entry_count"], 2);
 }
@@ -317,6 +324,7 @@ async fn 个人端点只给入口名不给地址端口() {
     // 整份响应里也不该出现那两个地址。
     let text = body.to_string();
     assert!(!text.contains("203.0.113.1"), "响应里漏了入口地址：{text}");
+    assert!(!text.contains("198.51.100.1"), "响应里漏了入口地址：{text}");
     assert!(!text.contains("65002"), "响应里漏了入口端口：{text}");
 }
 
@@ -351,11 +359,13 @@ async fn 查看订阅不签发新token() {
 
     let (_, first, _) = api.get("/api/v1/me/subscription", Some(&actor)).await;
     let (_, again, _) = api.get("/api/v1/me/subscription", Some(&actor)).await;
-    assert_eq!(first["url"], again["url"], "两次查看应当是同一个地址");
+    assert_eq!(first["subscriptions"], again["subscriptions"], "两次查看应当是同一批地址");
 
     proxy_manager::subscription::revoke_for_user(&api.store, logged_in.user_id).await.unwrap();
     let (_, after, _) = api.get("/api/v1/me/subscription", Some(&actor)).await;
-    assert!(after["url"].is_null(), "吊销之后不该还有地址：{after}");
+    for sub in after["subscriptions"].as_array().unwrap() {
+        assert!(sub["url"].is_null(), "吊销之后不该还有地址：{after}");
+    }
     assert_eq!(after["enabled"], true, "能力仍然是启用的，只是这个人没有 token");
 
     let rows: i64 = sqlx::query("SELECT count(*) FROM subscription_tokens WHERE user_id = ?")
@@ -384,8 +394,8 @@ async fn 别人的订阅要管理员() {
         api.get(&format!("/api/v1/subscriptions/{}", alice.user_id), Some(&actor(&boss))).await;
     assert_eq!(status, StatusCode::OK);
     let (_, seen_by_self, _) = api.get("/api/v1/me/subscription", Some(&actor(&alice))).await;
-    assert_eq!(seen_by_admin["url"], seen_by_self["url"]);
-    assert_eq!(seen_by_admin["profile_name"], "Proxy-alice");
+    assert_eq!(seen_by_admin["subscriptions"], seen_by_self["subscriptions"]);
+    assert_eq!(seen_by_admin["subscriptions"][0]["profile_name"], "proxyWan-alice");
 
     let (status, _, _) = api.get("/api/v1/subscriptions/999999", Some(&actor(&boss))).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "没有这个用户");
@@ -422,7 +432,9 @@ async fn 不可用的理由分得开() {
     assert!(body["unusable_reason"].is_null(), "{body}");
     // **能用就一定有地址。** 页面上的「有效」徽标只看 `usable`，
     // 这条不变式就是它可以不再另外判一次 `url` 的理由。
-    assert!(body["url"].is_string(), "usable 为真却没有地址：{body}");
+    for sub in body["subscriptions"].as_array().unwrap() {
+        assert!(sub["url"].is_string(), "usable 为真却有一种拨法没有地址：{body}");
+    }
 
     // 2) 吊销之后：有身份、有凭据，但没有地址。
     proxy_manager::subscription::revoke_for_user(&api.store, alice.user_id).await.unwrap();
@@ -488,10 +500,16 @@ fn 每种不可用理由都配了文案() {
 fn 入口卡上没有编出来的状态徽标() {
     let html = proxy_manager::web::page_body("me.html").unwrap();
     let (_, inside) = split_templates(html);
-    assert!(inside.contains("data-pm=\"name\""), "模板没扫到：扫描器坏了");
+    // **只看入口卡那一个模板。** 页面上现在有两个模板，另一个（订阅地址）里
+    // 那枚徽标绑的是 `profile_name`，有数据支撑，不该被这条误伤。
+    let card = inside
+        .split("pm-node-card")
+        .nth(1)
+        .expect("入口卡模板没扫到：扫描器坏了，或者页面结构变了");
+    assert!(card.contains("data-pm=\"name\""), "扫到的不是入口卡模板：{card}");
     assert!(
-        !inside.contains("wsk-badge"),
-        "入口卡模板里出现了徽标——服务端没有任何字段能支撑它：{inside}"
+        !card.contains("wsk-badge"),
+        "入口卡模板里出现了徽标——服务端没有任何字段能支撑它：{card}"
     );
 }
 
@@ -570,7 +588,6 @@ async fn me页面上的每个绑定都取得到值() {
     // **与 `web/assets/api.js` 的 `PAGES["me.html"].render` 是同一个合并口径。**
     // 那边改了这边不改，这条用例就是那次改动的报警器。
     let mut merged = me.clone();
-    merged["url"] = sub["url"].clone();
     merged["identity"] = sub["identity"].clone();
     merged["entry_count"] = sub["entry_count"].clone();
 
@@ -582,11 +599,11 @@ async fn me页面上的每个绑定都取得到值() {
     // 而它看起来仍然是绿的。
     let outside_paths = binding_paths(&outside);
     assert!(
-        outside_paths.len() >= 7,
+        outside_paths.len() >= 6,
         "只扫出 {} 条模板外绑定，扫描器多半坏了：{outside_paths:?}",
         outside_paths.len()
     );
-    assert!(outside_paths.contains(&"url".to_string()), "订阅地址那一格没扫到");
+    // 订阅地址现在在模板里（一种拨法一行），所以它在 inside_paths 里。
     assert!(outside_paths.contains(&"cycle.remaining_bytes".to_string()), "额度那一格没扫到");
 
     for path in outside_paths {
@@ -601,11 +618,25 @@ async fn me页面上的每个绑定都取得到值() {
     let inside_paths = binding_paths(&inside);
     assert_eq!(
         inside_paths,
-        vec!["name".to_string(), "node_id".to_string()],
+        vec![
+            "name".to_string(),
+            "node_id".to_string(),
+            "note".to_string(),
+            "profile_name".to_string(),
+            "url".to_string()
+        ],
         "模板里的绑定变了：要么页面改了，要么扫描器把模板内外分错了"
     );
-    for path in inside_paths {
-        let value = pick(entry, &path).unwrap_or_else(|| {
+    // 订阅那三个绑定按 subscriptions 的元素求值。
+    let dialing = &sub["subscriptions"][0];
+    assert!(dialing.is_object(), "至少要有一种拨法：{sub}");
+    for path in ["note", "profile_name", "url"] {
+        let value = pick(dialing, path)
+            .unwrap_or_else(|| panic!("me.html 的模板绑了 {path:?}，但拨法元素里没有"));
+        assert!(!value.is_null(), "拨法绑的 {path:?} 取到了 null");
+    }
+    for path in ["name", "node_id"] {
+        let value = pick(entry, path).unwrap_or_else(|| {
             panic!("me.html 的模板绑了 {path:?}，但 entries 的元素里没有这个字段")
         });
         assert!(!value.is_null(), "模板绑的 {path:?} 取到了 null");
@@ -622,7 +653,11 @@ fn me页面的集合名与脚本里的一致() {
     let html = proxy_manager::web::page_body("me.html").unwrap();
     let (script, _) = proxy_manager::web::asset("assets/api.js").unwrap();
     let names = attr_values(html, "data-pm-collection");
-    assert_eq!(names, vec!["me-entries".to_string()], "me.html 的集合名变了");
+    assert_eq!(
+        names,
+        vec!["subscriptions".to_string(), "me-entries".to_string()],
+        "me.html 的集合名变了"
+    );
     for name in names {
         assert!(
             script.contains(&format!("renderCollection(\"{name}\"")),
@@ -634,32 +669,48 @@ fn me页面的集合名与脚本里的一致() {
 
 // ============ 渲染的纯函数部分 ============
 
+/// 一份与生产同形的最小配置：一批入口 + 两种到达方式。
+fn fixture_config() -> proxy_manager::config::SubscriptionConfig {
+    toml::from_str(
+        r#"
+public_base_url = "https://pm.example.com"
+credentials_path = "/tmp/creds.toml"
+[[sources]]
+prefix = "proxyWan-"
+host = "203.0.113.1"
+note = "公网"
+[[sources]]
+prefix = "proxyLan-"
+host = "198.51.100.1"
+note = "内网"
+[[entries]]
+name = "HK"
+port = 65002
+node_id = "n"
+[[groups]]
+name = "手动选择"
+proxies = ["HK", "DIRECT"]
+"#,
+    )
+    .expect("夹具配置必须解析得动")
+}
+
 /// uPSK 是 base64 文本，含 `+` `/` `=`。**必须 URL 编码**——
 /// 不编码的话 `/` 会被客户端当成路径分隔符，密码从中间被截断。
 #[test]
 fn 密码在yaml里必须加引号() {
-    let entries = vec![proxy_manager::config::Entry {
-        name: "HK".into(),
-        host: "203.0.113.1".into(),
-        port: 65002,
-        node_id: "n".into(),
-    }];
+    let config = fixture_config();
     let credentials = proxy_manager::config::Credentials {
         method: "2022-blake3-aes-128-gcm".into(),
         ipsk: "a+b/c=".into(),
         upsk: [("slot-01".to_string(), "x+y/z=".to_string())].into_iter().collect(),
     };
-    let groups = vec![proxy_manager::config::ProxyGroup {
-        name: "手动选择".into(),
-        icon: None,
-        proxies: vec!["HK".into(), "DIRECT".into()],
-    }];
     let yaml = proxy_manager::subscription::render::clash_yaml(
-        &entries,
-        &groups,
+        &config,
+        &config.sources[0],
         &credentials,
         "slot-01",
-        "Proxy-alice",
+        "proxyWan-alice",
     );
     // SS2022 带 EIH 时 Clash 的 password 是 `<iPSK>:<uPSK>`。
     assert!(yaml.contains(r#"password: "a+b/c=:x+y/z=""#), "实际：{yaml}");
@@ -675,9 +726,11 @@ fn 组名与节点同名会被配置校验挡住() {
     let toml = r#"
 public_base_url = "https://pm.example.com"
 credentials_path = "/tmp/creds.toml"
+[[sources]]
+prefix = "proxyWan-"
+host = "203.0.113.1"
 [[entries]]
 name = "HK"
-host = "203.0.113.1"
 port = 65002
 node_id = "n"
 [[groups]]
@@ -696,9 +749,11 @@ fn 组里引用不存在的节点会被挡住() {
     let toml = r#"
 public_base_url = "https://pm.example.com"
 credentials_path = "/tmp/creds.toml"
+[[sources]]
+prefix = "proxyWan-"
+host = "203.0.113.1"
 [[entries]]
 name = "HK"
-host = "203.0.113.1"
 port = 65002
 node_id = "n"
 [[groups]]
@@ -708,4 +763,133 @@ proxies = ["HK", "JP"]
     let config: proxy_manager::config::SubscriptionConfig = toml::from_str(toml).unwrap();
     let error = config.validate().unwrap_err().to_string();
     assert!(error.contains("既不是入口也不是内置目标"), "实际：{error}");
+}
+
+// ============ 两种拨法 ============
+
+/// **同一个 token，两种拨法；节点只差一个 host。**
+///
+/// 这批入口在入口机上是 NAT 转发（`fib daddr type local`），对任意本机地址生效——
+/// 内网地址与公网地址走的是同一条规则、同一个端口、同一份凭据。
+/// 所以它们是同一份订阅的两种拨法，不是两份订阅：把入口清单抄两遍，
+/// 只会让它们在某次改端口时分家，而分家之后没有任何东西会报错。
+#[tokio::test]
+async fn 两种拨法只差一个host() {
+    let api = Api::with_subscription(&[], &["slot-01"]).await;
+    api.seed_claimable_pool(&["node-a"], &["slot-01"]).await;
+    let logged_in = login(&api, "alice").await;
+    let token = logged_in.subscription.as_ref().unwrap().plaintext.clone();
+
+    let (wan_status, wan, _) = api.get_text(&format!("/sub/proxyWan-{token}.yaml"), None).await;
+    let (lan_status, lan, _) = api.get_text(&format!("/sub/proxyLan-{token}.yaml"), None).await;
+    assert_eq!(wan_status, StatusCode::OK);
+    assert_eq!(lan_status, StatusCode::OK);
+
+    // 各自拨各自的 host，而且**只有 host 不一样**。
+    assert!(wan.contains("server: \"203.0.113.1\""), "{wan}");
+    assert!(lan.contains("server: \"198.51.100.1\""), "{lan}");
+    assert!(!wan.contains("198.51.100.1"), "公网那份里不该有内网地址");
+    assert!(!lan.contains("203.0.113.1"), "内网那份里不该有公网地址");
+    assert_eq!(
+        wan.replace("203.0.113.1", "<HOST>").replace("proxyWan-", "<P>"),
+        lan.replace("198.51.100.1", "<HOST>").replace("proxyLan-", "<P>"),
+        "除了 host 与前缀，两份必须逐字节相同——端口、凭据、规则都是同一套"
+    );
+}
+
+/// **吊销一次，两条一起失效。** 它们共用同一个 token，这正是想要的。
+#[tokio::test]
+async fn 吊销对两种拨法同时生效() {
+    let api = Api::with_subscription(&[], &["slot-01"]).await;
+    api.seed_claimable_pool(&["node-a"], &["slot-01"]).await;
+    let logged_in = login(&api, "alice").await;
+    let token = logged_in.subscription.as_ref().unwrap().plaintext.clone();
+
+    proxy_manager::subscription::revoke_for_user(&api.store, logged_in.user_id).await.unwrap();
+    for prefix in ["proxyWan-", "proxyLan-"] {
+        assert_eq!(
+            api.get_text(&format!("/sub/{prefix}{token}.yaml"), None).await.0,
+            StatusCode::NOT_FOUND,
+            "{prefix} 吊销之后还能取到"
+        );
+    }
+}
+
+/// 认不出的前缀与认不出的 token 一样回 404——**不给探测接口**。
+///
+/// 也钉住老前缀 `Proxy-` 确实不再有效：它是一次有意的改动，
+/// 不是「顺手还留着」。留着的话，同一份订阅会有三个地址，
+/// 而第三个不在任何文档里。
+#[tokio::test]
+async fn 认不出的前缀回404() {
+    let api = Api::with_subscription(&[], &["slot-01"]).await;
+    api.seed_claimable_pool(&["node-a"], &["slot-01"]).await;
+    let token = login(&api, "alice").await.subscription.unwrap().plaintext;
+
+    for name in [
+        format!("Proxy-{token}.yaml"),    // 旧前缀，已作废
+        format!("proxyWAN-{token}.yaml"), // 大小写不同
+        format!("proxy-{token}.yaml"),    // 更短
+        format!("proxyWan{token}.yaml"),  // 少了连字符
+        format!("proxyWan-{token}"),      // 缺扩展名
+    ] {
+        assert_eq!(
+            api.get_text(&format!("/sub/{name}"), None).await.0,
+            StatusCode::NOT_FOUND,
+            "{name} 不该被接受"
+        );
+    }
+}
+
+/// **一个前缀不许是另一个的前缀。** 否则同一个文件名会匹配上两种拨法，
+/// 而匹配到哪一个取决于配置顺序——一个静默的、改配置就会变的答案。
+#[test]
+fn 互为前缀的两种拨法会被配置校验挡住() {
+    let toml = r#"
+public_base_url = "https://pm.example.com"
+credentials_path = "/tmp/creds.toml"
+[[sources]]
+prefix = "proxy-"
+host = "203.0.113.1"
+[[sources]]
+prefix = "proxy-lan-"
+host = "198.51.100.1"
+[[entries]]
+name = "HK"
+port = 65002
+node_id = "n"
+[[groups]]
+name = "手动选择"
+proxies = ["HK"]
+"#;
+    let config: proxy_manager::config::SubscriptionConfig = toml::from_str(toml).unwrap();
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("互为前缀"), "实际：{error}");
+}
+
+/// 前缀会进 URL 的最后一段：带 `/` 或 `.` 的前缀会让订阅地址指到别处，
+/// 而那条路径**不认会话、只认 token**。
+#[test]
+fn 前缀里的路径字符会被挡住() {
+    for bad in ["../", "a/b", "a.b", "带中文"] {
+        let toml = format!(
+            r#"
+public_base_url = "https://pm.example.com"
+credentials_path = "/tmp/creds.toml"
+[[sources]]
+prefix = "{bad}"
+host = "203.0.113.1"
+[[entries]]
+name = "HK"
+port = 65002
+node_id = "n"
+[[groups]]
+name = "手动选择"
+proxies = ["HK"]
+"#
+        );
+        let config: proxy_manager::config::SubscriptionConfig = toml::from_str(&toml).unwrap();
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("只能是字母、数字与连字符"), "{bad} 没被挡住：{error}");
+    }
 }

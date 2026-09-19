@@ -17,7 +17,7 @@ pub use server::{
     AlertsConfig, CollectConfig, ImConfig, ListenConfig, QuotaConfig, ServerConfig, StorageConfig,
 };
 pub use sso::{SsoConfig, DEFAULT_QUOTA_GROUP, QUOTA_GROUPS};
-pub use subscription::{Credentials, Entry, ProxyGroup, SubscriptionConfig};
+pub use subscription::{Credentials, Entry, EntrySource, ProxyGroup, SubscriptionConfig};
 
 use std::path::Path;
 

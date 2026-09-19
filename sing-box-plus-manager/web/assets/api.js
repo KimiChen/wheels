@@ -215,17 +215,16 @@
         // 两份都铺一遍的话，后铺的会把 `remaining_bytes` 抹成 undefined。
         applyBindings(document, {
           ...me,
-          url: sub.enabled ? sub.url : null,
           identity: sub.identity,
           entry_count: sub.enabled ? sub.entry_count : 0,
         });
+        // 一种拨法一条地址。它们共用同一个 token，差的只是前缀与要拨的 host。
+        renderCollection("subscriptions", sub.enabled ? sub.subscriptions : [], "还没有订阅地址");
         renderCollection("me-entries", sub.enabled ? sub.entries : [], "还没有为你配置入口");
 
         // 三种状态各说各的话。**不要合并成一句「订阅不可用」**——
         // 「服务端没配」「你还没分到身份」「加载失败」要做的事完全不同。
         toggle("[data-pm-sub-disabled]", !sub.enabled);
-        toggle(".pm-subscription-address", sub.enabled);
-        toggle("[data-pm-copy]", sub.enabled);
         // 徽标说的是状态，不是装饰。**没有地址就不许说「有效」**，
         // 不可用的时候也不该顶着一个绿勾——那两种写法都会让人
         // 把一次真实的缺失读成「页面没加载出来」，然后反复刷新。
@@ -401,13 +400,17 @@
   // 于是点一下就把一串圆点复制走了，而它看起来完全像个地址。
   // 这是在浏览器里真跑一遍才发现的：读代码时那个判断看着是对的。
   document.addEventListener("click", async (event) => {
-    const button = event.target.closest?.("[data-pm-copy]");
+    const button = event.target.closest?.("[data-pm-copy], [data-pm-copy-self]");
     if (!button) return;
     if (document.body.dataset.pmMode !== "live") {
       window.wsk?.showToast?.("这是原型页面，上面的地址是示例。", "warning");
       return;
     }
-    const node = document.querySelector(button.dataset.pmCopy);
+    // `data-pm-copy-self` 复制**同一块里**的那个地址：一页上有多种拨法，
+    // 一个写死选择器的复制按钮会让三个按钮都复制第一条。
+    const node = button.hasAttribute("data-pm-copy-self")
+      ? button.closest(".pm-subscription-entry")?.querySelector("code")
+      : document.querySelector(button.dataset.pmCopy);
     const text = node?.textContent?.trim() ?? "";
     if (!/^https:\/\/[^\s<>\u2022]+$/.test(text)) {
       window.wsk?.showToast?.("还没有可复制的订阅地址。", "warning");

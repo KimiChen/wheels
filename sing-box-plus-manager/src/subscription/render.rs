@@ -15,7 +15,7 @@
 //! （64902-64905、19999、64911-64913），与新拓扑对不上，照抄会得到一份
 //! 引用了不存在节点的配置，而 Clash 对此的报错是「订阅格式错误」。
 
-use crate::config::{Credentials, Entry};
+use crate::config::Credentials;
 
 /// 旧站模板的两半，构建时嵌入。**逐字节不动。**
 const HEAD: &str = include_str!("../../web/subscription-head.yaml");
@@ -25,12 +25,13 @@ const RULES: &str = include_str!("../../web/subscription-rules.yaml");
 ///
 /// `head + proxies + proxy-groups + rules`，中间两段是生成的。
 pub fn clash_yaml(
-    entries: &[Entry],
-    groups: &[crate::config::ProxyGroup],
+    config: &crate::config::SubscriptionConfig,
+    source: &crate::config::EntrySource,
     credentials: &Credentials,
     identity: &str,
     profile_name: &str,
 ) -> String {
+    let (entries, groups) = (&config.entries, &config.groups);
     let Some(upsk) = credentials.upsk.get(identity) else {
         // 身份有、凭据没有：发一份**明说的空配置**，不是编一个密码。
         // 编一个的后果是用户导入后连不上，而客户端只会说「握手失败」。
@@ -55,7 +56,7 @@ pub fn clash_yaml(
         out.push_str(&format!(
             "  - name: {}\n    type: ss\n    server: {}\n    port: {}\n    cipher: {}\n    password: {}\n    udp: true\n",
             yaml_string(&entry.name),
-            yaml_string(&entry.host),
+            yaml_string(config.host_for(entry, source)),
             entry.port,
             yaml_string(&credentials.method),
             yaml_string(&password),
@@ -105,21 +106,18 @@ pub fn disposition(profile_name: &str) -> (String, String) {
     (format!("{ascii}.yaml"), format!("UTF-8''{}.yaml", percent_encode(profile_name)))
 }
 
-/// 订阅的显示名：`Proxy-<账号名>`。
+/// 订阅的显示名：`<前缀><账号名>`，例如 `proxyWan-kimi`。
 ///
-/// 它同时是代理组名、`MATCH` 的目标、以及 `Content-Disposition` 的文件名——
-/// 三处必须是同一个串，否则客户端里显示的名字与配置里的组名对不上。
-pub const PROFILE_PREFIX: &str = "Proxy-";
-
-pub fn profile_name(login_name: &str) -> String {
-    format!("{PROFILE_PREFIX}{login_name}")
+/// 它同时是**三样东西**：客户端里显示的名字、`Content-Disposition` 的文件名、
+/// 以及订阅正文首行的注释。三处必须是同一个串，否则客户端里显示的名字与
+/// 地址对不上，而人会以为自己导错了订阅。
+///
+/// 前缀同时也出现在订阅地址里，所以一眼就能对上「这份是哪种拨法」——
+/// 两份订阅同时导进一个客户端时，这一点是唯一能区分它们的东西。
+pub fn profile_name(login_name: &str, source: &crate::config::EntrySource) -> String {
+    format!("{}{login_name}", source.prefix)
 }
 
-/// `Subscription-Userinfo`：Clash / mihomo 靠它显示流量与到期。
-///
-/// 四个字段都必须是**十进制**。`total` 取真实额度（§4.7 明确警告不要填假值——
-/// 本项目有真实闸断，假值会让客户端显示与实际行为对不上）；
-/// `upload`/`download` 取**当前周期**的已结算累计，不是 lifetime。
 pub fn userinfo(upload: u128, download: u128, total: u64, expire_unix: i64) -> String {
     format!("upload={upload}; download={download}; total={total}; expire={expire_unix}")
 }
