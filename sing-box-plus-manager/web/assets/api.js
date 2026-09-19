@@ -411,9 +411,12 @@
   // 「看起来排好了、其实只排了当前这一页」的坑——那种错不报错，
   // 而且第一页通常恰好是对的，所以没人会发现。
   //
-  // 默认保持服务端的顺序（次数多的在前），点一下才切到按时刻排。
-  // 不默认按时刻排：那会让「我最常去哪」这个问题的答案从第一屏消失。
-  let auditState = { rows: [], data: null, order: null };
+  // **默认就是「最近的在前」。** 这一页要回答的问题是「我最近访问过哪些域名和
+  // IP」——那句话本身就是按时刻倒序的。服务端给的是「次数多的在前」，
+  // 那回答的是另一个问题（我最常去哪），放在这一页的第一屏是答非所问。
+  //
+  // 次数那一列仍然在，只是不再决定顺序。
+  let auditState = { rows: [], data: null, order: "desc" };
 
   function applyAuditSort() {
     const { rows, data, order } = auditState;
@@ -432,7 +435,6 @@
 
   document.addEventListener("click", (event) => {
     if (!event.target?.closest?.("[data-audit-sort]")) return;
-    // 第一下就切到「最近的在前」——那是点这个图标的人想要的东西。
     auditState.order = auditState.order === "desc" ? "asc" : "desc";
     applyAuditSort();
   });

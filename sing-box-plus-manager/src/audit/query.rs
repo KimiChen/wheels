@@ -305,6 +305,10 @@ pub async fn access(
     // 次数多的在前；同次数按最近一次访问排。人找「陌生的目标」时，
     // 最有用的排法是「你自己都不记得的那些」，而那通常次数少——
     // 但先给一个稳定且可预期的顺序，筛选交给页面。
+    //
+    // **本人页不用这个顺序**（2026-09-20）：它要回答的是「我最近访问过哪些」，
+    // 所以在前端默认按时刻倒序重排。这里仍然给一个确定的顺序，
+    // 因为管理员那一页与任何 API 调用方都还靠它。
     rows.sort_by(|a, b| b.count.cmp(&a.count).then(b.last_seen.cmp(&a.last_seen)));
     let latest = rows.iter().map(|r| r.last_seen.clone()).max();
     let archive_state =
