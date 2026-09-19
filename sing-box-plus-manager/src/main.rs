@@ -883,8 +883,8 @@ async fn print_verify(db: &std::path::Path) -> anyhow::Result<ExitCode> {
             println!("  epoch 水位        {node} / {} → {epoch}", &runtime[..8.min(runtime.len())]);
         }
     }
-    for drift in &report.column_drift {
-        println!("  **列与 DDL 不符**  {drift}");
+    for drift in &report.schema_drift {
+        println!("  **结构与 DDL 不符**  {drift}");
     }
     for error in &report.shape_errors {
         println!("  **列的形状不对**  {error}");
