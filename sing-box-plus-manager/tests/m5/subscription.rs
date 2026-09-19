@@ -1253,24 +1253,56 @@ fn 级别够时入口与组成员都在() {
 /// 注意这是**藏起来**，不是拦截：两种拨法共用同一个 token，把前缀从 `Lan-`
 /// 改成 `Wan-` 照样取得到。使用者选的就是这个口径，所以这条用例只钉住
 /// 「页面上给不给」——别把它读成访问控制的证据。
+/// 本人页上列出来的拨法前缀，按 `sources` 的次序。
+async fn 页上的拨法(api: &Api, actor: &crate::harness::Actor) -> Vec<String> {
+    let (_, body, _) = api.get("/api/v1/me/subscription", Some(actor)).await;
+    body["subscriptions"]
+        .as_array()
+        .unwrap_or_else(|| panic!("subscriptions 不是数组：{body}"))
+        .iter()
+        .map(|s| s["prefix"].as_str().unwrap().to_string())
+        .collect()
+}
+
 #[tokio::test]
 async fn 级别不够的拨法不出现在本人页上() {
-    let api = Api::with_subscription(&[], &["slot-01"]).await;
+    // 公网那份要 advanced（10）。新建的人一律落 normal。
+    let api = Api::with_subscription_levels(&[], &["slot-01", "slot-02"], 10).await;
+    api.seed_claimable_pool(&["node-a"], &["slot-01", "slot-02"]).await;
+
+    // 先立控制组：**够格的人两条都看得见**。
+    // 没有这一半，下面那条断言在「订阅整个坏了」时同样是绿的——
+    // 本项目为这种假绿吃过亏（`unusable_reason` 那段注释记着现场）。
+    let bob = login(&api, "bob").await;
+    api.set_quota_group(bob.user_id, "advanced").await;
+    let bob = actor(&bob);
+    assert_eq!(页上的拨法(&api, &bob).await, ["proxyWan-", "proxyLan-"], "advanced 该看到两条");
+
+    // 正题：normal 只剩内网那一条。
+    let alice = actor(&login(&api, "alice").await);
+    assert_eq!(页上的拨法(&api, &alice).await, ["proxyLan-"], "normal 不该看到公网那条");
+}
+
+/// 藏起来**不是**拦下来：同一个 token 换个前缀照样取得到公网那份。
+///
+/// 这条断言看着像在证明一个漏洞，它确实是——但这是使用者明确选的口径
+/// （2026-09-20「只要隐藏就行」）。钉住它是为了让哪天改成真拦截时，
+/// 这条用例**必须**跟着改，而不是让口径在无人察觉中漂移。
+#[tokio::test]
+async fn 藏起来的拨法换个前缀仍然取得到() {
+    let api = Api::with_subscription_levels(&[], &["slot-01"], 10).await;
     api.seed_claimable_pool(&["node-a"], &["slot-01"]).await;
     let logged_in = login(&api, "alice").await;
-    let actor = actor(&logged_in);
+    let token = logged_in.subscription.as_ref().unwrap().plaintext.clone();
+    let alice = actor(&logged_in);
 
-    // 夹具里两种拨法都是 min_level 0，先证明默认两条都在——
-    // 否则下面那条断言可能是因为别的原因绿的。
-    let (_, body, _) = api.get("/api/v1/me/subscription", Some(&actor)).await;
-    let prefixes: Vec<&str> = body["subscriptions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|s| s["prefix"].as_str().unwrap())
-        .collect();
-    assert_eq!(prefixes.len(), 2, "默认两种拨法都该在：{body}");
-    assert!(prefixes.contains(&"proxyWan-"), "{prefixes:?}");
+    // 页面上只给内网那条。
+    assert_eq!(页上的拨法(&api, &alice).await, ["proxyLan-"]);
+
+    // 同一个 token，换个前缀——`/sub/` 那一侧不判级别。
+    let (status, body, _) = api.get_text(&format!("/sub/proxyWan-{token}.yaml"), None).await;
+    assert_eq!(status, StatusCode::OK, "换个前缀照样发：{body}");
+    assert!(body.contains("type: vless"), "发出来的该是公网那份 VLESS：{body}");
 }
 
 /// 级别的判据本身：`normal` 够不到 10，其余三档都够。
