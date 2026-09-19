@@ -30,6 +30,25 @@ pub struct Api {
     pub sso_path: Option<std::path::PathBuf>,
     /// 审计镜像树的根。用例往里铺 JSONL 夹具。
     pub audit_dir: std::path::PathBuf,
+    /// 凭据文件的位置。`None` 表示这份 Api 没有 `[subscription]`。
+    pub credentials_path: Option<std::path::PathBuf>,
+}
+
+impl Api {
+    /// 原地改写凭据文件。
+    ///
+    /// 用来模拟**推送顺序**造成的中间态：二进制推了、凭据还没推。
+    /// 文件是按 mtime 重读的（凭据不进数据库），所以改完下一次请求就生效。
+    pub fn rewrite_credentials(&self, edit: impl FnOnce(&mut String)) {
+        let path = self.credentials_path.as_ref().expect("这份 Api 没有 [subscription]");
+        let mut text = std::fs::read_to_string(path).unwrap();
+        edit(&mut text);
+        std::fs::write(path, text).unwrap();
+        std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+            .unwrap();
+        // 不用碰 mtime：`CredentialSource` 的缓存键是 inode + **长度** + mtime，
+        // 改写只要改了长度就一定会重读。靠 mtime 的话得处理它只精确到秒这件事。
+    }
 }
 
 pub struct Actor {
@@ -156,6 +175,12 @@ impl Api {
                         .replace("{index}", &index.to_string()),
                 );
             }
+            // uuid 与 upsk 的身份集合必须**完全一致**：`Credentials::validate` 拒绝
+            // 「有一半」的文件，因为那种文件的症状是一部分人的公网订阅悄悄没有节点。
+            text.push_str("[uuid]\n");
+            for (index, name) in identities.iter().enumerate() {
+                text.push_str(&format!("{name} = \"00000000-0000-4000-8000-{:012}\"\n", index + 1));
+            }
             std::fs::write(&creds, text).unwrap();
             std::fs::set_permissions(&creds, std::os::unix::fs::PermissionsExt::from_mode(0o600))
                 .unwrap();
@@ -168,13 +193,30 @@ impl Api {
                         prefix: "proxyWan-".into(),
                         host: "203.0.113.1".into(),
                         note: "公网".into(),
+                        transport: proxy_manager::config::Transport::Vless,
                     },
                     proxy_manager::config::EntrySource {
                         prefix: "proxyLan-".into(),
                         host: "198.51.100.1".into(),
                         note: "内网".into(),
+                        transport: proxy_manager::config::Transport::Ss,
                     },
                 ],
+                vless: Some(proxy_manager::config::VlessConfig {
+                    servername: "www.example.com".into(),
+                    client_fingerprint: "chrome".into(),
+                    flow: "xtls-rprx-vision".into(),
+                    packet_encoding: "xudp".into(),
+                    reality: [(
+                        "node-a".to_string(),
+                        proxy_manager::config::Reality {
+                            public_key: "cHVibGljLWtleS1mb3ItdGVzdHMtMDAwMDAwMDAwMDA".into(),
+                            short_id: "01234567".into(),
+                        },
+                    )]
+                    .into_iter()
+                    .collect(),
+                }),
                 groups: vec![proxy_manager::config::ProxyGroup {
                     name: "手动选择".into(),
                     icon: None,
@@ -184,13 +226,17 @@ impl Api {
                     proxy_manager::config::Entry {
                         name: "HK".into(),
                         host: None,
-                        port: 65002,
+                        ports: [("ss".to_string(), 65002), ("vless".to_string(), 65081)]
+                            .into_iter()
+                            .collect(),
                         node_id: "node-a".into(),
                     },
                     proxy_manager::config::Entry {
                         name: "JP".into(),
                         host: None,
-                        port: 65003,
+                        ports: [("ss".to_string(), 65003), ("vless".to_string(), 65082)]
+                            .into_iter()
+                            .collect(),
                         node_id: "node-a".into(),
                     },
                 ],
@@ -202,6 +248,7 @@ impl Api {
             dir: audit_dir.clone(),
             interval_secs: 600,
         });
+        let credentials_path = subscription.as_ref().map(|c| c.credentials_path.clone());
         let router = proxy_manager::api::router(
             store.clone(),
             Arc::new(Vec::new()),
@@ -209,7 +256,7 @@ impl Api {
             subscription,
             audit,
         );
-        Api { _dir: Some(dir), store, router, sso_path, audit_dir }
+        Api { _dir: Some(dir), store, router, sso_path, audit_dir, credentials_path }
     }
 
     pub async fn user(&self, login: &str, role: Role, provider: &str) -> Actor {

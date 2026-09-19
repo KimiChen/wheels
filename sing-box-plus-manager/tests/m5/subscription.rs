@@ -83,7 +83,9 @@ async fn 用token取得到自己的节点() {
     let logged_in = login(&api, "alice").await;
     let token = logged_in.subscription.unwrap().plaintext;
 
-    let (status, body, headers) = api.get_text(&format!("/sub/proxyWan-{token}.yaml"), None).await;
+    // 拿内网那份：它走 SS，下面几条断言里有 cipher 与 password。
+    // 公网那份走 VLESS，由「两种拨法」那条用例逐字段核。
+    let (status, body, headers) = api.get_text(&format!("/sub/proxyLan-{token}.yaml"), None).await;
     assert_eq!(status, StatusCode::OK);
 
     // 正文是 Clash / mihomo YAML——地址以 .yaml 结尾，内容就得真是 YAML。
@@ -670,29 +672,65 @@ fn me页面的集合名与脚本里的一致() {
 // ============ 渲染的纯函数部分 ============
 
 /// 一份与生产同形的最小配置：一批入口 + 两种到达方式。
+///
+/// **两种拨法的协议不同**，与生产一致：内网走 SS，公网走 VLESS（SS 容易被墙）。
+/// 入口名两边逐字相同——代理组的成员写的就是这些名字。
 fn fixture_config() -> proxy_manager::config::SubscriptionConfig {
     toml::from_str(
         r#"
 public_base_url = "https://pm.example.com"
 credentials_path = "/tmp/creds.toml"
 [[sources]]
-prefix = "proxyWan-"
-host = "203.0.113.1"
-note = "公网"
-[[sources]]
 prefix = "proxyLan-"
 host = "198.51.100.1"
 note = "内网"
+transport = "ss"
+[[sources]]
+prefix = "proxyWan-"
+host = "203.0.113.1"
+note = "公网"
+transport = "vless"
 [[entries]]
 name = "HK"
-port = 65002
 node_id = "n"
+ports = { ss = 65002, vless = 65081 }
 [[groups]]
 name = "手动选择"
 proxies = ["HK", "DIRECT"]
+[vless]
+servername = "www.example.com"
+client_fingerprint = "chrome"
+flow = "xtls-rprx-vision"
+packet_encoding = "xudp"
+[vless.reality.n]
+public_key = "cHVibGljLWtleS1mb3ItdGVzdHMtMDAwMDAwMDAwMDA"
+short_id = "01234567"
 "#,
     )
     .expect("夹具配置必须解析得动")
+}
+
+/// 走 SS 的那种拨法。渲染 SS 的用例一律从这里取，不要写 `sources[0]`——
+/// 顺序一变就会静默换成另一种协议，而断言只会报「密码不在里面」。
+fn ss_source(
+    config: &proxy_manager::config::SubscriptionConfig,
+) -> &proxy_manager::config::EntrySource {
+    config
+        .sources
+        .iter()
+        .find(|s| s.transport == proxy_manager::config::Transport::Ss)
+        .expect("夹具里应当有一种 SS 拨法")
+}
+
+/// 走 VLESS 的那种拨法。
+fn vless_source(
+    config: &proxy_manager::config::SubscriptionConfig,
+) -> &proxy_manager::config::EntrySource {
+    config
+        .sources
+        .iter()
+        .find(|s| s.transport == proxy_manager::config::Transport::Vless)
+        .expect("夹具里应当有一种 VLESS 拨法")
 }
 
 /// uPSK 是 base64 文本，含 `+` `/` `=`。**必须 URL 编码**——
@@ -704,10 +742,13 @@ fn 密码在yaml里必须加引号() {
         method: "2022-blake3-aes-128-gcm".into(),
         ipsk: "a+b/c=".into(),
         upsk: [("slot-01".to_string(), "x+y/z=".to_string())].into_iter().collect(),
+        uuid: [("slot-01".to_string(), "9ba335c9-0d3e-48a4-9f2e-28614c264a2d".to_string())]
+            .into_iter()
+            .collect(),
     };
     let yaml = proxy_manager::subscription::render::clash_yaml(
         &config,
-        &config.sources[0],
+        ss_source(&config),
         &credentials,
         "slot-01",
         "proxyWan-alice",
@@ -729,10 +770,11 @@ credentials_path = "/tmp/creds.toml"
 [[sources]]
 prefix = "proxyWan-"
 host = "203.0.113.1"
+transport = "ss"
 [[entries]]
 name = "HK"
-port = 65002
 node_id = "n"
+ports = { ss = 65002 }
 [[groups]]
 name = "HK"
 proxies = ["HK"]
@@ -752,10 +794,11 @@ credentials_path = "/tmp/creds.toml"
 [[sources]]
 prefix = "proxyWan-"
 host = "203.0.113.1"
+transport = "ss"
 [[entries]]
 name = "HK"
-port = 65002
 node_id = "n"
+ports = { ss = 65002 }
 [[groups]]
 name = "手动选择"
 proxies = ["HK", "JP"]
@@ -767,14 +810,15 @@ proxies = ["HK", "JP"]
 
 // ============ 两种拨法 ============
 
-/// **同一个 token，两种拨法；节点只差一个 host。**
+/// **同一个 token，两种拨法；差的是协议与 host，别的一律相同。**
 ///
-/// 这批入口在入口机上是 NAT 转发（`fib daddr type local`），对任意本机地址生效——
-/// 内网地址与公网地址走的是同一条规则、同一个端口、同一份凭据。
-/// 所以它们是同一份订阅的两种拨法，不是两份订阅：把入口清单抄两遍，
-/// 只会让它们在某次改端口时分家，而分家之后没有任何东西会报错。
+/// 2026-09-20 之前这条用例叫「只差一个 host」，那时两种拨法确实只差客户端拨哪个
+/// 地址。现在内网继续走 SS、公网改走 VLESS（SS 容易被墙），于是「只差 host」
+/// 那半句不再成立——但**另外半句更要紧了**：入口名、代理组、规则、token
+/// 仍然是同一套，一份都不许抄两遍。抄两遍的下场是它们在某次改端口时分家，
+/// 而两份订阅里的节点名一模一样，看不出来。
 #[tokio::test]
-async fn 两种拨法只差一个host() {
+async fn 两种拨法差协议但共用入口名与规则() {
     let api = Api::with_subscription(&[], &["slot-01"]).await;
     api.seed_claimable_pool(&["node-a"], &["slot-01"]).await;
     let logged_in = login(&api, "alice").await;
@@ -785,16 +829,36 @@ async fn 两种拨法只差一个host() {
     assert_eq!(wan_status, StatusCode::OK);
     assert_eq!(lan_status, StatusCode::OK);
 
-    // 各自拨各自的 host，而且**只有 host 不一样**。
-    assert!(wan.contains("server: \"203.0.113.1\""), "{wan}");
-    assert!(lan.contains("server: \"198.51.100.1\""), "{lan}");
+    // 各自拨各自的 host，各自用各自的协议与端口。
+    assert!(lan.contains("server: \"198.51.100.1\"") && lan.contains("type: ss"), "{lan}");
+    assert!(wan.contains("server: \"203.0.113.1\"") && wan.contains("type: vless"), "{wan}");
     assert!(!wan.contains("198.51.100.1"), "公网那份里不该有内网地址");
     assert!(!lan.contains("203.0.113.1"), "内网那份里不该有公网地址");
-    assert_eq!(
-        wan.replace("203.0.113.1", "<HOST>").replace("proxyWan-", "<P>"),
-        lan.replace("198.51.100.1", "<HOST>").replace("proxyLan-", "<P>"),
-        "除了 host 与前缀，两份必须逐字节相同——端口、凭据、规则都是同一套"
-    );
+    assert!(!wan.contains("type: ss"), "公网那份里不该有 SS 节点：{wan}");
+    assert!(!lan.contains("type: vless"), "内网那份里不该有 VLESS 节点：{lan}");
+    // 端口按 +100 的规则各取各的。
+    assert!(lan.contains("port: 65002") && lan.contains("port: 65003"), "{lan}");
+    assert!(wan.contains("port: 65081") && wan.contains("port: 65082"), "{wan}");
+    // **凭据也各取各的**：SS 那份是 `<iPSK>:<uPSK>`，VLESS 那份是 UUID。
+    assert!(lan.contains("password: \"dGVzdC1pcHNr:"), "{lan}");
+    assert!(wan.contains("uuid: \"00000000-0000-4000-8000-000000000001\""), "{wan}");
+    // short-id 必须加引号：纯数字的十六进制不加引号会被 YAML 当成整数、
+    // 前导零一并丢掉，而客户端对此只有一句「握手失败」。
+    assert!(wan.contains("short-id: \"01234567\""), "short-id 没加引号：{wan}");
+
+    // **入口名、代理组与规则两份逐字节相同。** 名字一变三个组与两份规则集
+    // 模板都要跟着改，所以这一条是承重的。
+    let tail =
+        |body: &str| body[body.find("\nproxy-groups:").expect("应当有代理组段")..].to_string();
+    assert_eq!(tail(&wan), tail(&lan), "proxy-groups 与 rules 两段必须逐字节相同");
+    // 只数 proxies 段里的名字：代理组那一段也有 `- name:`，把它算进来的话
+    // 这条断言就不再是在说入口了。
+    let names = |body: &str| {
+        let head = &body[..body.find("\nproxy-groups:").expect("应当有代理组段")];
+        head.lines().filter(|l| l.starts_with("  - name: ")).map(str::to_string).collect::<Vec<_>>()
+    };
+    assert_eq!(names(&wan), names(&lan), "两份的入口名必须逐字相同且顺序一致");
+    assert_eq!(names(&wan).len(), 2, "夹具里是两条入口");
 }
 
 /// **吊销一次，两条一起失效。** 它们共用同一个 token，这正是想要的。
@@ -851,13 +915,15 @@ credentials_path = "/tmp/creds.toml"
 [[sources]]
 prefix = "proxy-"
 host = "203.0.113.1"
+transport = "ss"
 [[sources]]
 prefix = "proxy-lan-"
 host = "198.51.100.1"
+transport = "ss"
 [[entries]]
 name = "HK"
-port = 65002
 node_id = "n"
+ports = { ss = 65002 }
 [[groups]]
 name = "手动选择"
 proxies = ["HK"]
@@ -879,10 +945,11 @@ credentials_path = "/tmp/creds.toml"
 [[sources]]
 prefix = "{bad}"
 host = "203.0.113.1"
+transport = "ss"
 [[entries]]
 name = "HK"
-port = 65002
 node_id = "n"
+ports = {{ ss = 65002 }}
 [[groups]]
 name = "手动选择"
 proxies = ["HK"]
@@ -892,4 +959,171 @@ proxies = ["HK"]
         let error = config.validate().unwrap_err().to_string();
         assert!(error.contains("只能是字母、数字与连字符"), "{bad} 没被挡住：{error}");
     }
+}
+
+// ============ VLESS 那一侧的配置门禁 ============
+
+/// 改一处夹具配置再校验。返回错误文案。
+fn reject(edit: impl Fn(&mut String)) -> String {
+    let mut text = String::from(
+        r#"
+public_base_url = "https://pm.example.com"
+credentials_path = "/tmp/creds.toml"
+[[sources]]
+prefix = "proxyLan-"
+host = "198.51.100.1"
+transport = "ss"
+[[sources]]
+prefix = "proxyWan-"
+host = "203.0.113.1"
+transport = "vless"
+[[entries]]
+name = "HK"
+node_id = "n"
+ports = { ss = 65002, vless = 65081 }
+[[groups]]
+name = "手动选择"
+proxies = ["HK"]
+[vless]
+servername = "www.example.com"
+client_fingerprint = "chrome"
+flow = "xtls-rprx-vision"
+packet_encoding = "xudp"
+[vless.reality.n]
+public_key = "cHVibGljLWtleQ"
+short_id = "01234567"
+"#,
+    );
+    edit(&mut text);
+    let config: proxy_manager::config::SubscriptionConfig =
+        toml::from_str(&text).expect("夹具本身必须解析得动");
+    config.validate().unwrap_err().to_string()
+}
+
+/// 先证明没改过的那份是**通得过**的。少了这条，上面那些反向断言可能全是
+/// 因为别的原因红的。
+#[test]
+fn 未改动的vless夹具能通过校验() {
+    let config = fixture_config();
+    config.validate().expect("夹具配置本身必须合法");
+    assert_eq!(vless_source(&config).transport, proxy_manager::config::Transport::Vless);
+    assert_eq!(ss_source(&config).transport, proxy_manager::config::Transport::Ss);
+}
+
+/// **少配一台节点的 REALITY 参数要启动就失败。**
+///
+/// 不挡的话发出去的是一份格式完全正确、却连不上的订阅，
+/// 而客户端对此只有一句「握手失败」——指不到是主控少配了一台。
+#[test]
+fn 入口的落点没有reality参数会被挡住() {
+    let error =
+        reject(|text| *text = text.replace("[vless.reality.n]", "[vless.reality.another-node]"));
+    assert!(error.contains("没有这一台"), "{error}");
+    assert!(error.contains("HK"), "要点名是哪条入口：{error}");
+}
+
+/// 有 VLESS 拨法却没有 `[subscription.vless]`。
+#[test]
+fn 有vless来源却没有vless段会被挡住() {
+    let error = reject(|text| {
+        let cut = text.find("[vless]").expect("夹具里有这一段");
+        text.truncate(cut);
+    });
+    assert!(error.contains("没有 [subscription.vless] 段"), "{error}");
+}
+
+/// 入口少了某种协议的端口。**这条的失败形态是「少了一个节点」**：
+/// 那种拨法下这条入口会从订阅里消失，客户端不报错。
+#[test]
+fn 入口缺一种协议的端口会被挡住() {
+    let error = reject(|text| *text = text.replace(", vless = 65081", ""));
+    assert!(error.contains("没有 vless 端口"), "{error}");
+    assert!(error.contains("proxyWan-"), "要点名是哪种拨法：{error}");
+
+    let error = reject(|text| *text = text.replace("ss = 65002, ", ""));
+    assert!(error.contains("没有 ss 端口"), "{error}");
+}
+
+/// VLESS 的公共参数有空字段——每一项都会原样进订阅正文。
+#[test]
+fn vless公共参数有空字段会被挡住() {
+    for field in ["servername", "client_fingerprint", "flow", "packet_encoding"] {
+        let error = reject(|text| {
+            let line =
+                text.lines().find(|l| l.starts_with(field)).expect("夹具里有这一行").to_string();
+            *text = text.replace(&line, &format!("{field} = \"\""));
+        });
+        assert!(error.contains("有空字段"), "{field} 没被挡住：{error}");
+    }
+}
+
+// ============ 凭据文件的 uuid 那一半 ============
+
+fn credentials(upsk: &[&str], uuid: &[&str]) -> proxy_manager::config::Credentials {
+    proxy_manager::config::Credentials {
+        method: "2022-blake3-aes-128-gcm".into(),
+        ipsk: "dGVzdC1pcHNr".into(),
+        upsk: upsk.iter().map(|n| (n.to_string(), "dXBzaw==".to_string())).collect(),
+        uuid: uuid
+            .iter()
+            .map(|n| (n.to_string(), "00000000-0000-4000-8000-000000000001".to_string()))
+            .collect(),
+    }
+}
+
+/// **没有 uuid 的旧凭据文件仍然读得动。**
+///
+/// 这不是宽容，是推送顺序的保护：二进制与凭据是两次推送，
+/// 「先二进制、后凭据」这一支靠的就是这个 `default`——那时 uuid 为空，
+/// 公网订阅暂时发不出 VLESS，而**内网 SS 完全不受影响**。
+/// 反过来（先凭据、后二进制）会因为 `deny_unknown_fields` 整份拒绝，
+/// `/sub/…` 对所有人回 503。
+#[test]
+fn 没有uuid的旧凭据文件仍然合法() {
+    let text = "method = \"m\"\nipsk = \"i\"\n[upsk]\nslot-01 = \"u\"\n";
+    let parsed: proxy_manager::config::Credentials =
+        toml::from_str(text).expect("旧文件必须还读得动");
+    assert!(parsed.uuid.is_empty());
+    parsed.validate().expect("整份没有 uuid 是合法的");
+}
+
+/// **「有一半」要被拒。**
+///
+/// 症状是**一部分人**的公网订阅悄悄没有节点——比所有人都没有难查得多。
+#[test]
+fn 凭据文件的uuid只有一半会被拒() {
+    let error =
+        credentials(&["slot-01", "slot-02"], &["slot-01"]).validate().unwrap_err().to_string();
+    assert!(error.contains("不一致"), "{error}");
+    assert!(error.contains("slot-02"), "要点名是谁缺的：{error}");
+
+    // 反方向同样要拒：多出来的那个是谁的？
+    let error =
+        credentials(&["slot-01"], &["slot-01", "slot-09"]).validate().unwrap_err().to_string();
+    assert!(error.contains("slot-09"), "{error}");
+
+    // 正向控制：两边逐个对上就放行。
+    credentials(&["slot-01", "slot-02"], &["slot-01", "slot-02"]).validate().unwrap();
+}
+
+/// **有 uPSK、没 UUID 的人在本人页上不能是绿的。**
+///
+/// 那正是这个项目定义的假绿：服务端知道公网那份订阅会是空配置，界面不说。
+#[tokio::test]
+async fn 只有upsk没有uuid时本人页说不可用() {
+    let api = Api::with_subscription(&[], &["slot-01"]).await;
+    api.seed_claimable_pool(&["node-a"], &["slot-01"]).await;
+    let alice = login(&api, "alice").await;
+
+    // 先确认有 uuid 时是绿的——否则下面那条可能是因为别的原因红的。
+    let (_, body, _) = api.get("/api/v1/me/subscription", Some(&actor(&alice))).await;
+    assert_eq!(body["usable"], true, "{body}");
+
+    // 把 uuid 那一半摘掉，模拟「二进制推了、凭据还没推」。
+    api.rewrite_credentials(|text| {
+        text.truncate(text.find("[uuid]").expect("夹具凭据里有这一段"));
+    });
+    let (_, body, _) = api.get("/api/v1/me/subscription", Some(&actor(&alice))).await;
+    assert_eq!(body["usable"], false, "{body}");
+    assert_eq!(body["unusable_reason"], "no_credential", "{body}");
 }
