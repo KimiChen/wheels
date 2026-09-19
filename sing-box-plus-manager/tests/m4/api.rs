@@ -422,7 +422,9 @@ async fn 超过i64上界的额度被拒而不是截断() {
         .iter()
         .find(|g| g["group_name"] == "normal")
         .expect("normal 档");
-    assert_eq!(normal["monthly_bytes"], "1000000000000", "普通档应当还是种下的 1 TB");
+    // 二进制 TiB（2026-09-20 由十进制改来）：客户端按 GiB 显示，
+    // 十进制的 1 TB 在用户屏幕上是 931 G，与档位名对不上。
+    assert_eq!(normal["monthly_bytes"], "1099511627776", "普通档应当还是种下的 1 TiB");
 }
 
 /// 错误对象形状固定，不随端点变化。

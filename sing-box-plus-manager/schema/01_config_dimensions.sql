@@ -36,8 +36,12 @@ CREATE TABLE quota_groups (
     group_name   TEXT PRIMARY KEY NOT NULL
         CHECK(group_name IN ('normal', 'advanced', 'manage', 'admin')),
     display_name TEXT NOT NULL,
-    -- 月度额度，u64 字节（C3 的 20 位定宽文本）。**十进制 TB**：
-    -- 1 TB = 1 000 000 000 000，不是 2^40。
+    -- 月度额度，u64 字节（C3 的 20 位定宽文本）。**二进制 TiB**：
+    -- 1 TB = 2^40 = 1 099 511 627 776（2026-09-20 由十进制 10^12 改来）。
+    --
+    -- 改的理由是它每天都在说错话：客户端按 GiB 显示，于是一个叫「1 TB」的档
+    -- 在用户屏幕上是 931 G。档位名与用户看到的数字对不上，而对不上的那一方
+    -- 是用户天天看的那一方。
     --
     -- 上界钉在 i64::MAX 而不是 u64::MAX：wire 上 remaining_bytes 是非负 int64（C31），
     -- 超界值在分配那一层是**静默截断**。把上界写进库，等于把一次静默截断
