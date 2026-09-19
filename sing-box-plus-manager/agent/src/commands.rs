@@ -5,13 +5,13 @@
 //! - **agent 不解析快照 JSON、不缓存快照**（README §4.1）。`snapshot` 与 `quota`
 //!   都是字节透传：解析属于主控，缓存会让「谁是真相源」这件事出现第二个答案。
 //! - **硬校验放在 agent 侧**，因为它是唯一知道本机真实布局的一方。
-//!   `audit-fetch` 拒绝读活动文件这条，只有 agent 判得了。
+//!   `audit-read` 拒绝读活动文件、拒绝走出 `audit_dir` 这两条，只有 agent 判得了。
 
 use std::path::Path;
 use std::sync::Arc;
 
 use proxy_manager_wire::audit;
-use proxy_manager_wire::command::{AgentCommand, AuditFetchRequest};
+use proxy_manager_wire::command::{AgentCommand, AuditFileEntry, AuditListing, AuditReadRequest};
 use proxy_manager_wire::uds::UdsClient;
 use tokio::sync::Semaphore;
 
@@ -61,7 +61,8 @@ impl Executor {
         match command {
             AgentCommand::Snapshot {} => self.snapshot().await,
             AgentCommand::Quota { body } => self.quota(body).await,
-            AgentCommand::AuditFetch(request) => self.audit_fetch(request).await,
+            AgentCommand::AuditList {} => self.audit_list().await,
+            AgentCommand::AuditRead(request) => self.audit_read(request).await,
         }
     }
 
@@ -104,51 +105,120 @@ impl Executor {
         }
     }
 
-    async fn audit_fetch(&self, request: &AuditFetchRequest) -> Outcome {
+    async fn audit_list(&self) -> Outcome {
         let Some(dir) = self.config.audit_dir.as_ref() else {
             tracing::warn!("未配置 audit_dir，拒绝审计检索");
             return Outcome::agent_error(404);
         };
-        match read_rotated(dir, &request.identity) {
-            Ok(body) => Outcome { agent_status: 200, upstream_status: Some(200), body },
+        match list_rotated(dir) {
+            Ok(listing) => {
+                if listing.skipped > 0 {
+                    // 计数而不是静默跳过：真跳过了东西却不说，与「目录里就这些」
+                    // 在输出上长得一模一样。
+                    tracing::warn!(skipped = listing.skipped, "审计目录里有无法归类的条目");
+                }
+                match serde_json::to_vec(&listing) {
+                    Ok(body) => Outcome { agent_status: 200, upstream_status: Some(200), body },
+                    Err(error) => {
+                        tracing::warn!(error = %error, "审计清单序列化失败");
+                        Outcome::agent_error(500)
+                    }
+                }
+            }
             Err(error) => {
                 // 日志里不记身份明细（threat-model §5），只记错误码。
-                tracing::warn!(error = %error, "审计检索失败");
+                tracing::warn!(error = %error, "审计目录列举失败");
                 Outcome::agent_error(500)
+            }
+        }
+    }
+
+    async fn audit_read(&self, request: &AuditReadRequest) -> Outcome {
+        let Some(dir) = self.config.audit_dir.as_ref() else {
+            tracing::warn!("未配置 audit_dir，拒绝审计检索");
+            return Outcome::agent_error(404);
+        };
+        match read_rotated(dir, &request.file) {
+            Ok(body) => Outcome { agent_status: 200, upstream_status: Some(200), body },
+            Err(error) => {
+                // 三档分开：400 是「这个名字我不接受」，404 是「名字没问题但文件不在了」，
+                // 500 才是 agent 自己出了问题。同步器要靠这个区分「节点删了文件」
+                // 与「agent 坏了」——混成一个码，前者会被当成后者反复重试。
+                let status = match error.kind() {
+                    std::io::ErrorKind::InvalidInput => 400,
+                    std::io::ErrorKind::NotFound => 404,
+                    _ => 500,
+                };
+                // 不把被拒的文件名回显进日志：它来自主控，但这条路径的全部意义
+                // 就是不信任它。
+                tracing::warn!(error = %error, status, "审计读取被拒或失败");
+                Outcome::agent_error(status)
             }
         }
     }
 }
 
-/// 只读**已轮转**文件（C23）。
+/// 列出目录里**全部身份**的已轮转文件（C23）。
 ///
-/// 两条都要守住：
+/// 活动文件**不计入 `skipped`**：跳过它是这个函数的本职（它正在被写，
+/// 读到的可能是半行），把本职算成异常会让 `skipped` 这个数字失去意义。
+/// `skipped` 数的是**无法归类**的条目——那才是「这个目录里有我说不清的东西」。
+fn list_rotated(dir: &Path) -> std::io::Result<AuditListing> {
+    let mut files = Vec::new();
+    let mut skipped = 0usize;
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !audit::is_rotated_name(&name) {
+            if !name.starts_with(audit::FILE_PREFIX) || !name.ends_with(audit::FILE_SUFFIX) {
+                skipped += 1;
+            }
+            continue;
+        }
+        // 只要常规文件。目录与符号链接都不读——后者可能指到 audit_dir 之外。
+        let meta = entry.metadata()?;
+        if !meta.is_file() {
+            skipped += 1;
+            continue;
+        }
+        files.push(AuditFileEntry { name, size: meta.len() });
+    }
+    // 定宽时间戳的字典序即时间序，所以排序之后就是轮转顺序。
+    files.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(AuditListing { files, skipped })
+}
+
+/// 读**一个**已轮转文件（C23）。
+///
+/// 三条都要守住：
 ///
 /// - **拒绝读取活动文件。** 它正在被写，读到的可能是半行；而且 §4.8 已经接受了
 ///   「低流量身份可能数天拿不到归档」这个限制——用读活动文件去绕开它，
 ///   等于把一个已披露的限制换成一个不可见的正确性问题。
-/// - **agent 自身从不 `rm` 活动文件。** 轮转只许 `mv`；要删某人历史，
-///   删的是已轮转文件不是活动文件。这个函数只读，不删任何东西。
-fn read_rotated(dir: &Path, identity: &str) -> std::io::Result<Vec<u8>> {
-    let mut names: Vec<String> = Vec::new();
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let name = entry.file_name().to_string_lossy().to_string();
-        if audit::is_active_file(&name, identity) {
-            // 显式跳过，并留一条痕迹：这不是「没找到」，是「刻意不读」。
-            tracing::debug!("跳过活动文件：只读已轮转文件（C23）");
-            continue;
-        }
-        if audit::is_rotated_file(&name, identity) {
-            names.push(name);
-        }
+/// - **文件名来自主控，但这里不信任它。** 形状校验 + canonicalize 之后再确认
+///   仍在 `audit_dir` 之内。前者挡 `../`，后者挡符号链接。
+/// - **agent 自身从不 `rm` 任何东西。** 轮转只许 `mv`；要删某人历史，
+///   删的是已轮转文件不是活动文件。这个函数只读。
+fn read_rotated(dir: &Path, file: &str) -> std::io::Result<Vec<u8>> {
+    let refuse = |why: &str| {
+        Err::<Vec<u8>, _>(std::io::Error::new(std::io::ErrorKind::InvalidInput, why.to_string()))
+    };
+    // 第一道：形状。身份段只许 base64url 字母表（里面没有 `/` 也没有 `.`），
+    // 所以 `../../etc/passwd` 这一类根本拼不出来；活动文件也在这一道被挡掉——
+    // 它没有轮转时间戳后缀。
+    if !audit::is_rotated_name(file) {
+        return refuse("不是合法的已轮转审计文件名");
     }
-    // 排序让结果确定。文件名末尾是时间戳，字典序即时间序。
-    names.sort();
-
-    let mut body = Vec::new();
-    for name in names {
-        body.extend_from_slice(&std::fs::read(dir.join(name))?);
+    // 第二道：拼出来之后确认还在 audit_dir 之内。形状那一道已经够了，
+    // 但这一道挡的是另一类东西——目录里放了一个符号链接指到外面去。
+    // canonicalize 会解析链接，所以两道都得过。
+    let path = dir.join(file);
+    let (real_dir, real_path) = (dir.canonicalize()?, path.canonicalize()?);
+    if !real_path.starts_with(&real_dir) {
+        return refuse("解析之后不在 audit_dir 之内");
     }
-    Ok(body)
+    if !real_path.symlink_metadata()?.is_file() {
+        return refuse("不是常规文件");
+    }
+    std::fs::read(&real_path)
 }

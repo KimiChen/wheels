@@ -47,11 +47,24 @@ pub enum AgentCommand {
         body: Vec<u8>,
     },
 
-    /// 按身份文件与时间窗读取**已轮转**的审计片段。数据主体明细档。
+    /// 列出审计目录里**全部身份**的已轮转文件及其大小。数据主体明细档。
     ///
-    /// 硬校验放在 agent 侧，因为它是唯一知道本机真实布局的一方：
-    /// 拒绝读取**活动文件**，只读已轮转文件（C23）；agent 自身从不 `rm` 活动文件。
-    AuditFetch(AuditFetchRequest),
+    /// 一次往返拿到全貌，而不是拿着身份名一个个问——目录里是 301 个身份，
+    /// 逐身份问一轮就是 301 次往返，而同步器要的本来也不是「某个人的文件」，
+    /// 是「这个目录里有什么、跟我本机比差了哪些」。
+    ///
+    /// 只列已轮转文件（C23）：活动文件正在被写，读它拿到的可能是半行。
+    AuditList {},
+
+    /// 读一个已轮转文件的原始字节。
+    ///
+    /// 入参校验放在 agent 侧，因为它是唯一知道本机真实布局的一方：
+    /// 文件名形状、不含 `/`、解析后仍在 `audit_dir` 之内、且**不是活动文件**。
+    /// agent 自身从不 `rm` 任何东西——轮转只许 `mv`（C23）。
+    ///
+    /// **文件名不是授权依据**（C35）：它只用来定位，逐行的完整身份校验与归属裁剪
+    /// 在主控侧做。
+    AuditRead(AuditReadRequest),
 }
 
 impl AgentCommand {
@@ -62,7 +75,8 @@ impl AgentCommand {
         match self {
             AgentCommand::Snapshot {} => "snapshot",
             AgentCommand::Quota { .. } => "quota",
-            AgentCommand::AuditFetch(_) => "audit-fetch",
+            AgentCommand::AuditList {} => "audit-list",
+            AgentCommand::AuditRead(_) => "audit-read",
         }
     }
 
@@ -74,13 +88,33 @@ impl AgentCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct AuditFetchRequest {
-    /// 身份名。agent 按它定位候选文件，**但文件名不是授权依据**——
-    /// 逐行的完整身份校验与归属裁剪在主控侧做（C35）。
-    pub identity: String,
-    /// 半开区间 `[from, to)`，RFC 3339 UTC。
-    pub from: String,
-    pub to: String,
+pub struct AuditReadRequest {
+    /// 已轮转文件的**基名**，形如 `access-<b64url>.jsonl.<定宽时间戳>`。
+    ///
+    /// 它**不是**路径：agent 会拒绝任何含 `/` 的名字，并在拼接后再确认结果仍在
+    /// `audit_dir` 之内。这里没有时间窗参数——同步器要的是**文件级增量**，
+    /// 不是时间窗。上一版的 `from`/`to` 是死参数：调用方从不传，
+    /// 而实现把该身份**全部**已轮转文件整份拼起来返回。
+    pub file: String,
+}
+
+/// `AuditList` 的响应体。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuditListing {
+    pub files: Vec<AuditFileEntry>,
+    /// 目录里既不是活动文件、也不是合法已轮转文件的条目数。
+    ///
+    /// **计数而不是静默跳过**：真跳过了东西却不说，和「目录里就这些」在输出上
+    /// 长得一模一样，而这一项存在的全部意义是让「审计不完整」可见。
+    pub skipped: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuditFileEntry {
+    pub name: String,
+    pub size: u64,
 }
 
 /// `Vec<u8>` 的 base64 编解码。
@@ -151,11 +185,12 @@ mod tests {
 
     #[test]
     fn 命令集是封闭的() {
-        // 认识的三条。
+        // 认识的四条。
         for text in [
             r#"{"command":"snapshot"}"#,
             r#"{"command":"quota","body":"AAEC"}"#,
-            r#"{"command":"audit-fetch","identity":"u1","from":"2026-09-01T00:00:00Z","to":"2026-09-02T00:00:00Z"}"#,
+            r#"{"command":"audit-list"}"#,
+            r#"{"command":"audit-read","file":"access-dV9leGFtcGxlXzAx.jsonl.20260919T041530.123456789Z"}"#,
         ] {
             serde_json::from_str::<AgentCommand>(text)
                 .unwrap_or_else(|e| panic!("{text} 应当被接受：{e}"));
@@ -170,7 +205,12 @@ mod tests {
             r#"{"command":"quota"}"#,
             // 这一条曾经**通过**：Snapshot 当时是 unit 变体，多余字段被静默丢弃。
             r#"{"command":"snapshot","argv":["sh"]}"#,
-            r#"{"command":"audit-fetch","identity":"u1","from":"a","to":"b","extra":1}"#,
+            r#"{"command":"audit-read","file":"x","extra":1}"#,
+            r#"{"command":"audit-list","extra":1}"#,
+            r#"{"command":"audit-read"}"#,
+            // 换命令之后旧的那条必须**连反序列化都过不去**，而不是落到某个
+            // 还没删干净的分支上。
+            r#"{"command":"audit-fetch","identity":"u1","from":"a","to":"b"}"#,
         ] {
             assert!(serde_json::from_str::<AgentCommand>(text).is_err(), "{text} 必须被拒绝");
         }

@@ -18,7 +18,9 @@ pub mod tls;
 pub mod uds;
 pub mod verify;
 
-pub use command::{AgentCommand, AuditFetchRequest, COMMAND_METHOD, COMMAND_PATH};
+pub use command::{
+    AgentCommand, AuditFileEntry, AuditListing, AuditReadRequest, COMMAND_METHOD, COMMAND_PATH,
+};
 pub use sign::{
     canonical, Direction, HmacKey, NonceCache, SignatureHeaders, SigningError, MAX_SKEW_SECS,
     NONCE_TTL_SECS,

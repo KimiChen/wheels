@@ -9,7 +9,7 @@
 use std::path::Path;
 
 use proxy_manager_wire::command::{
-    AgentCommand, AuditFetchRequest, COMMAND_METHOD, COMMAND_PATH, UPSTREAM_STATUS_HEADER,
+    AgentCommand, AuditReadRequest, COMMAND_METHOD, COMMAND_PATH, UPSTREAM_STATUS_HEADER,
 };
 use proxy_manager_wire::sign::{self, Direction, HmacKey, NonceCache, SignatureHeaders};
 use rustls::pki_types::ServerName;
@@ -101,8 +101,14 @@ impl AgentClient {
         self.send(&AgentCommand::Quota { body }).await
     }
 
-    pub async fn audit_fetch(&self, request: AuditFetchRequest) -> Result<AgentResponse> {
-        self.send(&AgentCommand::AuditFetch(request)).await
+    /// 列出节点审计目录里全部身份的已轮转文件。一次往返拿到全貌。
+    pub async fn audit_list(&self) -> Result<AgentResponse> {
+        self.send(&AgentCommand::AuditList {}).await
+    }
+
+    /// 读一个已轮转文件的原始字节。文件名的硬校验在 agent 侧。
+    pub async fn audit_read(&self, file: String) -> Result<AgentResponse> {
+        self.send(&AgentCommand::AuditRead(AuditReadRequest { file })).await
     }
 
     pub async fn send(&self, command: &AgentCommand) -> Result<AgentResponse> {
