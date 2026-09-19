@@ -67,6 +67,62 @@ enum Command {
         #[command(subcommand)]
         command: SsoCommand,
     },
+
+    /// 出站目标审计。
+    Audit {
+        #[command(subcommand)]
+        command: AuditCommand,
+    },
+}
+
+async fn audit_command(command: AuditCommand) -> anyhow::Result<ExitCode> {
+    let AuditCommand::Sync { config_dir } = command;
+    let config = Config::load_dir(&config_dir)?;
+    let Some(audit) = config.server.audit.as_ref() else {
+        // 「没配」是一个确定的事实，说出来；而不是同步零台然后报告成功。
+        println!("server.toml 里没有 [audit] 段，审计同步未启用。");
+        return Ok(ExitCode::FAILURE);
+    };
+    let mut failed = false;
+    for outcome in proxy_manager::audit::sync::sync_all(&config.nodes, audit).await {
+        match outcome {
+            Ok(report) => {
+                println!(
+                    "{}\t归档 +{}（{} 字节）\t活动 +{} 字节\t轮转 {}\t节点侧无法归类 {}",
+                    report.node_id,
+                    report.archives_fetched,
+                    report.archive_bytes,
+                    report.live_bytes,
+                    report.rotations,
+                    report.skipped_on_node
+                );
+                for line in report.anomalies.iter().chain(report.errors.iter()) {
+                    println!("  ! {line}");
+                    failed = true;
+                }
+            }
+            Err(detail) => {
+                println!("  ! {detail}");
+                failed = true;
+            }
+        }
+    }
+    // 有未决项时退非零：这条命令会被放进排查脚本，而「打印了警告但退 0」
+    // 在脚本里与「一切正常」不可区分。
+    Ok(if failed { ExitCode::FAILURE } else { ExitCode::SUCCESS })
+}
+
+#[derive(Subcommand)]
+enum AuditCommand {
+    /// 立刻同步一轮，然后退出。服务里同一段代码按 `interval_secs` 周期跑。
+    ///
+    /// 手工跑一轮是安全的：同步只追加、不删除，偏移记在镜像目录里，
+    /// 与服务并发跑最坏也只是两边各收一段、各自推进自己那份状态——
+    /// 但那会让偏移打架，所以正常排查时先停服务或者只看不跑。
+    Sync {
+        #[arg(default_value = "/etc/proxy-manager")]
+        config_dir: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -384,6 +440,7 @@ async fn run(command: Command) -> anyhow::Result<ExitCode> {
         Command::User { command } => user_command(command).await,
 
         Command::Sso { command } => sso_command(command).await,
+        Command::Audit { command } => audit_command(command).await,
     }
 }
 
@@ -430,6 +487,24 @@ async fn run_service(config_dir: &std::path::Path) -> anyhow::Result<ExitCode> {
     }
     if tasks.is_empty() {
         anyhow::bail!("nodes.toml 里没有可采集的节点");
+    }
+
+    // 出站目标审计的同步。整段 `[audit]` 缺省即不同步——那时 me-audit.html 取不到
+    // 任何数据，所以要在启动日志里点名，而不是让人从「页面是空的」去反推。
+    match &config.server.audit {
+        Some(settings) => {
+            tracing::info!(
+                dir = %settings.dir.display(),
+                interval_secs = settings.interval_secs,
+                "启动审计同步循环：这个周期就是页面上数据的可见延迟"
+            );
+            tasks.push(tokio::spawn(proxy_manager::audit::sync::run(
+                config.nodes.clone(),
+                settings.clone(),
+                shutdown_rx.clone(),
+            )));
+        }
+        None => tracing::info!("server.toml 里没有 [audit] 段，不同步审计明细"),
     }
 
     // 失败开放的节点在启动日志里点名一次（C12）。配置里签过字不等于运行时没人再看见它。

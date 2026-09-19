@@ -52,6 +52,9 @@ pub enum Error {
 
     #[error("配额：{0}")]
     Quota(String),
+
+    #[error("审计：{0}")]
+    Audit(String),
 }
 
 impl Error {

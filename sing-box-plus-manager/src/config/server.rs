@@ -30,6 +30,27 @@ pub struct ServerConfig {
     /// 回错误会被读成「加载失败，刷新试试」，而刷多少次都一样。
     #[serde(default)]
     pub subscription: Option<crate::config::SubscriptionConfig>,
+    /// 出站目标审计的同步（§4.8）。**整段缺省即不同步**。
+    ///
+    /// 这棵树与账本完全分开（C24）：`ledger backup` 走 `VACUUM INTO`，只碰那一个
+    /// `.db` 文件，于是「用户 → 域名」的明细不会被复制进每一份账本备份。
+    #[serde(default)]
+    pub audit: Option<AuditConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuditConfig {
+    /// 本机镜像树的根，每台节点一个子目录。
+    pub dir: PathBuf,
+    /// 同步周期。**这就是页面上数据的可见延迟**——节点只按大小轮转，
+    /// 而活动文件是按偏移增量读的，所以延迟由这个值决定，不由轮转决定。
+    #[serde(default = "default_audit_interval_secs")]
+    pub interval_secs: u32,
+}
+
+fn default_audit_interval_secs() -> u32 {
+    600
 }
 
 #[derive(Debug, Clone, Deserialize)]

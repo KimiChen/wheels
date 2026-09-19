@@ -26,6 +26,7 @@
 
 pub mod agent;
 pub mod api;
+pub mod audit;
 pub mod collect;
 pub mod config;
 pub mod crash;
