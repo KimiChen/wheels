@@ -54,8 +54,17 @@ pub struct Report {
     /// 核对过的 `runtime_identity_id` 个数。
     pub lifetimes_checked: usize,
     pub mismatches: Vec<Mismatch>,
-    /// `quota_requests` 的 epoch 水位。**没有它，一次重建会让四台节点全部 409。**
-    pub epoch_high_water: Option<i64>,
+    /// 每个 `(node_id, runtime_id)` 的 epoch 水位。
+    ///
+    /// **epoch 是 per-(node_id, runtime_id) 的**（C31），不是全局的——
+    /// 报一个全局最大值会让「这个节点的水位是多少」这个问题得到一个
+    /// 看起来像答案的数字。没有这些值，一次重建会让四台节点全部 409 stale_epoch。
+    pub epoch_high_water: Vec<(String, String, u64)>,
+    /// 列的形状不对（类型与 DDL 的 CHECK 不符）。**不 panic，报出来。**
+    ///
+    /// 这是唯一一个必须能在坏库上跑完的工具：panic 掉等于「这份备份有问题」
+    /// 这个结论永远打印不出来。
+    pub shape_errors: Vec<String>,
     /// 载荷的编码分布：codec → (行数, 落库字节数, 原文字节数)。
     pub payload_codecs: Vec<(String, i64, i64, i64)>,
     pub counts: BTreeMap<String, i64>,
@@ -69,6 +78,7 @@ impl Report {
             && self.missing_tables.is_empty()
             && self.unexpected_tables.is_empty()
             && self.mismatches.is_empty()
+            && self.shape_errors.is_empty()
     }
 }
 
@@ -111,10 +121,32 @@ pub async fn verify(store: &Store) -> Result<Report> {
         report.counts.insert((*table).to_string(), n);
     }
 
-    report.epoch_high_water = sqlx::query("SELECT MAX(epoch) FROM quota_requests")
-        .fetch_one(store.readers())
-        .await?
-        .get::<Option<i64>, _>(0);
+    // epoch 是**定宽零填充的十进制文本**（C3），不是 INTEGER——
+    // 定宽正是为了让 `MAX()` 在 BINARY 排序下等于数值最大值。
+    for row in sqlx::query(
+        "SELECT node_id, runtime_id, MAX(epoch) FROM quota_requests GROUP BY node_id, runtime_id",
+    )
+    .fetch_all(store.readers())
+    .await?
+    {
+        let node: String = row.get(0);
+        let runtime: String = row.get(1);
+        // **类型不对要报出来，不能吞掉。** 吞掉的话这份库会被报成「没有水位」，
+        // 而那句话的下一步是「人工补水位」——对着一份形状不对的库补水位，
+        // 是在一个错误的诊断上继续施工。
+        match row.try_get::<Option<String>, _>(2) {
+            Ok(None) => {}
+            Ok(Some(text)) => match crate::store::codec::U64Text::decode(&text) {
+                Ok(epoch) => report.epoch_high_water.push((node, runtime, epoch.get())),
+                Err(error) => report
+                    .shape_errors
+                    .push(format!("quota_requests({node}/{runtime}).epoch 解不出来：{error}")),
+            },
+            Err(error) => report.shape_errors.push(format!(
+                "quota_requests({node}/{runtime}).epoch 的列类型与 DDL 不符：{error}"
+            )),
+        }
+    }
 
     for row in sqlx::query(
         "SELECT codec, count(*), sum(length(payload)), sum(raw_length) \

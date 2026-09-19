@@ -750,10 +750,16 @@ async fn print_verify(db: &std::path::Path) -> anyhow::Result<ExitCode> {
     );
     println!("  周期总账重算      {} 组", report.cycles_checked);
     println!("  永久累计重算      {} 个身份", report.lifetimes_checked);
-    match report.epoch_high_water {
-        Some(epoch) => println!("  epoch 水位        {epoch}"),
+    if report.epoch_high_water.is_empty() {
         // 这不是「干净」，是「一次重建会让四台节点全部 409 stale_epoch」。
-        None => println!("  epoch 水位        **没有**（重建后需要人工补水位）"),
+        println!("  epoch 水位        **没有**（重建后需要人工补水位）");
+    } else {
+        for (node, runtime, epoch) in &report.epoch_high_water {
+            println!("  epoch 水位        {node} / {} → {epoch}", &runtime[..8.min(runtime.len())]);
+        }
+    }
+    for error in &report.shape_errors {
+        println!("  **列的形状不对**  {error}");
     }
     for (codec, rows, packed, raw) in &report.payload_codecs {
         println!(

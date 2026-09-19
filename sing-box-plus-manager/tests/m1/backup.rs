@@ -304,3 +304,112 @@ async fn 月界前一秒还属于上一个月() {
     let report = verify(&ledger.store).await.unwrap();
     assert!(report.ok(), "15:59:59Z 仍属于 2026-08：{:?}", report.mismatches);
 }
+
+/// **epoch 水位要报得出来，而且是按 `(node_id, runtime_id)` 报的。**
+///
+/// 部署记录里有一段「重建库留下的一个真实缺口」：重建把 `quota_requests` 清空，
+/// 主控于是从 epoch 1 重来，而节点还记着重建前的水位，四台全部 409 `stale_epoch`，
+/// `resolve_conflict` 每轮只能加一。数字小的时候能自愈，**大的时候永远追不上**。
+/// 恢复演练必须把这个数报出来，否则「恢复成功」之后第一件事就是全线限速失效。
+///
+/// 这条是补上的：第一版把 epoch 当 `i64` 读，而它是**定宽零填充的十进制文本**（C3）。
+/// 夹具里从来没有 `quota_requests` 行，所以一路绿到线上才炸——
+/// 而且炸的方式是 panic，恰好发生在那个「必须能在坏库上跑完」的工具里。
+#[tokio::test]
+async fn epoch水位按节点报得出来() {
+    let (ledger, _) = seeded().await;
+
+    let mut txn = ledger.store.begin_immediate().await.unwrap();
+    for (epoch, runtime) in
+        [(7_u64, "0123456789abcdef0123456789abcdef"), (3, "ffffffffffffffffffffffffffffffff")]
+    {
+        sqlx::query(
+            "INSERT INTO quota_requests(node_id, runtime_id, epoch, table_kind, request_body, \
+             body_sha256, budget_version, setting_revision, prepared_at, result) \
+             VALUES (?, ?, ?, 'zero', x'00', ?, 0, 0, ?, 'applied')",
+        )
+        .bind(super::ledger_harness::NODE)
+        .bind(runtime)
+        .bind(format!("{epoch:0>20}"))
+        .bind("a".repeat(64))
+        .bind("2026-09-18T00:00:00Z")
+        .execute(txn.conn())
+        .await
+        .unwrap();
+    }
+    txn.commit().await.unwrap();
+
+    let report = verify(&ledger.store).await.unwrap();
+    assert!(report.shape_errors.is_empty(), "列形状报错：{:?}", report.shape_errors);
+    assert_eq!(
+        report.epoch_high_water.len(),
+        2,
+        "两个 runtime 各要一行：{:?}",
+        report.epoch_high_water
+    );
+    let epochs: Vec<u64> = report.epoch_high_water.iter().map(|(_, _, e)| *e).collect();
+    assert!(epochs.contains(&7) && epochs.contains(&3), "实际：{epochs:?}");
+    assert!(report.ok(), "{:?}", report.mismatches);
+}
+
+/// 一张空的 `quota_requests` 报的是「**没有水位**」，不是「水位是 0」。
+///
+/// 这两句话的下一步完全不同：前者要人工补水位，后者会让人以为一切正常。
+#[tokio::test]
+async fn 没有配额请求时说没有水位而不是零() {
+    let (ledger, _) = seeded().await;
+    let report = verify(&ledger.store).await.unwrap();
+    assert!(report.epoch_high_water.is_empty());
+}
+
+/// 一份**坏掉的**库要报「形状不对」，而不是报「没有水位」。
+///
+/// 这两句话的下一步完全不同：前者说这份库不能用，后者会让人去补水位——
+/// 在一个错误的诊断上继续施工。第一版把这个错误 `.ok()` 吞掉了，
+/// 于是一份坏库会被报成一份「干净但需要补水位」的库。
+///
+/// 用 `PRAGMA ignore_check_constraints` 造出这一行。这不是钻空子：
+/// **CHECK 只在写入时生效，读的时候不会重新校验**，
+/// 而一个核对器存在的理由正是「这份文件可能已经不满足它自己的约束了」。
+#[tokio::test]
+async fn 坏掉的epoch报形状不对而不是报没有() {
+    let (ledger, _) = seeded().await;
+
+    let mut txn = ledger.store.begin_immediate().await.unwrap();
+    sqlx::query("PRAGMA ignore_check_constraints = ON").execute(txn.conn()).await.unwrap();
+    sqlx::query(
+        "INSERT INTO quota_requests(node_id, runtime_id, epoch, table_kind, request_body, \
+         body_sha256, budget_version, setting_revision, prepared_at, result) \
+         VALUES (?, ?, 'not-a-number', 'zero', x'00', ?, 0, 0, ?, 'applied')",
+    )
+    .bind(super::ledger_harness::NODE)
+    .bind("0123456789abcdef0123456789abcdef")
+    .bind("a".repeat(64))
+    .bind("2026-09-18T00:00:00Z")
+    .execute(txn.conn())
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+
+    let report = verify(&ledger.store).await.unwrap();
+    assert!(
+        report.shape_errors.iter().any(|e| e.contains("epoch")),
+        "应当报 epoch 的形状不对：{:?} / 水位 {:?}",
+        report.shape_errors,
+        report.epoch_high_water
+    );
+    // **而且这份库要被判为不自洽。** 只把错误打出来却仍然报 ok，
+    // 等于让一次演练在「有报错但通过了」的状态下收场。
+    // **水位那一栏必须是空的**——这才是这条用例的重点：
+    // 一个把错误吞掉的实现会在这里给出「没有水位」，
+    // 而那句话的下一步是「人工补水位」，即在一个错误的诊断上继续施工。
+    assert!(report.epoch_high_water.is_empty(), "坏行不该被算成一个水位");
+    assert!(!report.ok(), "这份库不该判为自洽");
+
+    // 顺带记一个在写这条用例时才量出来的事实：**`PRAGMA integrity_check`
+    // 自己也会重新校验 CHECK**，所以这一行同时被两个独立的检测器抓住。
+    // 也就是说 `ok()` 里那条 `shape_errors.is_empty()` 在这个场景下是冗余的——
+    // 它的价值在没有 CHECK 兜底的列上。这里如实钉住实际发生的事，
+    // 而不是假装那条冗余的判据是被这条用例证明的。
+    assert!(report.integrity.contains("CHECK"), "integrity_check 也该抓到它：{}", report.integrity);
+}
