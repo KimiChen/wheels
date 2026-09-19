@@ -831,6 +831,10 @@ async fn subscription_view(state: &AppState, user_id: i64, login_name: &str) -> 
         "subscriptions": config
             .sources
             .iter()
+            // 级别不够的拨法不在页面上出现（`EntrySource::min_level`）。
+            // **只是藏起来**：两种拨法共用同一个 token，把前缀一改就取得到。
+            // 理由与代价写在那个字段的文档上。
+            .filter(|source| crate::quota::level::of(&group) >= source.min_level)
             .map(|source| {
                 json!({
                     "prefix": source.prefix,

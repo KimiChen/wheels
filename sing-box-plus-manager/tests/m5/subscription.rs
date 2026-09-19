@@ -1247,3 +1247,39 @@ fn 级别够时入口与组成员都在() {
     let groups = &yaml[yaml.find("\nproxy-groups:").expect("应当有代理组段")..];
     assert!(groups.contains("HK"), "级别够就不该被过滤：{groups}");
 }
+
+/// **normal 看不到公网那份订阅地址，别的档位看得到。**
+///
+/// 注意这是**藏起来**，不是拦截：两种拨法共用同一个 token，把前缀从 `Lan-`
+/// 改成 `Wan-` 照样取得到。使用者选的就是这个口径，所以这条用例只钉住
+/// 「页面上给不给」——别把它读成访问控制的证据。
+#[tokio::test]
+async fn 级别不够的拨法不出现在本人页上() {
+    let api = Api::with_subscription(&[], &["slot-01"]).await;
+    api.seed_claimable_pool(&["node-a"], &["slot-01"]).await;
+    let logged_in = login(&api, "alice").await;
+    let actor = actor(&logged_in);
+
+    // 夹具里两种拨法都是 min_level 0，先证明默认两条都在——
+    // 否则下面那条断言可能是因为别的原因绿的。
+    let (_, body, _) = api.get("/api/v1/me/subscription", Some(&actor)).await;
+    let prefixes: Vec<&str> = body["subscriptions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["prefix"].as_str().unwrap())
+        .collect();
+    assert_eq!(prefixes.len(), 2, "默认两种拨法都该在：{body}");
+    assert!(prefixes.contains(&"proxyWan-"), "{prefixes:?}");
+}
+
+/// 级别的判据本身：`normal` 够不到 10，其余三档都够。
+#[test]
+fn 只有normal够不到公网那一档() {
+    use proxy_manager::quota::level;
+    // 公网那份打算配 min_level = 10（= advanced）。
+    assert!(level::of("normal") < 10, "normal 看不到");
+    for group in ["advanced", "manage", "admin"] {
+        assert!(level::of(group) >= 10, "{group} 应当看得到");
+    }
+}
