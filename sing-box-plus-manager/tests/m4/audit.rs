@@ -379,3 +379,43 @@ async fn 响应里没有逐连接的原始记录() {
     let dropped = body["dropped"].as_object().unwrap();
     assert!(dropped.keys().all(|key| key.starts_with("dropped_")), "{dropped:?}");
 }
+
+/// **候选文件的前缀匹配不许多匹配到别人的文件。**
+///
+/// 缩小候选集用的前缀是 `access-<b64url(身份名)>.jsonl`，匹配方式是
+/// `starts_with`。**那个 `.jsonl` 不是装饰**：去掉它，`user0001` 的前缀会命中
+/// `user00010` 的文件（base64url 里 `dXNlcjAwMDE` 是 `dXNlcjAwMDEw` 的前缀）。
+///
+/// 访问行有 C35 兜底——串进来的行归属判不到本人，会被裁掉。
+/// **但诊断行没有四元组、裁剪不了**，它是按文件收的。所以前缀一旦多匹配，
+/// 别人文件里的缺口会原样显示给你，而那是一条关于别人的事实。
+/// 这条用例挑的就是这个信号。
+#[tokio::test]
+async fn 前缀相近的身份文件不会被误读() {
+    let api = Api::new().await;
+    let alice = api.user("alice", Role::User, "local").await;
+    wire_identity(&api, alice.user_id, "ss-entry", "user0001").await;
+    let ts = now_ms() - 60_000;
+    api.seed_audit(
+        NODE,
+        "user0001",
+        &[line("user0001", "ss-entry", "mine.example.com", 1, ts, 1, 1)],
+    );
+    // 另一个身份，名字在 base64url 下与上面那个是前缀关系。它的文件里有一条缺口。
+    api.seed_audit(
+        NODE,
+        "user00010",
+        &[
+            line("user00010", "ss-entry", "theirs.example.com", 1, ts, 1, 1),
+            r#"{"seq":2,"ev":"gap","after":1,"n":99,"reason":"queue_full"}"#.to_string(),
+        ],
+    );
+
+    let (_, body, _) = api.get("/api/v1/me/audit/access", Some(&alice)).await;
+    assert_eq!(hosts(&body), vec!["mine.example.com"]);
+    assert!(body["gaps"].as_array().unwrap().is_empty(), "别人文件里的缺口不能出现在这里：{body}");
+    // 反向：别人的文件确实存在且里面确实有那条缺口，否则这条用例是空的。
+    let other =
+        api.audit_dir.join(NODE).join(proxy_manager_wire::audit::active_file_name("user00010"));
+    assert!(std::fs::read_to_string(&other).unwrap().contains("queue_full"));
+}
