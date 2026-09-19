@@ -542,7 +542,7 @@ async fn 源库必须自报wal() {
 async fn 多出一列会被抓出来() {
     let (ledger, _) = seeded().await;
     let clean = verify(&ledger.store).await.unwrap();
-    assert!(clean.column_drift.is_empty(), "干净的库不该有列漂移：{:?}", clean.column_drift);
+    assert!(clean.schema_drift.is_empty(), "干净的库不该有列漂移：{:?}", clean.schema_drift);
     assert!(clean.ok());
 
     let mut txn = ledger.store.begin_immediate().await.unwrap();
@@ -553,9 +553,9 @@ async fn 多出一列会被抓出来() {
     // 表集合仍然完全一致——**旧门禁到这里就放行了**。
     assert!(drifted.missing_tables.is_empty() && drifted.unexpected_tables.is_empty());
     assert!(
-        drifted.column_drift.iter().any(|d| d.contains("users")),
+        drifted.schema_drift.iter().any(|d| d.contains("users")),
         "应当报 users 的列不一致：{:?}",
-        drifted.column_drift
+        drifted.schema_drift
     );
     assert!(!drifted.ok(), "列漂移的库不该判为自洽");
 }
@@ -593,8 +593,91 @@ async fn 列漂移会挡住启动() {
     txn.commit().await.unwrap();
 
     let error = ledger.store.init_schema().await.unwrap_err().to_string();
-    assert!(error.contains("列与 DDL 不一致"), "{error}");
+    assert!(error.contains("结构与 DDL 不一致"), "{error}");
     assert!(error.contains("nodes"), "要点名是哪张表：{error}");
     // 报错里要给出下一步，而不是只说「不行」。
     assert!(error.contains("备份"), "要说清接下来该怎么做：{error}");
+}
+
+/// 拿一段 DDL 现建一份内存库，取那张表的指纹。
+async fn fingerprint_of(ddl: &str) -> String {
+    use sqlx::Connection;
+    let mut conn = sqlx::SqliteConnection::connect("sqlite::memory:").await.unwrap();
+    sqlx::raw_sql(ddl).execute(&mut conn).await.unwrap();
+    let prints = proxy_manager::store::schema::table_fingerprints(&mut conn).await.unwrap();
+    let _ = conn.close().await;
+    prints.get("t").expect("表 t 没建出来").clone()
+}
+
+/// **换唯一键会被抓住。**
+///
+/// 这是 2026-09-20 那次改动（槽位键从三列改成两列）暴露出来的洞：
+/// `PRAGMA table_info` 只给列名 / 类型 / 非空 / 默认值 / 主键序，
+/// **看不见 UNIQUE**。三列变两列时列清单一个字都没变，旧库会顺利通过启动门禁，
+/// 然后 `ON CONFLICT` 报 `no unique index matching`——更坏的一支连报都不报，
+/// 只是让 `count(*)` 悄悄翻倍、池子看起来永远是空的。
+///
+/// D32 自己把这一条记成了「门禁不认的东西」。这条用例是把它划掉。
+#[tokio::test]
+async fn 换唯一键会被指纹抓住() {
+    let three =
+        fingerprint_of("CREATE TABLE t(a TEXT NOT NULL, b TEXT NOT NULL, c TEXT NOT NULL, UNIQUE(a, b, c)) STRICT;")
+            .await;
+    let two = fingerprint_of(
+        "CREATE TABLE t(a TEXT NOT NULL, b TEXT NOT NULL, c TEXT NOT NULL, UNIQUE(a, b)) STRICT;",
+    )
+    .await;
+    assert_ne!(three, two, "三列唯一键与两列唯一键的指纹必须不同");
+
+    // 反向控制：列段完全一样——这正是旧门禁放行的原因。
+    let columns = |text: &str| text.split('\u{1d}').next().unwrap().to_string();
+    assert_eq!(columns(&three), columns(&two), "列清单一个字都没变，所以只比列的门禁看不见它");
+}
+
+/// **CHECK 与索引同样要被认出来。**
+///
+/// 索引这一条是 D32 点名过的：「索引少了一个仍然静默」。
+#[tokio::test]
+async fn 改check或少一条索引都会被指纹抓住() {
+    let base = "CREATE TABLE t(a TEXT NOT NULL, b TEXT NOT NULL) STRICT;";
+    let plain = fingerprint_of(base).await;
+
+    let checked = fingerprint_of(
+        "CREATE TABLE t(a TEXT NOT NULL CHECK(length(a) = 4), b TEXT NOT NULL) STRICT;",
+    )
+    .await;
+    assert_ne!(plain, checked, "加一条 CHECK 必须改变指纹");
+
+    let indexed = fingerprint_of(&format!("{base} CREATE INDEX idx_t_b ON t(b);")).await;
+    assert_ne!(plain, indexed, "多一条索引必须改变指纹");
+
+    let partial =
+        fingerprint_of(&format!("{base} CREATE INDEX idx_t_b ON t(b) WHERE b <> '';")).await;
+    assert_ne!(indexed, partial, "部分索引的 WHERE 是它的一部分，改了必须改变指纹");
+}
+
+/// **只改注释或排版不许误报。**
+///
+/// 这条是承重的反向控制：指纹里塞进 DDL 原文之后，如果规范化不剥注释、不折空白，
+/// 那么**每一次给 schema 加一句注释都会变成一次「请重建数据库」**。
+/// 而这个仓库的 DDL 里注释比语句多——那样的门禁会在一周内被绕过。
+#[tokio::test]
+async fn 改注释与排版不算漂移() {
+    let tight = fingerprint_of("CREATE TABLE t(a TEXT NOT NULL, b TEXT NOT NULL) STRICT;").await;
+    let loose = fingerprint_of(
+        "CREATE TABLE t(\n\
+         -- 一句新写的注释\n\
+         a TEXT NOT NULL,\n\
+         /* 换一种注释写法 */\n\
+             b   TEXT   NOT NULL\n\
+         ) STRICT;",
+    )
+    .await;
+    assert_eq!(tight, loose, "剥注释 + 折空白之后两者必须同指纹");
+
+    // 但字符串字面量里的 `--` 不是注释，剥错了会把两份不同的 DDL 抹成一个指纹。
+    let dashes =
+        fingerprint_of("CREATE TABLE t(a TEXT NOT NULL DEFAULT '--x', b TEXT) STRICT;").await;
+    let empty = fingerprint_of("CREATE TABLE t(a TEXT NOT NULL DEFAULT '', b TEXT) STRICT;").await;
+    assert_ne!(dashes, empty, "默认值里的两横不是注释");
 }

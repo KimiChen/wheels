@@ -215,9 +215,13 @@ async fn 管理员按用户查与本人自助查结果相同() {
         NODE,
         "id-01",
         &[
+            // SS 那个目标去过两次、VLESS 一次。**次数必须不同**：行的排序是
+            // 次数降序、再按最近一次，而「最近一次」精确到秒——两条只差毫秒的
+            // 记录会落进同一秒，那时先后由别的东西决定，用例就会时绿时红。
             line("id-01", "ss-a", "alice-ss.example.com", 1, ts, 100, 200),
-            line("id-01", "vless-a", "alice-vless.example.com", 2, ts + 1, 100, 200),
-            line("id-02", "ss-a", "bob-only.example.com", 3, ts + 2, 100, 200),
+            line("id-01", "ss-a", "alice-ss.example.com", 2, ts + 1, 100, 200),
+            line("id-01", "vless-a", "alice-vless.example.com", 3, ts + 2, 100, 200),
+            line("id-02", "ss-a", "bob-only.example.com", 4, ts + 3, 100, 200),
         ],
     );
 
@@ -228,8 +232,8 @@ async fn 管理员按用户查与本人自助查结果相同() {
     assert_eq!(mine["rows"], theirs["rows"], "两条路径必须给出同一份行");
     assert_eq!(
         hosts(&mine),
-        // 排序是「最近一次在前」，vless 那条的 ts 更大，所以它排前面。
-        vec!["alice-vless.example.com", "alice-ss.example.com"],
+        // 次数多的在前：SS 两次、VLESS 一次。
+        vec!["alice-ss.example.com", "alice-vless.example.com"],
         "同一个名字的两个协议都是本人的，一条都不能丢"
     );
     assert_eq!(mine["dropped"]["dropped_other_owner"], 1, "bob 那条要被裁掉并计数");
