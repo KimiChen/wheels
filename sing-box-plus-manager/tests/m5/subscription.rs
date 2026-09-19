@@ -605,13 +605,18 @@ async fn me页面上的每个绑定都取得到值() {
     // 下面那个循环一次都不执行，这条用例就变成一句恒真的断言——
     // 而它看起来仍然是绿的。
     let outside_paths = binding_paths(&outside);
-    // 这个下限是**扫描器的自检**，不是页面的规格：它只用来挡住
-    // 「扫描器悄悄返回空列表，于是下面那个循环一次都不执行」那种恒真的绿。
-    // 2026-09-20 页面去掉「你的计费身份是 …」那一句之后从 6 条变成 5 条。
-    assert!(
-        outside_paths.len() >= 5,
-        "只扫出 {} 条模板外绑定，扫描器多半坏了：{outside_paths:?}",
-        outside_paths.len()
+    // **这一条是扫描器的自检，不是页面的规格。** 它挡的是「扫描器悄悄返回空列表，
+    // 于是下面那个循环一次都不执行」那种恒真的绿。
+    //
+    // 判据从「至少 N 条」换成「额度那四格都在」（2026-09-20）：数字那版每次
+    // 修剪页面文案都要跟着调，调着调着就没人记得它原本在防什么了。
+    // 额度区是这一页的固定家具，拿它当自检比拿一个魔数稳。
+    let cycle: Vec<&String> =
+        outside_paths.iter().filter(|path| path.starts_with("cycle.")).collect();
+    assert_eq!(
+        cycle.len(),
+        4,
+        "额度那四格没扫全，扫描器多半坏了：{outside_paths:?}"
     );
     // 订阅地址现在在模板里（一种拨法一行），所以它在 inside_paths 里。
     assert!(outside_paths.contains(&"cycle.remaining_bytes".to_string()), "额度那一格没扫到");

@@ -258,7 +258,6 @@
         applyBindings(document, {
           ...me,
           identity: sub.identity,
-          entry_count: sub.enabled ? sub.entry_count : 0,
         });
         // 一种拨法一条地址。它们共用同一个 token，差的只是前缀与要拨的 host。
         renderCollection("subscriptions", sub.enabled ? sub.subscriptions : [], "还没有订阅地址");
@@ -276,7 +275,6 @@
         // 凭据缺失时地址照样下载得到，下载到的却是一份空配置——
         // 那时还挂着绿色「有效」，就是在页面上同时给出两个相反的结论。
         toggle("[data-pm-sub-valid]", sub.enabled && sub.usable);
-        toggle("[data-pm-entry-badge]", sub.enabled && sub.usable && sub.entry_count > 0);
         toggle("[data-pm-entries-included]", sub.enabled && sub.usable);
         // 不可用的理由由服务端给，页面只负责挑出对应的那一条文案。
         // **不在前端推导理由**：服务端知道的比页面多（凭据文件读不读得到），
