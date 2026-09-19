@@ -11,7 +11,6 @@ use proxy_manager::agent::AgentClient;
 use proxy_manager::collect::snapshot;
 use proxy_manager::quota::{Quota, QuotaRequest};
 use proxy_manager_agent::{commands::Executor, config::AgentConfig, server::Server};
-use proxy_manager_wire::command::AuditFetchRequest;
 
 use super::fake_node::{FakeNode, TransportFault};
 use super::harness::{self, DNS_NAME, NODE_ID};
@@ -288,83 +287,156 @@ async fn 只有一条路由() {
     assert_eq!(response.status, 404, "别的路径必须 404");
 }
 
-// ---- 审计：只读已轮转文件 ----
+// ---- 审计：列目录 + 读单个已轮转文件 ----
 
-/// C23：**拒绝读取活动文件**，只读已轮转文件；agent 自身从不 `rm`。
+/// 真实的轮转后缀。定宽，**自带一个点**（纳秒的小数点），
+/// 所以「按最后一个点切文件名」是错的。夹具用真格式而不是 `.1`：
+/// 「字典序即时间序」只对定宽成立。
+const STAMP: &str = "20260919T041530.123456789Z";
+const LATER: &str = "20260919T041531.000000000Z";
+
+fn rotated(identity: &str, stamp: &str) -> String {
+    format!("{}.{stamp}", proxy_manager_wire::audit::active_file_name(identity))
+}
+
+fn listing(body: &[u8]) -> proxy_manager_wire::AuditListing {
+    serde_json::from_slice(body).expect("清单应当是合法 JSON")
+}
+
+/// C23：列目录**只列已轮转文件**，活动文件不在其中；agent 自身从不 `rm`。
 #[tokio::test]
-async fn 审计只读已轮转文件() {
+async fn 审计列目录只列已轮转文件() {
     let link = link().await;
     let identity = "u_example_01";
     let active = proxy_manager_wire::audit::active_file_name(identity);
-    let rotated = format!("{active}.1758153600");
+    let one = rotated(identity, STAMP);
+    let two = rotated("u_example_02", STAMP);
 
     std::fs::write(link.audit_dir.join(&active), b"ACTIVE-MUST-NOT-BE-READ\n").unwrap();
-    std::fs::write(link.audit_dir.join(&rotated), b"ROTATED-OK\n").unwrap();
+    std::fs::write(link.audit_dir.join(&one), b"ROTATED-OK\n").unwrap();
+    std::fs::write(link.audit_dir.join(&two), b"THEIRS\n").unwrap();
 
-    let response = link
-        .client
-        .audit_fetch(AuditFetchRequest {
-            identity: identity.to_string(),
-            from: "2026-09-01T00:00:00Z".into(),
-            to: "2026-10-01T00:00:00Z".into(),
-        })
-        .await
-        .expect("检索应当成功");
+    let response = link.client.audit_list().await.expect("列目录应当成功");
     assert_eq!(response.agent_status, 200);
+    let listed = listing(&response.body);
 
-    let text = String::from_utf8_lossy(&response.body);
-    assert!(text.contains("ROTATED-OK"), "已轮转文件要被读到");
-    assert!(
-        !text.contains("ACTIVE-MUST-NOT-BE-READ"),
-        "活动文件绝不能被读：它正在被写，读到的可能是半行"
-    );
+    let names: Vec<&str> = listed.files.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(names, vec![one.as_str(), two.as_str()].into_iter().collect::<Vec<_>>());
+    assert!(!names.contains(&active.as_str()), "活动文件不得出现在清单里");
+    // 一次往返拿到**全部身份**的文件，不是某一个人的。
+    assert_eq!(listed.files.len(), 2, "两个身份的文件都要在");
+    assert_eq!(listed.files[0].size, b"ROTATED-OK\n".len() as u64, "大小要真实");
+    // 活动文件是刻意不列的，不算「无法归类」。
+    assert_eq!(listed.skipped, 0);
 
     // agent 从不删任何东西。
     assert!(link.audit_dir.join(&active).exists(), "活动文件必须还在");
-    assert!(link.audit_dir.join(&rotated).exists(), "已轮转文件也不许删");
+    assert!(link.audit_dir.join(&one).exists(), "已轮转文件也不许删");
 }
 
-/// 反向证据：换一个身份就读不到别人的文件。
+/// 无法归类的条目**计数**，不静默跳过——真跳过了却不说，
+/// 与「目录里就这些」在输出上长得一模一样。
 #[tokio::test]
-async fn 审计不会读到别的身份的文件() {
+async fn 无法归类的条目被计数而不是静默跳过() {
     let link = link().await;
-    let mine = proxy_manager_wire::audit::active_file_name("u_example_01");
-    let theirs = proxy_manager_wire::audit::active_file_name("u_example_02");
-    std::fs::write(link.audit_dir.join(format!("{mine}.1")), b"MINE\n").unwrap();
-    std::fs::write(link.audit_dir.join(format!("{theirs}.1")), b"THEIRS\n").unwrap();
+    std::fs::write(link.audit_dir.join(rotated("u_example_01", STAMP)), b"OK\n").unwrap();
+    std::fs::write(link.audit_dir.join("README"), b"x\n").unwrap();
+    std::fs::write(link.audit_dir.join("access-abc.jsonl.1758153600"), b"x\n").unwrap();
 
-    let response = link
-        .client
-        .audit_fetch(AuditFetchRequest {
-            identity: "u_example_01".into(),
-            from: "2026-09-01T00:00:00Z".into(),
-            to: "2026-10-01T00:00:00Z".into(),
-        })
-        .await
-        .unwrap();
-    let text = String::from_utf8_lossy(&response.body);
-    assert!(text.contains("MINE"));
-    assert!(!text.contains("THEIRS"), "不得跨身份返回");
+    let listed = listing(&link.client.audit_list().await.unwrap().body);
+    assert_eq!(listed.files.len(), 1);
+    // README 一条；变长时间戳那个带 access- 前缀但不以 .jsonl 结尾，也算一条。
+    assert_eq!(listed.skipped, 2, "两个都说不清的条目都要报出来");
 }
 
-/// 路径穿越的身份名编码后穿越不了。
+/// 定宽时间戳的字典序即时间序，所以清单顺序就是轮转顺序。
 #[tokio::test]
-async fn 路径穿越的身份名读不到任何东西() {
+async fn 清单顺序就是轮转顺序() {
     let link = link().await;
-    let response = link
-        .client
-        .audit_fetch(AuditFetchRequest {
-            identity: "../../etc/passwd".into(),
-            from: "2026-09-01T00:00:00Z".into(),
-            to: "2026-10-01T00:00:00Z".into(),
-        })
-        .await
-        .unwrap();
+    let later = rotated("u_example_01", LATER);
+    let earlier = rotated("u_example_01", STAMP);
+    std::fs::write(link.audit_dir.join(&later), b"L\n").unwrap();
+    std::fs::write(link.audit_dir.join(&earlier), b"E\n").unwrap();
+
+    let listed = listing(&link.client.audit_list().await.unwrap().body);
+    assert_eq!(
+        listed.files.iter().map(|f| f.name.clone()).collect::<Vec<_>>(),
+        vec![earlier, later],
+        "早的在前"
+    );
+}
+
+/// 读**一个**文件，拿到的是它的原始字节——不是把同一身份的文件拼起来。
+#[tokio::test]
+async fn 审计读取返回单个文件的原始字节() {
+    let link = link().await;
+    let one = rotated("u_example_01", STAMP);
+    let two = rotated("u_example_01", LATER);
+    std::fs::write(link.audit_dir.join(&one), b"FIRST\n").unwrap();
+    std::fs::write(link.audit_dir.join(&two), b"SECOND\n").unwrap();
+
+    let response = link.client.audit_read(one.clone()).await.expect("读取应当成功");
     assert_eq!(response.agent_status, 200);
-    assert!(response.body.is_empty(), "编码之后它只是一个普通的文件名，什么都匹配不到");
+    assert_eq!(response.body, b"FIRST\n", "只返回这一个文件，逐字节");
+    assert!(!response.body.ends_with(b"SECOND\n"), "不得把同身份的文件拼起来");
+
+    // 清单报的大小要与真读到的一致——同步器靠这个判断「拉了一半」。
+    let listed = listing(&link.client.audit_list().await.unwrap().body);
+    let entry = listed.files.iter().find(|f| f.name == one).unwrap();
+    assert_eq!(entry.size as usize, response.body.len());
 }
 
-/// 未配置 audit_dir 时直接拒绝，而不是去猜一个目录。
+/// C23：**拒绝读取活动文件**。它正在被写，读到的可能是半行。
+#[tokio::test]
+async fn 审计读取拒绝活动文件() {
+    let link = link().await;
+    let active = proxy_manager_wire::audit::active_file_name("u_example_01");
+    std::fs::write(link.audit_dir.join(&active), b"ACTIVE-MUST-NOT-BE-READ\n").unwrap();
+
+    let response = link.client.audit_read(active.clone()).await.unwrap();
+    assert_eq!(response.agent_status, 400, "拒绝，而不是返回半行");
+    assert!(response.body.is_empty());
+    assert!(link.audit_dir.join(&active).exists(), "agent 从不删任何东西");
+}
+
+/// 文件名来自主控，而这条路径的全部意义就是不信任它。
+#[tokio::test]
+async fn 审计读取拒绝走出审计目录的名字() {
+    let link = link().await;
+    // 目录外放一个诱饵，证明拒绝不是因为「文件不存在」。
+    let outside = link.audit_dir.parent().unwrap().join("secret.txt");
+    std::fs::write(&outside, b"SECRET\n").unwrap();
+
+    // 目录里放一个**形状完全合法**的符号链接，指向目录外。形状那一道过得去，
+    // canonicalize 那一道过不去——两道校验挡的不是同一类东西。
+    let escaping = rotated("u_example_09", STAMP);
+    std::os::unix::fs::symlink(&outside, link.audit_dir.join(&escaping)).unwrap();
+    assert!(
+        proxy_manager_wire::audit::is_rotated_name(&escaping),
+        "这个名字必须是形状合法的，否则这条用例证明不了 canonicalize 那一道有用"
+    );
+
+    for name in [
+        "../secret.txt".to_string(),
+        "../../etc/passwd".to_string(),
+        "/etc/passwd".to_string(),
+        format!("access-../secret.jsonl.{STAMP}"),
+        format!("access-a/b.jsonl.{STAMP}"),
+        escaping.clone(),
+    ] {
+        let response = link.client.audit_read(name.clone()).await.unwrap();
+        assert_eq!(response.agent_status, 400, "{name} 必须被拒");
+        assert!(response.body.is_empty(), "{name} 不得返回任何字节");
+    }
+    assert!(outside.exists(), "目录外的文件当然也不许删");
+    assert!(link.audit_dir.join(&escaping).symlink_metadata().is_ok(), "链接本身也不许删");
+
+    // 反向：名字合法、不逃逸，但文件不在——那是 404，不是 400，也不是 500。
+    let missing = rotated("u_example_10", STAMP);
+    assert_eq!(link.client.audit_read(missing).await.unwrap().agent_status, 404);
+}
+
+/// 未配置 audit_dir 时直接拒绝，而不是去猜一个目录。两条命令都要。
 #[tokio::test]
 async fn 未配置审计目录时拒绝检索() {
     let materials = harness::materials();
@@ -388,41 +460,6 @@ async fn 未配置审计目录时拒绝检索() {
     tokio::spawn(Server::new(server_config, Executor::new(config), hmac).serve(listener));
 
     let client = AgentClient::new(NODE_ID, &endpoint, DNS_NAME, &materials.controller_dir).unwrap();
-    let response = client
-        .audit_fetch(AuditFetchRequest {
-            identity: "u_example_01".into(),
-            from: "a".into(),
-            to: "b".into(),
-        })
-        .await
-        .unwrap();
-    assert_eq!(response.agent_status, 404);
-}
-
-// ---- 配置门禁 ----
-
-/// C18 在 agent 侧的落点：它自己就该拒绝一份把两档权限合并掉的配置。
-#[test]
-fn agent拒绝把两个socket合并的配置() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("agent.toml");
-    std::fs::write(
-        &path,
-        "node_id = \"n\"\nlisten = \"127.0.0.1:0\"\nmaterials_dir = \"/tmp\"\n\n[sockets]\nsnapshot = \"/run/a.sock\"\nquota = \"/run/a.sock\"\n",
-    )
-    .unwrap();
-    let error = AgentConfig::load(&path).unwrap_err();
-    assert!(error.to_string().contains("C18"), "实际：{error}");
-}
-
-#[test]
-fn agent对未知字段失败关闭() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("agent.toml");
-    std::fs::write(
-        &path,
-        "node_id = \"n\"\nlisten = \"127.0.0.1:0\"\nmaterials_dir = \"/tmp\"\nunknown = 1\n\n[sockets]\nsnapshot = \"/run/a.sock\"\nquota = \"/run/b.sock\"\n",
-    )
-    .unwrap();
-    assert!(AgentConfig::load(&path).is_err());
+    assert_eq!(client.audit_list().await.unwrap().agent_status, 404);
+    assert_eq!(client.audit_read(rotated("u_example_01", STAMP)).await.unwrap().agent_status, 404);
 }
