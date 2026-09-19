@@ -281,7 +281,11 @@
 
     "nodes.html": {
       load: () => getJson("/nodes"),
-      render: (data) => renderCollection("nodes", data.nodes, "还没有配置任何节点"),
+      render: (data) => {
+        // 节点数从真实响应来。原来那一格写死着 6，而一共只有四个。
+        applyBindings(document, { nodes: { total: data.nodes.length } });
+        renderCollection("nodes", data.nodes, "还没有配置任何节点");
+      },
     },
 
     "users.html": {
