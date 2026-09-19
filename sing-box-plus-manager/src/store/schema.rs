@@ -73,6 +73,75 @@ pub async fn existing_tables(conn: &mut SqliteConnection) -> Result<Vec<String>>
     Ok(rows.into_iter().map(|row| row.get::<String, _>(0)).collect())
 }
 
+/// 每张表的结构指纹：列名、类型、非空、默认值、主键序，按 `cid` 排列。
+///
+/// **门禁原来只比表名。** 加一列、减一列、改一个默认值，两个方向都静默放行——
+/// 也就是说那道「要么空、要么完全一致，介于两者之间失败关闭」的门禁，
+/// 挡得住「少一张表」，挡不住「少一列」。而后者恰恰是更常见、也更难发现的那种：
+/// 库照常打开，查询照常跑，直到某个 INSERT 撞上一个不存在的列。
+pub async fn table_fingerprints(
+    conn: &mut SqliteConnection,
+) -> Result<std::collections::BTreeMap<String, String>> {
+    let mut out = std::collections::BTreeMap::new();
+    for table in existing_tables(conn).await? {
+        // 表名来自 sqlite_master，不是外部输入；PRAGMA 也不接受绑定参数。
+        let rows =
+            sqlx::query(&format!("PRAGMA table_info(\"{table}\")")).fetch_all(&mut *conn).await?;
+        let mut text = String::new();
+        for row in &rows {
+            // 分隔符用 US(0x1f) 与 RS(0x1e)：列名与默认值里可能有任何可打印字符，
+            // 用逗号拼会让「默认值是 'a,b'」和「两列 a 与 b」撞成同一个指纹。
+            text.push_str(&format!(
+                "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1e}",
+                row.get::<i64, _>(0),
+                row.get::<String, _>(1),
+                row.get::<String, _>(2),
+                row.get::<i64, _>(3),
+                row.get::<Option<String>, _>(4).unwrap_or_default(),
+            ));
+        }
+        out.insert(table, text);
+    }
+    Ok(out)
+}
+
+/// 按 `schema/` 下的 DDL 现建一份空库，取它的指纹。
+///
+/// **不把指纹写成常量。** 写常量要靠人记得同步，而那正是门禁本身要防的那类漂移；
+/// 拿 DDL 现算，比的就是「代码里的 DDL」与「磁盘上的库」，中间没有第三份真相。
+pub async fn expected_fingerprints() -> Result<std::collections::BTreeMap<String, String>> {
+    use sqlx::Connection;
+    let mut conn = SqliteConnection::connect("sqlite::memory:").await?;
+    for (name, sql) in PARTS {
+        sqlx::raw_sql(sql)
+            .execute(&mut conn)
+            .await
+            .map_err(|e| crate::error::Error::Codec(format!("建表 {name} 失败：{e}")))?;
+    }
+    let out = table_fingerprints(&mut conn).await?;
+    let _ = conn.close().await;
+    Ok(out)
+}
+
+/// 列层面的漂移。空表示一致。
+pub async fn column_drift(conn: &mut SqliteConnection) -> Result<Vec<String>> {
+    let actual = table_fingerprints(conn).await?;
+    let expected = expected_fingerprints().await?;
+    let mut drift = Vec::new();
+    for (table, want) in &expected {
+        match actual.get(table) {
+            Some(have) if have == want => {}
+            Some(have) => drift.push(format!(
+                "{table} 的列与 DDL 不一致：库里 {} 列，DDL {} 列",
+                have.matches('\u{1e}').count(),
+                want.matches('\u{1e}').count()
+            )),
+            None => drift.push(format!("{table} 不在库里")),
+        }
+    }
+    Ok(drift)
+}
+
 /// 建库或确认已建好。整套 DDL 在**一个事务**里提交：
 /// 建到一半失败不能留下一个「部分建好」的库，那正是上面那道门禁最难判断的状态。
 pub async fn initialize(conn: &mut SqliteConnection) -> Result<InitOutcome> {
@@ -80,6 +149,18 @@ pub async fn initialize(conn: &mut SqliteConnection) -> Result<InitOutcome> {
     if !present.is_empty() {
         let expected: Vec<String> = EXPECTED_TABLES.iter().map(|s| s.to_string()).collect();
         if present == expected {
+            // **表名一致还不够。** 原来这里就返回了，于是加一列、减一列、
+            // 改一个默认值，两个方向都静默放行——门禁挡得住「少一张表」，
+            // 挡不住「少一列」，而后者更常见也更难发现：库照常打开、
+            // 查询照常跑，直到某个 INSERT 撞上一个不存在的列。
+            let drift = column_drift(conn).await?;
+            if !drift.is_empty() {
+                return Err(crate::error::Error::Codec(format!(
+                    "数据库的表名对得上，但**列与 DDL 不一致**：{drift:?}。\
+                     本项目不做通用迁移引擎（D32）：请按「备份 → 在恢复出来的副本上\
+                     跑通导入 → 重算核对 → 才对生产执行」这条路径处理"
+                )));
+            }
             return Ok(InitOutcome::AlreadyInitialized);
         }
         let missing: Vec<&str> = EXPECTED_TABLES
@@ -94,7 +175,7 @@ pub async fn initialize(conn: &mut SqliteConnection) -> Result<InitOutcome> {
             .collect();
         return Err(crate::error::Error::Codec(format!(
             "数据库已存在但表集合与期望不一致：缺少 {missing:?}，多出 {unexpected:?}。\
-             本项目不做迁移（D22），请重建数据库文件"
+             本项目不做通用迁移引擎（D32），请按备份 → 副本上导入 → 重算核对的路径处理"
         )));
     }
 

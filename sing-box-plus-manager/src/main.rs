@@ -760,11 +760,25 @@ async fn print_verify(db: &std::path::Path) -> anyhow::Result<ExitCode> {
     let store = Store::open_readonly(db).await?;
     // 备份产物旁边**不该有 -wal / -shm**：有的话说明它不是一个自足的文件，
     // 而「只拷主文件」正是那条会静默丢数据、却让 integrity_check 照样报 ok 的路。
-    for sidecar in ["-wal", "-shm"] {
-        let path = std::path::PathBuf::from(format!("{}{sidecar}", db.display()));
-        if path.exists() {
-            println!("  **旁边有 {sidecar}**    {}：这份文件不是自足的", path.display());
+    //
+    // **只对看起来是备份产物的文件查这个。** 活库是 WAL，旁边本来就有这两个；
+    // 对它报警是一条永远亮着的假警报，而假警报比没有警报更糟。
+    // `VACUUM INTO` 出来的备份是 delete 模式，所以这个判据同时也认得出
+    // 「有人直接 cp 了一个活库过来」——那份文件会是 wal 模式且带着孤儿 sidecar。
+    let journal: String = sqlx::query("PRAGMA journal_mode")
+        .fetch_one(store.readers())
+        .await
+        .map(|row| sqlx::Row::get::<String, _>(&row, 0))
+        .unwrap_or_default();
+    if !journal.eq_ignore_ascii_case("wal") {
+        for sidecar in ["-wal", "-shm"] {
+            let path = std::path::PathBuf::from(format!("{}{sidecar}", db.display()));
+            if path.exists() {
+                println!("  **旁边有 {sidecar}**    {}：这份文件不是自足的", path.display());
+            }
         }
+    } else {
+        println!("  journal_mode      wal（这是一个活库，不是备份产物）");
     }
     let report = proxy_manager::store::verify::verify(&store).await?;
     store.close().await;
@@ -789,6 +803,9 @@ async fn print_verify(db: &std::path::Path) -> anyhow::Result<ExitCode> {
         for (node, runtime, epoch) in &report.epoch_high_water {
             println!("  epoch 水位        {node} / {} → {epoch}", &runtime[..8.min(runtime.len())]);
         }
+    }
+    for drift in &report.column_drift {
+        println!("  **列与 DDL 不符**  {drift}");
     }
     for error in &report.shape_errors {
         println!("  **列的形状不对**  {error}");

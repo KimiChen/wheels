@@ -82,8 +82,11 @@ async fn 建库产出期望的表集合且重复调用是幂等的() {
     );
 }
 
-/// 不做迁移（D22）的代价要能被观察到：表集合对不上时**失败关闭**，
+/// 不做通用迁移引擎（D32，取代 D22）的代价要能被观察到：表集合对不上时**失败关闭**，
 /// 而不是「补一张表继续跑」。
+///
+/// 处置方式从「重建数据库文件」改成了那条四步路径——**库里已经有真账了**，
+/// 「重建」在今天是一句会让人丢掉账本的建议。
 #[tokio::test]
 async fn 表集合不一致时失败关闭() {
     let fixture = fresh().await;
@@ -95,7 +98,11 @@ async fn 表集合不一致时失败关闭() {
     let error = fixture.store.init_schema().await.unwrap_err();
     let message = error.to_string();
     assert!(message.contains("usage_ledger"), "错误要指名缺了哪张表，实际：{message}");
-    assert!(message.contains("重建"), "要给出处置方式，实际：{message}");
+    assert!(message.contains("备份"), "要给出处置方式，实际：{message}");
+    assert!(
+        !message.contains("请重建数据库文件"),
+        "库里已经有真账了，不能再建议「重建」：{message}"
+    );
 }
 
 // ---- u64：20 位定宽文本 ----

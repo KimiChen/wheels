@@ -49,6 +49,9 @@ pub struct Report {
     pub foreign_key_violations: i64,
     pub missing_tables: Vec<String>,
     pub unexpected_tables: Vec<String>,
+    /// **列**层面的漂移。表名对得上不等于结构对得上——
+    /// 原来的门禁只比表名，加一列减一列两个方向都静默放行。
+    pub column_drift: Vec<String>,
     /// 核对过的 `(user_id, cycle_key, rule_version)` 组数。
     pub cycles_checked: usize,
     /// 核对过的 `runtime_identity_id` 个数。
@@ -77,6 +80,7 @@ impl Report {
             && self.foreign_key_violations == 0
             && self.missing_tables.is_empty()
             && self.unexpected_tables.is_empty()
+            && self.column_drift.is_empty()
             && self.mismatches.is_empty()
             && self.shape_errors.is_empty()
     }
@@ -119,6 +123,14 @@ pub async fn verify(store: &Store) -> Result<Report> {
             .await?
             .get(0);
         report.counts.insert((*table).to_string(), n);
+    }
+
+    // 列层面的核对：表名一致不代表结构一致。
+    // 这里用**一份按 `schema/` 下 DDL 现建的空库**做对照，不写死指纹常量——
+    // 写常量要靠人记得同步，而那正是这道门禁本身要防的那类漂移。
+    {
+        let mut conn = store.readers().acquire().await?;
+        report.column_drift = crate::store::schema::column_drift(&mut conn).await?;
     }
 
     // **缺表的库要能跑完。** 下面几段都查具体的表，而一个被截断、
