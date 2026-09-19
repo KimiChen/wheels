@@ -171,6 +171,20 @@ struct Candidate {
 /// 「当前」的判据与配额下发用的是同一个（`quota::service::latest_settled`）：
 /// 按 `started_at_unix_ms` 取最新的那个已批准 runtime。两处必须一致，
 /// 否则会出现「能领到、但配额表里没有它」这种对不上的状态。
+///
+/// # 为什么数的是 `DISTINCT node_id` 而不是行数
+///
+/// 「每个在册节点上都有一行」才是这里要表达的意思，而 `count(*) = 节点数` 只是
+/// 在「一个节点一个名字恰好一行」成立时碰巧等价于它。那个前提由
+/// `identity_routes` 的唯一键给出——于是这条查询**默默依赖了唯一键里有几列**。
+///
+/// 依赖得不值：它的失败形态是**名字永久挑不中，而且零报错**。
+/// 唯一键一旦多一列（比如把 inbound_tag 加回去），一个名字在一个节点上就有两行，
+/// `count(*)` 变成 `2 × 节点数`，`HAVING` 永远不成立，池子看起来是空的——
+/// 没有异常、没有日志、没有任何东西会红。
+///
+/// 数 `DISTINCT node_id` 让这条查询说的就是它想说的那件事，与键的形状无关。
+/// 空闲判据同理：数的是**有空闲槽位的节点数**，不是空闲行数。
 async fn pick_free_slot(
     txn: &mut crate::store::WriteTxn<'_>,
     node_count: i64,
@@ -181,8 +195,8 @@ async fn pick_free_slot(
            JOIN nodes n ON n.node_id = r.node_id \
                        AND n.status = 'active' \
           GROUP BY r.identity_name \
-         HAVING count(*) = ? \
-            AND sum(CASE WHEN r.state = 'free' THEN 1 ELSE 0 END) = ? \
+         HAVING count(DISTINCT r.node_id) = ? \
+            AND count(DISTINCT CASE WHEN r.state = 'free' THEN r.node_id END) = ? \
             AND NOT EXISTS ( \
                   SELECT 1 FROM counter_cursors c \
                     JOIN runtime_identities i ON i.runtime_identity_id = c.runtime_identity_id \
