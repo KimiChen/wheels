@@ -110,6 +110,17 @@ pub async fn current_token(store: &Store, user_id: i64) -> Result<Option<String>
 }
 
 /// 订阅请求解出来的主体。
+/// 这个人的档位名。用来算他看得见哪些节点（`quota::level`）。
+///
+/// 从库里现读而不是塞进 `Subscriber`：档位随时可能被管理员改（`user tier`），
+/// 而订阅是每次请求现渲染的——读旧值等于让一次改档要等到下次登录才生效。
+pub async fn quota_group_of(store: &Store, user_id: i64) -> Result<String> {
+    Ok(sqlx::query_scalar("SELECT quota_group FROM users WHERE user_id = ?")
+        .bind(user_id)
+        .fetch_one(store.readers())
+        .await?)
+}
+
 #[derive(Debug, Clone)]
 pub struct Subscriber {
     pub user_id: i64,

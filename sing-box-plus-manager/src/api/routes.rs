@@ -806,6 +806,17 @@ async fn subscription_view(state: &AppState, user_id: i64, login_name: &str) -> 
     // 那是本项目定义的假绿：**服务端知道，界面不说。**
     let reason = unusable_reason(state, token.as_deref(), identity.as_deref());
 
+    // 档位决定看得见哪些节点。读不出来按最低级算：少看见几条是一个看得见的
+    // 故障，按最高级算则是悄悄解除限制。
+    let group = crate::subscription::quota_group_of(&state.store, user_id)
+        .await
+        .unwrap_or_else(|_| "normal".to_string());
+    let visible_entries: Vec<&crate::config::Entry> = config
+        .entries
+        .iter()
+        .filter(|entry| crate::quota::level::can_see(&state.nodes, &entry.node_id, &group))
+        .collect();
+
     Ok(json!({
         "enabled": true,
         // 这份订阅现在**拿不拿得到能用的节点**。页面上每一处绿色状态都由它决定。
@@ -840,12 +851,14 @@ async fn subscription_view(state: &AppState, user_id: i64, login_name: &str) -> 
         "identity": identity,
         // **只给显示名与落点。** 地址与端口在订阅正文里，那是给客户端的；
         // 页面上列出来只是让人知道自己有哪几条入口（§4.11）。
-        "entries": config
-            .entries
+        //
+        // **过滤口径必须与订阅正文逐字一致**（`quota::level`）：页面上多列一条
+        // 而正文里没有，人会以为是客户端没同步，然后反复重新导入。
+        "entries": visible_entries
             .iter()
             .map(|entry| json!({ "name": entry.name, "node_id": entry.node_id }))
             .collect::<Vec<_>>(),
-        "entry_count": config.entries.len(),
+        "entry_count": visible_entries.len(),
         "cycle": {
             // 与 `Subscription-Userinfo` 是同一组数——页面上看到的和客户端里
             // 显示的必须一致，否则「哪个是对的」会变成一个没人能回答的问题。
