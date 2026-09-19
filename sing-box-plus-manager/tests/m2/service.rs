@@ -16,8 +16,8 @@ use proxy_manager::quota::wire::Quota;
 
 use super::quota_harness::{Stack, NODE, RUNTIME};
 
-/// `normal` 档位的月度额度（十进制 1 TB，定案第三条）。
-const NORMAL_BYTES: u64 = 1_000_000_000_000;
+/// `normal` 档位的月度额度（二进制 1 TiB，定案第三条；2026-09-20 由十进制改来）。
+const NORMAL_BYTES: u64 = 1 << 40;
 const NEW_RUNTIME: &str = "fedcba9876543210fedcba9876543210";
 
 fn policy() -> SchedulePolicy {

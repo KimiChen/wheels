@@ -62,6 +62,17 @@ enum Command {
         command: UserCommand,
     },
 
+    /// 档位设置：改某一档的月度额度。
+    ///
+    /// 与控制台的 `PUT /api/v1/settings/quota` 调**同一套库函数**
+    /// （`quota::settings::apply`），所以预览、审计、revision 与逐节点下发任务
+    /// 完全一致。做成 CLI 的理由与 `user` 那一组相同：登录链路依赖主控仓库之外的
+    /// 事实，改额度这件事不该被那些事卡住。
+    Settings {
+        #[command(subcommand)]
+        command: SettingsCommand,
+    },
+
     /// SSO：按配置里的成员名单对齐库里的展示缓存。
     Sso {
         #[command(subcommand)]
@@ -235,6 +246,32 @@ enum UserCommand {
         #[arg(long)]
         actor: String,
         /// 看过预览之后再加它。不加时只打印预览，**不提交**。
+        #[arg(long, default_value_t = false)]
+        confirm: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum SettingsCommand {
+    /// 改某一档的月度额度，影响该档全体。
+    ///
+    /// **先打印预览再执行**（D21）：预览里有当前值、新值、受影响人数，
+    /// 以及**调低时会被当场闸断的人**。调低必须带 `--confirm`，调高不要求——
+    /// 调低会让超额的人立刻断，那不是一次可以顺手做的操作。
+    Quota {
+        #[arg(long, default_value = "/etc/proxy-manager")]
+        config_dir: PathBuf,
+        #[arg(long, value_parser = ["normal", "advanced", "manage", "admin"])]
+        group: String,
+        /// 新的月度额度，**字节**。
+        ///
+        /// 写字节而不是「1TiB」这样的串：单位串要在两处解析（这里与页面），
+        /// 而两处的解析迟早会对不上，那种错不报错、只让某一档悄悄差一截。
+        #[arg(long)]
+        monthly_bytes: u64,
+        #[arg(long)]
+        actor: String,
+        /// 看过预览之后再加它。**调低必需**，调高忽略。
         #[arg(long, default_value_t = false)]
         confirm: bool,
     },
@@ -459,6 +496,7 @@ async fn run(command: Command) -> anyhow::Result<ExitCode> {
 
         Command::User { command } => user_command(command).await,
 
+        Command::Settings { command } => settings_command(command).await,
         Command::Sso { command } => sso_command(command).await,
         Command::Audit { command } => audit_command(command).await,
     }
@@ -1302,6 +1340,55 @@ async fn user_command(command: UserCommand) -> anyhow::Result<ExitCode> {
                 "已提交：revision {}，待下发节点 {}",
                 applied.revision,
                 applied.nodes.join(", ")
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+    }
+}
+
+async fn settings_command(command: SettingsCommand) -> anyhow::Result<ExitCode> {
+    use proxy_manager::quota::settings;
+    match command {
+        SettingsCommand::Quota { config_dir, group, monthly_bytes, actor, confirm } => {
+            let (store, _) = open_with_roster(&config_dir).await?;
+            let cycle = proxy_manager::quota::pool::cycle_key(time::OffsetDateTime::now_utc());
+            let scope = settings::Scope::Group {
+                group_name: group.clone(),
+                new_monthly_bytes: monthly_bytes,
+            };
+
+            // **先打印预览，无论接下来做不做。** 这条命令改的是一整档人的额度，
+            // 而「改了什么」事后只能从审计里翻——当场说出来成本是零。
+            let preview = settings::preview(&store, &scope, &cycle).await?;
+            println!(
+                "档位 {group}：{} → {} 字节",
+                preview.current_monthly_bytes, preview.new_monthly_bytes
+            );
+            println!("受影响：{} 人", preview.affected_users());
+            if preview.is_reduction {
+                println!("**这是一次调低。**");
+                for user in &preview.will_be_blocked {
+                    println!(
+                        "  会被当场闸断：{}（本周期已用 {} 字节）",
+                        user.login_name, user.cycle_used
+                    );
+                }
+                if !confirm {
+                    println!("\n看过上面这些再加 --confirm。调低会让超额的人立刻断。");
+                    return Ok(ExitCode::FAILURE);
+                }
+            }
+
+            let applied = settings::apply(&store, &scope, &actor, &cycle, confirm).await?;
+            println!(
+                "已生效：revision {}，受影响 {} 人，逐节点任务落在 {}",
+                applied.revision,
+                applied.affected_users,
+                if applied.nodes.is_empty() {
+                    "（没有在用节点）".to_string()
+                } else {
+                    applied.nodes.join(", ")
+                }
             );
             Ok(ExitCode::SUCCESS)
         }

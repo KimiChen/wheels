@@ -454,20 +454,24 @@ async fn scalar(stack: &Stack, sql: &str) -> i64 {
 
 // ============ 四档额度（定案第三条） ============
 
-/// 十进制 TB，不是 2^40。这个错不会报错，只会让每个人多拿约 10%。
+/// **二进制 TiB**（2026-09-20 由十进制改来）。
+///
+/// 反过来搞错不会报错，只会让每个人少拿约 9%——而客户端按 GiB 显示，
+/// 一个叫「1 TB」的档在用户屏幕上会变成 931 G，档位名与数字对不上。
+/// 改口径的理由就是这个：对不上的那一方是用户天天看的那一方。
 #[tokio::test]
-async fn 档位初值是十进制tb() {
+async fn 档位初值是二进制tib() {
     let stack = Stack::new().await;
     let groups = settings::load_groups(&stack.store).await.unwrap();
     let by_name: std::collections::BTreeMap<_, _> =
         groups.iter().map(|g| (g.group_name.as_str(), g.monthly_bytes)).collect();
 
-    assert_eq!(by_name["normal"], 1_000_000_000_000);
-    assert_eq!(by_name["advanced"], 2_000_000_000_000);
-    assert_eq!(by_name["manage"], 5_000_000_000_000);
-    assert_eq!(by_name["admin"], 10_000_000_000_000);
-    // 反向：如果有人按二进制理解，1 TB 会是这个数。
-    assert_ne!(by_name["normal"], 1_u64 << 40);
+    assert_eq!(by_name["normal"], 1 << 40);
+    assert_eq!(by_name["advanced"], 2 << 40);
+    assert_eq!(by_name["manage"], 5 << 40);
+    assert_eq!(by_name["admin"], 10 << 40);
+    // 反向：如果有人按十进制理解，1 TB 会是这个数。
+    assert_ne!(by_name["normal"], 1_000_000_000_000);
 }
 
 /// 预算按**用户自己的档位**取，而不是某个共同的值。
@@ -487,7 +491,7 @@ async fn 预算按用户档位而不是共同值() {
     seed_usage(&stack, low, used).await;
     seed_usage(&stack, high, used).await;
 
-    // 一个留在 normal（1 TB），一个换到 manage（5 TB）。
+    // 一个留在 normal（1 TiB），一个换到 manage（5 TiB）。
     let login_high = login_of(&stack, high).await;
     settings::apply(
         &stack.store,
@@ -511,13 +515,13 @@ async fn 预算按用户档位而不是共同值() {
 
     assert_eq!(
         quota_of(&plan, low, &stack).await,
-        Quota::Limited(1_000_000_000_000 - used as u64),
-        "normal 档按 1 TB 算剩余"
+        Quota::Limited((1 << 40) - used as u64),
+        "normal 档按 1 TiB 算剩余"
     );
     assert_eq!(
         quota_of(&plan, high, &stack).await,
-        Quota::Limited(5_000_000_000_000 - used as u64),
-        "manage 档按 5 TB 算剩余"
+        Quota::Limited((5 << 40) - used as u64),
+        "manage 档按 5 TiB 算剩余"
     );
 }
 
@@ -574,7 +578,7 @@ async fn 把用户换到更低档位也要确认() {
     let users = stack.map_users().await;
     let user_id = *users.values().next().unwrap();
     let login = login_of(&stack, user_id).await;
-    // 先换到 manage（5 TB），再往回换到 normal（1 TB）——后者是降额。
+    // 先换到 manage（5 TiB），再往回换到 normal（1 TiB）——后者是降额。
     let up = settings::Scope::UserGroup { login_name: login.clone(), new_group: "manage".into() };
     settings::apply(&stack.store, &up, "kimi", CYCLE, false).await.unwrap();
     seed_usage(&stack, user_id, 2_000_000_000_000_u128).await;

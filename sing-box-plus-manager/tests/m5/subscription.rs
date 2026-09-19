@@ -145,7 +145,7 @@ async fn 带着真实的用量与额度头() {
         assert!(info.contains(key), "缺 {key}：{info}");
     }
     // total 是**真实**额度：normal 档十进制 1 TB（D23）。
-    assert!(info.contains("total=1000000000000"), "total 必须是真实额度：{info}");
+    assert!(info.contains("total=1099511627776"), "total 必须是真实额度：{info}");
     // expire 是周期结束时刻，不能是 0——0 会让客户端显示「已过期」。
     let expire: i64 = info.split("expire=").nth(1).unwrap().trim().parse().unwrap();
     assert!(expire > 1_700_000_000, "expire 应当是将来的 unix 秒：{expire}");
@@ -613,11 +613,7 @@ async fn me页面上的每个绑定都取得到值() {
     // 额度区是这一页的固定家具，拿它当自检比拿一个魔数稳。
     let cycle: Vec<&String> =
         outside_paths.iter().filter(|path| path.starts_with("cycle.")).collect();
-    assert_eq!(
-        cycle.len(),
-        4,
-        "额度那四格没扫全，扫描器多半坏了：{outside_paths:?}"
-    );
+    assert_eq!(cycle.len(), 4, "额度那四格没扫全，扫描器多半坏了：{outside_paths:?}");
     // 订阅地址现在在模板里（一种拨法一行），所以它在 inside_paths 里。
     assert!(outside_paths.contains(&"cycle.remaining_bytes".to_string()), "额度那一格没扫到");
 

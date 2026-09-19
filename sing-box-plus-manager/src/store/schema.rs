@@ -332,14 +332,25 @@ pub async fn initialize(conn: &mut SqliteConnection) -> Result<InitOutcome> {
     Ok(InitOutcome::Created)
 }
 
-/// 四个档位的初值（定案第三条）。**十进制 TB**，1 TB = 1 000 000 000 000 字节。
+/// 四个档位的初值（定案第三条）。**二进制 TiB**，1 TiB = 2^40 = 1 099 511 627 776 字节。
+///
+/// # 为什么从十进制改成二进制（2026-09-20）
+///
+/// 原本是十进制 TB（`10^12`），理由是「TB 在计费语境里是十进制」。
+/// 实际用下来它每天都在说错话：**客户端按 GiB 显示**，于是一个叫「1 TB」的档
+/// 在用户屏幕上是 `931 G`。档位名与用户看到的数字对不上，而对不上的那一方
+/// 是用户天天看的那一方。
+///
+/// 改成二进制之后两者一致：`1 TiB / 2^30 = 1024 G`，客户端显示 1 T。
+/// 代价是「TB」这个词在本系统里从此指 TiB——写在这里、写在 README 的 D23、
+/// 也写在 schema 的注释里，三处一致。
 ///
 /// `(group_name, display_name, monthly_bytes, sort_order)`
 pub const SEED_QUOTA_GROUPS: &[(&str, &str, u64, i64)] = &[
-    ("normal", "普通用户", 1_000_000_000_000, 0),
-    ("advanced", "Advanced", 2_000_000_000_000, 1),
-    ("manage", "Manage", 5_000_000_000_000, 2),
-    ("admin", "Admin", 10_000_000_000_000, 3),
+    ("normal", "普通用户", 1 << 40, 0),
+    ("advanced", "Advanced", 2 << 40, 1),
+    ("manage", "Manage", 5 << 40, 2),
+    ("admin", "Admin", 10 << 40, 3),
 ];
 
 /// 在建库同一个事务里把四档写进去。
