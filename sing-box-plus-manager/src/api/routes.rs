@@ -200,6 +200,13 @@ pub fn transport_of(inbound_type: &str) -> Option<crate::config::Transport> {
 pub struct PageQuery {
     cursor: Option<String>,
     limit: Option<i64>,
+    /// 只看某一个档位的人。分组那张表点开时用它。
+    ///
+    /// **过滤必须落在 SQL 里，不能在前端按已加载的那一页筛。** 这个端点是分页的，
+    /// 而档位人数是对全表 `GROUP BY` 数出来的——两者口径不一致时，
+    /// 页面上会出现「这个组写着 37 人，点开只有 20 个」，
+    /// 而那看起来像丢数据，不像分页。
+    group: Option<String>,
 }
 
 pub async fn list_nodes(
@@ -365,15 +372,25 @@ pub async fn list_users(
     Query(page): Query<PageQuery>,
 ) -> ApiResult<impl IntoResponse> {
     subject.require_admin()?;
+    let group = page.group.clone();
     let page = Page::parse(page.cursor.as_deref(), page.limit)?;
     let cycle = crate::quota::pool::cycle_key(OffsetDateTime::now_utc());
 
+    // `?group=` 为空时那一段是恒真的，于是同一条 SQL 两用。
+    //
+    // **占位符全部显式编号。** 混用 `?` 与 `?1` 会踩 SQLite 的编号规则：
+    // 无编号的 `?` 取「已分配的最大编号 + 1」，于是
+    // `WHERE u.user_id > ? AND (?1 IS NULL …) … LIMIT ?` 只有**两个**参数，
+    // 而调用方绑了三个——`group` 会被拿去和 `user_id` 比。
+    // sqlx 不做编译期 SQL 检查，这种错编译得过、只在运行时炸。
     let rows = sqlx::query(
         "SELECT u.user_id, u.login_name, u.display_name, u.role, u.status, \
                 u.quota_group, g.monthly_bytes \
          FROM users u JOIN quota_groups g ON g.group_name = u.quota_group \
-         WHERE u.user_id > ? ORDER BY u.user_id LIMIT ?",
+         WHERE u.user_id > ?2 AND (?1 IS NULL OR u.quota_group = ?1) \
+         ORDER BY u.user_id LIMIT ?3",
     )
+    .bind(group.as_deref())
     .bind(page.after.unwrap_or(0))
     .bind(page.limit)
     .fetch_all(state.store.readers())
@@ -406,8 +423,36 @@ pub async fn list_users(
             ),
         }));
     }
+    // ---- 档位汇总 ----
+    //
+    // **人数对全表数，不受分页影响。** 档位是个闭集（D23：建库时种下，
+    // 没有运行期新增），所以从 `quota_groups` 左连出去——
+    // **一个人都没有的档位也要列出来**。少列一个的话，页面上看不出
+    // 「这个档存在但没人」与「这个档不存在」的区别，而前者是常态。
+    let group_rows = sqlx::query(
+        "SELECT g.group_name, g.monthly_bytes, count(u.user_id) \
+         FROM quota_groups g LEFT JOIN users u ON u.quota_group = g.group_name \
+         GROUP BY g.group_name, g.monthly_bytes ORDER BY g.monthly_bytes",
+    )
+    .fetch_all(state.store.readers())
+    .await
+    .map_err(|e| ApiError::internal(e.to_string()))?;
+    let mut groups = Vec::new();
+    for row in &group_rows {
+        // 额度是**定宽文本**（C3/D8），不是 INTEGER：整数解出来的话
+        // 到了 i64 上界会静默截断，而那正是分档把上界钉在 i64::MAX 要防的事。
+        let quota = U64Text::decode(&row.get::<String, _>(1))
+            .map_err(|e| ApiError::internal(e.to_string()))?
+            .get();
+        groups.push(json!({
+            "group_name": row.get::<String, _>(0),
+            "monthly_bytes": bytes_str(quota as u128),
+            "member_count": row.get::<i64, _>(2),
+        }));
+    }
+
     // 用户身上仍然没有额度字段：这里的 monthly_bytes 来自他所在档位（quota_groups）。
-    Ok(Json(json!({ "users": users, "next_cursor": next_cursor })))
+    Ok(Json(json!({ "users": users, "next_cursor": next_cursor, "groups": groups })))
 }
 
 pub async fn user_usage(
