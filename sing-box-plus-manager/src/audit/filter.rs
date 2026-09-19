@@ -91,6 +91,13 @@ struct Holding {
 /// 在页面上必须说得出区别。
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct Filtered {
+    /// **不序列化。** 这个结构体整体会作为响应里的 `dropped` 出现，而那一处只该
+    /// 有计数。跟着 derive 走的话，每次查询都会把**整份逐连接原始记录**
+    /// （含 run / seq / ms）塞进响应——页面只要聚合后的行，多出来的那份既是冗余，
+    /// 也是本可以不发生的明细外泄。
+    ///
+    /// 这个字段本身是给调用方消费的，只是不该出现在 JSON 里。
+    #[serde(skip)]
     pub rows: Vec<AccessRecord>,
     /// 关联不到已登记 lineage。
     pub dropped_unknown: usize,

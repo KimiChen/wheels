@@ -222,7 +222,7 @@
                   <div>
                     <strong>额度分四档，每个人属于其中一档（定案第三条）</strong>
                     <p>
-                      档位的字节数与「谁在哪一档」都是**数据库里的权威值**，这一页只读。
+                      档位的字节数与「谁在哪一档」都是<strong>数据库里的权威值</strong>，这一页只读。
                       改档位走 <code>proxy-manager user tier</code>，调低要按 D21 先预览再确认。
                       <strong>改动对本周期立即生效</strong>——额度是参数，账本记的是用量，
                       「剩余 = 档位字节数 − 本周期已用」跟着重算即可。
@@ -247,13 +247,13 @@
                       </template>
                     </div>
                     <p class="wsk-help wsk-mt-2">
-                      单位是**十进制** TB（1 TB = 10¹² 字节），不是 TiB——
+                      单位是<strong>十进制</strong> TB（1 TB = 10¹² 字节），不是 TiB——
                       与客户端流量条上那个数同一个口径。
                       超出后新连接被拒；已建立的连接仍受剩余额度约束直到结束。
                     </p>
                     <p class="wsk-help wsk-mt-2">
                       默认档位 <strong data-pm="default_group">—</strong>。
-                      每个节点拿到的是「这个人本月还剩多少」的**同一个数**（镜像下发），
+                      每个节点拿到的是「这个人本月还剩多少」的<strong>同一个数</strong>（镜像下发），
                       不按节点拆分——拆分会让一个人把流量压在单一节点时，
                       在四分之一额度处就被切断。
                     </p>
@@ -306,7 +306,7 @@
                   <div class="wsk-field wsk-wide">
                     <span class="wsk-label">节点 startup_action / stale_action</span>
                     <p class="wsk-help">
-                      **按节点**配在 <code>nodes.toml</code> 的 <code>[node.quota_control]</code> 里，
+                      <strong>按节点</strong>配在 <code>nodes.toml</code> 的 <code>[node.quota_control]</code> 里，
                       不是全局设置。节点侧默认是 <code>allow</code>：重启后尚未收到配额表就无限放行。
                       配成非 <code>deny</code> 时，同一段里必须写下
                       <code>fail_open_acknowledged</code>（一句理由），否则主控拒绝启动——

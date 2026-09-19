@@ -250,7 +250,14 @@
                         <td data-pm-bytes="cycle_remaining_bytes"></td>
                         <td data-pm="status"></td>
                         <td><div class="wsk-button-row">
-                          <button class="wsk-button wsk-secondary" type="button" data-toast="审计检索属于 M6，尚未启用。" data-js-only>查看审计</button>
+                          <!--
+                            **入口在每一行，不是一个独立的检索页。** §4.8 的理由很具体：
+                            从用户进比从身份名进更不容易串号——输入身份名的那种检索最容易
+                            漏掉裁剪这一步，因为身份名看起来已经足够定位了，而它恰恰不是
+                            （同一个名字可以在两个入口上分属两人）。
+                          -->
+                          <button class="wsk-button wsk-secondary" type="button" data-js-only
+                                  data-pm-attr="user_id -> data-audit-user, login_name -> data-audit-login">查看审计</button>
                         </div></td>
                       </tr>
                     </template>
@@ -262,39 +269,77 @@
                 额度是节点侧的内存态，主控重启不会刷新已下发的余额。
               </p>
 
-              <!--
-                这一块是**一份关于真人的伪造访问记录**：审计根本没启用
-                （/api/v1/me/audit/access 固定回 audit_not_enabled），
-                而页面上摆着「kimi 访问 www.example.com 1,284 次」。
-                me-audit.html 里同类的一份已经标过了，这一份当时漏了。
-              -->
-              <details class="wsk-panel wsk-mt-5"
-                       data-pm-prototype="出站目标审计（M6 的另一半）还没有启用，这里不会有任何记录。下面那张表是设计稿里的示例，不是谁的访问记录">
-                <summary><strong>出站目标</strong></summary>
+              <details class="wsk-panel wsk-mt-5" data-audit-panel hidden>
+                <summary><strong>出站目标</strong>：<span data-audit-title>—</span></summary>
+
                 <div class="wsk-alert wsk-info wsk-mt-5">
                   <svg class="wsk-icon" aria-hidden="true"><use href="#info"></use></svg>
                   <div>
                     <strong>记录已核验身份并按归属裁剪（C35）</strong>
                     <p>
-                      逐条核验节点、运行周期与入口下的身份，只返回 <strong>kimi 实际持有期间</strong>的记录。
-                      其他入口同名或曾属于别人的记录不会出现；归属存疑（<code>clock_ambiguous</code>）的
-                      时间段整段排除。<strong>本次查看已落审计</strong>，与被查看的数据分表存。
+                      逐条核验节点、运行周期与入口下的身份，只返回<strong>该用户实际持有期间</strong>的记录。
+                      其他入口同名或曾属于别人的记录不会出现；四值关联不唯一的记录整条排除。
+                      <strong>本次查看已落审计</strong>，与被查看的数据分表存。
                     </p>
+                    <!--
+                      原来这里还写着「归属存疑（clock_ambiguous）的时间段整段排除」。
+                      **那套机制根本没有实现**——全仓只有 schema 里一个 CHECK 枚举值，
+                      没有写入方、没有阈值、没有推导代码。在页面上声称一条不存在的
+                      保护措施，比不写它糟得多：它会让人以为边界情形已经被处理过了。
+                    -->
                   </div>
                 </div>
-                <div class="wsk-table-wrap wsk-mt-5">
+
+                <div class="wsk-button-row wsk-mt-5">
+                  <label class="wsk-field">
+                    <span class="wsk-label">时间范围</span>
+                    <select data-audit-range>
+                      <option value="24h">近 24 小时</option>
+                      <option value="7d" selected>近 7 天</option>
+                      <option value="30d">近 30 天</option>
+                    </select>
+                  </label>
+                </div>
+
+                <div class="wsk-alert wsk-danger wsk-mt-5" role="alert" data-audit-error hidden>
+                  <svg class="wsk-icon" aria-hidden="true"><use href="#warning"></use></svg>
+                  <div>
+                    <strong>没能取到这个用户的出站目标</strong>
+                    <p data-audit-error-text>请稍后重试。</p>
+                  </div>
+                </div>
+
+                <div class="wsk-table-wrap wsk-mt-5" data-pm-collection="user-audit">
                   <table class="wsk-table">
-                    <caption class="wsk-sr-only">kimi 的出站目标</caption>
+                    <caption class="wsk-sr-only">该用户的出站目标</caption>
                     <thead>
-                      <tr><th scope="col">目标</th><th scope="col">端口</th><th scope="col">最近记录</th><th scope="col">次数</th></tr>
+                      <tr>
+                        <th scope="col">目标</th><th scope="col">来源</th><th scope="col">端口</th>
+                        <th scope="col">最近记录 <small class="wsk-help">UTC</small></th><th scope="col">次数</th>
+                      </tr>
                     </thead>
                     <tbody>
-                      <tr><th scope="row">example.invalid</th><td>443</td><td>09-17 19:04</td><td class="wsk-tok-number">1,284</td></tr>
-                      <tr><th scope="row">api.example.invalid</th><td>443</td><td>09-17 18:51</td><td class="wsk-tok-number">906</td></tr>
-                      <tr><th scope="row">198.51.100.7</th><td>22</td><td>09-16 09:41</td><td class="wsk-tok-number">18</td></tr>
+                      <template data-pm-template>
+                        <tr>
+                          <th scope="row" data-pm="host">—</th>
+                          <td data-pm="host_src">—</td>
+                          <td data-pm="port">—</td>
+                          <td data-pm-time="last_seen">—</td>
+                          <td class="wsk-tok-number" data-pm-digits="count">—</td>
+                        </tr>
+                      </template>
+                      <tr data-table-empty hidden>
+                        <td colspan="5" data-pm-empty-text>正在加载…</td>
+                      </tr>
                     </tbody>
                   </table>
                 </div>
+
+                <p class="wsk-help wsk-mt-2" data-audit-gaps hidden>
+                  这段时间有已知缺口，记录可能不完整。
+                  <strong>不会把缺号换算成「丢了多少次」</strong>——那是把未知说成已知。
+                </p>
+
                 <p class="wsk-help wsk-mt-2">
                   展示域名或 IP + 端口，不含网址路径、参数或内容；节点另采集连接流量与时长，本面板不展示。
                   TCP 需成功双向传输，UDP 成功发送过数据即可记录，连接关闭后写出。

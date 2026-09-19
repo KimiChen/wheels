@@ -493,3 +493,35 @@ fn strip_html_comments(body: &str) -> String {
     out.push_str(rest);
     out
 }
+
+/// **正文里不许出现 Markdown 的 `**`。**
+///
+/// 这些页面的注释是用 Markdown 口吻写的，于是那套写法很容易漏进正文——
+/// 而浏览器不认识它，读者看到的是一对字面星号。这类错在任何 Rust 断言里都是绿的
+/// （服务端发的字节完全正确），只有把页面真的渲染出来才看得见，
+/// 而那件事不会每次改动都做一遍。所以做成门禁。
+///
+/// 只查注释之外的部分：注释里写 `**` 是对的，它们本来就是给人读的散文。
+#[test]
+fn 正文里不留字面的markdown加粗() {
+    for name in web::page_names() {
+        let text = web::page_body(name).expect("页面必须嵌入");
+        let mut body = String::new();
+        let mut rest = text;
+        while let Some(start) = rest.find("<!--") {
+            body.push_str(&rest[..start]);
+            match rest[start..].find("-->") {
+                Some(end) => rest = &rest[start + end + 3..],
+                None => {
+                    rest = "";
+                    break;
+                }
+            }
+        }
+        body.push_str(rest);
+        assert!(
+            !body.contains("**"),
+            "{name} 的正文里有一对字面星号：浏览器不认识 Markdown，用 <strong> 写"
+        );
+    }
+}

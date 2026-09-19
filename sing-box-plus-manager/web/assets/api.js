@@ -139,6 +139,38 @@
       const value = pick(data, node.dataset.pmExact);
       setText(node, value == null ? "—" : exactBytes(value));
     });
+    // 紧凑时刻：`2026-09-19T06:37:20Z` → `09-19 06:37`，完整串放进 title。
+    //
+    // **截串，不解析成 Date。** 值一律来自服务端的 `to_rfc3339`，永远是 UTC；
+    // 走一遍 Date 就会按浏览器时区重算，而那个时区与节点、与主控都可能不同——
+    // 于是同一条记录在三个地方显示出三个时刻，且没有任何地方标着这是哪个时区。
+    // 列头写明 UTC，这里只负责把它变短。
+    root.querySelectorAll("[data-pm-time]").forEach((node) => {
+      const value = pick(data, node.dataset.pmTime);
+      if (value == null) {
+        setText(node, "—");
+        node.removeAttribute("title");
+        return;
+      }
+      const text = String(value);
+      setText(node, text.length >= 16 ? `${text.slice(5, 10)} ${text.slice(11, 16)}` : text);
+      node.setAttribute("title", text);
+    });
+    // 属性绑定：`data-pm-attr="user_id -> data-audit-user, login_name -> data-audit-login"`。
+    //
+    // **只许写 `data-*`。** 目标属性名来自 HTML 而不是数据，所以它本身不是注入面；
+    // 但值来自服务端，而 `href="javascript:…"` 这类属性能把一个值变成代码。
+    // 限死在 `data-*` 上，这条路就不存在——需要别的属性时，应当再想一次
+    // 那个值凭什么可以直接落进 DOM 属性。
+    root.querySelectorAll("[data-pm-attr]").forEach((node) => {
+      for (const pair of node.dataset.pmAttr.split(",")) {
+        const [source, target] = pair.split("->").map((part) => part.trim());
+        if (!source || !target || !target.startsWith("data-")) continue;
+        const value = pick(data, source);
+        if (value == null) node.removeAttribute(target);
+        else node.setAttribute(target, String(value));
+      }
+    });
   }
 
   // 行渲染：把 `<template data-pm-template>` 按集合复制一遍。
@@ -299,7 +331,19 @@
       render: ({ users, identities }) => {
         renderCollection("users", users.users, "还没有用户");
         renderCollection("identities", identities.identities, "还没有登记的计费身份");
+        bindAdminAudit();
       },
+    },
+
+    "me-audit.html": {
+      // 时间范围从页面上那组分段控件读。**读 DOM 而不是记在模块变量里**：
+      // 切换时重新走 load/render，两者之间隔着请求序号门禁，
+      // 而门禁比对的是「这一次请求发出时的选择」——把选择记在别处，
+      // 晚到的旧响应会带着旧范围覆盖新选择，页面上就出现
+      // 「单选框指着 24h、表格是 30d 的数据」。
+      load: () => getJson(`/me/audit/access?range=${auditRange()}`),
+      render: renderAudit,
+      reloadOn: "input[name='audit-range']",
     },
 
     "usage.html": {
@@ -335,6 +379,94 @@
       },
     },
   };
+
+  // ---- 出站目标审计 ----
+
+  function auditRange() {
+    const picked = document.querySelector("input[name='audit-range']:checked");
+    return picked?.value ?? "7d";
+  }
+
+  function renderAudit(data) {
+    // 行是已经裁剪过的（C35 在服务端做，而且在聚合之前）。页面不再过滤，
+    // 拿到什么显示什么——在这里补一层「过滤」只会造出第二套规则。
+    renderCollection("audit", data.rows ?? [], emptyAuditText(data));
+    renderCollection("audit-gaps", data.gaps ?? [], "没有缺口");
+    const gaps = (data.gaps ?? []).length > 0;
+    toggle("[data-pm-state='gaps']", gaps);
+    toggle("[data-pm-state='no-gaps']", !gaps);
+    // 「同步还没跑过」单独说。它与「查过了没有记录」要做的事不一样。
+    toggle("[data-pm-state='unavailable']", data.archive_state === "unavailable");
+  }
+
+  // 空表要说清楚是哪一种空。三种情况在页面上的含义完全不同：
+  // 没同步过 / 这段时间没有记录 / 有记录但一条都判不了归属。
+  function emptyAuditText(data) {
+    if (data.archive_state === "unavailable") return "还没有同步过记录";
+    // 只问「有没有被裁掉的」，不算总数——也不做任何数值转换：
+    // C3 那条禁令是一刀切的，而这里本来就不需要转换（JSON 的数字就是数字）。
+    const dropped = data.dropped ?? {};
+    if (Object.values(dropped).some((n) => n > 0)) {
+      // **不说「没有访问」。** 有记录，只是都归不到你名下——那时说「没有访问」
+      // 是一句假话，而且会让真正的归属问题彻底看不见。
+      return "这段时间有记录，但没有一条能确定归属到你";
+    }
+    return "这段时间里没有已同步到的记录";
+  }
+
+  // ---- 管理员按用户查审计 ----
+  //
+  // 与本人页走**同一个端点族、同一套裁剪**，只是主体来自被点的那一行。
+  // 门禁的 key 带上 user_id：连点两个人时，先点那个的响应不得覆盖后点的。
+
+  function bindAdminAudit() {
+    const panel = document.querySelector("[data-audit-panel]");
+    if (!panel) return;
+    let current = null;
+
+    async function load() {
+      if (!current) return;
+      const range = panel.querySelector("[data-audit-range]")?.value ?? "7d";
+      await guarded(
+        `user-audit:${current.id}`,
+        () => getJson(`/users/${current.id}/audit/access?range=${range}`),
+        (data) => {
+          panel.querySelector("[data-audit-error]").hidden = true;
+          renderCollection("user-audit", data.rows ?? [], emptyAuditText(data));
+          panel.querySelector("[data-audit-gaps]").hidden = (data.gaps ?? []).length === 0;
+        },
+      );
+    }
+
+    document.addEventListener("click", (event) => {
+      const button = event.target?.closest?.("[data-audit-user]");
+      if (!button) return;
+      current = {
+        id: button.getAttribute("data-audit-user"),
+        login: button.getAttribute("data-audit-login") ?? "",
+      };
+      panel.hidden = false;
+      panel.open = true;
+      setText(panel.querySelector("[data-audit-title]"), current.login);
+      // 先清空再取数：留着上一个人的行，等于在标题已经换人之后还显示着
+      // 另一个人的访问记录——那是这一页最不该出现的一种错。
+      renderCollection("user-audit", [], "正在加载…");
+      panel.querySelector("[data-audit-error]").hidden = true;
+      load().catch((error) => {
+        const banner = panel.querySelector("[data-audit-error]");
+        banner.hidden = false;
+        setText(
+          banner.querySelector("[data-audit-error-text]"),
+          error.code === "audit_not_enabled" ? "该能力尚未启用。" : `加载失败：${error.message}`,
+        );
+        renderCollection("user-audit", [], "没能取到数据");
+      });
+    });
+
+    panel.addEventListener("change", (event) => {
+      if (event.target?.matches?.("[data-audit-range]")) load().catch(() => {});
+    });
+  }
 
   // `hidden` 而不是 `style.display`：前者是语义属性，辅助技术据此跳过，
   // 而且不会与 kit 自己的显示规则打架。
@@ -521,6 +653,15 @@
     const page = location.pathname.split("/").pop() || "index.html";
     const entry = PAGES[page];
     if (!entry) return;
+    // 筛选器变化时重新取数。**走的是同一条 load/render**，中间同样隔着
+    // 请求序号门禁——另写一条「刷新」路径的话，两条路径会在某次改动里分家，
+    // 而分家之后只有其中一条还带着门禁。
+    if (entry.reloadOn) {
+      document.addEventListener("change", (event) => {
+        if (!event.target?.closest?.(entry.reloadOn)) return;
+        guarded(page, entry.load, entry.render).catch(reportError);
+      });
+    }
     try {
       await guarded(page, entry.load, entry.render);
     } catch (error) {
