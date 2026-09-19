@@ -284,6 +284,33 @@ mod tests {
         }
     }
 
+    /// **从线上取出来的那一行**，逐字保留（键序、35 + 5 的长度、值）。
+    ///
+    /// 这一行是页面上「哪些目标不记录」的唯一来源，而它的形状由节点的
+    /// `encodeFilterEvent` 决定——自己编一个短的证明不了上游真的是这样。
+    /// 注意 `ev` 不在第一个键：`encode()` 用的是 `map[string]any`，
+    /// **键序不做任何保证**，所以解析器绝不能依赖它。
+    const REAL_FILTER: &str = r#"{"ev":"filter","hosts":["google.com","googleapis.com","googleusercontent.com","gstatic.com","googlevideo.com","google.com.hk","googletagmanager.com","googleadservices.com","google-analytics.com","doubleclick.net","gvt2.com","adtrafficquality.google","microsoft.com","vscode-cdn.net","vsassets.io","exp-tas.com","trafficmanager.net","applicationinsights.azure.com","apple.com","cdn-apple.com","edge.apple","icloud.com","apple-cloudkit.com","github.com","githubusercontent.com","githubassets.com","ghcr.io","nel.cloudflare.com","cloudflareinsights.com","cp.cloudflare.com","twimg.com","pythonhosted.org","nuget.org","cursor.com","launchdarkly.com"],"ips":["198.18.0.0/15","74.125.0.0/16","142.250.0.0/15","172.217.0.0/16","17.253.0.0/16"],"seq":1}"#;
+
+    #[test]
+    fn 线上真实的filter行解析得了() {
+        match parse_line(REAL_FILTER).expect("应当解析成功").0 {
+            Line::Diagnostic(Diagnostic::Filter { seq, hosts, ips }) => {
+                assert_eq!(seq, 1);
+                assert_eq!(hosts.len(), 35);
+                assert_eq!(ips.len(), 5);
+                assert_eq!(hosts[0], "google.com");
+                assert_eq!(ips[0], "198.18.0.0/15");
+            }
+            other => panic!("{other:?}"),
+        }
+        // 它是诊断行：**不进访问统计**，也不带 ts、不带四元组，归属不到任何人。
+        let parsed = parse(format!("{REAL_FILTER}\n{SNIFF}\n").as_bytes());
+        assert_eq!(parsed.access.len(), 1);
+        assert_eq!(parsed.diagnostics.len(), 1);
+        assert_eq!(parsed.unparsed, 0);
+    }
+
     #[test]
     fn filter与stop两种诊断行() {
         let filter = r#"{"seq":1,"ev":"filter","hosts":["example.com"],"ips":["203.0.113.0/24"]}"#;
