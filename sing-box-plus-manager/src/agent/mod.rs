@@ -106,9 +106,12 @@ impl AgentClient {
         self.send(&AgentCommand::AuditList {}).await
     }
 
-    /// 读一个已轮转文件的原始字节。文件名的硬校验在 agent 侧。
-    pub async fn audit_read(&self, file: String) -> Result<AgentResponse> {
-        self.send(&AgentCommand::AuditRead(AuditReadRequest { file })).await
+    /// 从 `offset` 起读一个审计文件。文件名的硬校验在 agent 侧。
+    ///
+    /// 活动文件只会返回完整行，所以**收下的字节数就是可以推进的偏移量**——
+    /// 调用方推进偏移时要用 `body.len()`，不是它请求的范围长度。
+    pub async fn audit_read(&self, file: String, offset: u64) -> Result<AgentResponse> {
+        self.send(&AgentCommand::AuditRead(AuditReadRequest { file, offset })).await
     }
 
     pub async fn send(&self, command: &AgentCommand) -> Result<AgentResponse> {

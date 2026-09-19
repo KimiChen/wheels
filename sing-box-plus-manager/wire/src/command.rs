@@ -47,19 +47,18 @@ pub enum AgentCommand {
         body: Vec<u8>,
     },
 
-    /// 列出审计目录里**全部身份**的已轮转文件及其大小。数据主体明细档。
+    /// 列出审计目录里**全部身份**的审计文件及其大小，活动的与已轮转的都列。
+    /// 数据主体明细档。
     ///
     /// 一次往返拿到全貌，而不是拿着身份名一个个问——目录里是 301 个身份，
     /// 逐身份问一轮就是 301 次往返，而同步器要的本来也不是「某个人的文件」，
     /// 是「这个目录里有什么、跟我本机比差了哪些」。
-    ///
-    /// 只列已轮转文件（C23）：活动文件正在被写，读它拿到的可能是半行。
     AuditList {},
 
-    /// 读一个已轮转文件的原始字节。
+    /// 从某个偏移读一个审计文件。
     ///
     /// 入参校验放在 agent 侧，因为它是唯一知道本机真实布局的一方：
-    /// 文件名形状、不含 `/`、解析后仍在 `audit_dir` 之内、且**不是活动文件**。
+    /// 文件名形状、不含 `/`、解析后仍在 `audit_dir` 之内。
     /// agent 自身从不 `rm` 任何东西——轮转只许 `mv`（C23）。
     ///
     /// **文件名不是授权依据**（C35）：它只用来定位，逐行的完整身份校验与归属裁剪
@@ -89,19 +88,27 @@ impl AgentCommand {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuditReadRequest {
-    /// 已轮转文件的**基名**，形如 `access-<b64url>.jsonl.<定宽时间戳>`。
+    /// 文件**基名**：`access-<b64url>.jsonl`（活动）或加上定宽时间戳（已轮转）。
     ///
     /// 它**不是**路径：agent 会拒绝任何含 `/` 的名字，并在拼接后再确认结果仍在
-    /// `audit_dir` 之内。这里没有时间窗参数——同步器要的是**文件级增量**，
+    /// `audit_dir` 之内。这里没有时间窗参数——同步器要的是**字节级增量**，
     /// 不是时间窗。上一版的 `from`/`to` 是死参数：调用方从不传，
     /// 而实现把该身份**全部**已轮转文件整份拼起来返回。
     pub file: String,
+    /// 从这个字节偏移开始读。已轮转文件一般传 0；活动文件传上次读到的位置。
+    ///
+    /// 偏移超过文件当前大小时返回空，**不是错误**——轮转会把同名文件变回 0 字节，
+    /// 那是正常事件，调用方据此把偏移归零。
+    #[serde(default)]
+    pub offset: u64,
 }
 
 /// `AuditList` 的响应体。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuditListing {
+    /// 按文件名排序。定宽时间戳的字典序即时间序，所以同一身份的归档天然有序，
+    /// 而活动文件（没有时间戳后缀）排在它自己那些归档的前面。
     pub files: Vec<AuditFileEntry>,
     /// 目录里既不是活动文件、也不是合法已轮转文件的条目数。
     ///
@@ -115,6 +122,11 @@ pub struct AuditListing {
 pub struct AuditFileEntry {
     pub name: String,
     pub size: u64,
+    /// 这是**正在被写**的活动文件。
+    ///
+    /// 同步器必须区别对待：活动文件按偏移增量读、且它会在轮转时变回 0 字节；
+    /// 已轮转文件不再变化，拉过一次就不用再拉。
+    pub active: bool,
 }
 
 /// `Vec<u8>` 的 base64 编解码。
@@ -185,12 +197,14 @@ mod tests {
 
     #[test]
     fn 命令集是封闭的() {
-        // 认识的四条。
+        // 认识的五条。
         for text in [
             r#"{"command":"snapshot"}"#,
             r#"{"command":"quota","body":"AAEC"}"#,
             r#"{"command":"audit-list"}"#,
             r#"{"command":"audit-read","file":"access-dV9leGFtcGxlXzAx.jsonl.20260919T041530.123456789Z"}"#,
+            // offset 可省，缺省即 0。
+            r#"{"command":"audit-read","file":"access-dV9leGFtcGxlXzAx.jsonl","offset":4096}"#,
         ] {
             serde_json::from_str::<AgentCommand>(text)
                 .unwrap_or_else(|e| panic!("{text} 应当被接受：{e}"));

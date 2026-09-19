@@ -321,12 +321,13 @@ async fn 审计列目录只列已轮转文件() {
     let listed = listing(&response.body);
 
     let names: Vec<&str> = listed.files.iter().map(|f| f.name.as_str()).collect();
-    assert_eq!(names, vec![one.as_str(), two.as_str()].into_iter().collect::<Vec<_>>());
-    assert!(!names.contains(&active.as_str()), "活动文件不得出现在清单里");
-    // 一次往返拿到**全部身份**的文件，不是某一个人的。
-    assert_eq!(listed.files.len(), 2, "两个身份的文件都要在");
-    assert_eq!(listed.files[0].size, b"ROTATED-OK\n".len() as u64, "大小要真实");
-    // 活动文件是刻意不列的，不算「无法归类」。
+    // 一次往返拿到**全部身份**的文件，不是某一个人的；活动的与已轮转的都在。
+    assert_eq!(names, vec![active.as_str(), one.as_str(), two.as_str()]);
+    // 活动文件排在它自己那份归档之前——它没有时间戳后缀。
+    let entry = |name: &str| listed.files.iter().find(|f| f.name == name).unwrap();
+    assert!(entry(&active).active, "活动文件必须标出来");
+    assert!(!entry(&one).active, "已轮转文件不是活动的");
+    assert_eq!(entry(&one).size, b"ROTATED-OK\n".len() as u64, "大小要真实");
     assert_eq!(listed.skipped, 0);
 
     // agent 从不删任何东西。
@@ -345,7 +346,8 @@ async fn 无法归类的条目被计数而不是静默跳过() {
 
     let listed = listing(&link.client.audit_list().await.unwrap().body);
     assert_eq!(listed.files.len(), 1);
-    // README 一条；变长时间戳那个带 access- 前缀但不以 .jsonl 结尾，也算一条。
+    // README 一条；`access-abc.jsonl.1758153600` 一条——变长时间戳既不是合法的
+    // 已轮转名，也不是活动名（它不以 .jsonl 结尾）。
     assert_eq!(listed.skipped, 2, "两个都说不清的条目都要报出来");
 }
 
@@ -366,6 +368,73 @@ async fn 清单顺序就是轮转顺序() {
     );
 }
 
+/// 活动文件按偏移增量读，**只返回完整行**。
+///
+/// 这是使用者定的口径（2026-09-19）：只读已轮转文件的话，忙的身份要等 1.4 天、
+/// 闲的要等 63 天才第一次可见，这一页在那之前是空的。节点的活动文件是
+/// `O_APPEND` 只追加、`repairTrailingNewline` 只补换行符从不截断，
+/// 所以按偏移读、截到最后一个换行符处，是安全的。
+#[tokio::test]
+async fn 活动文件按偏移增量读且只返回完整行() {
+    let link = link().await;
+    let active = proxy_manager_wire::audit::active_file_name("u_example_01");
+    let path = link.audit_dir.join(&active);
+    std::fs::write(&path, b"one\ntwo\n").unwrap();
+
+    let first = link.client.audit_read(active.clone(), 0).await.unwrap();
+    assert_eq!(first.agent_status, 200);
+    assert_eq!(first.body, b"one\ntwo\n");
+
+    // 追加一条完整行 + 一条写到一半的。
+    use std::io::Write;
+    let mut handle = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+    handle.write_all(b"three\nhal").unwrap();
+
+    let second = link.client.audit_read(active.clone(), first.body.len() as u64).await.unwrap();
+    assert_eq!(second.body, b"three\n", "半行不能返回");
+
+    // 推进量就是收下的字节数。再读一次不该重复拿到已经拿过的行。
+    let offset = (first.body.len() + second.body.len()) as u64;
+    let third = link.client.audit_read(active.clone(), offset).await.unwrap();
+    assert!(third.body.is_empty(), "只剩半行时一个字节都不该给");
+
+    // 半行补完之后才拿得到。
+    handle.write_all(b"f\n").unwrap();
+    let fourth = link.client.audit_read(active.clone(), offset).await.unwrap();
+    assert_eq!(fourth.body, b"half\n");
+}
+
+/// 轮转把同名文件变回 0 字节。偏移超过大小是**正常事件**，不是错误——
+/// 调用方据此把偏移归零，而不是把它当成 agent 出了问题反复重试。
+#[tokio::test]
+async fn 偏移超过文件大小返回空而不是报错() {
+    let link = link().await;
+    let active = proxy_manager_wire::audit::active_file_name("u_example_01");
+    std::fs::write(link.audit_dir.join(&active), b"short\n").unwrap();
+
+    let response = link.client.audit_read(active.clone(), 9999).await.unwrap();
+    assert_eq!(response.agent_status, 200, "不是错误");
+    assert!(response.body.is_empty());
+
+    // 模拟轮转：同名文件变回 0 字节。清单里报的大小小于调用方的偏移，
+    // 这就是「该归零了」的信号。
+    std::fs::write(link.audit_dir.join(&active), b"").unwrap();
+    let listed = listing(&link.client.audit_list().await.unwrap().body);
+    assert_eq!(listed.files.iter().find(|f| f.name == active).unwrap().size, 0);
+}
+
+/// 已轮转文件**不做**完整行截断：它不再变化，末尾若真有半行，那是节点侧的事实，
+/// 应当让主控看见并计入解析失败，而不是在 agent 里悄悄抹掉。
+#[tokio::test]
+async fn 已轮转文件原样返回不截断() {
+    let link = link().await;
+    let name = rotated("u_example_01", STAMP);
+    std::fs::write(link.audit_dir.join(&name), b"complete\npartial-no-newline").unwrap();
+
+    let response = link.client.audit_read(name, 0).await.unwrap();
+    assert_eq!(response.body, b"complete\npartial-no-newline", "逐字节原样");
+}
+
 /// 读**一个**文件，拿到的是它的原始字节——不是把同一身份的文件拼起来。
 #[tokio::test]
 async fn 审计读取返回单个文件的原始字节() {
@@ -375,7 +444,7 @@ async fn 审计读取返回单个文件的原始字节() {
     std::fs::write(link.audit_dir.join(&one), b"FIRST\n").unwrap();
     std::fs::write(link.audit_dir.join(&two), b"SECOND\n").unwrap();
 
-    let response = link.client.audit_read(one.clone()).await.expect("读取应当成功");
+    let response = link.client.audit_read(one.clone(), 0).await.expect("读取应当成功");
     assert_eq!(response.agent_status, 200);
     assert_eq!(response.body, b"FIRST\n", "只返回这一个文件，逐字节");
     assert!(!response.body.ends_with(b"SECOND\n"), "不得把同身份的文件拼起来");
@@ -384,19 +453,6 @@ async fn 审计读取返回单个文件的原始字节() {
     let listed = listing(&link.client.audit_list().await.unwrap().body);
     let entry = listed.files.iter().find(|f| f.name == one).unwrap();
     assert_eq!(entry.size as usize, response.body.len());
-}
-
-/// C23：**拒绝读取活动文件**。它正在被写，读到的可能是半行。
-#[tokio::test]
-async fn 审计读取拒绝活动文件() {
-    let link = link().await;
-    let active = proxy_manager_wire::audit::active_file_name("u_example_01");
-    std::fs::write(link.audit_dir.join(&active), b"ACTIVE-MUST-NOT-BE-READ\n").unwrap();
-
-    let response = link.client.audit_read(active.clone()).await.unwrap();
-    assert_eq!(response.agent_status, 400, "拒绝，而不是返回半行");
-    assert!(response.body.is_empty());
-    assert!(link.audit_dir.join(&active).exists(), "agent 从不删任何东西");
 }
 
 /// 文件名来自主控，而这条路径的全部意义就是不信任它。
@@ -424,7 +480,7 @@ async fn 审计读取拒绝走出审计目录的名字() {
         format!("access-a/b.jsonl.{STAMP}"),
         escaping.clone(),
     ] {
-        let response = link.client.audit_read(name.clone()).await.unwrap();
+        let response = link.client.audit_read(name.clone(), 0).await.unwrap();
         assert_eq!(response.agent_status, 400, "{name} 必须被拒");
         assert!(response.body.is_empty(), "{name} 不得返回任何字节");
     }
@@ -433,7 +489,7 @@ async fn 审计读取拒绝走出审计目录的名字() {
 
     // 反向：名字合法、不逃逸，但文件不在——那是 404，不是 400，也不是 500。
     let missing = rotated("u_example_10", STAMP);
-    assert_eq!(link.client.audit_read(missing).await.unwrap().agent_status, 404);
+    assert_eq!(link.client.audit_read(missing, 0).await.unwrap().agent_status, 404);
 }
 
 /// 未配置 audit_dir 时直接拒绝，而不是去猜一个目录。两条命令都要。
@@ -461,5 +517,8 @@ async fn 未配置审计目录时拒绝检索() {
 
     let client = AgentClient::new(NODE_ID, &endpoint, DNS_NAME, &materials.controller_dir).unwrap();
     assert_eq!(client.audit_list().await.unwrap().agent_status, 404);
-    assert_eq!(client.audit_read(rotated("u_example_01", STAMP)).await.unwrap().agent_status, 404);
+    assert_eq!(
+        client.audit_read(rotated("u_example_01", STAMP), 0).await.unwrap().agent_status,
+        404
+    );
 }
