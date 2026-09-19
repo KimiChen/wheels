@@ -479,6 +479,48 @@ async fn 分页用游标不用offset() {
     }
 }
 
+/// **管理员真的调一次 `/api/v1/identities`，并核对字段。**
+///
+/// 这条是补上的。原来这个端点只被「普通用户调了被拒」那条用例覆盖过，
+/// **200 那条路径从来没有人走过**——而它里面的 SQL 选了一个
+/// `runtime_identities` 上根本不存在的列（`i.user_id`，被
+/// `schema/02_runtime_lifecycle.sql` 显式删掉了，注释写着「它是错的地方」）。
+/// `sqlx::query` 是运行时检查，所以它编译得过、部署得上、一调就 500。
+///
+/// 这个洞漏到线上的直接原因就是缺这条用例：一个「只测被拒、不测放行」的
+/// 端点用例，证明的是权限，不是它能用。
+#[tokio::test]
+async fn 管理员取得到计费身份列表() {
+    let api = Api::new().await;
+    api.seed_claimable_pool(&["node-a"], &["slot-01", "slot-02"]).await;
+    let admin = api.admin().await;
+
+    let (status, body, _) = api.get("/api/v1/identities", Some(&admin)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let rows = body["identities"].as_array().expect("要有 identities");
+    assert_eq!(rows.len(), 2, "夹具种了两个身份：{body}");
+
+    // 六元组要齐：generation 属于协议键，不能因为恒为 1 就省略。
+    let row = &rows[0];
+    for key in [
+        "id",
+        "node_id",
+        "runtime_id",
+        "inbound_tag",
+        "inbound_generation",
+        "identity_name",
+        "identity_generation",
+        "active",
+    ] {
+        assert!(!row[key].is_null(), "{key} 缺失或为 null：{row}");
+    }
+    // 归属来自 identity_routes 的 LEFT JOIN；没人认领时是 null，**不是报错**。
+    assert!(row.get("user_id").is_some(), "user_id 这个键要在：{row}");
+    assert_eq!(row["node_id"], "node-a");
+    assert_eq!(row["inbound_generation"], "1", "定宽文本要解成十进制字符串");
+}
+
 /// 尚未启用的能力回 `audit_not_enabled`，**不是 404**。
 ///
 /// 404 会被读成「打错了」，而真相是「这个能力还没开」——

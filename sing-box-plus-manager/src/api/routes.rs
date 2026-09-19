@@ -229,11 +229,19 @@ pub async fn list_identities(
     subject.require_admin()?;
     let page = Page::parse(page.cursor.as_deref(), page.limit)?;
     let rows = sqlx::query(
+        // **归属要 join 到 identity_routes，不能从 runtime_identities 上取。**
+        // 这里原来写的是 `i.user_id`，而那一列在 schema/02_runtime_lifecycle.sql
+        // 里被显式删掉了（注释：「这里曾经有一个 user_id。它是错的地方——本表按
+        // (node_id, runtime_id) 键，节点一重启归属就全丢」）。`sqlx::query` 是运行时
+        // 检查，所以它编译得过、跑起来 500。抄 `src/quota/table.rs` 的现成写法。
         "SELECT i.runtime_identity_id, r.node_id, r.runtime_id, s.inbound_tag, s.generation, \
-                i.identity_name, i.generation, i.active, i.user_id \
+                i.identity_name, i.generation, i.active, rt.user_id \
          FROM runtime_identities i \
          JOIN runtime_services s ON s.runtime_service_id = i.runtime_service_id \
          JOIN node_runtimes r ON r.runtime_pk = i.runtime_pk \
+         LEFT JOIN identity_routes rt \
+                ON rt.node_id = r.node_id AND rt.inbound_tag = s.inbound_tag \
+               AND rt.identity_name = i.identity_name \
          WHERE i.runtime_identity_id > ? ORDER BY i.runtime_identity_id LIMIT ?",
     )
     .bind(page.after.unwrap_or(0))
