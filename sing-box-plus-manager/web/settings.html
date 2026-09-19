@@ -200,7 +200,6 @@
               </div>
               <div class="wsk-tab-list" role="tablist" aria-label="设置分组">
                 <button id="tab-access" type="button" role="tab" aria-controls="panel-access" aria-selected="true">用户与授权</button>
-                <button id="tab-im" type="button" role="tab" aria-controls="panel-im" aria-selected="false" tabindex="-1">IM 凭据</button>
                 <button id="tab-collect" type="button" role="tab" aria-controls="panel-collect" aria-selected="false" tabindex="-1">采集与配额</button>
                 <button id="tab-retention" type="button" role="tab" aria-controls="panel-retention" aria-selected="false" tabindex="-1">审计保留期</button>
               </div>
@@ -210,50 +209,28 @@
                   <div class="wsk-panel"><p class="wsk-panel-title">ADMIN</p><h3>管理员</h3><p class="wsk-help wsk-mt-2">管理节点、用户、配额、发布与审计，同时可使用自己的订阅。</p></div>
                   <div class="wsk-panel"><p class="wsk-panel-title">USER</p><h3>普通用户</h3><p class="wsk-help wsk-mt-2">登录后自动获得默认节点，只查看自己的订阅、节点和用量。</p></div>
                 </div>
+                <!-- 原来这里是一组「默认节点组」复选框（hk-01 / us-01 / jp-01）加一个
+                     只弹提示的保存按钮。**那三个节点名不存在，这个概念也不存在**：
+                     一次登录领到的是**一个**计费身份，它在全部入口上通用（D24 镜像分配）。 -->
                 <div class="wsk-panel wsk-mt-5">
-                  <div class="wsk-section-head"><h3>新用户默认节点组</h3><span class="wsk-badge wsk-success">自动授权已开启</span></div>
-                  <p class="wsk-help">首次登录自动分配下列节点的计费身份并生成订阅。节点不可用时显示开通进度，账号仍为普通用户。</p>
-                  <fieldset class="pm-default-nodes">
-                    <legend class="wsk-sr-only">默认授权节点（示例配置）</legend>
-                    <label><input type="checkbox" name="default-nodes" value="hk-01" checked />hk-01</label>
-                    <label><input type="checkbox" name="default-nodes" value="us-01" checked />us-01</label>
-                    <label><input type="checkbox" name="default-nodes" value="jp-01" />jp-01</label>
-                  </fieldset>
-                  <button class="wsk-button" type="button" data-write data-js-only data-toast="静态原型：配置尚未连接服务器，本次选择未保存。">保存默认授权</button>
+                  <div class="wsk-section-head"><h3>新用户怎么开通</h3></div>
+                  <p class="wsk-help">
+                    首次用泡游账号登录时自动从账号池领一个计费身份，并签发一条订阅——
+                    <strong>没有「选哪几个节点」这一步</strong>：一个身份在全部入口上通用，
+                    每个节点拿到的都是「这个人本月还剩多少」的同一个数。
+                    池子空了时登录仍然成功，但订阅里不会有能用的节点，本人页面上会说明原因。
+                  </p>
+                  <p class="wsk-help wsk-mt-2">
+                    退役身份、补开通、改档位目前只有命令行：
+                    <code>proxy-manager user retire / grant / tier</code>。
+                  </p>
                 </div>
               </div>
 
-              <div class="wsk-tab-panel" id="panel-im" role="tabpanel" aria-labelledby="tab-im" tabindex="0" hidden>
-                <div class="wsk-alert wsk-warning wsk-mt-2">
-                  <svg class="wsk-icon" aria-hidden="true"><use href="#warning"></use></svg>
-                  <div>
-                    <strong>企业微信「企业可信 IP」绑死主控出口 IP</strong>
-                    <p>
-                      必须<strong>先</strong>配可信域名或接收消息 URL，<strong>再</strong>配可信 IP，
-                      否则返回 <code>60020</code>。多出口或动态 NAT 必须提前登记全部出口地址；
-                      失配时 IM 登录会整体失效——本地应急管理员是这条风险的唯一出口。
-                    </p>
-                  </div>
-                </div>
-                <div class="wsk-form-grid wsk-mt-5">
-                  <div class="wsk-field">
-                    <label class="wsk-label" for="feishu-app">飞书 app_id</label>
-                    <input class="wsk-control" id="feishu-app" type="text" value="cli_••••••••••••" readonly />
-                    <p class="wsk-help">凭据只有 管理员 能改。tenant_access_token 集中缓存并提前刷新。</p>
-                  </div>
-                  <div class="wsk-field">
-                    <label class="wsk-label" for="wecom-corp">企业微信 corpid</label>
-                    <input class="wsk-control" id="wecom-corp" type="text" value="ww••••••••••••" readonly />
-                    <p class="wsk-help">网页登录只用 snsapi_base，不用 snsapi_privateinfo。</p>
-                  </div>
-                  <div class="wsk-field wsk-wide">
-                    <label class="wsk-label" for="egress-ip">已登记出口 IP</label>
-                    <input class="wsk-control" id="egress-ip" type="text" value="（示例：全部出口地址，含备用线路）" readonly />
-                    <p class="wsk-help">出口 IP 是一等配置项，与节点侧的上一跳 admission 同源管理（§10 R5）。</p>
-                  </div>
-                </div>
-              </div>
-
+              <!-- 「IM 凭据」整块已删。D27 把登录换成了泡游 SSO（它承载飞书实名），
+                   D33 又明确不做 IM 通知通道——那一页配的是一套**不存在的东西**：
+                   飞书 app_id、企业微信 corpid、可信出口 IP。留着它比留一句「尚未启用」更糟，
+                   因为它看起来像是当前生效的配置。 -->
               <div class="wsk-tab-panel" id="panel-collect" role="tabpanel" aria-labelledby="tab-collect" tabindex="0" hidden>
                 <div class="wsk-alert wsk-info wsk-mt-2">
                   <svg class="wsk-icon" aria-hidden="true"><use href="#info"></use></svg>
@@ -336,28 +313,29 @@
                       每次采集恰好产生一个已结算序列，每次正额度下发恰好消耗一个。
                     </p>
                   </div>
-                  <div class="wsk-field">
-                    <label class="wsk-label" for="startup">节点 startup_action</label>
-                    <div class="wsk-select-wrap">
-                      <select class="wsk-select" id="startup">
-                        <option selected>deny（受限节点必须）</option>
-                        <option>allow（节点侧默认值）</option>
-                      </select>
-                    </div>
+                  <!-- 这两项原本是两个下拉框，而且 startup_action 选中的是 deny——
+                       **生产上是 allow**（定案第五条，带 fail_open_acknowledged 签字）。
+                       一个显示着相反值、又点不动的下拉框，比不显示糟得多。
+                       两项都是**按节点**配在 nodes.toml 里的，这一页是全局设置，
+                       所以改成指路，并把真实值留给节点页去显示。 -->
+                  <div class="wsk-field wsk-wide">
+                    <span class="wsk-label">节点 startup_action / stale_action</span>
                     <p class="wsk-help">
-                      <strong>节点侧默认是 allow</strong>：重启后尚未收到配额表就无限放行。
-                      受限节点必须显式配成 deny（C12）。
+                      **按节点**配在 <code>nodes.toml</code> 的 <code>[node.quota_control]</code> 里，
+                      不是全局设置。节点侧默认是 <code>allow</code>：重启后尚未收到配额表就无限放行。
+                      配成非 <code>deny</code> 时，同一段里必须写下
+                      <code>fail_open_acknowledged</code>（一句理由），否则主控拒绝启动——
+                      让这个取舍留下签字，而不是埋在一行配置里（C12）。
                     </p>
                   </div>
-                  <div class="wsk-field">
-                    <label class="wsk-label" for="first-snapshot">首快照策略</label>
-                    <div class="wsk-select-wrap">
-                      <select class="wsk-select" id="first-snapshot">
-                        <option selected>baseline（只建基线）</option>
-                        <option>include（首次增量 = 当前累计）</option>
-                      </select>
-                    </div>
-                    <p class="wsk-help">无默认值：配置缺省即启动失败（C8）。</p>
+                  <div class="wsk-field wsk-wide">
+                    <span class="wsk-label">首快照策略</span>
+                    <p class="wsk-help">
+                      同样按节点配，<strong>没有默认值</strong>：缺省即启动失败（C8）。
+                      <code>baseline</code> 只建基线、首次增量为 0；<code>include</code>
+                      把节点上已有的累计一次性记成首次增量。当前各节点的取值在
+                      <a href="nodes.html">节点页</a>上。
+                    </p>
                   </div>
                 </div>
               </div>
@@ -373,11 +351,13 @@
                     </p>
                   </div>
                 </div>
-                <div class="wsk-status-list wsk-mt-5">
-                  <div><span>原始快照 payload<small>终态 + 宽限期后清理</small></span><strong>14 天</strong></div>
-                  <div><span>只追加账本<small>按审计要求</small></span><strong>365 天</strong></div>
-                  <div><span>小时缓存</span><strong>180 天</strong></div>
-                  <div><span>日缓存</span><strong>730 天</strong></div>
+                <div data-pm-prototype="保留期清理没有实现（D33 决定不做）。上面那四个天数是设计稿里的策略，不是当前生效的配置——账本、载荷、批次与会话目前只增不删">
+                  <div class="wsk-status-list wsk-mt-5">
+                    <div><span>原始快照 payload<small>终态 + 宽限期后清理</small></span><strong>14 天</strong></div>
+                    <div><span>只追加账本<small>按审计要求</small></span><strong>365 天</strong></div>
+                    <div><span>小时缓存</span><strong>180 天</strong></div>
+                    <div><span>日缓存</span><strong>730 天</strong></div>
+                  </div>
                 </div>
               </div>
             </section>
@@ -388,7 +368,7 @@
 
     <footer class="wsk-footer">
       <div class="wsk-footer-inner">
-        <div class="wsk-footer-legal"><span>proxy-manager · 静态原型 / 示例数据</span></div>
+        <div class="wsk-footer-legal"><span data-pm-when="prototype">proxy-manager · 静态原型 / 示例数据</span><span data-pm-when="live">proxy-manager</span></div>
         <a
           class="wsk-footer-link"
           href="https://github.com/KimiChen/wheels/tree/main/web-standard-kit"
