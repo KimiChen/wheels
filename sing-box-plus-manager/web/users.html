@@ -335,6 +335,23 @@
                   </table>
                 </div>
 
+                <!-- 与本人页同一条纪律：看别人的明细同样是不完整的，必须说出来。 -->
+                <details class="wsk-panel wsk-mt-5" data-pm-state="excluded" hidden>
+                  <summary><strong>有些目标我们不记录</strong></summary>
+                  <p class="wsk-help wsk-mt-2" data-pm-state="excluded-changed" hidden>
+                    这段时间里名单变过，下面是并集；记录规则的那一行不带时间戳，
+                    所以说不出分界线在哪一条。
+                  </p>
+                  <p class="wsk-help wsk-mt-2">
+                    命中的连接<strong>根本不写审计</strong>，所以上表里既没有它们的行、
+                    也看不出被排掉了多少条；但它们<strong>照样计费</strong>。
+                  </p>
+                  <strong class="wsk-help">域名（按后缀，含全部子域）</strong>
+                  <p data-pm-excluded-hosts>—</p>
+                  <strong class="wsk-help">网段（只对没有域名的连接生效）</strong>
+                  <p data-pm-excluded-ips>—</p>
+                </details>
+
                 <p class="wsk-help wsk-mt-2" data-audit-gaps hidden>
                   这段时间有已知缺口，记录可能不完整。
                   <strong>不会把缺号换算成「丢了多少次」</strong>——那是把未知说成已知。

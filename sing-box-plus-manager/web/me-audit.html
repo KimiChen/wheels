@@ -229,6 +229,45 @@
               </div>
 
               <!--
+                **这一块不是可选的。** 开了排除之后这一页只显示一部分目标
+                （线上实测排掉的是 85.6%），而一个看到 N 个目标的人会以为那就是他
+                去过的全部地方——那是一句关于他本人的假话。名单来自节点写在审计文件
+                头部的 ev=filter 行，也就是**那些记录写下来的当时**真正生效的规则。
+
+                三种状态各说各的话，不合并：
+                  observed=false  —— 说不出规则（可能没开，也可能这些记录写下来时
+                                     文件已经开着）。闭嘴比猜一句好。
+                  consistent=false —— 这段时间里规则变过，显示的是并集。
+                  其余             —— 正常显示名单。
+              -->
+              <details class="wsk-panel wsk-mt-5" data-pm-state="excluded" hidden>
+                <summary>
+                  <strong>有些目标我们不记录</strong>
+                  <span class="wsk-help">—— 下面这些不会出现在上表里</span>
+                </summary>
+                <div class="wsk-alert wsk-warning wsk-mt-5" data-pm-state="excluded-changed" hidden>
+                  <svg class="wsk-icon" aria-hidden="true"><use href="#warning"></use></svg>
+                  <div>
+                    <strong>这段时间里名单变过</strong>
+                    <p>
+                      下面是<strong>这段时间内出现过的全部规则的并集</strong>。
+                      记录规则的那一行不带时间戳，所以说不出分界线在哪一条。
+                    </p>
+                  </div>
+                </div>
+                <p class="wsk-help wsk-mt-2">
+                  命中的连接<strong>根本不写审计</strong>，所以上表里既没有它们的行，也看不出被排掉了多少条。
+                  但它们<strong>照样计费、照样扣额度</strong>——排除只挡审计，挡不住计量。
+                </p>
+                <div class="wsk-panel wsk-mt-2">
+                  <strong class="wsk-help">域名（按后缀匹配，含其全部子域）</strong>
+                  <p data-pm-excluded-hosts>—</p>
+                  <strong class="wsk-help">网段（只对没有域名、只记得下 IP 的连接生效）</strong>
+                  <p data-pm-excluded-ips>—</p>
+                </div>
+              </details>
+
+              <!--
                 取不到数时**整页不留假数据**：api.js 的 neutralize() 会先把所有绑定
                 清成「—」，这条横幅再说明原因。空表 + 没有说明会被读成
                 「你没访问过任何目标」，而那是一句关于这个人的假话。

@@ -397,6 +397,24 @@
     toggle("[data-pm-state='no-gaps']", !gaps);
     // 「同步还没跑过」单独说。它与「查过了没有记录」要做的事不一样。
     toggle("[data-pm-state='unavailable']", data.archive_state === "unavailable");
+    renderExcluded(data.excluded);
+  }
+
+  // 「哪些目标不记录」。**读不出规则时整块不显示**，而不是显示一个空名单——
+  // 空名单会被读成「什么都记录」，而真相可能只是「这些记录写下来时文件已经开着」。
+  function renderExcluded(excluded) {
+    const observed = excluded?.observed === true;
+    toggle("[data-pm-state='excluded']", observed);
+    if (!observed) return;
+    toggle("[data-pm-state='excluded-changed']", excluded.consistent === false);
+    setText(
+      document.querySelector("[data-pm-excluded-hosts]"),
+      (excluded.hosts ?? []).join("、") || "（没有域名规则）",
+    );
+    setText(
+      document.querySelector("[data-pm-excluded-ips]"),
+      (excluded.ips ?? []).join("、") || "（没有网段规则）",
+    );
   }
 
   // 空表要说清楚是哪一种空。三种情况在页面上的含义完全不同：
@@ -434,6 +452,8 @@
           panel.querySelector("[data-audit-error]").hidden = true;
           renderCollection("user-audit", data.rows ?? [], emptyAuditText(data));
           panel.querySelector("[data-audit-gaps]").hidden = (data.gaps ?? []).length === 0;
+          // 看别人的明细同样是不完整的，同一条纪律、同一个函数。
+          renderExcluded(data.excluded);
         },
       );
     }
