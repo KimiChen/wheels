@@ -142,6 +142,8 @@ enum UserCommand {
     /// 处理完原因之后用它补上。
     ///
     /// **幂等**：已经有的直接返回，不再消耗一个名额。
+    ///
+    /// `--identity` 是**显式旁路**：指定名字并跳过零基线门禁。见它自己的说明。
     Grant {
         #[arg(long, default_value = "/etc/proxy-manager")]
         config_dir: PathBuf,
@@ -151,6 +153,24 @@ enum UserCommand {
         /// 操作者。必填并落进审计——这是一次影响他人的操作。
         #[arg(long)]
         actor: String,
+        /// 指定身份名，**跳过零基线门禁**。不给就从池子里挑。
+        ///
+        /// 零基线门禁挡的是「把一个用过的身份发给新用户，于是他一上来就欠着
+        /// 别人的账」。它防的情形在**原持有者拿回自己的身份**上不成立——
+        /// 那些字节本来就是他自己跑的，而系统没有别的办法表达这个区别。
+        ///
+        /// 不放宽的两件事：目标必须在**全部**在册节点上空闲；
+        /// `claim_fence_*` 一律留 NULL（本支没有证明零基线，填值就是撒谎）。
+        #[arg(long, requires = "reason")]
+        identity: Option<String>,
+        /// 为什么要绕过门禁。**用 `--identity` 时必填**，落进只追加的归属事件。
+        #[arg(long, requires = "identity")]
+        reason: Option<String>,
+        /// 这个人已经持有**另一个**身份时，先放掉它。
+        ///
+        /// 默认不放：`grant` 这个词不该悄悄退掉一个已经发出去的凭据。
+        #[arg(long, default_value_t = false, requires = "identity")]
+        replace: bool,
     },
     /// 永久退役一个身份名：它在全部节点上的槽位一并置为 retired。
     ///
@@ -1157,12 +1177,25 @@ async fn user_command(command: UserCommand) -> anyhow::Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
 
-        UserCommand::Grant { config_dir, account, actor } => {
+        UserCommand::Grant { config_dir, account, actor, identity, reason, replace } => {
             let (store, _) = open_with_roster(&config_dir).await?;
             let user_id = user_id_of(&store, &account).await?;
-            let claim = proxy_manager::identity::claim_for_user(&store, user_id, &actor).await?;
+            // clap 的 `requires` 已经保证 identity 与 reason 同进同出，
+            // 这里只是把它摊成库那一层的形状。
+            let pick = match (identity.as_deref(), reason.as_deref()) {
+                (Some(identity_name), Some(reason)) => {
+                    proxy_manager::identity::Pick::Named { identity_name, reason, replace }
+                }
+                _ => proxy_manager::identity::Pick::FromPool,
+            };
+            let claim = proxy_manager::identity::claim(&store, user_id, pick, &actor).await?;
             if claim.newly_claimed {
                 println!("已开通：{account} → 身份 {}", claim.identity_name);
+                if identity.is_some() {
+                    println!(
+                        "**走的是显式旁路**：跳过了零基线门禁，理由已写进归属事件。\n                         这个身份的凭据与之前那个不同，{account} 要重新拉一次订阅。"
+                    );
+                }
             } else {
                 // 幂等不是「没生效」，说清楚免得有人重跑到池子见底。
                 println!("{account} 早已开通：身份 {}（本次未消耗名额）", claim.identity_name);

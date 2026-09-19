@@ -43,14 +43,69 @@ pub struct Claim {
     pub newly_claimed: bool,
 }
 
+/// 怎么挑那个身份。
+#[derive(Debug, Clone, Copy)]
+pub enum Pick<'a> {
+    /// 从池子里挑：要求在全部节点上空闲，**且四向计数为零**（D11 §4.6、R12）。
+    /// 常规路径走这一支。
+    FromPool,
+    /// 指定名字，**跳过零基线门禁**。
+    ///
+    /// # 这个旁路为什么存在
+    ///
+    /// 零基线门禁挡的是「把一个用过的身份发给新用户，于是他一上来就欠着别人的
+    /// 账」——用实际观察代替相信配置。它防的情形在**原持有者拿回自己的身份**
+    /// 上不成立：那些字节本来就是他自己跑的。
+    ///
+    /// 2026-09-20 重建库之后撞上过一次：kimi 重新登录拿到的是 user0002，
+    /// 因为他自己的 user0001 转发过 92 MB/726 MB、不再是零基线。
+    /// 当时只能手工改库（`operations` 仓的 `scripts/reassign-identity.py`），
+    /// 而那意味着这条判断留痕在一个运维脚本里而不是代码里。
+    ///
+    /// # 它不放宽的东西
+    ///
+    /// * 目标必须在**全部**在册节点上空闲。部分认领会让订阅里有一条连不上的
+    ///   入口，而客户端只说「握手失败」。
+    /// * `claim_fence_*` 一律留 NULL。那两列记的是「证明零基线的那份快照」，
+    ///   让这个敞口事后可核；本支根本没有证明零基线，填一个值就是撒谎。
+    /// * `reason` 必填，落进只追加的归属事件（D14）。旁路的理由必须能被事后读到。
+    Named {
+        identity_name: &'a str,
+        reason: &'a str,
+        /// 这个人已经持有**另一个**身份时，是否先放掉它。
+        ///
+        /// 默认不放：`grant` 这个词不该悄悄退掉一个已经发出去的凭据。
+        /// 要换就明写。
+        replace: bool,
+    },
+}
+
 /// 给用户认领一个身份。**幂等**：已经有的直接返回，不再消耗一个名额。
 ///
 /// 同一个身份名在四个节点上是同一份凭据（同一个 uPSK），所以认领必须
 /// 在**全部**启用配额的节点上落同一个名字——否则用户的订阅里会有几条入口
 /// 连不上，而那看起来像网络问题。
 pub async fn claim_for_user(store: &Store, user_id: i64, actor: &str) -> Result<Claim> {
+    claim(store, user_id, Pick::FromPool, actor).await
+}
+
+/// 同上，但由调用方决定怎么挑。
+pub async fn claim(store: &Store, user_id: i64, pick: Pick<'_>, actor: &str) -> Result<Claim> {
     if actor.trim().is_empty() {
         return Err(Error::Quota("认领必须留下操作者".into()));
+    }
+    if let Pick::Named { identity_name, reason, .. } = pick {
+        if identity_name.trim().is_empty() {
+            return Err(Error::Quota("指定认领必须给出身份名".into()));
+        }
+        if reason.trim().is_empty() {
+            return Err(Error::Quota(
+                "指定认领必须写明理由：它跳过了零基线门禁，而那道门禁挡的是\
+                 「把用过的身份发给新用户」。理由会落进只追加的归属事件，\
+                 事后要读得到"
+                    .into(),
+            ));
+        }
     }
     let now = bucket::to_rfc3339(OffsetDateTime::now_utc());
     let mut txn = store.begin_immediate().await?;
@@ -74,18 +129,92 @@ pub async fn claim_for_user(store: &Store, user_id: i64, actor: &str) -> Result<
     .await?
     .map(|row| row.get(0));
     if let Some(identity_name) = existing {
-        txn.commit().await?;
-        return Ok(Claim { user_id, identity_name, nodes: targets, newly_claimed: false });
+        match pick {
+            // D11：重复登录不重复分配、不重置用量。
+            Pick::FromPool => {
+                txn.commit().await?;
+                return Ok(Claim { user_id, identity_name, nodes: targets, newly_claimed: false });
+            }
+            // 指定的就是他已经持有的那个：同样是幂等，不白费一个名额。
+            Pick::Named { identity_name: wanted, .. } if wanted == identity_name => {
+                txn.commit().await?;
+                return Ok(Claim { user_id, identity_name, nodes: targets, newly_claimed: false });
+            }
+            Pick::Named { replace: false, .. } => {
+                return Err(Error::Quota(format!(
+                    "这个人已经持有 {identity_name}。换成别的身份要明写 --replace：\
+                     换了之后旧凭据不再属于他，而他的订阅地址不变、内容会变，\
+                     已导入的客户端要重新拉一次"
+                )));
+            }
+            Pick::Named { reason, .. } => {
+                // 只追加的归属事件（D14）：把 route 行改回 free 而不留事件，
+                // 等于让一段持有从历史里消失。
+                sqlx::query(
+                    "INSERT INTO identity_assignment_events(route_id, user_id, state, \
+                     effective_from, recorded_at, reason) \
+                     SELECT route_id, NULL, 'unassigned', ?, ?, ? FROM identity_routes \
+                      WHERE user_id = ? AND state = 'claimed'",
+                )
+                .bind(&now)
+                .bind(&now)
+                .bind(reason)
+                .bind(user_id)
+                .execute(txn.conn())
+                .await?;
+                // **先放旧的再认领新的**：`idx_identity_routes_active_per_user`
+                // 限制一人一节点一个 claimed 槽位，反过来会被索引当场拒掉。
+                sqlx::query(
+                    "UPDATE identity_routes SET user_id = NULL, state = 'free', \
+                     claimed_at = NULL, claim_fence_runtime_id = NULL, \
+                     claim_fence_sequence = NULL \
+                      WHERE user_id = ? AND state = 'claimed'",
+                )
+                .bind(user_id)
+                .execute(txn.conn())
+                .await?;
+                tracing::info!(user_id, released = %identity_name, actor, "换身份：先放掉旧的");
+            }
+        }
     }
 
-    let candidate = pick_free_slot(&mut txn, targets.len() as i64).await?.ok_or_else(|| {
-        // R12：池耗尽要有明确错误码，绝不静默退化成复用一个已用过的身份。
-        Error::Quota(
-            "身份池已耗尽：没有在全部节点上都空闲且四向计数为零的身份。\
-             扩容需要改节点配置并 reload，不能靠复用退役身份"
-                .into(),
-        )
-    })?;
+    let candidate = match pick {
+        Pick::FromPool => {
+            pick_free_slot(&mut txn, targets.len() as i64).await?.ok_or_else(|| {
+                // R12：池耗尽要有明确错误码，绝不静默退化成复用一个已用过的身份。
+                Error::Quota(
+                    "身份池已耗尽：没有在全部节点上都空闲且四向计数为零的身份。\
+                 扩容需要改节点配置并 reload，不能靠复用退役身份"
+                        .into(),
+                )
+            })?
+        }
+        Pick::Named { identity_name, .. } => {
+            // **零基线不查，空闲照查。** 部分认领会让订阅里有一条连不上的入口。
+            let free: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM identity_routes r \
+                   JOIN nodes n ON n.node_id = r.node_id AND n.status = 'active' \
+                  WHERE r.identity_name = ? AND r.state = 'free'",
+            )
+            .bind(identity_name)
+            .fetch_one(txn.conn())
+            .await?;
+            if free != targets.len() as i64 {
+                return Err(Error::Quota(format!(
+                    "{identity_name} 在 {free} 台在册节点上空闲，而在册节点有 {}。\
+                     必须全部空闲才能整体认领——同一个名字在每台上是同一份凭据，\
+                     缺一台就是订阅里有一条连不上的入口",
+                    targets.len()
+                )));
+            }
+            // fence 两列留 NULL：本支没有证明零基线，填值就是撒谎。
+            Candidate {
+                identity_name: identity_name.to_string(),
+                fence_runtime_id: None,
+                fence_sequence: None,
+            }
+        }
+    };
 
     // CAS：`WHERE state = 'free'` 让「同一个槽位被认领两次」写不进去，
     // 而不是靠上面那次 SELECT 的时效性。影响行数必须恰好等于节点数。
@@ -130,7 +259,12 @@ pub async fn claim_for_user(store: &Store, user_id: i64, actor: &str) -> Result<
         .bind(user_id)
         .bind(&now)
         .bind(&now)
-        .bind(actor)
+        // 常规认领留操作者；指定认领留**理由**（外加操作者），
+        // 因为那一支跳过了门禁，事后要读得到为什么。
+        .bind(match pick {
+            Pick::FromPool => actor.to_string(),
+            Pick::Named { reason, .. } => format!("{reason}（操作者 {actor}）"),
+        })
         .execute(txn.conn())
         .await?;
     }
