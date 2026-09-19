@@ -120,3 +120,88 @@ mod tests {
         assert!(decode(ZSTD, &stored, (raw.len() * 100) as i64).is_ok());
     }
 }
+
+// ============ 把旧的 identity 行补压 ============
+
+use crate::store::Store;
+use sqlx::Row;
+
+#[derive(Debug, Default)]
+pub struct Recompressed {
+    pub candidates: i64,
+    pub raw_bytes: i64,
+    pub packed_bytes: i64,
+    pub rewritten: i64,
+}
+
+/// 把 `codec = 'identity'` 的行重新按 zstd 编码。
+///
+/// **逐行核对往返**：压完立刻解回来，与原文逐字节比较，长度也要对上。
+/// 不这么做的话，一次编码 bug 会把**结算输入**换成一串解不开的字节，
+/// 而症状要等到那条批次需要重放时才出现——那时原文已经没了。
+///
+/// 只碰 `identity` 行，所以**可以重复跑**：跑第二遍时没有候选行，什么都不做。
+pub async fn recompress(store: &Store, apply: bool, batch: i64) -> Result<Recompressed> {
+    let mut outcome = Recompressed::default();
+    let mut last_pk: i64 = 0;
+
+    loop {
+        let rows = sqlx::query(
+            "SELECT batch_pk, raw_length, payload FROM snapshot_payloads \
+              WHERE codec = 'identity' AND batch_pk > ? ORDER BY batch_pk LIMIT ?",
+        )
+        .bind(last_pk)
+        .bind(batch)
+        .fetch_all(store.readers())
+        .await?;
+        if rows.is_empty() {
+            break;
+        }
+
+        let mut packed_rows = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let batch_pk: i64 = row.get(0);
+            let raw_length: i64 = row.get(1);
+            let raw: Vec<u8> = row.get(2);
+            last_pk = batch_pk;
+            outcome.candidates += 1;
+            outcome.raw_bytes += raw.len() as i64;
+
+            let (codec, stored) = encode(&raw);
+            outcome.packed_bytes += stored.len() as i64;
+            if codec == IDENTITY {
+                continue; // 压不小，保持原样
+            }
+            // **往返核对。** 这一步不能省：它是「换掉结算输入」这件事唯一的护栏。
+            let back = decode(codec, &stored, raw_length)?;
+            if back != raw {
+                return Err(Error::Ledger(format!(
+                    "batch_pk={batch_pk} 的载荷压缩往返不一致，整批中止"
+                )));
+            }
+            packed_rows.push((batch_pk, stored));
+        }
+
+        if !apply || packed_rows.is_empty() {
+            continue;
+        }
+        let mut txn = store.begin_immediate().await?;
+        for (batch_pk, stored) in &packed_rows {
+            // **带上 `codec = 'identity'` 这个条件**：万一有别人同时改了这一行，
+            // 这次写入就该落空，而不是把它覆盖掉。
+            let affected = sqlx::query(
+                "UPDATE snapshot_payloads SET codec = 'zstd', payload = ? \
+                  WHERE batch_pk = ? AND codec = 'identity'",
+            )
+            .bind(stored)
+            .bind(batch_pk)
+            .execute(txn.conn())
+            .await?
+            .rows_affected();
+            outcome.rewritten += affected as i64;
+        }
+        txn.commit().await?;
+    }
+
+    Ok(outcome)
+}
