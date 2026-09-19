@@ -26,6 +26,8 @@ mod harness;
 
 #[path = "m4/api.rs"]
 mod api;
+#[path = "m4/audit.rs"]
+mod audit;
 
 #[path = "m4/assets.rs"]
 mod assets;

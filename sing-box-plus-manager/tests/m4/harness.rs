@@ -28,6 +28,8 @@ pub struct Api {
     pub router: axum::Router,
     /// 名单文件的位置。`None` 表示这份 Api 没有 `[sso]`。
     pub sso_path: Option<std::path::PathBuf>,
+    /// 审计镜像树的根。用例往里铺 JSONL 夹具。
+    pub audit_dir: std::path::PathBuf,
 }
 
 pub struct Actor {
@@ -105,16 +107,23 @@ impl Api {
 
     /// 带订阅的 Api：写一份凭据文件（0600）与入口清单。
     pub async fn with_subscription(admins: &[&str], identities: &[&str]) -> Self {
-        Api::build_full(Some(server_toml_with(admins, &[])), Some(identities.to_vec())).await
+        Api::build_full(Some(server_toml_with(admins, &[])), Some(identities.to_vec()), true).await
     }
 
     async fn build(server_toml: Option<String>) -> Self {
-        Api::build_full(server_toml, None).await
+        Api::build_full(server_toml, None, true).await
+    }
+
+    /// 没有 `[audit]` 的一份。审计端点那时回 `audit_not_enabled` 而不是空表——
+    /// 空表会被读成「你没访问过任何目标」。
+    pub async fn without_audit() -> Self {
+        Api::build_full(None, None, false).await
     }
 
     async fn build_full(
         server_toml: Option<String>,
         subscription_identities: Option<Vec<&str>>,
+        with_audit: bool,
     ) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let config = StorageConfig { path: dir.path().join("pm.db"), busy_timeout_ms: 5_000 };
@@ -187,9 +196,20 @@ impl Api {
                 ],
             }
         });
-        let router =
-            proxy_manager::api::router(store.clone(), Arc::new(Vec::new()), sso, subscription);
-        Api { _dir: Some(dir), store, router, sso_path }
+        // 审计镜像树放在这个用例自己的临时目录下，与真实部署同形。
+        let audit_dir = dir.path().join("audit");
+        let audit = with_audit.then(|| proxy_manager::config::AuditConfig {
+            dir: audit_dir.clone(),
+            interval_secs: 600,
+        });
+        let router = proxy_manager::api::router(
+            store.clone(),
+            Arc::new(Vec::new()),
+            sso,
+            subscription,
+            audit,
+        );
+        Api { _dir: Some(dir), store, router, sso_path, audit_dir }
     }
 
     pub async fn user(&self, login: &str, role: Role, provider: &str) -> Actor {
@@ -219,6 +239,20 @@ impl Api {
             cookie: issued.cookie_value,
             csrf: issued.csrf_token,
         }
+    }
+
+    /// 往审计镜像树里铺一份 JSONL。`lines` 是**整行**，照节点真实写法。
+    pub fn seed_audit(&self, node_id: &str, identity: &str, lines: &[String]) {
+        let dir = self.audit_dir.join(node_id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let name = proxy_manager_wire::audit::active_file_name(identity);
+        let mut body = lines.join("\n");
+        body.push('\n');
+        std::fs::write(dir.join(name), body).unwrap();
+    }
+
+    pub fn audit_queries(&self) -> Vec<proxy_manager::audit::queries::QueryRecord> {
+        proxy_manager::audit::queries::read(&self.audit_dir).unwrap()
     }
 
     pub async fn admin(&self) -> Actor {

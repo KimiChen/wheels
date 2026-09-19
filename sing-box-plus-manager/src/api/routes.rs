@@ -766,16 +766,83 @@ fn unusable_reason(
     }
 }
 
-// ============ 尚未启用的能力 ============
+// ============ 出站目标审计（§4.8） ============
 
-/// §4.8 的全局审计开关没开。
+#[derive(Debug, Deserialize)]
+pub struct AuditQuery {
+    #[serde(default)]
+    range: Option<String>,
+}
+
+/// 本人自助查（D18）。
+pub async fn me_audit_access(
+    State(state): State<AppState>,
+    subject: Subject,
+    Query(query): Query<AuditQuery>,
+) -> ApiResult<impl IntoResponse> {
+    audit_access(&state, subject.user_id, subject.user_id, query).await
+}
+
+/// 管理员按用户查。
 ///
-/// **不是 `forbidden`**：没有记录可看和不让你看是两回事（D18）。
-/// 开关关闭时导航项也不该存在——前端据此隐藏入口，而这里是服务端那一半。
-pub async fn audit_not_enabled(subject: Subject) -> ApiResult<impl IntoResponse> {
-    let _ = subject; // admin 与 user 都可调；开关没开，两者一样拿不到
-    Err::<Json<Value>, _>(
-        ApiError::new(ApiCode::AuditNotEnabled, "出站目标审计尚未启用")
-            .with_detail(json!({ "milestone": "M6" })),
-    )
+/// **入口在用户列表每一行，不是一个独立的检索页。** §4.8 的理由很具体：
+/// 从用户进比从身份名进更不容易串号——输入身份名的那种检索最容易漏掉裁剪这一步，
+/// 因为身份名看起来已经足够定位了，而它恰恰不是（同一个名字可以在两个入口上
+/// 分属两人）。
+pub async fn user_audit_access(
+    State(state): State<AppState>,
+    subject: Subject,
+    Path(user_id): Path<i64>,
+    Query(query): Query<AuditQuery>,
+) -> ApiResult<impl IntoResponse> {
+    subject.require_admin()?;
+    audit_access(&state, subject.user_id, user_id, query).await
+}
+
+/// 两条路由的共同实现。`actor` 是调用者，`data_subject` 是被查的人。
+async fn audit_access(
+    state: &AppState,
+    actor: i64,
+    data_subject: i64,
+    query: AuditQuery,
+) -> ApiResult<Json<Value>> {
+    // 没配 `[audit]`：**不是 `forbidden`**——没有记录可看和不让你看是两回事（D18）。
+    let Some(config) = state.audit.as_ref() else {
+        return Err(ApiError::new(ApiCode::AuditNotEnabled, "出站目标审计尚未启用")
+            .with_detail(json!({ "reason": "服务端没有配置 [audit]" })));
+    };
+    let range = match query.range.as_deref() {
+        None => crate::audit::query::Range::Week,
+        Some(text) => crate::audit::query::Range::parse(text)
+            .ok_or_else(|| ApiError::new(ApiCode::InvalidRequest, "range 只能是 24h / 7d / 30d"))?,
+    };
+    let now = OffsetDateTime::now_utc();
+    let now_ms = (now.unix_timestamp_nanos() / 1_000_000) as i64;
+
+    // **拉取行为本身要落主控审计**（§4.8）：谁、什么时候、拉了谁的哪个时间窗。
+    // 放文件不放库，与审计数据同一棵树、同一条纪律——也免得为一张小表去走 D32 的
+    // 四步迁移。记在**取数之前**：一次失败的查询同样是一次访问。
+    if let Err(error) = crate::audit::queries::record(
+        &config.dir,
+        &crate::audit::queries::QueryRecord {
+            at: crate::ledger::bucket::to_rfc3339(now),
+            actor,
+            data_subject,
+            range: range.as_str().to_string(),
+        },
+    ) {
+        // 记不下来就不给看。这条查询日志是 §4.8 对「谁看过谁的明细」的全部答案，
+        // 悄悄放行等于让那个答案有一个没人知道的缺口。
+        tracing::error!(%error, "写审计查询日志失败：拒绝本次查询（P1）");
+        return Err(ApiError::new(ApiCode::Internal, "审计查询日志不可写"));
+    }
+
+    let answer =
+        crate::audit::query::access(&state.store, &config.dir, data_subject, range, now_ms)
+            .await
+            .map_err(|error| {
+            tracing::error!(%error, "读审计镜像失败");
+            ApiError::new(ApiCode::Internal, "读取审计明细失败")
+        })?;
+    Ok(Json(serde_json::to_value(answer).unwrap_or_else(|_| json!({}))))
 }

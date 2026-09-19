@@ -57,9 +57,12 @@ async fn main() -> anyhow::Result<()> {
     let (_tx, rx) = tokio::sync::watch::channel(false);
     // 预览用 `local` 会话，所以角色取自 `users.role`，不需要成员名单（D27）。
     // 预览不带订阅：`/sub/…` 不挂载，`me.html` 上那块保持占位。
+    // 也不带审计：`me-audit.html` 会拿到 audit_not_enabled，页面据此说「还没开」，
+    // 而不是显示一张空表——空表会被读成「你没访问过任何目标」。
     proxy_manager::api::serve(
         store.clone(),
         std::sync::Arc::new(Vec::new()),
+        None,
         None,
         None,
         listener,
