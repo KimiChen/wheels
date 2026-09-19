@@ -119,7 +119,7 @@
               管理员进入控制台，管理节点、用户与授权设置。
             </p>
             <div class="pm-demo-links" data-js-only>
-              <span>体验静态原型 · 不进行真实登录或授权</span>
+              <span data-pm-when="prototype">体验静态原型 · 不进行真实登录或授权</span><span data-pm-when="live">用泡游账号登录（承载飞书实名）</span>
               <a class="wsk-button" href="me.html" data-demo-principal="user">预览普通用户</a>
               <a class="wsk-button wsk-secondary" href="overview.html" data-demo-principal="admin">预览管理员</a>
             </div>
@@ -184,7 +184,7 @@
 
     <footer class="wsk-footer">
       <div class="wsk-footer-inner">
-        <div class="wsk-footer-legal"><span>proxy-manager · 静态原型 / 示例数据</span></div>
+        <div class="wsk-footer-legal"><span data-pm-when="prototype">proxy-manager · 静态原型 / 示例数据</span><span data-pm-when="live">proxy-manager</span></div>
         <a
           class="wsk-footer-link"
           href="https://github.com/KimiChen/wheels/tree/main/web-standard-kit"

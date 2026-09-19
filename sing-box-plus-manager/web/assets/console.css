@@ -207,3 +207,14 @@ body[data-pm-sso] [data-demo-badge] { display: none; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; animation: none !important; }
 }
+
+/* 只在原型里成立的文案 vs 只在真实模式下成立的文案。
+   用 CSS 而不是 JS：这是一条**服务端事实**（<body> 上的 data-pm-mode / data-pm-sso），
+   不该等脚本跑完才正确，也不该在脚本挂掉时显示错的那一句。
+   登录页是 Public 页、不经 stamp()，但 stamp_sso 总会给它盖上 data-pm-sso，
+   所以那个属性存在本身就说明「这一页是主控服务出来的」。 */
+[data-pm-when="live"] { display: none; }
+body[data-pm-mode="live"] [data-pm-when="live"],
+body[data-pm-sso] [data-pm-when="live"] { display: inline; }
+body[data-pm-mode="live"] [data-pm-when="prototype"],
+body[data-pm-sso] [data-pm-when="prototype"] { display: none; }
