@@ -238,7 +238,11 @@
       // 订阅地址单独一个端点是服务端的决定（它是凭据，不该出现在每一页的
       // `/me` 响应里），页面这边照做即可。
       load: async () => {
-        const [me, sub] = await Promise.all([getJson("/me"), getJson("/me/subscription")]);
+        const [me, sub, usage] = await Promise.all([
+          getJson("/me"),
+          getJson("/me/subscription"),
+          getJson("/me/usage"),
+        ]);
         return { me, sub };
       },
       render: ({ me, sub }) => {
@@ -252,7 +256,9 @@
         });
         // 一种拨法一条地址。它们共用同一个 token，差的只是前缀与要拨的 host。
         renderCollection("subscriptions", sub.enabled ? sub.subscriptions : [], "还没有订阅地址");
-        renderCollection("me-entries", sub.enabled ? sub.entries : [], "还没有为你配置入口");
+        // 列节点而不是列入口：入口名在订阅正文里，而这一页真正回答的是
+        // 「我的流量落在哪几台、公网内网各多少」。
+        renderCollection("me-nodes-usage", usage.nodes ?? [], "本周期还没有入账记录");
 
         // 三种状态各说各的话。**不要合并成一句「订阅不可用」**——
         // 「服务端没配」「你还没分到身份」「加载失败」要做的事完全不同。
@@ -279,7 +285,10 @@
 
     "me-usage.html": {
       load: () => getJson("/me/usage"),
-      render: (usage) => renderCollection("me-usage", usage.nodes, "本周期还没有入账记录"),
+      render: (usage) => {
+        renderCollection("me-usage", usage.nodes, "本周期还没有入账记录");
+        renderCollection("me-sources", usage.sources, "本周期还没有入账记录");
+      },
     },
 
     "overview.html": {

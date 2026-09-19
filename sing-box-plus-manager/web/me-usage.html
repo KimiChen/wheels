@@ -235,6 +235,39 @@
                 包含本周期曾使用过的节点，停止授权后历史用量仍会保留。
               </p>
             </section>
+
+            <section class="wsk-section" aria-labelledby="me-sources">
+              <div class="wsk-section-head">
+                <h3 id="me-sources">按来源分布</h3>
+              </div>
+              <div class="wsk-table-wrap">
+                <table class="wsk-table pm-personal-usage" data-pm-collection="me-sources">
+                  <caption class="wsk-sr-only">我在各来源的用量</caption>
+                  <thead>
+                    <tr><th scope="col">来源</th><th scope="col">协议</th><th scope="col">本周期用量</th><th scope="col">量级</th></tr>
+                  </thead>
+                  <tbody>
+                    <tr><th scope="row">公网</th><td>vless</td><td class="wsk-tok-number">620,144,220,160</td><td>69%</td></tr>
+                    <tr><th scope="row">公司内网</th><td>ss</td><td class="wsk-tok-number">208,077,109,760</td><td>23%</td></tr>
+                    <tr data-table-empty hidden><td colspan="4" class="wsk-help" data-pm-empty-text>暂无数据</td></tr>
+                    <template data-pm-template>
+                      <tr data-row>
+                        <th scope="row" data-pm="label"></th>
+                        <td data-pm="transport"></td>
+                        <td class="wsk-tok-number" data-pm-exact="total_bytes"></td>
+                        <td data-pm-bytes="total_bytes"></td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+              <p class="wsk-help wsk-mt-2">
+                分的是<strong>协议</strong>：内网那份订阅走 Shadowsocks、公网那份走 VLESS。
+                入口机做地址转换，节点看不到你拨的是哪个地址，所以拿内网那份订阅
+                从公网拨会算进「公司内网」。2026-09-20 之前两份订阅都是
+                Shadowsocks，那之前的用量全部落在内网一侧。
+              </p>
+            </section>
           </div>
         </div>
       </div>

@@ -232,7 +232,7 @@
                 <h2>登录即已分配，不需要申请</h2>
                 <p>
                   你的计费身份是
-                  <strong data-pm="identity">user0000</strong>；下面每一条入口都用这一个身份，
+                  <strong data-pm="identity">user0000</strong>；每一条入口都用这一个身份，
                   用量合并计入本周期额度。
                 </p>
               </div>
@@ -298,34 +298,47 @@
 
             <section class="wsk-section" aria-labelledby="me-nodes">
               <div class="wsk-section-head">
-                <h2 id="me-nodes">我的入口</h2>
+                <h2 id="me-nodes">我的节点</h2>
                 <!-- 只在这份订阅真的能用时才说「全部已包含」：
                      没有身份或缺凭据时订阅正文是 `proxies: []`，这句就是假的。 -->
                 <span class="wsk-badge" data-pm-entries-included data-pm-state>全部已包含在订阅里</span>
               </div>
-              <div class="pm-node-grid" data-pm-collection="me-entries">
+              <div class="pm-node-grid" data-pm-collection="me-nodes-usage">
                 <article class="pm-node-card">
-                  <div><h3>Forward-甲地-直连</h3><p>node-a</p></div>
+                  <div><h3>node-a</h3><p>公网 12.4 GB · 公司内网 3.1 GB</p></div>
                 </article>
-                <article class="pm-node-card">
-                  <div><h3>MTLS-乙地-经甲地</h3><p>node-b</p></div>
-                </article>
-                <!-- 真实模式下上面两张示例卡会被整体清掉，不会与真行混排。 -->
-                <p data-table-empty hidden class="wsk-help"><span data-pm-empty-text>还没有为你配置入口</span></p>
+                <!-- 真实模式下上面这张示例卡会被整体清掉，不会与真行混排。 -->
+                <p data-table-empty hidden class="wsk-help"><span data-pm-empty-text>本周期还没有入账记录</span></p>
                 <!--
-                  卡片上**没有**状态徽标。服务端的 entries 只有名字与落点，
-                  没有任何可用性字段，写一个「可用」上去就是替服务端编答案：
-                  节点掉线、采集失败、额度闸断时它照样是绿的。
-                  一列永远是同一个答案的状态，看几次之后就不再有人读它。
+                  卡片上**没有**状态徽标。这里只有用量，没有任何可用性字段，
+                  写一个「可用」上去就是替服务端编答案：节点掉线、采集失败、
+                  额度闸断时它照样是绿的。一列永远是同一个答案的状态，
+                  看几次之后就不再有人读它。
+
+                  两条来源按**下标**绑（sources.0 / sources.1），顺序由
+                  server.toml 里 [[subscription.sources]] 的书写顺序决定，
+                  服务端照那个顺序输出。改了配置顺序，这里跟着变，不用改页面。
                 -->
                 <template data-pm-template>
                   <article class="pm-node-card">
-                    <div><h3 data-pm="name"></h3><p data-pm="node_id"></p></div>
+                    <div>
+                      <h3 data-pm="node_id"></h3>
+                      <p>
+                        <span data-pm="sources.0.label"></span>
+                        <strong data-pm-bytes="sources.0.total_bytes"></strong>
+                        ·
+                        <span data-pm="sources.1.label"></span>
+                        <strong data-pm-bytes="sources.1.total_bytes"></strong>
+                      </p>
+                    </div>
                   </article>
                 </template>
               </div>
               <p class="wsk-help wsk-mt-2">
-                名字里的 <strong>Forward</strong> 是直连落地，<strong>MTLS</strong> 是经中转再落地。
+                只列本周期有过流量的节点。分的是<strong>协议</strong>：内网那份订阅走
+                Shadowsocks、公网那份走 VLESS。入口机做地址转换，节点看不到你拨的是
+                哪个地址，所以拿内网那份订阅从公网拨会算进「公司内网」；
+                2026-09-20 之前两份订阅都是 Shadowsocks，那之前的用量全部落在内网一侧。
                 连接地址与端口只写在订阅正文里，这一页不重复——它们是给客户端看的。
               </p>
             </section>
