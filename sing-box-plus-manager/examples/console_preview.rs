@@ -36,12 +36,19 @@ async fn main() -> anyhow::Result<()> {
 
     let store = Arc::new(Store::open(&StorageConfig { path, busy_timeout_ms: 5_000 }).await?);
     store.init_schema().await?;
+    // 与 `run_service` 同一条纪律：单行设置在这里建出来，`quota::settings::apply`
+    // 只负责改。少了它，趋势数据铺完之后下一步就崩。
+    proxy_manager::quota::settings::ensure_initialized(&store, "Asia/Shanghai").await?;
     seed(&store).await?;
 
     // 两个角色各签一张：管理员视角与普通用户视角要能来回切，
     // 否则「越权拦截」这件事只在测试里成立，在眼前看不到。
     let admin = session::create(&store, 1, "local", time::Duration::hours(8)).await?;
     let member = session::create(&store, 2, "local", time::Duration::hours(8)).await?;
+    let audit_dir = dir.join("audit");
+    let _ = std::fs::remove_dir_all(&audit_dir);
+    seed_audit(&audit_dir)?;
+
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", PORT)).await?;
 
     println!("\n预览地址  http://127.0.0.1:{PORT}/overview.html");
@@ -57,14 +64,14 @@ async fn main() -> anyhow::Result<()> {
     let (_tx, rx) = tokio::sync::watch::channel(false);
     // 预览用 `local` 会话，所以角色取自 `users.role`，不需要成员名单（D27）。
     // 预览不带订阅：`/sub/…` 不挂载，`me.html` 上那块保持占位。
-    // 也不带审计：`me-audit.html` 会拿到 audit_not_enabled，页面据此说「还没开」，
-    // 而不是显示一张空表——空表会被读成「你没访问过任何目标」。
+    // **带审计**：这一页的价值全在「看见自己的出站目标」上，而那件事只有把
+    // 真实形状的 JSONL 铺进去、让它走完解析 → C35 裁剪 → 聚合这条链才看得见。
     proxy_manager::api::serve(
         store.clone(),
         std::sync::Arc::new(Vec::new()),
         None,
         None,
-        None,
+        Some(proxy_manager::config::AuditConfig { dir: audit_dir, interval_secs: 600 }),
         listener,
         rx,
     )
@@ -192,10 +199,15 @@ async fn seed_trend(store: &Store, node_id: &str) -> anyhow::Result<()> {
     .await?
     .get(0);
 
+    // **归属不写在这里。** `runtime_identities` 按 (node, runtime) 键，节点一重启
+    // 就是全新的行，写在这里的归属会静默全部丢失——schema 里那一列早就删了，
+    // 而这个示例一直还在往它里面写，于是它启动即崩。没人发现是因为没有任何东西
+    // 会跑它：Rust 侧的断言证明得了服务端发了什么，证明不了页面画成了什么，
+    // 而这个示例正是用来看后者的。
     let identity_id: i64 = sqlx::query(
         "INSERT INTO runtime_identities(runtime_pk, runtime_service_id, identity_name, \
-         generation, active, user_id, first_seen_at, last_seen_at) \
-         VALUES (?, ?, 'u_example_01', ?, 1, 2, ?, ?) RETURNING runtime_identity_id",
+         generation, active, first_seen_at, last_seen_at) \
+         VALUES (?, ?, 'u_example_01', ?, 1, ?, ?) RETURNING runtime_identity_id",
     )
     .bind(runtime_pk)
     .bind(service_id)
@@ -205,6 +217,30 @@ async fn seed_trend(store: &Store, node_id: &str) -> anyhow::Result<()> {
     .fetch_one(txn.conn())
     .await?
     .get(0);
+
+    // 归属落在**槽位**上，跨重启存活。审计裁剪（C35）也是从这里取历史持有区间。
+    let route_id: i64 = sqlx::query(
+        "INSERT INTO identity_routes(node_id, inbound_tag, identity_name, state, user_id, \
+         claimed_at, created_at) VALUES (?, 'ss-in', 'u_example_01', 'claimed', 2, ?, ?) \
+         RETURNING route_id",
+    )
+    .bind(node_id)
+    .bind(&stamp)
+    .bind(&stamp)
+    .fetch_one(txn.conn())
+    .await?
+    .get(0);
+    // 持有起点放到一年前：预览里的审计记录跨度可以到 30 天，
+    // 起点设成「刚才」的话那些记录会被正确地判成「持有之前」而全部不显示，
+    // 然后人会以为是页面坏了。
+    sqlx::query(
+        "INSERT INTO identity_assignment_events(route_id, user_id, state, effective_from, \
+         recorded_at) VALUES (?, 2, 'assigned', '2026-01-01T00:00:00Z', ?)",
+    )
+    .bind(route_id)
+    .bind(&stamp)
+    .execute(txn.conn())
+    .await?;
 
     // 24 小时，**留几个空桶**：空桶要能在图上看见，
     // 否则「这段时间没有流量」会被压成两根相邻的柱子。
@@ -255,5 +291,69 @@ async fn seed_trend(store: &Store, node_id: &str) -> anyhow::Result<()> {
     }
     txn.commit().await?;
     println!("已造趋势数据：24 小时中 20 个桶有流量，4 个空桶");
+    Ok(())
+}
+
+/// 铺一份**真实形状**的审计 JSONL。
+///
+/// 13 个键、键名与类型照 `internal/userstats/audit.go` 的 `encode()`，
+/// 三种 `host_src` 各有，外加两条诊断行——`ev=gap` 的 `n` 一条给了数、一条是
+/// `null`，因为页面必须在后一种情况下显示「—」而不是编一个数出来。
+///
+/// 域名用 RFC 2606 的保留段。`wheels` 是公开仓库，示例数据里不出现任何真实
+/// 节点、域名或账号。
+fn seed_audit(root: &std::path::Path) -> anyhow::Result<()> {
+    let node = root.join("node-a");
+    std::fs::create_dir_all(&node)?;
+    let now = OffsetDateTime::now_utc().unix_timestamp() * 1_000;
+    let run = "b1c2d3e4f5061728394a5b6c7d8e9f01";
+
+    let mut lines = Vec::new();
+    let mut seq = 0u64;
+    // 同一个域名来一批，让「次数」这一列有东西可排。
+    for (host, source, port, hits, ago_ms) in [
+        ("www.example.com", "sniff", 443u16, 37u32, 3_600_000i64),
+        ("api.example.net", "sniff", 443, 12, 7_200_000),
+        ("git.example.org", "fqdn", 22, 4, 86_400_000),
+        ("203.0.113.9", "ip", 9000, 2, 172_800_000),
+    ] {
+        for hit in 0..hits {
+            seq += 1;
+            lines.push(format!(
+                r#"{{"down":{down},"host":"{host}","host_src":"{source}","in":"ss-in","ms":{ms},"net":"tcp","node":"node-a","port":{port},"run":"{run}","seq":{seq},"ts":{ts},"up":{up},"user":"u_example_01"}}"#,
+                down = 3_800 + hit as u64 * 7,
+                ms = 40 + hit % 30,
+                ts = now - ago_ms + hit as i64 * 1_000,
+                up = 1_500 + hit as u64 * 3,
+            ));
+        }
+    }
+    // 一条 TCP 只上行没下行：**节点会写，主控要自己复核判据**，所以它不该出现在
+    // 页面上。留着它，是为了让「复核」这件事在预览里也是可证的。
+    seq += 1;
+    lines.push(format!(
+        r#"{{"down":0,"host":"never-shown.example.com","host_src":"sniff","in":"ss-in","ms":9,"net":"tcp","node":"node-a","port":443,"run":"{run}","seq":{seq},"ts":{ts},"up":800,"user":"u_example_01"}}"#,
+        ts = now - 600_000,
+    ));
+    seq += 1;
+    lines.push(format!(
+        r#"{{"seq":{seq},"ev":"gap","after":{after},"n":9,"reason":"queue_full"}}"#,
+        after = seq - 1
+    ));
+    seq += 1;
+    lines.push(format!(
+        r#"{{"seq":{seq},"ev":"gap","after":{after},"n":null,"reason":"total_cap"}}"#,
+        after = seq - 1
+    ));
+
+    let name = proxy_manager_wire::audit::active_file_name("u_example_01");
+    let mut body = lines.join("\n");
+    body.push('\n');
+    std::fs::write(node.join(name), body)?;
+
+    // 粘滞到 plus 重启的那一位。页面要能把它与 ev=gap 分开显示——
+    // 前者范围开口，后者有边界。
+    proxy_manager::audit::health::note_dropped(&node, "node-a", run, "2026-09-19T06:00:00Z")?;
+    println!("已造审计数据：{} 行，含 2 条缺口与 1 条 audit_dropped", lines.len());
     Ok(())
 }

@@ -209,53 +209,88 @@
                 </div>
               </div>
 
+              <!--
+                原来这里写的是「仅显示已归档记录」。**那句话现在不成立了**：
+                只等归档的话，实测忙的身份要 1.4 天、闲的要 63 天才第一次可见，
+                这一页在那之前是空的。所以主控改成按字节偏移增量读活动文件，
+                可见延迟由同步周期决定。文案跟着改——留着旧说法的代价是，
+                一个看不到刚才那次访问的人会以为「还没归档，再等等」，
+                而真相可能是同步坏了。
+              -->
               <div class="wsk-alert wsk-warning">
                 <svg class="wsk-icon" aria-hidden="true"><use href="#clock"></use></svg>
                 <div>
-                  <strong>仅显示已归档记录，归档时间不固定</strong>
+                  <strong>记录是定期同步过来的，可见时间没有保证</strong>
                   <p>
-                    每个身份的记录文件达到大小阈值后才会归档。使用较少时，可能数天或更久仍未归档。
-                    查不到记录不代表没有访问；列表中的最新时间也不表示此前记录已全部收齐。
+                    刚发生的访问要等下一轮同步才会出现，同步失败时会更久，<strong>没有上界</strong>。
+                    查不到记录不代表没有访问；列表里的最新时间也不表示此前记录已全部收齐。
                   </p>
                 </div>
               </div>
 
               <!--
-                **这张表是编的，而且编的是「这个人访问过什么」。**
-                出站目标审计属于 M6 的另一半，`/api/v1/me/audit/access` 现在回
-                `audit_not_enabled`。留着的话，一个使用者会以为系统真的记下了
-                他访问过 www.example.com 一千二百多次——那是一条关于他本人的假记录，
-                比任何一处假数字都糟。live 模式下 app.js 把整块换成一句说明。
+                取不到数时**整页不留假数据**：api.js 的 neutralize() 会先把所有绑定
+                清成「—」，这条横幅再说明原因。空表 + 没有说明会被读成
+                「你没访问过任何目标」，而那是一句关于这个人的假话。
               -->
-              <div class="wsk-table-wrap wsk-mt-5"
-                   data-pm-prototype="出站目标审计属于 M6 的另一半，还没有启用。启用之前这里不会有任何记录——查不到不等于没有访问">
+              <div class="wsk-alert wsk-danger wsk-mt-5" role="alert" data-pm-error hidden>
+                <svg class="wsk-icon" aria-hidden="true"><use href="#warning"></use></svg>
+                <div>
+                  <strong>出站目标没能取到</strong>
+                  <p data-pm-error-text>请稍后重试；持续失败请联系管理员。</p>
+                </div>
+              </div>
+
+              <!--
+                「查过了，没有记录」与「同步还没跑过，我不知道」是两回事，
+                服务端用 archive_state 分开了，这里就得分开说。合成一句
+                「没有数据」的话，后一种情况下那句话是错的。
+              -->
+              <div class="wsk-alert wsk-info wsk-mt-5" data-pm-state="unavailable" hidden>
+                <svg class="wsk-icon" aria-hidden="true"><use href="#info"></use></svg>
+                <div>
+                  <strong>还没有同步过这台机器上的记录</strong>
+                  <p>这不等于你没有访问过任何目标——是这边还没拿到数据。请稍后再看。</p>
+                </div>
+              </div>
+
+              <div class="wsk-table-wrap wsk-mt-5" data-pm-collection="audit">
                 <table class="wsk-table">
                   <caption class="wsk-sr-only">我的出站目标</caption>
                   <thead>
                     <tr>
                       <th scope="col">目标</th>
+                      <th scope="col">来源</th>
                       <th scope="col">端口</th>
-                      <th scope="col">首次记录</th>
-                      <th scope="col">最近记录</th>
+                      <th scope="col">首次记录 <small class="wsk-help">UTC</small></th>
+                      <th scope="col">最近记录 <small class="wsk-help">UTC</small></th>
                       <th scope="col">次数</th>
                     </tr>
                   </thead>
                   <tbody>
-                    <tr>
-                      <th scope="row">example.invalid</th>
-                      <td>443</td><td>09-11 08:22</td><td>09-17 19:04</td><td class="wsk-tok-number">1,284</td>
-                    </tr>
-                    <tr>
-                      <th scope="row">api.example.invalid</th>
-                      <td>443</td><td>09-12 10:05</td><td>09-17 18:51</td><td class="wsk-tok-number">906</td>
-                    </tr>
-                    <tr>
-                      <th scope="row">cdn.example.invalid</th>
-                      <td>443</td><td>09-11 08:23</td><td>09-17 17:30</td><td class="wsk-tok-number">412</td>
-                    </tr>
-                    <tr>
-                      <th scope="row">198.51.100.7</th>
-                      <td>22</td><td>09-15 14:02</td><td>09-16 09:41</td><td class="wsk-tok-number">18</td>
+                    <!--
+                      模板必须是 `<tbody>` 的**直接子元素**，而且里面只能有一个顶层元素
+                      （renderRows 取的是 `template.content.firstElementChild`）。
+                      空态行是同一个 `<tbody>` 的兄弟，不在模板里。
+                    -->
+                    <template data-pm-template>
+                      <tr>
+                        <th scope="row" data-pm="host">—</th>
+                        <!--
+                          **来源这一列不是装饰。** sniff 来的域名取自 TLS SNI，
+                          而 SNI 可以被 ECH 伪装——那是一条**错误记录**而不是缺失。
+                          把它和客户端直接给出的 fqdn 混成一列，等于让人无法判断
+                          这一行有多可信。
+                        -->
+                        <td data-pm="host_src">—</td>
+                        <td data-pm="port">—</td>
+                        <td data-pm-time="first_seen">—</td>
+                        <td data-pm-time="last_seen">—</td>
+                        <td class="wsk-tok-number" data-pm-digits="count">—</td>
+                      </tr>
+                    </template>
+                    <tr data-table-empty hidden>
+                      <td colspan="6" data-pm-empty-text>这段时间里没有已同步到的记录</td>
                     </tr>
                   </tbody>
                 </table>
@@ -270,17 +305,65 @@
                    上一轮清假数据时标了隔壁那张表，漏了这一块：它在另一个 section 里。
                    缺口标记本身是 §4.8 的真实设计（audit_dropped 位为真时打标），
                    但具体的时间窗只能来自真实数据，所以这里只留说明、不留示例。 -->
-              <div class="wsk-alert wsk-info">
+              <!-- 没有缺口时说「没有缺口」，而不是什么都不显示——
+                   什么都不显示会被读成「这一块还没做」。 -->
+              <div class="wsk-alert wsk-info" data-pm-state="no-gaps" hidden>
                 <svg class="wsk-icon" aria-hidden="true"><use href="#info"></use></svg>
                 <div>
-                  <strong>有缺口时会明确标出来</strong>
+                  <strong>这段时间没有已知缺口</strong>
                   <p>
-                    节点的审计写入失败过的时间窗会被标注，那一段的记录可能不完整。
+                    节点写审计失败过的时间窗会被标注在这里。
                     照常展示已有的部分并明确标注——<strong>不会把缺号换算成「丢了多少次」</strong>，
-                    那是把未知说成已知。审计尚未启用，所以现在没有任何时间窗可标。
+                    那是把未知说成已知。
                   </p>
                 </div>
               </div>
+
+              <div class="wsk-table-wrap" data-pm-collection="audit-gaps" data-pm-state="gaps" hidden>
+                <table class="wsk-table">
+                  <caption class="wsk-sr-only">证据链缺口</caption>
+                  <thead>
+                    <tr>
+                      <th scope="col">类型</th>
+                      <th scope="col">节点</th>
+                      <!--
+                        两列而不是合成一列：`ev=gap` 有起点序号没有时刻，
+                        `audit_dropped` 有观察时刻没有序号，**两者都没有另一半**。
+                        合成一列的话，那一格里的值来自哪一种缺口就看不出来了。
+                      -->
+                      <th scope="col">起点序号</th>
+                      <th scope="col">观察时刻 <small class="wsk-help">UTC</small></th>
+                      <th scope="col">条数</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <template data-pm-template>
+                      <tr>
+                        <th scope="row" data-pm="kind">—</th>
+                        <td data-pm="node_id">—</td>
+                        <td data-pm="after_seq">—</td>
+                        <td data-pm-time="at">—</td>
+                        <!--
+                          节点给了条数才显示条数。它给的是 null 时这里就是「—」，
+                          **不换算**：把缺号算成「丢了 N 条」是把未知说成已知。
+                          audit_dropped 那一类更是连边界都没有——它是「连这句话都
+                          写不进去」，范围开口到下一次重启。
+                        -->
+                        <td data-pm="n">—</td>
+                      </tr>
+                    </template>
+                    <tr data-table-empty hidden>
+                      <td colspan="5" data-pm-empty-text>没有缺口</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <p class="wsk-help wsk-mt-2">
+                <code>queue_full</code> / <code>total_cap</code> 是节点写下来的缺口：它丢了记录，
+                但<strong>写得下这句话</strong>，所以有边界。<code>audit_dropped</code> 不一样——那是
+                <strong>连这句话都写不进去</strong>，范围从观察时刻开口到节点下一次重启为止，
+                没有条数也没有终点。
+              </p>
             </section>
 
             <section class="wsk-section" aria-labelledby="me-audit-why">

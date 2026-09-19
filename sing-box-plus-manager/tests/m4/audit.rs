@@ -352,3 +352,30 @@ async fn 查询日志写不下去就拒绝查询() {
     assert!(body.get("rows").is_none(), "{body}");
     assert!(!body.to_string().contains("secret.example.com"), "{body}");
 }
+
+/// 响应里**只有聚合后的行**，没有逐连接的原始记录。
+///
+/// 这条是真跑了一遍才发现的：`dropped` 那一块是把内部的 `Filtered` 直接
+/// 序列化出去的，而它带着整份原始记录（含 run / seq / ms）。
+/// 页面只要聚合，多出来的那份既是冗余，也是本可以不发生的明细外泄。
+#[tokio::test]
+async fn 响应里没有逐连接的原始记录() {
+    let api = Api::new().await;
+    let alice = api.user("alice", Role::User, "local").await;
+    wire_identity(&api, alice.user_id, "ss-entry", "id-01").await;
+    api.seed_audit(
+        NODE,
+        "id-01",
+        &[line("id-01", "ss-entry", "www.example.com", 4242, now_ms() - 1_000, 100, 200)],
+    );
+
+    let (_, body, _) = api.get("/api/v1/me/audit/access", Some(&alice)).await;
+    let text = body.to_string();
+    assert!(text.contains("www.example.com"), "聚合后的行要在");
+    for leaked in ["4242", RUN, "\"ms\"", "\"seq\"", "\"user\"", "\"in\""] {
+        assert!(!text.contains(leaked), "响应里不该出现 {leaked}：{text}");
+    }
+    // dropped 那一块只该有计数。
+    let dropped = body["dropped"].as_object().unwrap();
+    assert!(dropped.keys().all(|key| key.starts_with("dropped_")), "{dropped:?}");
+}
