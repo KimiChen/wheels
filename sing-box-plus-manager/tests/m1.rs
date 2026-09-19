@@ -9,6 +9,7 @@
 //! | 密钥不进版本库——门禁而不是嘱咐 | [`secret_gate`] |
 //! | 封闭命令集、单飞、审计列目录与按偏移读、端到端 | [`agent_contract`] |
 //! | 审计同步：轮转、偏移、说不清就停住 | [`audit_sync`] |
+//! | C35 归属裁剪的正反矩阵 | [`audit_filter`] |
 //! | 结算事务 11 步与四项判据 | [`settlement`] |
 //! | 事务中途真 `kill -9` 后的自洽 | [`crash`] |
 //! | 采集调度全栈（假节点→agent→主控→账本） | [`scheduler`] |
@@ -33,6 +34,8 @@ mod secret_gate;
 
 #[path = "m1/agent_contract.rs"]
 mod agent_contract;
+#[path = "m1/audit_filter.rs"]
+mod audit_filter;
 #[path = "m1/audit_sync.rs"]
 mod audit_sync;
 #[path = "m1/backup.rs"]
