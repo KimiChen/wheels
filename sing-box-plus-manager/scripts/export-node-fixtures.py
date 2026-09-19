@@ -34,6 +34,14 @@ CONSUMED = [
     "internal/userstats/snapshot.go",
     "internal/userstats/quota_endpoint.go",
     "internal/userstats/quota.go",
+    # 审计链路。docs/integration-contract.md §3 一直列着这四个文件，而这张清单
+    # 从来没有包含它们——于是计量与配额链路有锁，审计链路没有。
+    # 不补上的话，JSONL 形状漂移时**没有任何机械门禁会红**，
+    # 而出站目标那一页的每一行都建立在那 13 个键上。
+    "internal/userstats/audit.go",
+    "internal/userstats/audit_file.go",
+    "internal/userstats/audit_test.go",
+    "internal/userstats/audit_integration_test.go",
 ]
 
 
