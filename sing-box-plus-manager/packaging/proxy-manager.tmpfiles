@@ -12,3 +12,9 @@
 d /etc/proxy-manager      0750 root          proxy-manager -
 d /etc/proxy-manager/pki  0700 proxy-manager proxy-manager -
 d /var/lib/proxy-manager  0700 proxy-manager proxy-manager -
+
+# 自动备份的落点。0700 且属于服务账号——**一份备份就是一份 server_secrets 副本**。
+# 不放 /root/backup（运维约定的默认备份目录）：那里只有 root 写得动，
+# 而让 root 打开一个 WAL 库会在服务停着时留下 root 拥有的 -wal/-shm，
+# 之后服务再也写不进去。手工的、动手术之前的那种备份仍然放 /root/backup。
+d /var/backups/proxy-manager 0700 proxy-manager proxy-manager -

@@ -1,0 +1,14 @@
+[Unit]
+Description=每天做一份 proxy-manager 的一致性备份
+
+[Timer]
+# UTC 18:20 = 东八区 02:20。周期按 UTC+8 切月，所以**刻意不在月界附近**跑：
+# 月初那一刻正是周期总账换行的时候，备份撞上去会让「这份备份属于哪个周期」
+# 变成一个要看时间戳才能回答的问题。
+OnCalendar=*-*-* 18:20:00 UTC
+# 机器睡过头（VPS 挂起、重启）时补一次，而不是跳过。
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target
