@@ -683,21 +683,45 @@ async fn ledger_command(command: LedgerCommand) -> anyhow::Result<ExitCode> {
             if let Some(parent) = out.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            let (_, store) = open_store(&config_dir).await?;
+            // **只读配置，不走 `open_store`。** 那条路径会 `init_schema()` 加
+            // `sync_nodes()`——两件都是写。备份工具不该在动手之前先改一遍被备份的对象。
+            let config = Config::load_dir(&config_dir)?;
+            let store = Store::open_for_backup(&config.server.storage.path).await?;
+            store.assert_backup_preconditions().await?;
+            // 先写 `.partial-`，核对通过才改名。中途失败时留下的是一个**名字就说明
+            // 它没写完**的文件，而不是一份看起来正常、其实截断了的备份。
+            // 这条是运维仓库里踩过才写下的纪律，照搬过来。
+            let partial = out.with_extension("partial");
+            let _ = std::fs::remove_file(&partial);
             // `VACUUM INTO` 取一个读事务：WAL 下与单写者并发安全，不阻塞采集入账。
             // 参数化绑定，不拼字符串——路径里的单引号会把语句拼坏。
             sqlx::query("VACUUM INTO ?")
-                .bind(out.to_string_lossy().as_ref())
+                .bind(partial.to_string_lossy().as_ref())
                 .execute(store.readers())
                 .await?;
             store.close().await;
-            let bytes = std::fs::metadata(&out)?.len();
             // 只有属主读得到：库里有 `server_secrets`，一份备份就是一份密钥副本。
+            // （`server_secrets` 进库进备份是**刻意**的——见 `schema/06_session.sql`：
+            // 它与会话表同生共死，单独丢一个都会让所有会话失效。）
             #[cfg(unix)]
-            std::fs::set_permissions(&out, std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
-            println!("已写出 {}（{} 字节）", out.display(), bytes);
+            std::fs::set_permissions(
+                &partial,
+                std::os::unix::fs::PermissionsExt::from_mode(0o600),
+            )?;
+            let bytes = std::fs::metadata(&partial)?.len();
+            println!("已写出 {}（{} 字节）", partial.display(), bytes);
             println!();
-            print_verify(&out).await
+            let code = print_verify(&partial).await?;
+            if code != ExitCode::SUCCESS {
+                println!();
+                println!("**核对没过，不改名。** 那份写坏的东西留在 {}，", partial.display());
+                println!("名字里就带着 partial——它不会被误当成一份可用的备份。");
+                return Ok(code);
+            }
+            std::fs::rename(&partial, &out)?;
+            println!();
+            println!("核对通过，已改名为 {}", out.display());
+            Ok(ExitCode::SUCCESS)
         }
 
         LedgerCommand::Verify { db } => print_verify(&db).await,
@@ -734,6 +758,14 @@ async fn ledger_command(command: LedgerCommand) -> anyhow::Result<ExitCode> {
 /// 核对一份库并把结果打出来。退出码非 0 表示**这份库不自洽**。
 async fn print_verify(db: &std::path::Path) -> anyhow::Result<ExitCode> {
     let store = Store::open_readonly(db).await?;
+    // 备份产物旁边**不该有 -wal / -shm**：有的话说明它不是一个自足的文件，
+    // 而「只拷主文件」正是那条会静默丢数据、却让 integrity_check 照样报 ok 的路。
+    for sidecar in ["-wal", "-shm"] {
+        let path = std::path::PathBuf::from(format!("{}{sidecar}", db.display()));
+        if path.exists() {
+            println!("  **旁边有 {sidecar}**    {}：这份文件不是自足的", path.display());
+        }
+    }
     let report = proxy_manager::store::verify::verify(&store).await?;
     store.close().await;
 

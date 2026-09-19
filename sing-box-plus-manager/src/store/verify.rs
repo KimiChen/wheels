@@ -121,14 +121,23 @@ pub async fn verify(store: &Store) -> Result<Report> {
         report.counts.insert((*table).to_string(), n);
     }
 
+    // **缺表的库要能跑完。** 下面几段都查具体的表，而一个被截断、
+    // 或者根本不是这个 schema 的文件，正是核对器最该说得出话的时候——
+    // 它在这里 panic 掉，等于「这份备份有问题」这个结论永远打印不出来。
+    let has = |name: &str| !report.missing_tables.iter().any(|m| m == name);
+
     // epoch 是**定宽零填充的十进制文本**（C3），不是 INTEGER——
     // 定宽正是为了让 `MAX()` 在 BINARY 排序下等于数值最大值。
-    for row in sqlx::query(
-        "SELECT node_id, runtime_id, MAX(epoch) FROM quota_requests GROUP BY node_id, runtime_id",
-    )
-    .fetch_all(store.readers())
-    .await?
-    {
+    for row in if has("quota_requests") {
+        sqlx::query(
+            "SELECT node_id, runtime_id, MAX(epoch) FROM quota_requests \
+             GROUP BY node_id, runtime_id",
+        )
+        .fetch_all(store.readers())
+        .await?
+    } else {
+        Vec::new()
+    } {
         let node: String = row.get(0);
         let runtime: String = row.get(1);
         // **类型不对要报出来，不能吞掉。** 吞掉的话这份库会被报成「没有水位」，
@@ -148,13 +157,16 @@ pub async fn verify(store: &Store) -> Result<Report> {
         }
     }
 
-    for row in sqlx::query(
-        "SELECT codec, count(*), sum(length(payload)), sum(raw_length) \
-           FROM snapshot_payloads GROUP BY codec ORDER BY codec",
-    )
-    .fetch_all(store.readers())
-    .await?
-    {
+    for row in if has("snapshot_payloads") {
+        sqlx::query(
+            "SELECT codec, count(*), sum(length(payload)), sum(raw_length) \
+               FROM snapshot_payloads GROUP BY codec ORDER BY codec",
+        )
+        .fetch_all(store.readers())
+        .await?
+    } else {
+        Vec::new()
+    } {
         report.payload_codecs.push((
             row.get::<String, _>(0),
             row.get::<i64, _>(1),
@@ -163,7 +175,11 @@ pub async fn verify(store: &Store) -> Result<Report> {
         ));
     }
 
-    recompute(store, &mut report).await?;
+    // 三张表缺任何一张，重算就无从谈起——那时报的是「缺表」，
+    // 而不是一个「零处不一致」的假清白。
+    if has("usage_ledger") && has("usage_cycle_totals") && has("usage_lifetime_totals") {
+        recompute(store, &mut report, LEDGER_PAGE).await?;
+    }
     Ok(report)
 }
 
@@ -173,35 +189,48 @@ pub async fn verify(store: &Store) -> Result<Report> {
 /// 的纯函数（UTC+8 切月），而 SQLite 没有这个口径；在 SQL 里用 `substr(accounting_at,1,7)`
 /// 拼一个出来，等于写第二份实现——两份对月界的理解会在某个月初的那 8 小时里分家，
 /// 而那正是它最难被发现的时候。
-async fn recompute(store: &Store, report: &mut Report) -> Result<()> {
+/// 翻页大小。**做成参数是为了能被测到**：默认值下一次测试要塞五千行才会翻第二页，
+/// 于是「翻页」这段代码在用例里从来不执行——而它恰好是只在大库上才走到的那一段。
+pub const LEDGER_PAGE: i64 = 5_000;
+
+pub(crate) async fn recompute(store: &Store, report: &mut Report, page: i64) -> Result<()> {
     let mut by_cycle: BTreeMap<(i64, String, i64), u128> = BTreeMap::new();
     let mut by_runtime_identity: BTreeMap<i64, u128> = BTreeMap::new();
 
-    let rows = sqlx::query(
-        "SELECT user_id, runtime_identity_id, accounting_at, \
-                tcp_uplink_bytes, tcp_downlink_bytes, udp_uplink_bytes, udp_downlink_bytes \
-           FROM usage_ledger",
-    )
-    .fetch_all(store.readers())
-    .await?;
+    // **按 ledger_id 翻页，不 `fetch_all`。** 今天账本只有三行，把全表物化成 Vec
+    // 毫无感觉；而账本是只追加的，180-400 天之后它是这个库里行数最多的表，
+    // 那时一次核对会把它整个读进内存——**恰好在库最大、最需要核对的那天**。
+    let mut after: i64 = 0;
+    loop {
+        let rows = sqlx::query(
+            "SELECT ledger_id, user_id, runtime_identity_id, accounting_at, \
+                    tcp_uplink_bytes, tcp_downlink_bytes, udp_uplink_bytes, udp_downlink_bytes \
+               FROM usage_ledger WHERE ledger_id > ? ORDER BY ledger_id LIMIT ?",
+        )
+        .bind(after)
+        .bind(page)
+        .fetch_all(store.readers())
+        .await?;
+        let Some(last) = rows.last() else { break };
+        after = last.get::<i64, _>(0);
 
-    for row in &rows {
-        let mut sum: u128 = 0;
-        for index in 3..7 {
-            sum +=
-                crate::store::codec::U64Text::decode(&row.get::<String, _>(index))?.get() as u128;
+        for row in &rows {
+            let mut sum: u128 = 0;
+            for index in 4..8 {
+                sum += crate::store::codec::U64Text::decode(&row.get::<String, _>(index))?.get()
+                    as u128;
+            }
+            *by_runtime_identity.entry(row.get::<i64, _>(2)).or_default() += sum;
+
+            // `user_id` 可空：未登记身份走的是失败开放，账本行照写但没有主人（C25）。
+            // 那些字节不属于任何周期总账，这里也就不该把它们算进去。
+            let Some(user_id) = row.get::<Option<i64>, _>(1) else { continue };
+            let at = crate::ledger::bucket::parse_rfc3339(&row.get::<String, _>(3)).ok_or_else(
+                || crate::error::Error::Ledger("账本行的 accounting_at 不是合法 RFC 3339".into()),
+            )?;
+            let key = cycle_key_for(at, CYCLE_RULE_VERSION)?;
+            *by_cycle.entry((user_id, key, CYCLE_RULE_VERSION)).or_default() += sum;
         }
-        *by_runtime_identity.entry(row.get::<i64, _>(1)).or_default() += sum;
-
-        // `user_id` 可空：未登记身份走的是失败开放，账本行照写但没有主人（C25）。
-        // 那些字节不属于任何周期总账，这里也就不该把它们算进去。
-        let Some(user_id) = row.get::<Option<i64>, _>(0) else { continue };
-        let at =
-            crate::ledger::bucket::parse_rfc3339(&row.get::<String, _>(2)).ok_or_else(|| {
-                crate::error::Error::Ledger("账本行的 accounting_at 不是合法 RFC 3339".into())
-            })?;
-        let key = cycle_key_for(at, CYCLE_RULE_VERSION)?;
-        *by_cycle.entry((user_id, key, CYCLE_RULE_VERSION)).or_default() += sum;
     }
 
     for row in
@@ -265,4 +294,15 @@ async fn recompute(store: &Store, report: &mut Report) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// 只给测试用：按指定的翻页大小重算一遍。
+#[doc(hidden)]
+pub async fn verify_with_page(store: &Store, page: i64) -> Result<Report> {
+    let mut report = verify(store).await?;
+    report.mismatches.clear();
+    report.cycles_checked = 0;
+    report.lifetimes_checked = 0;
+    recompute(store, &mut report, page).await?;
+    Ok(report)
 }
