@@ -752,7 +752,19 @@ fn unusable_reason(
     match state.credentials() {
         // 凭据文件读得出来，但里面没有这个身份：**订阅正文会是空的**，
         // 而 `/sub/…` 已经为此打过一条 P1。页面上不说，等于让那条 P1 只有运维看得见。
-        Ok(credentials) if !credentials.upsk.contains_key(identity) => {
+        //
+        // **每一种拨法各查各的凭据。** 只查 uPSK 的话，一个「有 uPSK、没 UUID」的人
+        // 在本人页上是满屏绿、公网那份订阅却是空配置——那正是这段代码自己在上面
+        // 定义的假绿。有一份拨法用不了就说用不了，文案「服务端取不到你这个身份的
+        // 节点凭据」对两种缺失都成立。
+        Ok(credentials)
+            if state.subscription.as_ref().is_some_and(|config| {
+                config.sources.iter().any(|source| match source.transport {
+                    crate::config::Transport::Ss => !credentials.upsk.contains_key(identity),
+                    crate::config::Transport::Vless => !credentials.uuid.contains_key(identity),
+                })
+            }) =>
+        {
             Some("no_credential".to_string())
         }
         Ok(_) => None,

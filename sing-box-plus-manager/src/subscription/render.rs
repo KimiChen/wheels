@@ -15,7 +15,7 @@
 //! （64902-64905、19999、64911-64913），与新拓扑对不上，照抄会得到一份
 //! 引用了不存在节点的配置，而 Clash 对此的报错是「订阅格式错误」。
 
-use crate::config::Credentials;
+use crate::config::{Credentials, Transport};
 
 /// 旧站模板的两半，构建时嵌入。**逐字节不动。**
 const HEAD: &str = include_str!("../../web/subscription-head.yaml");
@@ -32,7 +32,15 @@ pub fn clash_yaml(
     profile_name: &str,
 ) -> String {
     let (entries, groups) = (&config.entries, &config.groups);
-    let Some(upsk) = credentials.upsk.get(identity) else {
+    // 这种拨法要的凭据在不在。SS 要 uPSK，VLESS 要 UUID——**分开判**：
+    // 凭据文件是分两次长出来的（uuid 那一半 2026-09-20 才加），
+    // 一份只有 uPSK 的旧文件对内网那份订阅完全够用，不该连带把它也打成空配置。
+    let has_credential = match source.transport {
+        Transport::Ss => credentials.upsk.contains_key(identity),
+        Transport::Vless => credentials.uuid.contains_key(identity),
+    };
+    let upsk = credentials.upsk.get(identity).map(String::as_str).unwrap_or_default();
+    if !has_credential {
         // 身份有、凭据没有：发一份**明说的空配置**，不是编一个密码。
         // 编一个的后果是用户导入后连不上，而客户端只会说「握手失败」。
         return format!(
@@ -42,7 +50,7 @@ pub fn clash_yaml(
              mixed-port: 7890\nmode: rule\nproxies: []\nproxy-groups: []\n\
              rules:\n  - MATCH,DIRECT\n"
         );
-    };
+    }
     // SS2022 带 EIH 时，Clash 的 password 是 `<iPSK>:<uPSK>`。
     let password = format!("{}:{}", credentials.ipsk, upsk);
 
@@ -53,14 +61,56 @@ pub fn clash_yaml(
 
     out.push_str("\nproxies:\n");
     for entry in entries {
-        out.push_str(&format!(
-            "  - name: {}\n    type: ss\n    server: {}\n    port: {}\n    cipher: {}\n    password: {}\n    udp: true\n",
-            yaml_string(&entry.name),
-            yaml_string(config.host_for(entry, source)),
-            entry.port,
-            yaml_string(&credentials.method),
-            yaml_string(&password),
-        ));
+        // **入口名逐字复用，两种协议一模一样。** 代理组的成员写的就是这些名字，
+        // 名字一变三个组与两份规则集模板都要跟着改；复用之后
+        // `proxy-groups` 与 `rules` 两段在两份订阅里**逐字节相同**。
+        let Some(port) = entry.port_for(source.transport) else {
+            // 配置校验已经保证它存在。走到这里说明门禁漏了，
+            // 而这里绝不替它编一个端口——编一个的后果是发出一份连不上的订阅。
+            continue;
+        };
+        out.push_str(&format!("  - name: {}\n", yaml_string(&entry.name)));
+        out.push_str(&format!("    server: {}\n", yaml_string(config.host_for(entry, source))));
+        out.push_str(&format!("    port: {port}\n"));
+        match source.transport {
+            Transport::Ss => {
+                out.push_str("    type: ss\n");
+                out.push_str(&format!("    cipher: {}\n", yaml_string(&credentials.method)));
+                out.push_str(&format!("    password: {}\n", yaml_string(&password)));
+                out.push_str("    udp: true\n");
+            }
+            Transport::Vless => {
+                // 走到这里 vless 与 reality 一定在：`validate()` 校验过
+                // 「有 vless 来源就必须有 [subscription.vless]」与
+                // 「每条入口的 node_id 都要有一套 REALITY 参数」。
+                let (Some(vless), Some(uuid)) = (&config.vless, credentials.uuid.get(identity))
+                else {
+                    continue;
+                };
+                let Some(reality) = vless.reality.get(&entry.node_id) else { continue };
+                out.push_str("    type: vless\n");
+                out.push_str(&format!("    uuid: {}\n", yaml_string(uuid)));
+                out.push_str("    network: tcp\n");
+                out.push_str("    udp: true\n");
+                out.push_str("    tls: true\n");
+                out.push_str(&format!("    flow: {}\n", yaml_string(&vless.flow)));
+                out.push_str(&format!(
+                    "    packet-encoding: {}\n",
+                    yaml_string(&vless.packet_encoding)
+                ));
+                out.push_str(&format!("    servername: {}\n", yaml_string(&vless.servername)));
+                out.push_str(&format!(
+                    "    client-fingerprint: {}\n",
+                    yaml_string(&vless.client_fingerprint)
+                ));
+                out.push_str("    reality-opts:\n");
+                out.push_str(&format!("      public-key: {}\n", yaml_string(&reality.public_key)));
+                // **short-id 必须加引号。** 它是十六进制，纯数字的那些（`01234567`）
+                // 不加引号会被 YAML 当成整数、前导零一并丢掉，
+                // 而客户端对此只有一句「握手失败」。
+                out.push_str(&format!("      short-id: {}\n", yaml_string(&reality.short_id)));
+            }
+        }
     }
 
     out.push_str("\nproxy-groups:\n");

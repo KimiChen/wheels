@@ -18,7 +18,10 @@ pub use server::{
     StorageConfig,
 };
 pub use sso::{SsoConfig, DEFAULT_QUOTA_GROUP, QUOTA_GROUPS};
-pub use subscription::{Credentials, Entry, EntrySource, ProxyGroup, SubscriptionConfig};
+pub use subscription::{
+    Credentials, Entry, EntrySource, ProxyGroup, Reality, SubscriptionConfig, Transport,
+    VlessConfig,
+};
 
 use std::path::Path;
 

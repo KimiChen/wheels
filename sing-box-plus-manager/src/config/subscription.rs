@@ -44,6 +44,59 @@ pub struct SubscriptionConfig {
     /// 代理组。名字与成员都要与旧站模板里的规则集对得上——
     /// 规则里写的是 `…,海外AI` 这样的组名，组不存在会让整份配置解析失败。
     pub groups: Vec<ProxyGroup>,
+
+    /// VLESS 那一侧的公共参数。只要有一个来源是 `transport = "vless"` 就必须有。
+    #[serde(default)]
+    pub vless: Option<VlessConfig>,
+}
+
+/// 客户端拨这条入口时说的是哪种协议。
+///
+/// **两种来源不再只差一个 host。** 内网继续用 SS，公网用 VLESS——SS 容易被墙。
+/// 于是「一套入口的两种拨法」这句话只剩一半还对：端口、凭据、token 仍然共用，
+/// 协议不再共用。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Transport {
+    Ss,
+    Vless,
+}
+
+impl Transport {
+    /// `Entry.ports` 里的键，也是 `server.toml` 里写的那个字面量。
+    pub fn key(self) -> &'static str {
+        match self {
+            Transport::Ss => "ss",
+            Transport::Vless => "vless",
+        }
+    }
+}
+
+/// VLESS + REALITY 的公共参数。逐字段都会进订阅正文。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VlessConfig {
+    /// REALITY 的握手目标域名，客户端侧的 `servername`。
+    pub servername: String,
+    /// `client-fingerprint`，例如 `chrome`。
+    pub client_fingerprint: String,
+    /// per-user 的 `flow`，例如 `xtls-rprx-vision`。
+    pub flow: String,
+    /// `packet-encoding`，例如 `xudp`。
+    pub packet_encoding: String,
+    /// **按 node_id 索引的** REALITY 公开参数。每台节点一套密钥
+    /// （与 mTLS leaf 同惯例：一台被攻陷不牵连其余三台），而 7 条入口里
+    /// 有 3 条分别终结在不同节点上，`Entry` 本来就带 node_id，所以对得上。
+    pub reality: BTreeMap<String, Reality>,
+}
+
+/// 一台节点的 REALITY 公开参数。**这里只放公开的那一半**——
+/// 私钥在部署侧的 `private/network-reality/<短名>.json`，不进主控。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Reality {
+    pub public_key: String,
+    pub short_id: String,
 }
 
 /// 一个代理组。
@@ -77,6 +130,10 @@ pub struct EntrySource {
     /// 给人看的一句话，出现在控制台上（例如「公司内网」）。不进任何 URL。
     #[serde(default)]
     pub note: String,
+    /// 这种拨法用哪种协议。**没有默认值，必须显式写。**
+    /// 给一个默认（比如 ss）的话，「忘了把公网那份标成 vless」会是完全无声的：
+    /// 配置照常加载，订阅照常发出，只是公网那份发的是一份会被墙的 SS。
+    pub transport: Transport,
 }
 
 /// 一条入口。
@@ -89,9 +146,22 @@ pub struct Entry {
     /// 它会在每一份订阅里都用这个地址。
     #[serde(default)]
     pub host: Option<String>,
-    pub port: u16,
+    /// 协议 → 端口。键是 `Transport::key()`。
+    ///
+    /// **一条入口一行、每种协议一个端口**，而不是把清单抄两遍。抄两遍的下场是
+    /// 它们在某次改端口时分家，而两份订阅里的节点名一模一样，看不出来。
+    /// 编号规则：VLESS 口 = 对应的 SS 口 + 100。
+    pub ports: BTreeMap<String, u16>,
     /// 这条入口最终落到哪个节点。用来在订阅里标注出口，也用来将来按节点过滤。
     pub node_id: String,
+}
+
+impl Entry {
+    /// 这条入口在这种协议下的端口。配置校验保证它存在，所以调用方拿到
+    /// `None` 就是配置门禁漏了——不要在渲染时替它编一个。
+    pub fn port_for(&self, transport: Transport) -> Option<u16> {
+        self.ports.get(transport.key()).copied()
+    }
 }
 
 impl SubscriptionConfig {
@@ -182,8 +252,16 @@ impl SubscriptionConfig {
         }
         let mut seen = std::collections::BTreeSet::new();
         for entry in &self.entries {
-            if entry.name.is_empty() || entry.port == 0 {
+            if entry.name.is_empty() || entry.ports.is_empty() {
                 return Err(Error::invalid_config("§4.7", "subscription.entries 里有空字段"));
+            }
+            for (protocol, port) in &entry.ports {
+                if *port == 0 {
+                    return Err(Error::invalid_config(
+                        "§4.7",
+                        format!("入口 {:?} 的 {protocol} 端口是 0", entry.name),
+                    ));
+                }
             }
             if entry.host.as_deref().is_some_and(str::is_empty) {
                 return Err(Error::invalid_config(
@@ -200,6 +278,68 @@ impl SubscriptionConfig {
                 ));
             }
         }
+        // **每个来源的协议都要被每条入口覆盖。** 少一个的后果不是报错：
+        // 那种拨法下这条入口会从订阅里消失，而客户端只表现成「少了一个节点」。
+        for source in &self.sources {
+            for entry in &self.entries {
+                if entry.port_for(source.transport).is_none() {
+                    return Err(Error::invalid_config(
+                        "§4.7",
+                        format!(
+                            "入口 {:?} 没有 {} 端口，而来源 {:?} 是这种协议",
+                            entry.name,
+                            source.transport.key(),
+                            source.prefix
+                        ),
+                    ));
+                }
+            }
+        }
+
+        // 只要有一种拨法是 VLESS，公共参数就必须在。
+        let needs_vless = self.sources.iter().any(|s| s.transport == Transport::Vless);
+        match (&self.vless, needs_vless) {
+            (None, true) => {
+                return Err(Error::invalid_config(
+                    "§4.7",
+                    "有来源是 transport = \"vless\"，但没有 [subscription.vless] 段",
+                ));
+            }
+            (Some(vless), _) => {
+                if vless.servername.is_empty()
+                    || vless.client_fingerprint.is_empty()
+                    || vless.flow.is_empty()
+                    || vless.packet_encoding.is_empty()
+                {
+                    return Err(Error::invalid_config(
+                        "§4.7",
+                        "[subscription.vless] 有空字段：每一项都会原样进订阅正文",
+                    ));
+                }
+                // **每条入口的落点都要有一套 REALITY 参数。**
+                // 少配一台节点的后果是那条入口发出去连不上，而客户端只说
+                // 「握手失败」——所以这里要的是**启动就失败**，不是发一份坏订阅。
+                for entry in &self.entries {
+                    let Some(reality) = vless.reality.get(&entry.node_id) else {
+                        return Err(Error::invalid_config(
+                            "§4.7",
+                            format!(
+                                "入口 {:?} 落在 {}，而 [subscription.vless.reality] 里没有这一台",
+                                entry.name, entry.node_id
+                            ),
+                        ));
+                    };
+                    if reality.public_key.is_empty() || reality.short_id.is_empty() {
+                        return Err(Error::invalid_config(
+                            "§4.7",
+                            format!("节点 {} 的 REALITY 参数有空字段", entry.node_id),
+                        ));
+                    }
+                }
+            }
+            (None, false) => {}
+        }
+
         // 组成员必须存在。写错一个名字的后果是 Clash 整份配置解析失败，
         // 而它只说「订阅格式错误」——指不到这里。
         let names: std::collections::BTreeSet<&str> =
@@ -241,6 +381,19 @@ pub struct Credentials {
     pub ipsk: String,
     /// 身份名 → uPSK。
     pub upsk: BTreeMap<String, String>,
+    /// 身份名 → VLESS UUID。
+    ///
+    /// **`default` 不是宽容，是推送顺序的保护。** 二进制与凭据文件是两次推送，
+    /// 顺序只有两种，代价差得很远：
+    ///
+    /// * 先二进制、后凭据 → 新二进制读到旧文件，uuid 为空，公网订阅暂时发不出
+    ///   VLESS，**内网 SS 完全不受影响**；
+    /// * 先凭据、后二进制 → 本结构体带 `deny_unknown_fields`，旧二进制**整份拒绝**，
+    ///   `credentials_unreadable`，`/sub/…` 对**所有人**回 503。
+    ///
+    /// 所以推送顺序是「二进制在前、凭据在后」，而这个 `default` 是它的安全网。
+    #[serde(default)]
+    pub uuid: BTreeMap<String, String>,
 }
 
 impl Credentials {
@@ -253,6 +406,26 @@ impl Credentials {
                 "§4.7",
                 "凭据文件里一个 uPSK 都没有：那会让每个人的订阅都是空的",
             ));
+        }
+        // **要么整个没有，要么与 uPSK 的身份集合完全一致。**
+        // 「有一半」是一份渲染到一半的文件，症状是**一部分人**的公网订阅悄悄
+        // 没有节点——比所有人都没有难查得多。
+        if !self.uuid.is_empty() {
+            let upsk: std::collections::BTreeSet<&str> =
+                self.upsk.keys().map(String::as_str).collect();
+            let uuid: std::collections::BTreeSet<&str> =
+                self.uuid.keys().map(String::as_str).collect();
+            if upsk != uuid {
+                let only_upsk: Vec<&str> = upsk.difference(&uuid).copied().take(4).collect();
+                let only_uuid: Vec<&str> = uuid.difference(&upsk).copied().take(4).collect();
+                return Err(Error::invalid_config(
+                    "§4.7",
+                    format!(
+                        "凭据文件的 uuid 与 upsk 身份集合不一致：只有 uPSK 的 {only_upsk:?}，\
+                         只有 UUID 的 {only_uuid:?}。要么整份没有 uuid，要么两边逐个对上",
+                    ),
+                ));
+            }
         }
         Ok(())
     }
