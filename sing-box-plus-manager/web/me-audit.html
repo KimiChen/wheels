@@ -165,25 +165,10 @@
         </aside>
 
         <div class="wsk-reference-content">
-          <!--
-            常驻反馈位。操作结果、降级通道状态、通知连续失败的红条都落在这里，
-            而不是散在各页各自的位置——出问题时人只需要看一个地方。
-          -->
-          <div
-            class="wsk-alert wsk-warning pm-global-notice"
-            role="status"
-            aria-live="polite"
-            data-roles="admin"
-          >
-            <svg class="wsk-icon" aria-hidden="true"><use href="#warning"></use></svg>
-            <div>
-              <strong>fr-01 采集连续失败，已停止入账并把该节点额度置零</strong>
-              <p>
-                没有新鲜且已结算的健康快照时不得刷新正额度（C33）；通道可用时下发全零表。
-                <a href="alerts.html">查看告警 →</a>
-              </p>
-            </div>
-          </div>
+          <!-- 原来这里是一条常驻反馈位，正文写死成「fr-01 采集连续失败」。
+            live 模式下**没有任何东西会往它里面写**，于是管理员在每一页都看见
+            同一条假 P1——看几天之后就再也不会认真看告警了。整块删掉，
+            而不是靠 app.js 在运行时把它摘走。 -->
 
           <div class="wsk-page">
             <div class="wsk-page-head" id="me-audit">
@@ -257,19 +242,19 @@
                   </thead>
                   <tbody>
                     <tr>
-                      <th scope="row">www.example.com</th>
+                      <th scope="row">example.invalid</th>
                       <td>443</td><td>09-11 08:22</td><td>09-17 19:04</td><td class="wsk-tok-number">1,284</td>
                     </tr>
                     <tr>
-                      <th scope="row">api.example.org</th>
+                      <th scope="row">api.example.invalid</th>
                       <td>443</td><td>09-12 10:05</td><td>09-17 18:51</td><td class="wsk-tok-number">906</td>
                     </tr>
                     <tr>
-                      <th scope="row">cdn.example.net</th>
+                      <th scope="row">cdn.example.invalid</th>
                       <td>443</td><td>09-11 08:23</td><td>09-17 17:30</td><td class="wsk-tok-number">412</td>
                     </tr>
                     <tr>
-                      <th scope="row">203.0.113.7</th>
+                      <th scope="row">198.51.100.7</th>
                       <td>22</td><td>09-15 14:02</td><td>09-16 09:41</td><td class="wsk-tok-number">18</td>
                     </tr>
                   </tbody>

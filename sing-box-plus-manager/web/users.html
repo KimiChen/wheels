@@ -165,25 +165,10 @@
         </aside>
 
         <div class="wsk-reference-content">
-          <!--
-            常驻反馈位。操作结果、降级通道状态、通知连续失败的红条都落在这里，
-            而不是散在各页各自的位置——出问题时人只需要看一个地方。
-          -->
-          <div
-            class="wsk-alert wsk-warning pm-global-notice"
-            role="status"
-            aria-live="polite"
-            data-roles="admin"
-          >
-            <svg class="wsk-icon" aria-hidden="true"><use href="#warning"></use></svg>
-            <div>
-              <strong>fr-01 采集连续失败，已停止入账并把该节点额度置零</strong>
-              <p>
-                没有新鲜且已结算的健康快照时不得刷新正额度（C33）；通道可用时下发全零表。
-                <a href="alerts.html">查看告警 →</a>
-              </p>
-            </div>
-          </div>
+          <!-- 原来这里是一条常驻反馈位，正文写死成「fr-01 采集连续失败」。
+            live 模式下**没有任何东西会往它里面写**，于是管理员在每一页都看见
+            同一条假 P1——看几天之后就再也不会认真看告警了。整块删掉，
+            而不是靠 app.js 在运行时把它摘走。 -->
 
           <div class="wsk-page">
             <div class="wsk-page-head" id="identities">
@@ -231,7 +216,7 @@
                       </td>
                     </tr>
                     <tr>
-                      <th scope="row">wangwei</th>
+                      <th scope="row">someone</th>
                       <td><span class="wsk-badge">user</span></td>
                       <td>301 GiB<small class="wsk-help"> · 323,195,764,736 字节</small></td>
                       <td><strong class="wsk-danger">已用尽</strong></td>
@@ -273,12 +258,19 @@
                 </table>
               </div>
               <p class="wsk-help wsk-mt-2">
-                <code>wangwei</code> 已用尽：新连接被拒，已建立的连接仍受剩余额度约束直到结束。
+                额度用尽的人：新连接被拒，已建立的连接仍受剩余额度约束直到结束。
                 额度是节点侧的内存态，主控重启不会刷新已下发的余额。
               </p>
 
-              <details class="wsk-panel wsk-mt-5">
-                <summary><strong>出站目标 · kimi</strong></summary>
+              <!--
+                这一块是**一份关于真人的伪造访问记录**：审计根本没启用
+                （/api/v1/me/audit/access 固定回 audit_not_enabled），
+                而页面上摆着「kimi 访问 www.example.com 1,284 次」。
+                me-audit.html 里同类的一份已经标过了，这一份当时漏了。
+              -->
+              <details class="wsk-panel wsk-mt-5"
+                       data-pm-prototype="出站目标审计（M6 的另一半）还没有启用，这里不会有任何记录。下面那张表是设计稿里的示例，不是谁的访问记录">
+                <summary><strong>出站目标</strong></summary>
                 <div class="wsk-alert wsk-info wsk-mt-5">
                   <svg class="wsk-icon" aria-hidden="true"><use href="#info"></use></svg>
                   <div>
@@ -297,9 +289,9 @@
                       <tr><th scope="col">目标</th><th scope="col">端口</th><th scope="col">最近记录</th><th scope="col">次数</th></tr>
                     </thead>
                     <tbody>
-                      <tr><th scope="row">www.example.com</th><td>443</td><td>09-17 19:04</td><td class="wsk-tok-number">1,284</td></tr>
-                      <tr><th scope="row">api.example.org</th><td>443</td><td>09-17 18:51</td><td class="wsk-tok-number">906</td></tr>
-                      <tr><th scope="row">203.0.113.7</th><td>22</td><td>09-16 09:41</td><td class="wsk-tok-number">18</td></tr>
+                      <tr><th scope="row">example.invalid</th><td>443</td><td>09-17 19:04</td><td class="wsk-tok-number">1,284</td></tr>
+                      <tr><th scope="row">api.example.invalid</th><td>443</td><td>09-17 18:51</td><td class="wsk-tok-number">906</td></tr>
+                      <tr><th scope="row">198.51.100.7</th><td>22</td><td>09-16 09:41</td><td class="wsk-tok-number">18</td></tr>
                     </tbody>
                   </table>
                 </div>
@@ -314,54 +306,42 @@
             <section class="wsk-section" data-table-scope aria-labelledby="identities-title">
               <div class="wsk-section-head">
                 <h2 id="identities-title">计费身份</h2>
-                <span class="wsk-badge">节点 hk-01</span>
               </div>
               <div class="wsk-table-wrap">
-                <table class="wsk-table" data-table data-page-size="20">
+                <!-- 接 /api/v1/identities。**列只留端点真的给得出的那几个**：
+                     它不返回本周期用量，user_id 也只是个数字而不是账号名——
+                     摆一个原始 id 在「业务用户」列里，比不摆这一列更容易被读错。 -->
+                <table class="wsk-table" data-table data-page-size="20" data-pm-collection="identities">
                   <caption class="wsk-sr-only">计费身份的六元组</caption>
                   <thead>
                     <tr>
                       <th scope="col">身份</th>
+                      <th scope="col">节点</th>
                       <th scope="col">inbound · 代次</th>
                       <th scope="col">runtime</th>
-                      <th scope="col">业务用户</th>
-                      <th scope="col">本周期用量</th>
-                      <th scope="col">状态</th>
+                      <th scope="col">在用</th>
                     </tr>
                   </thead>
                   <tbody>
+                    <!-- 这两行是示例，live 模式下由 renderRows 整体清掉。 -->
                     <tr data-row>
-                      <th scope="row">u-kimi</th>
-                      <td>vless-in · 1</td>
-                      <td><code>a3f1…9c</code></td>
-                      <td>kimi</td>
-                      <td class="wsk-tok-number">88,402,117,993</td>
-                      <td><span class="wsk-badge wsk-success">active</span></td>
-                    </tr>
-                    <tr data-row>
-                      <th scope="row">u-wang</th>
-                      <td>vless-in · 1</td>
-                      <td><code>a3f1…9c</code></td>
-                      <td>wangwei</td>
-                      <td class="wsk-tok-number">12,003,884,210</td>
-                      <td><span class="wsk-badge wsk-success">active</span></td>
+                      <th scope="row">slot-0001</th><td>node-a</td><td>ss-in · 1</td>
+                      <td><code>a3f1…9c</code></td><td>是</td>
                     </tr>
                     <tr data-row class="wsk-quiet">
-                      <th scope="row">u-retired</th>
-                      <td>vless-in · 1</td>
-                      <td><code>a3f1…9c</code></td>
-                      <td class="wsk-quiet">未映射</td>
-                      <td class="wsk-tok-number">402,118,000</td>
-                      <td><span class="wsk-badge">active=false</span></td>
+                      <th scope="row">slot-0002</th><td>node-a</td><td>ss-in · 1</td>
+                      <td><code>a3f1…9c</code></td><td>否</td>
                     </tr>
-                    <tr data-row>
-                      <th scope="row">pool-0042</th>
-                      <td>vless-in · 1</td>
-                      <td><code>a3f1…9c</code></td>
-                      <td class="wsk-quiet">池中未分配</td>
-                      <td class="wsk-tok-number">0</td>
-                      <td><span class="wsk-badge wsk-info">待分配</span></td>
-                    </tr>
+                    <tr data-table-empty hidden><td colspan="5" class="wsk-help" data-pm-empty-text>还没有登记的计费身份</td></tr>
+                    <template data-pm-template>
+                      <tr data-row>
+                        <th scope="row" data-pm="identity_name"></th>
+                        <td data-pm="node_id"></td>
+                        <td><span data-pm="inbound_tag"></span> · <span data-pm="inbound_generation"></span></td>
+                        <td><code data-pm="runtime_id"></code></td>
+                        <td data-pm="active"></td>
+                      </tr>
+                    </template>
                   </tbody>
                 </table>
               </div>
@@ -379,10 +359,12 @@
 
             <section class="wsk-section" aria-labelledby="pool-title">
               <div class="wsk-section-head">
-                <h3 id="pool-title">账号池水位（hk-01）</h3>
-                <span class="wsk-badge wsk-warning">身份数 892 / 1024</span>
+                <h3 id="pool-title">账号池水位</h3>
               </div>
-              <div class="wsk-progress-list">
+              <!-- 892/1024、468、424 全是编的，节点名 hk-01 也不存在。
+                   池水位的计算函数（identity::free_slots）写好了，但没有任何端点暴露它，
+                   也没有任何调用方——R12 的两条水位告警因此是空的。 -->
+              <div class="wsk-progress-list" data-pm-prototype="账号池水位没有对应端点：计算函数写好了但没有调用方，也没有路由暴露它">
                 <div>
                   <span>已分配身份</span><strong>468</strong
                   ><progress max="1024" value="468" aria-label="已分配身份">468</progress>
