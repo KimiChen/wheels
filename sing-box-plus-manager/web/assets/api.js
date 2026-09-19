@@ -327,6 +327,49 @@
     });
   }
 
+  // 退出登录。
+  //
+  // 服务端这条一直是实现好的（`POST /api/v1/auth/logout`，走 `WriteSubject` 的双提交
+  // CSRF，成功后清掉两个 cookie），而十个页面的退出按钮一直是一句
+  // `data-toast="原型页面不执行退出。"` ——**点一下弹个提示，会话原封不动**。
+  // 共用设备上的人会以为自己退了。
+  //
+  // CSRF 走双提交：token 在 `__Host-pm_csrf` 这个**非 HttpOnly** 的 cookie 里，
+  // 脚本读得到，随 `x-csrf-token` 头一起发回去；服务端比对两者并核对库里的哈希。
+  document.addEventListener("click", async (event) => {
+    const button = event.target.closest?.("[data-pm-logout]");
+    if (!button) return;
+    event.preventDefault();
+    const csrf = readCookie("__Host-pm_csrf");
+    if (!csrf) {
+      // 没有 CSRF cookie 说明本来就没有会话——直接回登录页，别报错吓人。
+      location.href = "/login.html";
+      return;
+    }
+    button.disabled = true;
+    try {
+      const response = await fetch(`${API_BASE}/auth/logout`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "x-csrf-token": csrf, accept: "application/json" },
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      // **整页跳转，不是原地改状态。** 退出要把内存里那份数据也一起丢掉——
+      // 留在当前页等于会话没了、屏幕上还挂着上一个人的订阅地址与用量。
+      location.href = "/login.html";
+    } catch (error) {
+      button.disabled = false;
+      window.wsk?.showToast?.(`退出失败：${error.message}`, "danger");
+    }
+  });
+
+  function readCookie(name) {
+    return document.cookie
+      .split("; ")
+      .find((part) => part.startsWith(`${name}=`))
+      ?.slice(name.length + 1);
+  }
+
   // 复制订阅地址。
   //
   // **只复制看起来像地址的东西**：原型模式下那一格是脱敏占位符，

@@ -26,6 +26,44 @@ fn front_end_never_converts_bytes_to_float() {
     assert!(source.contains("BigInt("), "api.js 必须用 BigInt 解析字节");
 }
 
+/// **每一个登录态页面都要能退出登录。**
+///
+/// 服务端 `POST /api/v1/auth/logout` 一直是实现好的（`WriteSubject` 的双提交 CSRF、
+/// 成功后清两个 cookie），而十个页面的退出按钮一直是一句
+/// `data-toast="原型页面不执行退出。"`——**点一下弹个提示，会话原封不动**。
+/// 共用设备上的人会以为自己退了。
+///
+/// 这条同时钉住两端：页面上有按钮，脚本里有那次 POST。少任何一端，
+/// 那个按钮就退回成一个「看起来能点」的装饰。
+#[test]
+fn every_authenticated_page_can_log_out() {
+    for name in proxy_manager::web::page_names() {
+        if proxy_manager::web::is_public(name) {
+            continue; // 登录页与越权提示页没有会话可退
+        }
+        let body = proxy_manager::web::page_body(name).expect("页面必须嵌进二进制");
+        if name == "index.html" {
+            continue; // 兼容跳转页，没有外壳
+        }
+        assert!(body.contains("data-pm-logout"), "{name} 没有可用的退出按钮");
+        assert!(!body.contains("原型页面不执行退出"), "{name} 还留着那个只弹提示的原型退出按钮");
+    }
+
+    let (script, _) = proxy_manager::web::asset("assets/api.js").expect("api.js 必须嵌进二进制");
+    assert!(script.contains("/auth/logout"), "api.js 里没有那次 POST");
+    assert!(script.contains("x-csrf-token"), "退出是写操作，必须带双提交 CSRF 头，否则服务端会拒");
+    // 名字要与服务端一致：写错一个字母，退出按钮会变成「点了没反应」。
+    //
+    // **连引号一起比。** 只 `contains(CSRF_COOKIE)` 挡不住把名字写成
+    // `__Host-pm_csrf_x`——那个串把正确的名字整个包在里面，断言照样通过。
+    let quoted = format!("\"{}\"", proxy_manager::api::session::CSRF_COOKIE);
+    assert!(
+        script.contains(&quoted),
+        "api.js 读的 CSRF cookie 名与服务端的 {} 对不上",
+        proxy_manager::api::session::CSRF_COOKIE
+    );
+}
+
 /// 复制按钮必须**先确认自己跑在真实模式下**，不能只判「这串字符像不像 URL」。
 ///
 /// 原型页面里那一格是脱敏占位符 `https://<控制台域名>/sub/Proxy-••••.yaml`，
