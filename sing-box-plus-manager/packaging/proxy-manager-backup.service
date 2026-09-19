@@ -1,0 +1,24 @@
+[Unit]
+Description=proxy-manager 一致性备份并当场核对（R3）
+Documentation=https://github.com/KimiChen/wheels
+# 库在服务的 StateDirectory 里；服务没起也能备份（VACUUM INTO 只要读得到文件）。
+After=proxy-manager.service
+
+[Service]
+Type=oneshot
+User=proxy-manager
+Group=proxy-manager
+# 备份里有 server_secrets：一份备份就是一份密钥副本。
+UMask=0077
+ExecStart=/usr/local/lib/proxy-manager/backup.sh
+# 一次备份失败要看得见。核对不过时 `ledger backup` 退出码是 2，
+# 这里不 `|| true`——**把失败吞掉的备份任务比没有备份任务更糟**。
+Nice=10
+IOSchedulingClass=idle
+
+# 与主控 unit 同一套收敛：只能读配置、只能写备份目录。
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+ReadWritePaths=/var/lib/proxy-manager /var/backups/proxy-manager
