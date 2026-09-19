@@ -15,7 +15,7 @@ implementation_commit = "c1102a4edaffedbeaf2a22208a5328267738bd43"
 schema_version = 3
 snapshot_path = "/v3/snapshot"
 quota_path = "/v3/quota"
-checked_at = "2026-09-18"
+checked_at = "2026-09-19"
 
 # 计量与配额链路应消费的文件（docs/integration-contract.md §3 第一、二行）。
 [consumed]
@@ -25,7 +25,14 @@ checked_at = "2026-09-18"
 "internal/userstats/snapshot.go" = "9721de5e21ae1a35b968ffa9f3d1bc2e084940c1aa9302014051c400553e530b"
 "internal/userstats/quota_endpoint.go" = "a4ba7b53aa954e93626b66d1f9492dd8d292773b5da1385a4da4281ab36a4ab3"
 "internal/userstats/quota.go" = "677cd9397214aab6012eae7c2f01b7c1cd77676382845aaa94811bdd215e63de"
+# 审计链路。docs/integration-contract.md §3 一直列着这四个文件，而这张清单从来
+# 没有包含它们——于是计量与配额链路有锁，审计链路没有。不补上的话，JSONL 形状
+# 漂移时没有任何机械门禁会红，而出站目标那一页的每一行都建立在那 13 个键上。
+"internal/userstats/audit.go" = "8978f83f74e9db6e02cef51710aaf358b7ea83d4e1c37210db277ded9d93f4ca"
+"internal/userstats/audit_file.go" = "73d76c87248f606f9783b07143915862f21b4fd3ee00d9d40d8da85769ebd7a0"
+"internal/userstats/audit_test.go" = "a54639e4389952e9f431e137af348151f528b2738d108bcf84364c9c61e28ae6"
+"internal/userstats/audit_integration_test.go" = "b2ec060451530cef7b1f624529658b036841125cac9a59eb341ce6f6269b8d8d"
 
 [export]
 # scripts/export-node-fixtures.py 的完整输出。上游改了样例形状，这一条先变。
-document_sha256 = "59ee30c762c8f122672d7e5dc97df5423aee00f1bf56fbf9146b153838ae4773"
+document_sha256 = "1191b959f98e52a3feb20b93c68a783741b94fc3130d4780bdad44855fc39c20"
