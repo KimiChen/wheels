@@ -393,3 +393,220 @@ async fn 认领与退役都落审计事件() {
     assert!(rows[0].get::<Option<String>, _>(1).is_some(), "退役时要关掉持有区间");
     assert_eq!(rows[1].get::<String, _>(0), "unassigned");
 }
+
+// ============ 指定认领：显式旁路零基线门禁 ============
+
+/// **零基线门禁挡的情形，在「原持有者拿回自己的身份」上不成立。**
+///
+/// 那道门禁防的是「把一个用过的身份发给新用户，于是他一上来就欠着别人的账」。
+/// 而重建库之后原持有者重新领取自己原来那个名字，会被同一条门禁挡住——
+/// 他自己转发过的字节让那个名字不再是零基线。2026-09-20 撞上过一次，
+/// 当时只能手工改库，也就是把这条判断留痕在一个运维脚本里而不是代码里。
+#[tokio::test]
+async fn 指定认领拿得到零基线门禁挡住的身份() {
+    let stack = Stack::new().await;
+    let user = make_user(&stack, "kimi").await;
+
+    // 基线夹具里 u_example_01 带着非零计数，所以它不是合法候选。
+    // 先证明这一点，否则下面那条断言可能是因为别的原因绿的。
+    let auto = identity::claim_for_user(&stack.store, user, "用例").await.unwrap();
+    assert_eq!(auto.identity_name, "s1", "池子只会挑四向计数为零的那个");
+
+    let other = make_user(&stack, "kimi2").await;
+    let claim = identity::claim(
+        &stack.store,
+        other,
+        identity::Pick::Named {
+            identity_name: "u_example_01",
+            reason: "原持有者拿回自己重建前的身份",
+            replace: false,
+        },
+        "用例",
+    )
+    .await
+    .expect("指定认领应当跳过零基线门禁");
+    assert_eq!(claim.identity_name, "u_example_01");
+    assert!(claim.newly_claimed);
+    assert_eq!(slot_state(&stack, "u_example_01").await, ("claimed".into(), Some(other)));
+}
+
+/// **fence 两列必须留 NULL。**
+///
+/// 它们记的是「证明零基线的那份快照」，让这个敞口事后可核。
+/// 本支根本没有证明零基线——填一个值就是撒谎，而那是一句没人会去复核的谎。
+#[tokio::test]
+async fn 指定认领不伪造零基线的证据() {
+    let stack = Stack::new().await;
+    let user = make_user(&stack, "kimi").await;
+    identity::claim(
+        &stack.store,
+        user,
+        identity::Pick::Named { identity_name: "u_example_01", reason: "理由", replace: false },
+        "用例",
+    )
+    .await
+    .unwrap();
+
+    let row = sqlx::query(
+        "SELECT claim_fence_runtime_id, claim_fence_sequence FROM identity_routes \
+          WHERE identity_name = 'u_example_01'",
+    )
+    .fetch_one(stack.store.readers())
+    .await
+    .unwrap();
+    assert_eq!(row.get::<Option<String>, _>(0), None, "没证明过零基线就不许留证据");
+    assert_eq!(row.get::<Option<String>, _>(1), None);
+}
+
+/// 理由必填，而且要真的落进只追加的归属事件里。
+#[tokio::test]
+async fn 指定认领的理由必填且落进归属事件() {
+    let stack = Stack::new().await;
+    let user = make_user(&stack, "kimi").await;
+
+    let error = identity::claim(
+        &stack.store,
+        user,
+        identity::Pick::Named { identity_name: "u_example_01", reason: "  ", replace: false },
+        "用例",
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("必须写明理由"), "{error}");
+
+    identity::claim(
+        &stack.store,
+        user,
+        identity::Pick::Named {
+            identity_name: "u_example_01",
+            reason: "重建库后拿回原身份",
+            replace: false,
+        },
+        "kimi",
+    )
+    .await
+    .unwrap();
+    let reason: String = sqlx::query_scalar(
+        "SELECT e.reason FROM identity_assignment_events e \
+           JOIN identity_routes r ON r.route_id = e.route_id \
+          WHERE r.identity_name = 'u_example_01' AND e.state = 'assigned'",
+    )
+    .fetch_one(stack.store.readers())
+    .await
+    .unwrap();
+    assert!(reason.contains("重建库后拿回原身份"), "{reason}");
+    // 操作者也要留，否则事后只知道为什么、不知道是谁。
+    assert!(reason.contains("kimi"), "{reason}");
+}
+
+/// **部分认领不放行。** 同一个名字在每台上是同一份凭据，缺一台就是订阅里
+/// 有一条连不上的入口，而客户端只说「握手失败」。
+#[tokio::test]
+async fn 指定认领仍然要求全部节点都空闲() {
+    let stack = Stack::new().await;
+    let user = make_user(&stack, "kimi").await;
+    identity::retire(&stack.store, "u_example_01", "用例", "先退役掉").await.unwrap();
+
+    let error = identity::claim(
+        &stack.store,
+        user,
+        identity::Pick::Named { identity_name: "u_example_01", reason: "理由", replace: false },
+        "用例",
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("必须全部空闲"), "{error}");
+}
+
+/// 已经持有别的身份时**不给换**，除非明写 `replace`。
+///
+/// `grant` 这个词不该悄悄退掉一个已经发出去的凭据。
+#[tokio::test]
+async fn 换身份必须明写replace() {
+    let stack = Stack::new().await;
+    let user = make_user(&stack, "kimi").await;
+    identity::claim_for_user(&stack.store, user, "用例").await.unwrap();
+
+    let error = identity::claim(
+        &stack.store,
+        user,
+        identity::Pick::Named { identity_name: "u_example_01", reason: "理由", replace: false },
+        "用例",
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("--replace"), "{error}");
+    // 拒绝之后旧的必须原样还在，不能落个半截。
+    assert_eq!(slot_state(&stack, "s1").await, ("claimed".into(), Some(user)));
+}
+
+/// `replace` 换身份：旧的放回池子并留下 `unassigned` 事件，新的认领成功。
+///
+/// 事件是**只追加**的（D14）。把 route 行改回 free 而不留事件，
+/// 等于让一段持有从历史里消失。
+#[tokio::test]
+async fn replace换身份留下完整的归属痕迹() {
+    let stack = Stack::new().await;
+    let user = make_user(&stack, "kimi").await;
+    identity::claim_for_user(&stack.store, user, "用例").await.unwrap();
+
+    let claim = identity::claim(
+        &stack.store,
+        user,
+        identity::Pick::Named {
+            identity_name: "u_example_01",
+            reason: "拿回重建前的身份",
+            replace: true,
+        },
+        "kimi",
+    )
+    .await
+    .unwrap();
+    assert_eq!(claim.identity_name, "u_example_01");
+    // 旧的回到池子（不是 retired——它没被用过，退役会白白少一个名额）。
+    assert_eq!(slot_state(&stack, "s1").await, ("free".into(), None));
+    assert_eq!(slot_state(&stack, "u_example_01").await, ("claimed".into(), Some(user)));
+
+    let events: Vec<(String, String)> = sqlx::query_as(
+        "SELECT r.identity_name, e.state FROM identity_assignment_events e \
+           JOIN identity_routes r ON r.route_id = e.route_id ORDER BY e.event_id",
+    )
+    .fetch_all(stack.store.readers())
+    .await
+    .unwrap();
+    assert_eq!(
+        events,
+        vec![
+            ("s1".to_string(), "assigned".to_string()),
+            ("s1".to_string(), "unassigned".to_string()),
+            ("u_example_01".to_string(), "assigned".to_string()),
+        ],
+        "先放旧的再认领新的，三条事件一条都不能少"
+    );
+}
+
+/// 指定的就是他已经持有的那个 → 幂等，不白费一个名额。
+#[tokio::test]
+async fn 指定已持有的身份是幂等的() {
+    let stack = Stack::new().await;
+    let user = make_user(&stack, "kimi").await;
+    let first = identity::claim_for_user(&stack.store, user, "用例").await.unwrap();
+
+    let again = identity::claim(
+        &stack.store,
+        user,
+        identity::Pick::Named {
+            identity_name: &first.identity_name,
+            reason: "理由",
+            replace: false,
+        },
+        "用例",
+    )
+    .await
+    .unwrap();
+    assert_eq!(again.identity_name, first.identity_name);
+    assert!(!again.newly_claimed, "幂等不该再消耗一个名额");
+}
