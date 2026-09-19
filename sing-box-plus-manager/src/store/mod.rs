@@ -9,6 +9,7 @@
 
 pub mod codec;
 pub mod schema;
+pub mod verify;
 
 use std::path::PathBuf;
 
@@ -62,6 +63,38 @@ impl Store {
             readers,
             writer: Mutex::new(Writer { conn, txn_open: false }),
             path: config.path.clone(),
+        })
+    }
+
+    /// 只读地打开一份**已经存在**的库，用于核对备份与恢复出来的副本。
+    ///
+    /// 三处与 [`Store::open`] 刻意不同，每一处都是为了**不改动被检查的那份文件**：
+    ///
+    /// * `create_if_missing(false)`——路径打错时要报错，而不是凭空造一个空库
+    ///   然后报告「表都不在」。那个结论看起来像「备份坏了」，其实是路径写错了。
+    /// * 不设 `journal_mode`——`VACUUM INTO` 出来的备份是 delete 模式，
+    ///   而把它切成 WAL 会**写回文件头**：一次「只读检查」改掉了被检查的对象。
+    /// * `read_only(true)`——任何写入直接失败，而不是悄悄成功。
+    pub async fn open_readonly(path: &std::path::Path) -> Result<Self> {
+        if !path.exists() {
+            return Err(crate::error::Error::invalid_config(
+                "§5",
+                format!("{} 不存在", path.display()),
+            ));
+        }
+        let options = SqliteConnectOptions::new()
+            .filename(path)
+            .create_if_missing(false)
+            .read_only(true)
+            .foreign_keys(true)
+            .busy_timeout(std::time::Duration::from_millis(5_000));
+        let readers =
+            SqlitePoolOptions::new().max_connections(2).connect_with(options.clone()).await?;
+        let conn = SqliteConnection::connect_with(&options).await?;
+        Ok(Store {
+            readers,
+            writer: Mutex::new(Writer { conn, txn_open: false }),
+            path: path.to_path_buf(),
         })
     }
 

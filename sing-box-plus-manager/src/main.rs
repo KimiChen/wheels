@@ -241,6 +241,48 @@ enum LedgerCommand {
         #[arg(long, default_value = "/etc/proxy-manager")]
         config_dir: PathBuf,
     },
+
+    /// 做一份**一致性备份**（R3），并当场核对它自洽。
+    ///
+    /// 用 `VACUUM INTO`：库是 WAL 模式，`cp` 拿到的是一个撕裂的快照，
+    /// 而 `VACUUM INTO` 取一个读事务，与单写者并发是安全的，不阻塞写入。
+    ///
+    /// **备份完立刻核对。** 一份没被核对过的备份，与没有备份的区别只在
+    /// 你自以为有——而这件事要到真的需要它的那天才会被发现。
+    Backup {
+        #[arg(long, default_value = "/etc/proxy-manager")]
+        config_dir: PathBuf,
+        /// 备份文件路径。**已存在就拒绝**，不覆盖。
+        #[arg(long)]
+        out: PathBuf,
+    },
+
+    /// 核对任意一份库是否自洽——恢复演练的判据就是它。
+    ///
+    /// 主线只有一条：**总账必须能从账本重新算出来**。
+    /// 「文件能打开」不是判据，那句话对一个被截断到一半的文件也成立。
+    Verify {
+        /// 要核对的库文件。只读打开，**不会改动它**。
+        #[arg(long)]
+        db: PathBuf,
+    },
+
+    /// 把旧的 `identity` 载荷重新按 zstd 编码。
+    ///
+    /// 压缩是从某一版才开始写的，之前的行原样留着（不做迁移，D22）。
+    /// 这条命令把它们补上——**逐行核对往返**：解出来的字节必须与原文完全一致，
+    /// 长度也必须对得上，任何一条对不上就整批回滚。
+    Recompress {
+        #[arg(long, default_value = "/etc/proxy-manager")]
+        config_dir: PathBuf,
+        /// 不加就是空跑：只报告会压多少、省多少，不写库。
+        #[arg(long)]
+        apply: bool,
+        /// 每个事务处理多少行。默认 200——写入是单写者（D8），
+        /// 一次吞太多会让正在采集的节点排在后面。
+        #[arg(long, default_value_t = 200)]
+        batch: i64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -635,7 +677,109 @@ async fn ledger_command(command: LedgerCommand) -> anyhow::Result<ExitCode> {
             store.close().await;
             Ok(if criteria.all_zero() { ExitCode::SUCCESS } else { ExitCode::from(2) })
         }
+
+        LedgerCommand::Backup { config_dir, out } => {
+            anyhow::ensure!(!out.exists(), "{} 已存在：备份不覆盖既有文件", out.display());
+            if let Some(parent) = out.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let (_, store) = open_store(&config_dir).await?;
+            // `VACUUM INTO` 取一个读事务：WAL 下与单写者并发安全，不阻塞采集入账。
+            // 参数化绑定，不拼字符串——路径里的单引号会把语句拼坏。
+            sqlx::query("VACUUM INTO ?")
+                .bind(out.to_string_lossy().as_ref())
+                .execute(store.readers())
+                .await?;
+            store.close().await;
+            let bytes = std::fs::metadata(&out)?.len();
+            // 只有属主读得到：库里有 `server_secrets`，一份备份就是一份密钥副本。
+            #[cfg(unix)]
+            std::fs::set_permissions(&out, std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+            println!("已写出 {}（{} 字节）", out.display(), bytes);
+            println!();
+            print_verify(&out).await
+        }
+
+        LedgerCommand::Verify { db } => print_verify(&db).await,
+
+        LedgerCommand::Recompress { config_dir, apply, batch } => {
+            anyhow::ensure!(batch > 0, "--batch 必须为正");
+            let (_, store) = open_store(&config_dir).await?;
+            let outcome = proxy_manager::ledger::payload::recompress(&store, apply, batch).await?;
+            store.close().await;
+            println!("identity 行：{}", outcome.candidates);
+            println!("原文合计    ：{} 字节", outcome.raw_bytes);
+            println!("压缩后合计  ：{} 字节", outcome.packed_bytes);
+            if outcome.raw_bytes > 0 {
+                println!(
+                    "可省        ：{} 字节（{:.1}×）",
+                    outcome.raw_bytes.saturating_sub(outcome.packed_bytes),
+                    outcome.raw_bytes as f64 / outcome.packed_bytes.max(1) as f64
+                );
+            }
+            if apply {
+                println!("已改写      ：{} 行", outcome.rewritten);
+                println!();
+                println!("文件不会自己变小：SQLite 把腾出来的页留作空闲页。");
+                println!("要把空间还给磁盘，停服务后跑一次 VACUUM。");
+            } else {
+                println!();
+                println!("这是空跑，没有写库。确认之后加 --apply。");
+            }
+            Ok(ExitCode::SUCCESS)
+        }
     }
+}
+
+/// 核对一份库并把结果打出来。退出码非 0 表示**这份库不自洽**。
+async fn print_verify(db: &std::path::Path) -> anyhow::Result<ExitCode> {
+    let store = Store::open_readonly(db).await?;
+    let report = proxy_manager::store::verify::verify(&store).await?;
+    store.close().await;
+
+    println!("核对 {}", db.display());
+    println!("  integrity_check   {}", report.integrity);
+    println!("  外键违规          {}", report.foreign_key_violations);
+    println!(
+        "  表集合            {}",
+        if report.missing_tables.is_empty() && report.unexpected_tables.is_empty() {
+            "与 EXPECTED_TABLES 一致".to_string()
+        } else {
+            format!("缺 {:?}，多 {:?}", report.missing_tables, report.unexpected_tables)
+        }
+    );
+    println!("  周期总账重算      {} 组", report.cycles_checked);
+    println!("  永久累计重算      {} 个身份", report.lifetimes_checked);
+    match report.epoch_high_water {
+        Some(epoch) => println!("  epoch 水位        {epoch}"),
+        // 这不是「干净」，是「一次重建会让四台节点全部 409 stale_epoch」。
+        None => println!("  epoch 水位        **没有**（重建后需要人工补水位）"),
+    }
+    for (codec, rows, packed, raw) in &report.payload_codecs {
+        println!(
+            "  载荷 {codec:<9}    {rows} 行，落库 {packed} 字节，原文 {raw} 字节{}",
+            if *packed > 0 && raw > packed {
+                format!("（{:.1}×）", *raw as f64 / *packed as f64)
+            } else {
+                String::new()
+            }
+        );
+    }
+    println!();
+    if report.mismatches.is_empty() {
+        println!("**总账与账本对得上。**");
+    } else {
+        println!("**对不上 {} 处：**", report.mismatches.len());
+        for mismatch in &report.mismatches {
+            println!("  {mismatch}");
+        }
+    }
+    let interesting: Vec<_> =
+        report.counts.iter().filter(|(_, n)| **n > 0).map(|(t, n)| format!("{t}={n}")).collect();
+    println!();
+    println!("行数：{}", interesting.join(" "));
+
+    Ok(if report.ok() { ExitCode::SUCCESS } else { ExitCode::from(2) })
 }
 
 /// 允许直接喂完整往返记录：排查现场拿得到的往往是那个。

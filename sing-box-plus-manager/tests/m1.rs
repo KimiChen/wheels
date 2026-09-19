@@ -32,9 +32,12 @@ mod secret_gate;
 
 #[path = "m1/agent_contract.rs"]
 mod agent_contract;
+#[path = "m1/backup.rs"]
+mod backup;
 #[path = "m1/crash.rs"]
 mod crash;
 #[path = "m1/scheduler.rs"]
 mod scheduler;
+
 #[path = "m1/settlement.rs"]
 mod settlement;
