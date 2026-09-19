@@ -165,25 +165,10 @@
         </aside>
 
         <div class="wsk-reference-content">
-          <!--
-            常驻反馈位。操作结果、降级通道状态、通知连续失败的红条都落在这里，
-            而不是散在各页各自的位置——出问题时人只需要看一个地方。
-          -->
-          <div
-            class="wsk-alert wsk-warning pm-global-notice"
-            role="status"
-            aria-live="polite"
-            data-roles="admin"
-          >
-            <svg class="wsk-icon" aria-hidden="true"><use href="#warning"></use></svg>
-            <div>
-              <strong>fr-01 采集连续失败，已停止入账并把该节点额度置零</strong>
-              <p>
-                没有新鲜且已结算的健康快照时不得刷新正额度（C33）；通道可用时下发全零表。
-                <a href="alerts.html">查看告警 →</a>
-              </p>
-            </div>
-          </div>
+          <!-- 原来这里是一条常驻反馈位，正文写死成「fr-01 采集连续失败」。
+            live 模式下**没有任何东西会往它里面写**，于是管理员在每一页都看见
+            同一条假 P1——看几天之后就再也不会认真看告警了。整块删掉，
+            而不是靠 app.js 在运行时把它摘走。 -->
 
           <div class="wsk-page">
             <div class="wsk-page-head" id="nodes">
@@ -248,8 +233,8 @@
                     </tr>
                   </thead>
                   <tbody>
-                    <tr data-row data-node="hk-01">
-                      <th scope="row">hk-01</th>
+                    <tr data-row data-node="node-a">
+                      <th scope="row">node-a</th>
                       <td><span class="wsk-badge wsk-accent">plus_v3</span></td>
                       <td>四位全 false</td>
                       <td>TCP 1,284 · UDP 96</td>
@@ -257,8 +242,8 @@
                       <td><span class="wsk-badge wsk-success">可下发</span></td>
                       <td><span class="wsk-badge wsk-success"><span class="wsk-dot"></span>在线</span></td>
                     </tr>
-                    <tr data-row data-node="jp-01">
-                      <th scope="row">jp-01</th>
+                    <tr data-row data-node="node-c">
+                      <th scope="row">node-c</th>
                       <td><span class="wsk-badge wsk-accent">plus_v3</span></td>
                       <td>四位全 false</td>
                       <td>TCP 642 · UDP 31</td>
@@ -266,8 +251,8 @@
                       <td><span class="wsk-badge wsk-warning">结果不明</span></td>
                       <td><span class="wsk-badge wsk-warning"><span class="wsk-dot"></span>待收敛</span></td>
                     </tr>
-                    <tr data-row data-node="us-01">
-                      <th scope="row">us-01</th>
+                    <tr data-row data-node="node-b">
+                      <th scope="row">node-b</th>
                       <td><span class="wsk-badge wsk-accent">plus_v3</span></td>
                       <td><span class="wsk-badge wsk-warning">audit_dropped</span></td>
                       <td>TCP 318 · UDP 12</td>
@@ -275,8 +260,8 @@
                       <td><span class="wsk-badge wsk-success">可下发</span></td>
                       <td><span class="wsk-badge wsk-success"><span class="wsk-dot"></span>在线</span></td>
                     </tr>
-                    <tr data-row data-node="la-01">
-                      <th scope="row">la-01</th>
+                    <tr data-row data-node="node-f">
+                      <th scope="row">node-f</th>
                       <td><span class="wsk-badge wsk-accent">plus_v3</span></td>
                       <td>四位全 false</td>
                       <td>TCP 204 · UDP 8</td>
@@ -284,8 +269,8 @@
                       <td><span class="wsk-badge wsk-success">可下发</span></td>
                       <td><span class="wsk-badge wsk-warning"><span class="wsk-dot"></span>时钟偏移</span></td>
                     </tr>
-                    <tr data-row data-node="sg-01">
-                      <th scope="row">sg-01</th>
+                    <tr data-row data-node="node-d">
+                      <th scope="row">node-d</th>
                       <td><span class="wsk-badge wsk-accent">plus_v3</span></td>
                       <td>四位全 false</td>
                       <td class="wsk-quiet">读取失败</td>
@@ -293,8 +278,8 @@
                       <td><span class="wsk-badge wsk-success">可下发</span></td>
                       <td><span class="wsk-badge wsk-success"><span class="wsk-dot"></span>在线</span></td>
                     </tr>
-                    <tr data-row data-node="fr-01">
-                      <th scope="row">fr-01</th>
+                    <tr data-row data-node="node-e">
+                      <th scope="row">node-e</th>
                       <td><span class="wsk-badge wsk-accent">plus_v3</span></td>
                       <td class="wsk-quiet">采集失败</td>
                       <td class="wsk-quiet">不可用</td>
@@ -320,8 +305,8 @@
               </div>
               <p class="wsk-help wsk-mt-2">
                 只对接 <code>sing-box-plus</code> 一种节点实现（D3）。
-                <code>sg-01</code> 的会话 gauge 读取失败——标注为<strong>读取失败</strong>而不是填
-                <code>0</code>：填 0 会让排空第 2 步误以为会话已归零。
+                会话 gauge 读取失败时标注为<strong>读取失败</strong>而不是填 <code>0</code>：
+                填 0 会让排空第 2 步误以为会话已归零。
                 gauge 不可用时只能按固定超时，<strong>该窗口无条件标记未排空</strong>。
               </p>
 
@@ -329,8 +314,12 @@
                 详情内嵌展开，不跳转——运维在对照多个节点时不该丢掉列表上下文。
                 用原生 <details>，没有 JavaScript 也能展开。
               -->
-              <details class="wsk-panel wsk-mt-5">
-                <summary><strong>节点详情 · hk-01</strong></summary>
+              <!-- 这一块整个是写死的：runtime a3f1…9c、身份数 892/1024、epoch 138，
+                   节点名 hk-01 也不存在。`/api/v1/nodes/{node_id}` 是有的，
+                   但把它接成一个「点哪个节点看哪个」的详情面板是功能活，不是清假数据。 -->
+              <details class="wsk-panel wsk-mt-5"
+                       data-pm-prototype="节点详情面板还没有接上 /api/v1/nodes/{node_id}。上面那张表是真实数据">
+                <summary><strong>节点详情</strong></summary>
                 <div class="wsk-mini-metric-grid wsk-mt-5">
                   <div>
                     <span>runtime</span><strong><code>a3f1…9c</code></strong

@@ -263,6 +263,11 @@
           nodes: { total: nodes.nodes.length },
         });
         markCriteria(alerts.acceptance_criteria);
+        // 页头那枚徽标**不能**走 markCriteria：它用 Number.isFinite 取值，
+        // 而 all_zero 是 bool，Number.isFinite(true) 为 false 会回落成 0，
+        // 于是徽标被永久焊死在绿色上。这里按布尔值直接决定露哪一个。
+        toggle("[data-pm-healthy]", alerts.acceptance_criteria?.all_zero === true);
+        toggle("[data-pm-unhealthy]", alerts.acceptance_criteria?.all_zero === false);
         renderCollection("nodes", nodes.nodes, "还没有配置任何节点");
       },
     },
@@ -281,8 +286,17 @@
     },
 
     "users.html": {
-      load: () => getJson("/users"),
-      render: (data) => renderCollection("users", data.users, "还没有用户"),
+      load: async () => {
+        const [users, identities] = await Promise.all([
+          getJson("/users"),
+          getJson("/identities"),
+        ]);
+        return { users, identities };
+      },
+      render: ({ users, identities }) => {
+        renderCollection("users", users.users, "还没有用户");
+        renderCollection("identities", identities.identities, "还没有登记的计费身份");
+      },
     },
 
     "usage.html": {

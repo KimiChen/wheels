@@ -165,25 +165,10 @@
         </aside>
 
         <div class="wsk-reference-content">
-          <!--
-            常驻反馈位。操作结果、降级通道状态、通知连续失败的红条都落在这里，
-            而不是散在各页各自的位置——出问题时人只需要看一个地方。
-          -->
-          <div
-            class="wsk-alert wsk-warning pm-global-notice"
-            role="status"
-            aria-live="polite"
-            data-roles="admin"
-          >
-            <svg class="wsk-icon" aria-hidden="true"><use href="#warning"></use></svg>
-            <div>
-              <strong>fr-01 采集连续失败，已停止入账并把该节点额度置零</strong>
-              <p>
-                没有新鲜且已结算的健康快照时不得刷新正额度（C33）；通道可用时下发全零表。
-                <a href="alerts.html">查看告警 →</a>
-              </p>
-            </div>
-          </div>
+          <!-- 原来这里是一条常驻反馈位，正文写死成「fr-01 采集连续失败」。
+            live 模式下**没有任何东西会往它里面写**，于是管理员在每一页都看见
+            同一条假 P1——看几天之后就再也不会认真看告警了。整块删掉，
+            而不是靠 app.js 在运行时把它摘走。 -->
 
           <div class="wsk-page">
             <div class="wsk-page-head" id="me-usage">
@@ -194,7 +179,13 @@
               </div>
             </div>
 
-            <section class="wsk-section" aria-labelledby="me-trend">
+            <!--
+              这张图在真实模式下画的也是 app.js 里那组硬编码的点，三个时间范围按钮
+              一个都不接线：`/api/v1/usage/trend` 是**管理员端点**，本人没有对应的趋势端点。
+              一张按自己名字画出来的假曲线，比没有这张图糟得多。
+            -->
+            <section class="wsk-section" aria-labelledby="me-trend"
+                     data-pm-prototype="个人趋势图还没有对应端点（/api/v1/usage/trend 是管理员端点）。下面「按节点分布」那张表是真实数据">
               <div class="wsk-section-head">
                 <h2 id="me-trend">趋势</h2>
                 <fieldset class="wsk-segmented">
@@ -226,9 +217,9 @@
                     <tr><th scope="col">节点</th><th scope="col">本周期用量</th><th scope="col">量级</th></tr>
                   </thead>
                   <tbody>
-                    <tr><th scope="row">hk-01</th><td class="wsk-tok-number">620,144,220,160</td><td>69%</td></tr>
-                    <tr><th scope="row">us-01</th><td class="wsk-tok-number">208,077,109,760</td><td>23%</td></tr>
-                    <tr><th scope="row">jp-01<small>历史授权</small></th><td class="wsk-tok-number">73,003,000,192</td><td>8%</td></tr>
+                    <tr><th scope="row">node-a</th><td class="wsk-tok-number">620,144,220,160</td><td>69%</td></tr>
+                    <tr><th scope="row">node-b</th><td class="wsk-tok-number">208,077,109,760</td><td>23%</td></tr>
+                    <tr><th scope="row">node-c<small>历史授权</small></th><td class="wsk-tok-number">73,003,000,192</td><td>8%</td></tr>
                     <tr data-table-empty hidden><td colspan="3" class="wsk-help" data-pm-empty-text>暂无数据</td></tr>
                     <template data-pm-template>
                       <tr data-row>

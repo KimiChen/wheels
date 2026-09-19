@@ -352,3 +352,141 @@ fn vendored_files_are_actually_committed() {
         );
     }
 }
+
+/// **页面里不许出现编出来的具体值。**
+///
+/// 这一条是补上的，起因是一次不完整的体检：上一轮我清了 me.html、me-audit.html
+/// 与几处外壳，然后在文档里写了「整站体检」——而 overview 的「今日结算 3.80 TiB」、
+/// users 的「出站目标 · kimi 访问 www.example.com 1,284 次」、nodes 的
+/// 「节点详情 · hk-01」、settings 的飞书 app_id 都还在生产上显示着。
+///
+/// 靠人记得去看每一页是不行的。这里列的是**曾经真的出现在生产页面上**的那些串：
+/// 编出来的节点名、用户名、域名、数字。它们要么接真实数据，要么进
+/// `data-pm-prototype`（live 模式会把整块换成一句说明），要么删掉。
+///
+/// 加新页面时这条会跟着生效；要放行一个串，先想清楚它凭什么不是假数据。
+#[test]
+fn pages_carry_no_invented_values() {
+    // 每一条都带上它当初出现在哪里，免得将来有人不知道为什么禁它。
+    const FORBIDDEN: &[(&str, &str)] = &[
+        ("hk-01", "编出来的节点名，真实节点叫 paoyou-work-*"),
+        ("us-01", "同上"),
+        ("jp-01", "同上"),
+        ("sg-01", "同上，而且这个节点从来没存在过"),
+        ("fr-01", "同上，曾出现在一条写死的 P1 假告警里"),
+        ("la-01", "同上"),
+        ("www.example.com", "伪造的个人访问记录"),
+        ("api.example.org", "同上"),
+        ("cdn.example.net", "同上"),
+        ("203.0.113.7", "同上"),
+        ("wangwei", "编出来的用户名"),
+        ("u-kimi", "编出来的身份名"),
+        ("pool-0042", "同上"),
+        ("cli_", "飞书 app_id 的前缀，D27 之后这套凭据不存在了"),
+        ("892 / 1024", "编出来的身份池水位"),
+        ("3.80 TiB", "编出来的当日结算量"),
+        ("4,182,996,341,208", "同上，精确到个位，对账时会被直接引用"),
+    ];
+
+    for name in proxy_manager::web::page_names() {
+        let body = proxy_manager::web::page_body(name).expect("页面必须嵌进二进制");
+        // 两处豁免，各有理由：
+        //  * HTML 注释——不渲染，而解释「这里原来是什么」正需要提到那些串；
+        //  * `[data-pm-prototype]` 的子树——live 模式下 app.js 把整块换成一句说明，
+        //    里面的内容一个字都不会显示，而那正是「这一块还没有数据源」的正式标记。
+        let visible = strip_prototype_blocks(&strip_html_comments(body));
+        for (needle, why) in FORBIDDEN {
+            assert!(
+                !visible.contains(needle),
+                "{name} 里还有编出来的 {needle:?}（{why}）。\
+                 要么接真实数据，要么放进 data-pm-prototype，要么删掉"
+            );
+        }
+    }
+}
+
+/// 去掉每一个带 `data-pm-prototype` 的元素连同它的子树。
+///
+/// 按标签名做深度匹配。**这个函数自己有一条用例**（`stripper_actually_strips`）——
+/// 一个什么都不剥的剥离器会让上面那条断言全盘放行，而它看起来仍然是绿的。
+fn strip_prototype_blocks(body: &str) -> String {
+    let mut out = String::new();
+    let mut rest = body;
+    while let Some(pos) = rest.find("data-pm-prototype") {
+        let Some(open) = rest[..pos].rfind('<') else { break };
+        let tag: String =
+            rest[open + 1..].chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+        if tag.is_empty() {
+            break;
+        }
+        out.push_str(&rest[..open]);
+        let Some(gt) = rest[open..].find('>') else { break };
+        let open_pat = format!("<{tag}");
+        let close_pat = format!("</{tag}>");
+        let mut cursor = open + gt + 1;
+        let mut depth = 1usize;
+        loop {
+            let next_open = rest[cursor..].find(&open_pat).map(|i| cursor + i);
+            let Some(next_close) = rest[cursor..].find(&close_pat).map(|i| cursor + i) else {
+                return out; // 没有闭合标签：剩下的整段都当作被标记的内容丢掉
+            };
+            match next_open {
+                Some(o) if o < next_close => {
+                    depth += 1;
+                    cursor = o + open_pat.len();
+                }
+                _ => {
+                    depth -= 1;
+                    cursor = next_close + close_pat.len();
+                    if depth == 0 {
+                        break;
+                    }
+                }
+            }
+        }
+        rest = &rest[cursor..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// **剥离器必须真的在剥。**
+///
+/// 没有这条，上面那条禁令会在剥离器坏掉的那天静默变成一句空话——
+/// 它会把整页都当成「被标记的内容」放行，而测试照常是绿的。
+#[test]
+fn stripper_actually_strips() {
+    let html = "<p>保留</p><div data-pm-prototype=\"x\"><div>内层</div>假数据</div><p>也保留</p>";
+    let out = strip_prototype_blocks(html);
+    assert!(out.contains("保留") && out.contains("也保留"), "剥多了：{out}");
+    assert!(!out.contains("假数据") && !out.contains("内层"), "剥少了：{out}");
+
+    // 没有标记时一个字都不该动。
+    let plain = "<p>什么都没有</p>";
+    assert_eq!(strip_prototype_blocks(plain), plain);
+
+    // 真实页面上剥完之后必须**还剩下东西**——剥成空串等于全盘放行。
+    let body = proxy_manager::web::page_body("overview.html").unwrap();
+    let stripped = strip_prototype_blocks(&strip_html_comments(body));
+    assert!(
+        stripped.len() > body.len() / 2,
+        "overview.html 被剥掉了一大半（{} -> {}），多半是深度匹配写错了",
+        body.len(),
+        stripped.len()
+    );
+}
+
+/// 去掉 HTML 注释。注释不会渲染，而解释「这里原来是什么」正需要提到那些串。
+fn strip_html_comments(body: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    let mut rest = body;
+    while let Some(open) = rest.find("<!--") {
+        out.push_str(&rest[..open]);
+        match rest[open..].find("-->") {
+            Some(close) => rest = &rest[open + close + 3..],
+            None => return out,
+        }
+    }
+    out.push_str(rest);
+    out
+}

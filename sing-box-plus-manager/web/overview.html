@@ -165,25 +165,10 @@
         </aside>
 
         <div class="wsk-reference-content">
-          <!--
-            常驻反馈位。操作结果、降级通道状态、通知连续失败的红条都落在这里，
-            而不是散在各页各自的位置——出问题时人只需要看一个地方。
-          -->
-          <div
-            class="wsk-alert wsk-warning pm-global-notice"
-            role="status"
-            aria-live="polite"
-            data-roles="admin"
-          >
-            <svg class="wsk-icon" aria-hidden="true"><use href="#warning"></use></svg>
-            <div>
-              <strong>fr-01 采集连续失败，已停止入账并把该节点额度置零</strong>
-              <p>
-                没有新鲜且已结算的健康快照时不得刷新正额度（C33）；通道可用时下发全零表。
-                <a href="alerts.html">查看告警 →</a>
-              </p>
-            </div>
-          </div>
+          <!-- 原来这里是一条常驻反馈位，正文写死成「fr-01 采集连续失败」。
+            live 模式下**没有任何东西会往它里面写**，于是管理员在每一页都看见
+            同一条假 P1——看几天之后就再也不会认真看告警了。整块删掉，
+            而不是靠 app.js 在运行时把它摘走。 -->
 
           <div class="wsk-page">
             <div class="wsk-page-head" id="overview">
@@ -192,73 +177,100 @@
                 <h1 tabindex="-1">运行总览</h1>
                 <p>掌握节点运行状态、流量结算与需要处理的事项。</p>
               </div>
-              <span class="wsk-badge wsk-success"
-                ><span class="wsk-dot"></span>结算链路健康</span
+              <!--
+                原来这里是一个**写死的绿色「结算链路健康」**。四项判据非零时，
+                下面的卡片会被 markCriteria 标红，而页头照样是绿的——
+                同一屏给出两个相反的结论，而绿色那个更显眼。
+                写成两个互斥的 [data-pm-state]：neutralize 会先把两个都藏起来，
+                取数失败时页头**一个结论都不给**，而不是残留一句「健康」。
+                不能给它加 data-pm-criteria：markCriteria 用 Number.isFinite 取值，
+                而 all_zero 是 bool，Number.isFinite(true) 是 false，会回落成 0，
+                于是那枚徽标被永久焊死在绿色上——比现在更糟。
+              -->
+              <span class="wsk-badge wsk-success" data-pm-healthy data-pm-state hidden
+                ><span class="wsk-dot"></span>四项判据全零</span
+              ><span class="wsk-badge wsk-danger" data-pm-unhealthy data-pm-state hidden
+                ><span class="wsk-dot"></span>判据非零：账本已不可信</span
               >
             </div>
 
             <section class="wsk-section" aria-labelledby="overview-criteria">
               <div class="wsk-section-head">
                 <h2 id="overview-criteria">结算健康</h2>
-                <span class="wsk-badge">近 24 小时</span>
+                <!-- 原来写的是「近 24 小时」。四项判据统计的是 snapshot_batches 全表，
+                     是**开服至今**的结论——一个假的统计窗口会让人把全量的 0
+                     读成一天的 0，也会让人以为昨天的问题已经滚出窗口。 -->
+                <span class="wsk-badge">全量</span>
               </div>
               <div class="wsk-metric-grid">
                 <div class="wsk-metric pm-health-metric" data-pm-criteria="counter_regression">
                   <span>负增量</span><strong data-pm="criteria.counter_regression">0</strong
-                  ><small>四向累计均正常递增</small>
+                  ><small>四向累计出现倒退的批次数</small>
                 </div>
                 <div class="wsk-metric pm-health-metric" data-pm-criteria="unknown_runtime">
                   <span>未知 runtime</span><strong data-pm="criteria.unknown_runtime">0</strong
-                  ><small>所有运行实例均已确认</small>
+                  ><small>未登记 runtime 的批次数</small>
                 </div>
                 <div class="wsk-metric pm-health-metric" data-pm-criteria="stale_sequence">
                   <span>重复 sequence</span><strong data-pm="criteria.stale_sequence">0</strong
-                  ><small>未发现重复采集批次</small>
+                  ><small>重复 sequence 的批次数</small>
                 </div>
                 <div class="wsk-metric pm-health-metric" data-pm-criteria="unhealthy_accounted">
                   <span>异常快照入账</span><strong data-pm="criteria.unhealthy_accounted">0</strong
-                  ><small>异常快照均已拦截</small>
+                  ><small>health 为异常却入了账的批次数</small>
                 </div>
               </div>
 
               <div class="wsk-reference-split wsk-mt-5">
                 <div class="wsk-panel">
                   <div class="wsk-section-head wsk-compact">
-                    <h3>今日结算</h3>
-                    <span class="wsk-badge wsk-success">账本已同步</span>
+                    <h3>累计异常计数</h3>
                   </div>
+                  <!--
+                    原来这一块叫「今日结算」，三个数（已入账字节 3.80 TiB、批次 1,440、
+                    拒绝入账 3）全是写死的，而且**没有一个有对应端点**：
+                    /api/v1/alerts 给的是开服至今的累计计数，不是当天的；
+                    1,440 恰好是 24×60，是为了凑「每分钟一批」编的。
+                    改成只显示这一页已经取回来、却一直被丢掉的三个真数，
+                    标题也跟着改成它们真实的口径。
+                  -->
                   <div class="wsk-mini-metric-grid">
                     <div>
-                      <span>已入账字节</span><strong>3.80 TiB</strong
-                      ><small>4,182,996,341,208 字节</small>
+                      <span>拒绝入账</span><strong data-pm-digits="counts.rejected_batches">—</strong
+                      ><small>被拒的批次，未入账</small>
                     </div>
                     <div>
-                      <span>批次</span><strong>1,440</strong
-                      ><small>已完成结算的批次</small>
+                      <span>配额冲突</span><strong data-pm-digits="counts.quota_conflicts">—</strong
+                      ><small>409：runtime 不符或 epoch 过期</small>
                     </div>
                     <div>
-                      <span>拒绝入账</span><strong>3</strong
-                      ><small>均为 429，可重试且未入账</small>
+                      <span>下发结果不明</span><strong data-pm-digits="counts.quota_unknown_results">—</strong
+                      ><small>没有可信回执，不能证明旧授权已失效</small>
                     </div>
                   </div>
                 </div>
                 <div class="wsk-panel">
                   <h3>待处理事项</h3>
+                  <!--
+                    原来三行全是编的：「在线节点 5/6」——一共只有四个节点，而且
+                    nodes[].status 是**配置**启用不是在线，系统里没有存活探测；
+                    「未闭合窗口 1」「时钟偏移节点 1」——数字写死，而且后者的真实计数
+                    是批次数不是节点数。改成三个真的，并把口径写对。
+                  -->
                   <div class="wsk-status-list wsk-mt-2">
                     <div>
-                      <span><a href="nodes.html">在线节点</a><small>1 个节点暂时离线</small></span
-                      ><strong class="wsk-success-text">5 / 6</strong>
+                      <span><a href="nodes.html">已配置节点</a><small>没有存活探测，这是配置里的数量</small></span
+                      ><strong data-pm-digits="nodes.total">—</strong>
                     </div>
                     <div>
-                      <span><a href="alerts.html">未闭合窗口</a><small>异常退出，可能丢尾</small></span
-                      ><strong>1</strong>
+                      <span><a href="alerts.html">未闭合窗口</a><small>暂无写入方，恒为 0</small></span
+                      ><strong data-pm-digits="counts.unclosed_windows">—</strong>
                     </div>
                     <div>
-                      <span><a href="nodes.html">时钟偏移节点</a><small>归桶已回落并标记</small></span
-                      ><strong>1</strong>
+                      <span><a href="alerts.html">归桶回落批次</a><small>采集与收到时刻相差过大，按收到时刻归桶</small></span
+                      ><strong data-pm-digits="counts.time_quality_fallback">—</strong>
                     </div>
                   </div>
-                </div>
               </div>
             </section>
 
@@ -279,7 +291,7 @@
                     <use href="#warning"></use>
                   </svg>
                   <div>
-                    <strong>P1 · 额度结果不明（节点 jp-01）</strong>
+                    <strong>P1 · 额度结果不明（节点 node-c）</strong>
                     <p>
                       下发无可信响应，不能证明旧授权已失效。恢复流程先核对 runtime，
                       再以更高 epoch 的表收敛；本轮照常重算，代价是可能重复授信（D20、§10 R2）。
@@ -291,7 +303,7 @@
                     <use href="#warning"></use>
                   </svg>
                   <div>
-                    <strong>P2 · 节点时钟偏移（节点 la-01）</strong>
+                    <strong>P2 · 节点时钟偏移（节点 node-f）</strong>
                     <p>
                       采集时刻与主控收到时刻相差 41s，已回落按收到时刻归桶并标
                       <code>time_quality = fallback</code>。请检查该节点的 NTP（C27）。
@@ -303,7 +315,7 @@
                     <use href="#info"></use>
                   </svg>
                   <div>
-                    <strong>P2 · 身份数逼近上限（节点 hk-01）</strong>
+                    <strong>P2 · 身份数逼近上限（节点 node-a）</strong>
                     <p>
                       已配置 892 / 1024。再加身份会撞 C29——而越界是通过 SIGHUP 发生的话，
                       不可入账位会粘滞到该 runtime 结束。请安排排空窗口扩容。
