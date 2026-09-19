@@ -194,7 +194,10 @@
             <section class="wsk-section" data-table-scope aria-labelledby="nodes-title">
               <div class="wsk-section-head">
                 <h2 id="nodes-title">节点清单</h2>
-                <span class="wsk-badge wsk-accent">6 个节点</span>
+                <!-- 写死的「6 个节点」——一共只有四个。这一格没有任何绑定，
+                     所以它在生产上一直显示 6，而下面那张表列的是真实的四行。
+                     旁边「N 条记录」那一格是 kit 按真实行数重算的，不是这个毛病。 -->
+                <span class="wsk-badge wsk-accent"><span data-pm-digits="nodes.total">—</span> 个节点</span>
               </div>
               <div class="wsk-toolbar wsk-mb-3" data-js-only>
                 <div class="wsk-filter">
