@@ -117,6 +117,11 @@ pub async fn claim(store: &Store, user_id: i64, pick: Pick<'_>, actor: &str) -> 
         .map(|row| row.get(0))
         .collect();
     if targets.is_empty() {
+        // **每一条错误路径都显式回滚。** 直接 return 会让 `WriteTxn` 在 Drop 里
+        // 打一条「写事务未显式结束就被丢弃」——那句话是给真异常用的。
+        // 让它在**正常的拒绝**上反复出现，等于把它训练成噪音，
+        // 于是有一天真出事的时候没人再看它一眼。
+        txn.rollback().await?;
         return Err(Error::Quota("没有启用配额的在用节点，认领无处落地".into()));
     }
 
@@ -141,11 +146,13 @@ pub async fn claim(store: &Store, user_id: i64, pick: Pick<'_>, actor: &str) -> 
                 return Ok(Claim { user_id, identity_name, nodes: targets, newly_claimed: false });
             }
             Pick::Named { replace: false, .. } => {
-                return Err(Error::Quota(format!(
+                let message = format!(
                     "这个人已经持有 {identity_name}。换成别的身份要明写 --replace：\
                      换了之后旧凭据不再属于他，而他的订阅地址不变、内容会变，\
                      已导入的客户端要重新拉一次"
-                )));
+                );
+                txn.rollback().await?;
+                return Err(Error::Quota(message));
             }
             Pick::Named { reason, .. } => {
                 // 只追加的归属事件（D14）：把 route 行改回 free 而不留事件，
@@ -178,7 +185,9 @@ pub async fn claim(store: &Store, user_id: i64, pick: Pick<'_>, actor: &str) -> 
         }
     }
 
-    let candidate = match pick {
+    // 先把「挑哪个」算成一个 Result，再在一处回滚。分散在各分支里 return，
+    // 迟早会漏掉一条——而漏掉的那条不会报错，只会多一行噪音警告。
+    let picked: Result<Candidate> = match pick {
         Pick::FromPool => {
             pick_free_slot(&mut txn, targets.len() as i64).await?.ok_or_else(|| {
                 // R12：池耗尽要有明确错误码，绝不静默退化成复用一个已用过的身份。
@@ -187,7 +196,7 @@ pub async fn claim(store: &Store, user_id: i64, pick: Pick<'_>, actor: &str) -> 
                  扩容需要改节点配置并 reload，不能靠复用退役身份"
                         .into(),
                 )
-            })?
+            })
         }
         Pick::Named { identity_name, .. } => {
             // **零基线不查，空闲照查。** 部分认领会让订阅里有一条连不上的入口。
@@ -200,19 +209,27 @@ pub async fn claim(store: &Store, user_id: i64, pick: Pick<'_>, actor: &str) -> 
             .fetch_one(txn.conn())
             .await?;
             if free != targets.len() as i64 {
-                return Err(Error::Quota(format!(
+                Err(Error::Quota(format!(
                     "{identity_name} 在 {free} 台在册节点上空闲，而在册节点有 {}。\
                      必须全部空闲才能整体认领——同一个名字在每台上是同一份凭据，\
                      缺一台就是订阅里有一条连不上的入口",
                     targets.len()
-                )));
+                )))
+            } else {
+                // fence 两列留 NULL：本支没有证明零基线，填值就是撒谎。
+                Ok(Candidate {
+                    identity_name: identity_name.to_string(),
+                    fence_runtime_id: None,
+                    fence_sequence: None,
+                })
             }
-            // fence 两列留 NULL：本支没有证明零基线，填值就是撒谎。
-            Candidate {
-                identity_name: identity_name.to_string(),
-                fence_runtime_id: None,
-                fence_sequence: None,
-            }
+        }
+    };
+    let candidate = match picked {
+        Ok(candidate) => candidate,
+        Err(error) => {
+            txn.rollback().await?;
+            return Err(error);
         }
     };
 
@@ -234,10 +251,10 @@ pub async fn claim(store: &Store, user_id: i64, pick: Pick<'_>, actor: &str) -> 
     .await?
     .rows_affected();
     if changed != targets.len() as u64 {
-        return Err(Error::Quota(format!(
-            "认领影响了 {changed} 行而不是 {}：槽位状态在事务内被并发改动",
-            targets.len()
-        )));
+        let message =
+            format!("认领影响了 {changed} 行而不是 {}：槽位状态在事务内被并发改动", targets.len());
+        txn.rollback().await?;
+        return Err(Error::Quota(message));
     }
 
     // 只追加的归属事件（D14）。半开区间的 effective_to 留空表示仍在持有。
@@ -407,6 +424,7 @@ pub async fn retire(
     .map(|row| (row.get(0), row.get(1)))
     .collect();
     if routes.is_empty() {
+        txn.rollback().await?;
         return Err(Error::Quota(format!("没有可退役的槽位：{identity_name}")));
     }
 
