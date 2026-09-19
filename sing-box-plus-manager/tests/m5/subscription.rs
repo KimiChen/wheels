@@ -493,25 +493,28 @@ fn 每种不可用理由都配了文案() {
     }
 }
 
-/// 入口卡上**不许有状态徽标**。
+/// 节点卡上**不许有状态徽标**。
 ///
-/// 服务端的 `entries` 只有名字与落点，没有任何可用性字段。写一个「可用」上去
-/// 就是替服务端编答案：节点掉线、采集失败、额度闸断时它照样是绿的。
+/// 这张卡上只有用量，没有任何可用性字段。写一个「可用」上去就是替服务端编答案：
+/// 节点掉线、采集失败、额度闸断时它照样是绿的。
 /// 这条是那次改动的回归测试——加回去很容易，因为那样"好看"。
+///
+/// 2026-09-20 这张卡从「列入口」改成「列节点 + 公网/内网用量」，
+/// 判据跟着从 `name` 换成 `node_id`，但要守的东西一个字没变。
 #[test]
-fn 入口卡上没有编出来的状态徽标() {
+fn 节点卡上没有编出来的状态徽标() {
     let html = proxy_manager::web::page_body("me.html").unwrap();
     let (_, inside) = split_templates(html);
-    // **只看入口卡那一个模板。** 页面上现在有两个模板，另一个（订阅地址）里
+    // **只看节点卡那一个模板。** 页面上现在有两个模板，另一个（订阅地址）里
     // 那枚徽标绑的是 `profile_name`，有数据支撑，不该被这条误伤。
     let card = inside
         .split("pm-node-card")
         .nth(1)
-        .expect("入口卡模板没扫到：扫描器坏了，或者页面结构变了");
-    assert!(card.contains("data-pm=\"name\""), "扫到的不是入口卡模板：{card}");
+        .expect("节点卡模板没扫到：扫描器坏了，或者页面结构变了");
+    assert!(card.contains("data-pm=\"node_id\""), "扫到的不是节点卡模板：{card}");
     assert!(
         !card.contains("wsk-badge"),
-        "入口卡模板里出现了徽标——服务端没有任何字段能支撑它：{card}"
+        "节点卡模板里出现了徽标——服务端没有任何字段能支撑它：{card}"
     );
 }
 
@@ -571,7 +574,8 @@ fn pick<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::
 
 /// **me.html 上的每一个绑定，都要在端点真的返回的 JSON 里取得到值。**
 ///
-/// 这一页的绑定横跨两个端点（`/me` 给身份与额度，`/me/subscription` 给地址与入口），
+/// 这一页的绑定横跨三个端点（`/me` 给身份与额度，`/me/subscription` 给地址，
+/// `/me/usage` 给按节点的公网/内网用量），
 /// 而 `api.js` 把它们合成一个对象再铺上去。合并口径是**手写的**，
 /// 于是这里有三样东西必须同时对得上：页面上的路径、合并后的对象、两个端点的字段名。
 ///
@@ -586,6 +590,7 @@ async fn me页面上的每个绑定都取得到值() {
 
     let (_, me, _) = api.get("/api/v1/me", Some(&actor)).await;
     let (_, sub, _) = api.get("/api/v1/me/subscription", Some(&actor)).await;
+    let (_, usage, _) = api.get("/api/v1/me/usage", Some(&actor)).await;
 
     // **与 `web/assets/api.js` 的 `PAGES["me.html"].render` 是同一个合并口径。**
     // 那边改了这边不改，这条用例就是那次改动的报警器。
@@ -615,16 +620,17 @@ async fn me页面上的每个绑定都取得到值() {
     }
 
     // 模板里的绑定按集合成员求值。
-    let entry = &sub["entries"][0];
-    assert!(entry.is_object(), "夹具里应当至少有一条入口：{sub}");
     let inside_paths = binding_paths(&inside);
     assert_eq!(
         inside_paths,
         vec![
-            "name".to_string(),
             "node_id".to_string(),
             "note".to_string(),
             "profile_name".to_string(),
+            "sources.0.label".to_string(),
+            "sources.0.total_bytes".to_string(),
+            "sources.1.label".to_string(),
+            "sources.1.total_bytes".to_string(),
             "url".to_string()
         ],
         "模板里的绑定变了：要么页面改了，要么扫描器把模板内外分错了"
@@ -637,11 +643,25 @@ async fn me页面上的每个绑定都取得到值() {
             .unwrap_or_else(|| panic!("me.html 的模板绑了 {path:?}，但拨法元素里没有"));
         assert!(!value.is_null(), "拨法绑的 {path:?} 取到了 null");
     }
-    for path in ["name", "node_id"] {
-        let value = pick(entry, path).unwrap_or_else(|| {
-            panic!("me.html 的模板绑了 {path:?}，但 entries 的元素里没有这个字段")
-        });
-        assert!(!value.is_null(), "模板绑的 {path:?} 取到了 null");
+    // **节点卡按下标绑两条来源**（`sources.0` / `sources.1`），所以
+    // 「每个节点恒有一条来源对应一种拨法」必须由服务端保证，
+    // 不能靠这个人恰好两种都用过。少一条的话页面上那一格是「—」，
+    // 不报错、不进日志，看起来就像「这个人没用过公网」。
+    //
+    // 这里验的是**恒定那一半**：没有任何流量时，按来源那张表照样一种拨法一条。
+    // 节点元素里的同一份列表由同一个函数产出（`split_by_source`），
+    // 它带着真实流量的样子由 M4 的 `个人用量按来源分且标签取自配置` 钉住——
+    // 那一组有 `ledger_harness`，能让账本行由真实结算产生，而这个二进制没有。
+    let sources = usage["sources"].as_array().expect("/me/usage 必须有 sources");
+    assert_eq!(
+        sources.len(),
+        2,
+        "夹具配了两种拨法，按来源那张表就该恒有两条（与有没有流量无关）：{usage}"
+    );
+    for source in sources {
+        for key in ["label", "total_bytes"] {
+            assert!(!source[key].is_null(), "来源缺 {key}：{source}");
+        }
     }
 }
 
@@ -657,7 +677,7 @@ fn me页面的集合名与脚本里的一致() {
     let names = attr_values(html, "data-pm-collection");
     assert_eq!(
         names,
-        vec!["subscriptions".to_string(), "me-entries".to_string()],
+        vec!["subscriptions".to_string(), "me-nodes-usage".to_string()],
         "me.html 的集合名变了"
     );
     for name in names {

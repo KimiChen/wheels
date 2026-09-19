@@ -81,33 +81,117 @@ pub async fn me_usage(
     State(state): State<AppState>,
     subject: Subject,
 ) -> ApiResult<impl IntoResponse> {
+    // 一次查到底：按 (节点, 协议) 分组，两张表都从这一份结果里拼。
+    // 分开查两次的话，两张表可能落在不同的事务上，总和对不上而没人知道为什么。
     let rows = sqlx::query(
-        "SELECT n.node_id, \
+        "SELECT n.node_id, s.inbound_type, \
                 sum(CAST(l.tcp_uplink_bytes AS INTEGER)), sum(CAST(l.tcp_downlink_bytes AS INTEGER)), \
                 sum(CAST(l.udp_uplink_bytes AS INTEGER)), sum(CAST(l.udp_downlink_bytes AS INTEGER)) \
          FROM usage_ledger l \
          JOIN runtime_identities i ON i.runtime_identity_id = l.runtime_identity_id \
+         JOIN runtime_services s ON s.runtime_service_id = i.runtime_service_id \
          JOIN node_runtimes r ON r.runtime_pk = i.runtime_pk \
          JOIN nodes n ON n.node_id = r.node_id \
-         WHERE l.user_id = ? GROUP BY n.node_id ORDER BY n.node_id",
+         WHERE l.user_id = ? GROUP BY n.node_id, s.inbound_type ORDER BY n.node_id",
     )
     .bind(subject.user_id)
     .fetch_all(state.store.readers())
     .await
     .map_err(|e| ApiError::internal(e.to_string()))?;
 
-    let nodes: Vec<Value> = rows
+    // 节点 → 协议 → 字节。BTreeMap 让节点顺序稳定，页面上不会每次刷新都跳。
+    let mut by_node: std::collections::BTreeMap<String, std::collections::BTreeMap<String, i64>> =
+        std::collections::BTreeMap::new();
+    let mut overall: std::collections::BTreeMap<String, i64> = std::collections::BTreeMap::new();
+    for row in &rows {
+        let total: i64 = (2..6).map(|i| row.get::<i64, _>(i)).sum();
+        let protocol: String = row.get(1);
+        *by_node.entry(row.get(0)).or_default().entry(protocol.clone()).or_default() += total;
+        *overall.entry(protocol).or_default() += total;
+    }
+
+    let nodes: Vec<Value> = by_node
         .iter()
-        .map(|row| {
-            let total: i64 = (1..5).map(|i| row.get::<i64, _>(i)).sum();
+        .map(|(node_id, protocols)| {
+            let total: i64 = protocols.values().sum();
             json!({
                 // 只给代号。地址、端口与转发链细节不进个人端点。
-                "node_id": row.get::<String, _>(0),
-                "total_bytes": bytes_str(total as u128),
+                "node_id": node_id,
+                "total_bytes": bytes_str(total.max(0) as u128),
+                "sources": split_by_source(state.subscription.as_deref(), protocols),
             })
         })
         .collect();
-    Ok(Json(json!({ "nodes": nodes })))
+
+    Ok(Json(json!({
+        "nodes": nodes,
+        "sources": split_by_source(state.subscription.as_deref(), &overall),
+    })))
+}
+
+/// 把「协议 → 字节」摊成订阅里那几种拨法。**顺序跟着配置走**，
+/// 所以页面可以按下标绑（`sources.0` / `sources.1`）而不必猜。
+///
+/// # 它分的是协议，不是「客户端拨了哪个地址」
+///
+/// 入口机做 masquerade，节点只看到入口机；客户端拨的是内网地址还是公网地址
+/// **任何地方都没有记录**，事后也补不出来。之所以能当来源用，是因为两份订阅
+/// 从 2026-09-20 起各自只提供一种协议（内网 SS、公网 VLESS）。
+///
+/// 两处会让它说错话，都记在这里而不是假装没有：
+///
+/// * 入口机的 SS 端口对**任意本机地址**生效（nft 的 `fib daddr type local`），
+///   所以拿内网那份订阅从公网拨是通的，而它会被算进「内网」；
+/// * 2026-09-20 之前两份订阅都是 SS、端口相同，那段历史里这个区分不存在。
+///
+/// 标签取自 `server.toml` 里每个来源的 `note`，不在代码里写死中文——
+/// 改订阅配置时页面跟着变，而不是多出第二份要手工同步的真相。
+fn split_by_source(
+    config: Option<&crate::config::SubscriptionConfig>,
+    protocols: &std::collections::BTreeMap<String, i64>,
+) -> Vec<Value> {
+    let mut out = Vec::new();
+    let mut used: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    if let Some(config) = config {
+        for source in &config.sources {
+            let mut total: i64 = 0;
+            for (name, bytes) in protocols {
+                if transport_of(name) == Some(source.transport) {
+                    total += *bytes;
+                    used.insert(name.as_str());
+                }
+            }
+            out.push(json!({
+                // 给人看的那句话由配置提供；没写 note 时退回前缀，
+                // 不自己编一个「公网」出来。
+                "label": if source.note.is_empty() { &source.prefix } else { &source.note },
+                "transport": source.transport.key(),
+                "total_bytes": bytes_str(total.max(0) as u128),
+            }));
+        }
+    }
+    // 对不上任何来源的协议**不丢**：丢了的话按来源的总和会小于按节点的总和，
+    // 而页面上两处并排放着——对不上比没有更糟。
+    for (name, total) in protocols {
+        if !used.contains(name.as_str()) {
+            out.push(json!({
+                "label": name,
+                "transport": name,
+                "total_bytes": bytes_str((*total).max(0) as u128),
+            }));
+        }
+    }
+    out
+}
+
+/// 节点上报的 inbound 类型 → 订阅里的拨法。认不出就是 `None`，
+/// 由调用方原样显示协议名，不猜。
+pub fn transport_of(inbound_type: &str) -> Option<crate::config::Transport> {
+    match inbound_type {
+        "shadowsocks" => Some(crate::config::Transport::Ss),
+        "vless" => Some(crate::config::Transport::Vless),
+        _ => None,
+    }
 }
 
 // ============ 管理面 ============

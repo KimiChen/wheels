@@ -162,6 +162,20 @@ async fn trend_is_admin_only() {
 /// 与生产路径完全一致，只是把 `collected_at` 拨到指定的小时。
 impl Api {
     pub async fn seed_ledger(&self, node_id: &str, points: &[(i64, u64)]) {
+        self.seed_ledger_owned(node_id, None, points).await
+    }
+
+    /// 同上，但在**基线结算之后**把 `u_example_01` 认领给某个用户。
+    ///
+    /// 顺序与生产一致，而且必须一致：槽位是由基线那一次结算登记为 free 的，
+    /// 认领只能发生在那之后；而归属只对**认领之后**的增量生效（D14 只追加）。
+    /// 先认领再结算基线的写法测不出这件事，反而会把一个错的实现测成对的。
+    pub async fn seed_ledger_owned(
+        &self,
+        node_id: &str,
+        owner: Option<i64>,
+        points: &[(i64, u64)],
+    ) {
         use proxy_manager::ledger::runtime;
         use proxy_manager::ledger::settle::{self, FirstSnapshot};
 
@@ -213,6 +227,104 @@ impl Api {
                 .await
                 .expect("接收不该失败");
             settle::settle_next(&self.store, node_id, RUNTIME).await.expect("结算不该 Err");
+            if sequence == 1 {
+                if let Some(user_id) = owner {
+                    let mut txn = self.store.begin_immediate().await.unwrap();
+                    let changed = sqlx::query(
+                        "UPDATE identity_routes SET user_id = ?, state = 'claimed', \
+                         claimed_at = ? WHERE node_id = ? AND identity_name = 'u_example_01' \
+                         AND state = 'free'",
+                    )
+                    .bind(user_id)
+                    .bind("2026-09-19T00:00:00Z")
+                    .bind(node_id)
+                    .execute(txn.conn())
+                    .await
+                    .unwrap()
+                    .rows_affected();
+                    txn.commit().await.unwrap();
+                    assert_eq!(changed, 1, "槽位应当由基线那一次结算登记为 free");
+                }
+            }
         }
     }
+}
+
+// ============ 个人用量：按来源分 ============
+
+/// **分的是协议，不是「客户端拨了哪个地址」。**
+///
+/// 入口机做 masquerade，节点只看到入口机；客户端拨的是内网地址还是公网地址
+/// 任何地方都没有记录。之所以能当来源用，是因为两份订阅从 2026-09-20 起
+/// 各自只提供一种协议（内网 SS、公网 VLESS）。
+#[tokio::test]
+async fn 个人用量按来源分且标签取自配置() {
+    // 必须是带 [subscription] 的夹具：标签取自配置里每个来源的 note，
+    // 没有配置时接口只能退回显示协议名——那条兜底另有用例守。
+    let api = Api::with_subscription(&[], &["u_example_01"]).await;
+    let user = api.user("alice", Role::User, "local").await;
+    // 夹具的基线快照把 u_example_01 放在一条 **vless** 入站上。
+    api.seed_ledger_owned("node-a", Some(user.user_id), &[(1, 4096)]).await;
+
+    let (status, body, _) = api.get("/api/v1/me/usage", Some(&user)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let sources = body["sources"].as_array().expect("应当有 sources");
+
+    // 标签来自 server.toml 里每个来源的 note，不是代码里写死的中文。
+    let labels: Vec<&str> = sources.iter().map(|s| s["label"].as_str().unwrap()).collect();
+    assert!(labels.contains(&"公网"), "{sources:?}");
+    assert!(labels.contains(&"内网"), "{sources:?}");
+
+    let by_label = |want: &str| -> u128 {
+        sources
+            .iter()
+            .find(|s| s["label"] == want)
+            .and_then(|s| s["total_bytes"].as_str())
+            .unwrap()
+            .parse()
+            .unwrap()
+    };
+    // 流量全在 vless 那条入站上，于是全部算给走 vless 的那个来源。
+    assert_eq!(by_label("公网"), 4096, "{sources:?}");
+    assert_eq!(by_label("内网"), 0, "{sources:?}");
+
+    // **两张表说的是同一笔账。** 少算一种协议会让来源那张表的总和小于节点那张，
+    // 而页面上两张表并排放着——对不上比没有更糟。
+    let nodes: u128 = body["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n["total_bytes"].as_str().unwrap().parse::<u128>().unwrap())
+        .sum();
+    let total: u128 =
+        sources.iter().map(|s| s["total_bytes"].as_str().unwrap().parse::<u128>().unwrap()).sum();
+    assert_eq!(total, nodes, "按来源的总和必须等于按节点的总和");
+
+    // 字节一律是字符串（C3）：JSON 数字到了 53 位以上会被静默削掉。
+    for source in sources {
+        assert!(source["total_bytes"].is_string(), "{source:?}");
+    }
+
+    // **每个节点也带同一份来源列表**，而且顺序与配置一致——me.html 的节点卡
+    // 按下标绑（`sources.0` / `sources.1`），顺序一乱标签就对错了数字。
+    let node = &body["nodes"][0];
+    assert_eq!(node["node_id"], "node-a", "{body}");
+    let per_node = node["sources"].as_array().expect("节点元素必须带 sources");
+    assert_eq!(per_node.len(), 2, "两种拨法就该两条，与这个节点用过几种无关：{node}");
+    assert_eq!(per_node[0]["label"], "公网");
+    assert_eq!(per_node[1]["label"], "内网");
+    assert_eq!(per_node[0]["total_bytes"], "4096");
+    assert_eq!(per_node[1]["total_bytes"], "0");
+}
+
+/// 认不出的 inbound 类型**不丢**，原样显示协议名。
+///
+/// 丢了的话来源那张表的总和会小于节点那张，而这正是上一条断言守的东西——
+/// 新增一种协议时，先红的应该是这条，不是生产上的一张对不上的表。
+#[test]
+fn 认不出的协议不映射到任何来源() {
+    use proxy_manager::config::Transport;
+    assert_eq!(proxy_manager::api::routes::transport_of("shadowsocks"), Some(Transport::Ss));
+    assert_eq!(proxy_manager::api::routes::transport_of("vless"), Some(Transport::Vless));
+    assert_eq!(proxy_manager::api::routes::transport_of("hysteria2"), None);
 }
