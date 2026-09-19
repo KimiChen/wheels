@@ -266,14 +266,18 @@
               <div class="wsk-section-head">
                 <h3 id="me-audit-gap">证据链缺口</h3>
               </div>
-              <div class="wsk-alert wsk-warning">
-                <svg class="wsk-icon" aria-hidden="true"><use href="#warning"></use></svg>
+              <!-- 原来这里写着「09-14 03:10 — 03:40 这段有缺口」——**那个缺口是编的**。
+                   上一轮清假数据时标了隔壁那张表，漏了这一块：它在另一个 section 里。
+                   缺口标记本身是 §4.8 的真实设计（audit_dropped 位为真时打标），
+                   但具体的时间窗只能来自真实数据，所以这里只留说明、不留示例。 -->
+              <div class="wsk-alert wsk-info">
+                <svg class="wsk-icon" aria-hidden="true"><use href="#info"></use></svg>
                 <div>
-                  <strong>09-14 03:10 — 03:40 这段有缺口</strong>
+                  <strong>有缺口时会明确标出来</strong>
                   <p>
-                    该时间窗内节点的审计写入失败过，这段的记录可能不完整。
+                    节点的审计写入失败过的时间窗会被标注，那一段的记录可能不完整。
                     照常展示已有的部分并明确标注——<strong>不会把缺号换算成「丢了多少次」</strong>，
-                    那是把未知说成已知。
+                    那是把未知说成已知。审计尚未启用，所以现在没有任何时间窗可标。
                   </p>
                 </div>
               </div>
