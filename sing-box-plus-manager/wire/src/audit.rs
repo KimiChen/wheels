@@ -48,6 +48,46 @@ pub fn is_rotation_stamp(stamp: &str) -> bool {
         && bytes[25] == b'Z'
 }
 
+/// 一个审计文件名的两种形态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NameKind {
+    /// `access-<b64>.jsonl`——正在被写。
+    ///
+    /// 节点以 `O_CREATE|O_RDWR|O_APPEND` 打开它，且 `repairTrailingNewline`
+    /// 只**补一个换行符、从不截断**（`internal/userstats/audit.go:650-670`）。
+    /// 所以它是严格只追加的：按字节偏移增量读、只取到最后一个换行符处，
+    /// 读到的就永远是完整行。
+    ///
+    /// 它唯一会「变短」的时刻是轮转——那是一次 `mv` 加一个新建的同名空文件，
+    /// 读取方必须把「大小小于我记的偏移」当成轮转信号而不是错误。
+    Active,
+    /// `access-<b64>.jsonl.<定宽时间戳>`——已轮转，不再变化。
+    Rotated,
+}
+
+/// 认出一个审计文件名，并给出它的身份段（base64url，未解码）。
+///
+/// 校验的是**形状**，不是授权（C35）：文件名只用来定位，逐行的完整身份校验与
+/// 归属裁剪在主控侧做。但形状本身要严——这个串会被拼进路径：
+/// 身份段只允许 base64url 字母表（里面没有 `/`、没有 `.`，所以拼不出 `..`）。
+pub fn name_kind(name: &str) -> Option<(NameKind, &str)> {
+    let rest = name.strip_prefix(FILE_PREFIX)?;
+    let (segment, kind) = match rest.split_once(ROTATED_SEPARATOR) {
+        Some((segment, stamp)) => {
+            // 分隔符只许出现一次，时间戳只许是定宽那一种。
+            if stamp.contains(ROTATED_SEPARATOR) || !is_rotation_stamp(stamp) {
+                return None;
+            }
+            (segment, NameKind::Rotated)
+        }
+        None => (rest.strip_suffix(FILE_SUFFIX)?, NameKind::Active),
+    };
+    if segment.is_empty() || !segment.bytes().all(|b| ALPHABET.contains(&b)) {
+        return None;
+    }
+    Some((kind, segment))
+}
+
 /// 这个文件名是不是一个**已轮转**的审计文件——**不需要先知道它属于谁**。
 ///
 /// 同步器要的是这一支：它按文件增量拉整个目录，一次往返拿到全部身份的文件，
@@ -63,18 +103,10 @@ pub fn is_rotated_name(name: &str) -> bool {
 
 /// 已轮转文件名里的身份段（base64url，未解码）。不是已轮转文件则 `None`。
 pub fn rotated_identity_segment(name: &str) -> Option<&str> {
-    let rest = name.strip_prefix(FILE_PREFIX)?;
-    let (segment, stamp) = rest.split_once(ROTATED_SEPARATOR)?;
-    // 身份段不能为空，且只能是 base64url 字母表——这条同时挡掉了 `/` 与 `.`，
-    // 于是 `../../etc/passwd` 这一类形状根本拼不出来。
-    if segment.is_empty() || !segment.bytes().all(|b| ALPHABET.contains(&b)) {
-        return None;
+    match name_kind(name) {
+        Some((NameKind::Rotated, segment)) => Some(segment),
+        _ => None,
     }
-    // 分隔符只许出现一次：`a.jsonl.b.jsonl.c` 这种不接受。
-    if stamp.contains(ROTATED_SEPARATOR) || !is_rotation_stamp(stamp) {
-        return None;
-    }
-    Some(segment)
 }
 
 /// 这个文件名是不是该身份的**已轮转**文件。
@@ -90,6 +122,20 @@ pub fn is_rotated_file(name: &str, identity: &str) -> bool {
 /// 这个文件名是不是该身份的活动文件。
 pub fn is_active_file(name: &str, identity: &str) -> bool {
     name == active_file_name(identity)
+}
+
+/// **只取完整行。**
+///
+/// 活动文件是只追加的，但最后一行可能正写到一半。截到最后一个 `\n`（含）为止，
+/// 返回的字节数同时就是「下一次该从哪里接着读」的增量——所以调用方推进偏移时
+/// 用的是**真正收下的字节数**，不是它请求的范围。
+///
+/// 一个换行符都没有时返回空：那说明整段都是半行，一个字节都不能要。
+pub fn whole_lines(bytes: &[u8]) -> &[u8] {
+    match bytes.iter().rposition(|&b| b == b'\n') {
+        Some(index) => &bytes[..=index],
+        None => &[],
+    }
 }
 
 fn base64url_nopad(input: &[u8]) -> String {
@@ -179,16 +225,39 @@ mod tests {
     }
 
     #[test]
+    fn 认得出活动文件与已轮转文件() {
+        let active = active_file_name("u_example_01");
+        assert_eq!(name_kind(&active), Some((NameKind::Active, "dV9leGFtcGxlXzAx")));
+        let rotated = format!("{active}.20260919T041530.123456789Z");
+        assert_eq!(name_kind(&rotated), Some((NameKind::Rotated, "dV9leGFtcGxlXzAx")));
+        // 两者的身份段相同——同步器靠这一点把一个人的活动文件与归档串起来。
+        assert_eq!(name_kind(&active).unwrap().1, name_kind(&rotated).unwrap().1);
+    }
+
+    #[test]
+    fn 只取完整行() {
+        assert_eq!(whole_lines(b"a\nb\n"), b"a\nb\n");
+        // 最后一行写到一半：丢掉它，返回的长度就是可以推进的偏移量。
+        assert_eq!(whole_lines(b"a\nb\nhal"), b"a\nb\n");
+        // 一个换行符都没有：整段都是半行，一个字节都不能要。
+        assert_eq!(whole_lines(b"half"), b"");
+        assert_eq!(whole_lines(b""), b"");
+        // 推进量必须等于收下的字节数，否则下一轮会重读或漏读。
+        let raw = b"one\ntwo\nthr";
+        let kept = whole_lines(raw);
+        assert_eq!(&raw[..kept.len()], kept);
+    }
+
+    #[test]
     fn 形状不对的名字一律拒绝() {
         let stamp = "20260919T041530.123456789Z";
         for name in [
-            // 活动文件：正在被写，读到的可能是半行（C23）。
-            "access-dV9leGFtcGxlXzAx.jsonl".to_string(),
             // 路径穿越的几种写法。身份段只许 base64url，里面没有 `/` 也没有 `.`。
             format!("../../etc/passwd.jsonl.{stamp}"),
             format!("access-../../etc/passwd.jsonl.{stamp}"),
             format!("access-a/b.jsonl.{stamp}"),
             format!("access-...jsonl.{stamp}"),
+            // 活动文件是合法名字，但不是**已轮转**文件。
             // 前缀不对。
             format!("other-dV9leGFtcGxlXzAx.jsonl.{stamp}"),
             // 身份段为空。
@@ -203,6 +272,11 @@ mod tests {
         ] {
             assert!(!is_rotated_name(&name), "这个名字不该被接受：{name}");
             assert!(rotated_identity_segment(&name).is_none(), "{name}");
+            assert!(name_kind(&name).is_none(), "连活动文件都算不上：{name}");
         }
+        // 活动文件单独一条：它是合法名字，但**不是已轮转文件**。
+        let active = active_file_name("u_example_01");
+        assert!(!is_rotated_name(&active));
+        assert_eq!(name_kind(&active).map(|k| k.0), Some(NameKind::Active));
     }
 }
