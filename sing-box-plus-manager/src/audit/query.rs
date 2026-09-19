@@ -150,6 +150,13 @@ pub async fn access(
     now_ms: i64,
 ) -> Result<Answer> {
     let identities = candidate_identities(store, subject).await?;
+    // 前缀是 `access-<b64url>.jsonl`，匹配方式是 `starts_with`——于是它同时命中
+    // 活动文件与它的全部归档（`…​.jsonl.<定宽时间戳>`）。
+    //
+    // **那个 `.jsonl` 不是装饰。** 去掉它，`user0001` 的前缀会命中 `user00010`
+    // 的文件（base64url 下 `dXNlcjAwMDE` 是 `dXNlcjAwMDEw` 的前缀）。访问行有 C35
+    // 兜底，但**诊断行没有四元组、裁剪不了**——它是按文件收的，于是别人文件里的
+    // 缺口会原样显示给你。
     let prefixes: Vec<String> =
         identities.iter().map(|name| audit::active_file_name(name)).collect();
 
