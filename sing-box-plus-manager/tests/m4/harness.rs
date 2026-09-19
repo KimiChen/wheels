@@ -124,25 +124,56 @@ impl Api {
         std::fs::write(path, "这不是 TOML {{{").unwrap();
     }
 
-    /// 带订阅的 Api：写一份凭据文件（0600）与入口清单。
+    /// 带订阅的 Api：写一份凭据文件（0600）与入口清单。两种拨法都是 0 级。
     pub async fn with_subscription(admins: &[&str], identities: &[&str]) -> Self {
-        Api::build_full(Some(server_toml_with(admins, &[])), Some(identities.to_vec()), true).await
+        Api::with_subscription_levels(admins, identities, 0).await
+    }
+
+    /// 同上，但能指定公网那份拨法的级别门槛——用来验**可见性分级**。
+    ///
+    /// 门槛是参数而不是夹具常量：写死 0 的那份夹具能证明「默认两条都在」，
+    /// 但证不了「级别不够就不给」，而后者才是这个功能本身。
+    pub async fn with_subscription_levels(
+        admins: &[&str],
+        identities: &[&str],
+        wan_min_level: i64,
+    ) -> Self {
+        Api::build_full(
+            Some(server_toml_with(admins, &[])),
+            Some(identities.to_vec()),
+            true,
+            wan_min_level,
+        )
+        .await
+    }
+
+    /// 改某人的档位。落点与 `proxy-manager user tier` 相同：`users.quota_group`。
+    pub async fn set_quota_group(&self, user_id: i64, group: &str) {
+        let mut txn = self.store.begin_immediate().await.unwrap();
+        sqlx::query("UPDATE users SET quota_group = ? WHERE user_id = ?")
+            .bind(group)
+            .bind(user_id)
+            .execute(txn.conn())
+            .await
+            .unwrap();
+        txn.commit().await.unwrap();
     }
 
     async fn build(server_toml: Option<String>) -> Self {
-        Api::build_full(server_toml, None, true).await
+        Api::build_full(server_toml, None, true, 0).await
     }
 
     /// 没有 `[audit]` 的一份。审计端点那时回 `audit_not_enabled` 而不是空表——
     /// 空表会被读成「你没访问过任何目标」。
     pub async fn without_audit() -> Self {
-        Api::build_full(None, None, false).await
+        Api::build_full(None, None, false, 0).await
     }
 
     async fn build_full(
         server_toml: Option<String>,
         subscription_identities: Option<Vec<&str>>,
         with_audit: bool,
+        wan_min_level: i64,
     ) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let config = StorageConfig { path: dir.path().join("pm.db"), busy_timeout_ms: 5_000 };
@@ -194,7 +225,7 @@ impl Api {
                         host: "203.0.113.1".into(),
                         note: "公网".into(),
                         transport: proxy_manager::config::Transport::Vless,
-                        min_level: 0,
+                        min_level: wan_min_level,
                     },
                     proxy_manager::config::EntrySource {
                         prefix: "proxyLan-".into(),
