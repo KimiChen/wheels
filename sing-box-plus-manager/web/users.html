@@ -183,10 +183,86 @@
               </div>
             </div>
 
+            <section class="wsk-section" aria-labelledby="groups-title">
+              <div class="wsk-section-head">
+                <h2 id="groups-title">用户分组</h2>
+              </div>
+              <div class="wsk-table-wrap">
+                <table class="wsk-table" data-pm-collection="user-groups">
+                  <caption class="wsk-sr-only">额度档位与人数</caption>
+                  <thead>
+                    <tr>
+                      <th scope="col">档位</th>
+                      <th scope="col">月度额度</th>
+                      <th scope="col">人数</th>
+                      <th scope="col">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr><th scope="row">normal</th><td>1 TB</td><td>12</td><td></td></tr>
+                    <tr><th scope="row">advanced</th><td>2 TB</td><td>3</td><td></td></tr>
+                    <!-- 真实模式下上面两行示例会被整体清掉，不会与真行混排。 -->
+                    <tr data-table-empty hidden><td colspan="4" class="wsk-help" data-pm-empty-text>还没有档位</td></tr>
+                    <!--
+                      **人数是对全表数的，不是这一页数的。** 用户列表是分页的，
+                      在前端按已加载的那一页统计，会在第二页之后开始少算——
+                      而少算看起来像丢了人，不像分页。所以人数由服务端
+                      `GROUP BY` 给出，展开也走 `?group=` 让 SQL 去筛。
+                    -->
+                    <template data-pm-template>
+                      <tr data-row>
+                        <th scope="row" data-pm="group_name"></th>
+                        <td data-pm-bytes="monthly_bytes"></td>
+                        <td data-pm="member_count"></td>
+                        <td><button class="wsk-button wsk-secondary" type="button" data-js-only
+                                    data-pm-attr="group_name -> data-group-expand">展开用户</button></td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+
+              <details class="wsk-panel wsk-mt-5" data-group-panel hidden>
+                <summary>
+                  <strong>档位 <span data-group-title>—</span> 的成员</strong>
+                </summary>
+                <div class="wsk-alert wsk-danger wsk-mt-5" role="alert" data-group-error hidden>
+                  <svg class="wsk-icon" aria-hidden="true"><use href="#warning"></use></svg>
+                  <div>
+                    <strong>没能取到这个档位的成员</strong>
+                    <p data-group-error-text>请稍后重试。</p>
+                  </div>
+                </div>
+                <div class="wsk-table-wrap wsk-mt-5" data-pm-collection="group-members">
+                  <table class="wsk-table">
+                    <caption class="wsk-sr-only">该档位的成员</caption>
+                    <thead>
+                      <tr>
+                        <th scope="col">用户</th>
+                        <th scope="col">角色</th>
+                        <th scope="col">本周期用量</th>
+                        <th scope="col">剩余</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr data-table-empty hidden><td colspan="4" class="wsk-help" data-pm-empty-text>这个档位还没有人</td></tr>
+                      <template data-pm-template>
+                        <tr data-row>
+                          <th scope="row" data-pm="login_name"></th>
+                          <td><span class="wsk-badge" data-pm="role"></span></td>
+                          <td data-pm-bytes="cycle_used_bytes"></td>
+                          <td data-pm-bytes="cycle_remaining_bytes"></td>
+                        </tr>
+                      </template>
+                    </tbody>
+                  </table>
+                </div>
+              </details>
+            </section>
+
             <section class="wsk-section" data-table-scope aria-labelledby="users-title">
               <div class="wsk-section-head">
                 <h2 id="users-title">用户</h2>
-                <span class="wsk-badge">统一额度 300 GiB / 月</span>
               </div>
               <div class="wsk-table-wrap">
                 <table class="wsk-table" data-pm-collection="users">

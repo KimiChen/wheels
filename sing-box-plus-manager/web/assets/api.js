@@ -345,8 +345,12 @@
       },
       render: ({ users, identities }) => {
         renderCollection("users", users.users, "还没有用户");
+        // 档位是闭集（D23），**一个人都没有的也要列**：页面上看不出
+        // 「这个档存在但没人」与「这个档不存在」的区别时，前者才是常态。
+        renderCollection("user-groups", users.groups ?? [], "还没有档位");
         renderCollection("identities", identities.identities, "还没有登记的计费身份");
         bindAdminAudit();
+        bindGroupExpand();
       },
     },
 
@@ -605,6 +609,40 @@
     range.selectNodeContents(node);
     selection.removeAllRanges();
     selection.addRange(range);
+  }
+
+  // 点开一个档位，列出它的成员。
+  //
+  // **成员从服务端按 `?group=` 取，不在前端按已加载的那一页筛。**
+  // 用户列表是分页的，而档位人数是对全表 GROUP BY 数出来的——
+  // 两者口径不一致时，页面上会出现「这个组写着 37 人，点开只有 20 个」，
+  // 而那看起来像丢数据，不像分页。
+  let groupExpandBound = false;
+  function bindGroupExpand() {
+    const panel = document.querySelector("[data-group-panel]");
+    if (!panel || groupExpandBound) return;
+    groupExpandBound = true;
+    document.addEventListener("click", async (event) => {
+      const button = event.target?.closest?.("[data-group-expand]");
+      if (!button) return;
+      const group = button.getAttribute("data-group-expand");
+      panel.hidden = false;
+      panel.open = true;
+      setText(panel.querySelector("[data-group-title]"), group);
+      panel.querySelector("[data-group-error]").hidden = true;
+      // 先清空再取数：留着上一个档位的行，等于在标题已经换了之后
+      // 还显示着另一个档位的人。
+      renderCollection("group-members", [], "正在加载…");
+      try {
+        const data = await getJson(`/users?group=${encodeURIComponent(group)}`);
+        renderCollection("group-members", data.users ?? [], "这个档位还没有人");
+      } catch (error) {
+        const banner = panel.querySelector("[data-group-error]");
+        banner.hidden = false;
+        setText(banner.querySelector("[data-group-error-text]"), `加载失败：${error.message}`);
+        renderCollection("group-members", [], "没能取到数据");
+      }
+    });
   }
 
   function renderCollection(name, items, emptyText) {
