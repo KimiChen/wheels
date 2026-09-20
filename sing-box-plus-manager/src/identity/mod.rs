@@ -155,6 +155,31 @@ pub async fn claim(store: &Store, user_id: i64, pick: Pick<'_>, actor: &str) -> 
                 return Err(Error::Quota(message));
             }
             Pick::Named { reason, .. } => {
+                // **先关掉上一段持有区间，再追加 unassigned**——顺序不能反。
+                //
+                // 漏掉这一步的后果不是历史不全，是**审计记录判给错的人**：
+                // `audit::filter` 的 holdings 只取 `state = 'assigned'`、按
+                // `effective_from` 排序，然后**命中第一个 [from, to) 就返回**。
+                // 旧持有者的区间留着 NULL 就是开口到无穷、而且排在前面，于是
+                // 换身份之后新持有者的每一条记录都落给旧持有者，新人自己一条看不到。
+                //
+                // 2026-09-20 线上撞见：一个人换走了自己原来的身份，那个名字
+                // 随后发给了另一个人，于是**新持有者一千多条记录全判给了旧持有者**
+                // ——新人看不到自己的日志，而旧人看得到新人的浏览记录。
+                // 退役那条路径（`retire`）一直是对的，只有这条换身份的漏了。
+                //
+                // 必须在下面那条 UPDATE 之前跑：子查询依赖 `state = 'claimed'`，
+                // 放掉之后就选不中了。
+                sqlx::query(
+                    "UPDATE identity_assignment_events SET effective_to = ? \
+                      WHERE effective_to IS NULL AND route_id IN ( \
+                            SELECT route_id FROM identity_routes \
+                             WHERE user_id = ? AND state = 'claimed')",
+                )
+                .bind(&now)
+                .bind(user_id)
+                .execute(txn.conn())
+                .await?;
                 // 只追加的归属事件（D14）：把 route 行改回 free 而不留事件，
                 // 等于让一段持有从历史里消失。
                 sqlx::query(

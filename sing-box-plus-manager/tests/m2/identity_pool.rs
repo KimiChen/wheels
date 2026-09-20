@@ -586,6 +586,34 @@ async fn replace换身份留下完整的归属痕迹() {
         ],
         "先放旧的再认领新的，三条事件一条都不能少"
     );
+
+    // **三条事件齐全还不够——旧那段区间必须被关掉。**
+    //
+    // 只断言事件存在是这条用例原本的样子，而缺口正好落在它没看的那一列上：
+    // `audit::filter` 的 holdings 只取 `assigned`、按 `effective_from` 排序，
+    // 然后命中第一个 `[from, to)` 就返回。旧区间留着 NULL 就是开口到无穷、
+    // 且排在前面，于是这个名字之后**换给谁，谁的记录都落回旧持有者**。
+    let (from, to): (String, Option<String>) = sqlx::query_as(
+        "SELECT e.effective_from, e.effective_to FROM identity_assignment_events e \
+           JOIN identity_routes r ON r.route_id = e.route_id \
+          WHERE r.identity_name = 's1' AND e.state = 'assigned'",
+    )
+    .fetch_one(stack.store.readers())
+    .await
+    .unwrap();
+    let to = to.expect("旧持有区间必须有 effective_to，否则它开口到无穷");
+    assert!(to > from, "区间要有正长度：[{from}, {to})");
+
+    // 关的那一刻就是放手的那一刻——两者之间有缝的话，缝里的记录谁都不属于。
+    let released: String = sqlx::query_scalar(
+        "SELECT e.effective_from FROM identity_assignment_events e \
+           JOIN identity_routes r ON r.route_id = e.route_id \
+          WHERE r.identity_name = 's1' AND e.state = 'unassigned'",
+    )
+    .fetch_one(stack.store.readers())
+    .await
+    .unwrap();
+    assert_eq!(to, released, "关区间与放手必须是同一个时刻");
 }
 
 /// 指定的就是他已经持有的那个 → 幂等，不白费一个名额。
