@@ -167,6 +167,90 @@ fn hosts(body: &Value) -> Vec<String> {
         .collect()
 }
 
+/// 把一个身份从旧持有者交给新持有者，**照 `identity::claim` 的 replace 分支做**：
+/// 先关上一段区间，再补 unassigned，最后给新人补 assigned。
+async fn hand_over(api: &Api, identity: &str, to_user: i64, at: &str) {
+    let mut txn = api.store.begin_immediate().await.unwrap();
+    let route: i64 = sqlx::query_scalar(
+        "SELECT route_id FROM identity_routes WHERE node_id = ? AND identity_name = ?",
+    )
+    .bind(NODE)
+    .bind(identity)
+    .fetch_one(txn.conn())
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE identity_assignment_events SET effective_to = ? \
+          WHERE route_id = ? AND effective_to IS NULL",
+    )
+    .bind(at)
+    .bind(route)
+    .execute(txn.conn())
+    .await
+    .unwrap();
+    for (user, state) in [(None, "unassigned"), (Some(to_user), "assigned")] {
+        sqlx::query(
+            "INSERT INTO identity_assignment_events(route_id, user_id, state, \
+             effective_from, recorded_at) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(route)
+        .bind(user)
+        .bind(state)
+        .bind(at)
+        .bind(at)
+        .execute(txn.conn())
+        .await
+        .unwrap();
+    }
+    sqlx::query("UPDATE identity_routes SET user_id = ?, claimed_at = ? WHERE route_id = ?")
+        .bind(to_user)
+        .bind(at)
+        .bind(route)
+        .execute(txn.conn())
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+}
+
+/// 一个身份换过人之后，**新持有者看得到自己的记录，旧持有者看不到**。
+///
+/// 2026-09-20 线上撞见的形态：一个名字换过持有者之后，新人一条都看不到，
+/// 而他那一千多条全出现在旧持有者页上。成因是换身份那条路径没关上一段持有
+/// 区间，`audit::filter` 的 holdings 顺序扫、命中第一个就返回，于是开口到
+/// 无穷又排在前面的旧区间把后来的记录全吃了。
+///
+/// 这条用例断的是**后果**而不是那一列的值：换一种方式再犯同样的错，它照样红。
+#[tokio::test]
+async fn 换过人的身份记录归新持有者() {
+    let api = Api::new().await;
+    let alice = api.user("alice", Role::User, "local").await;
+    let bob = api.user("bob", Role::User, "local").await;
+    wire_identity(&api, alice.user_id, "ss-entry", "id-01").await;
+    hand_over(&api, "id-01", bob.user_id, "2026-06-01T00:00:00Z").await;
+
+    // 交接之后产生的记录。
+    let ts = now_ms() - 60_000;
+    api.seed_audit(
+        NODE,
+        "id-01",
+        &[
+            line("id-01", "ss-entry", "bob.example.com", 1, ts, 100, 200),
+            line("id-01", "ss-entry", "bob.example.com", 2, ts + 1, 100, 200),
+        ],
+    );
+
+    let (status, body, _) = api.get("/api/v1/me/audit/access", Some(&bob)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(hosts(&body), vec!["bob.example.com"], "新持有者该看到自己的记录：{body}");
+    assert_eq!(body["rows"][0]["count"], 2);
+
+    // 反面同样要断。少了这一半，「旧持有者仍然看得见」这个泄漏不会被发现——
+    // 而那正是线上真实发生的事，比新人看不见更严重。
+    let (status, body, _) = api.get("/api/v1/me/audit/access", Some(&alice)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(hosts(&body).is_empty(), "旧持有者不该看到交接之后的记录：{body}");
+}
+
 #[tokio::test]
 async fn 本人查得到自己的出站目标() {
     let api = Api::new().await;
