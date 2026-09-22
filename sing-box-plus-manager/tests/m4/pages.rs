@@ -12,11 +12,41 @@ use crate::harness::Api;
 #[tokio::test]
 async fn unauthenticated_page_request_redirects_to_login() {
     let api = Api::new().await;
-    for page in ["overview.html", "nodes.html", "me.html", "index.html"] {
+    // 首页**不在这张表里**：它是公开页（与原站同一口径），未登录直接发内容。
+    // 下面那条用例钉住这件事，免得有人把它悄悄改回 Authenticated。
+    for page in ["overview.html", "nodes.html", "me.html"] {
         let (status, _, headers) = api.get_text(&format!("/{page}"), None).await;
         assert_eq!(status, StatusCode::SEE_OTHER, "{page} 未认证时应跳登录页");
         assert_eq!(headers.get(header::LOCATION).unwrap(), "/login.html");
     }
+}
+
+/// 首页登录前后是同一个 URL、两套内容，**判据由服务端盖在 `<body>` 上**。
+///
+/// 让页面自己去问一次 `/me` 也能得到答案，但那答案要等一个来回——
+/// 中间那段时间里，一个已登录的人看到的是「登录获取个人订阅」。
+/// 而更糟的一路是 `/me` 失败：那时页面永远停在未登录的那一套上。
+#[tokio::test]
+async fn 首页公开可达且盖着这一次的登录态() {
+    let api = Api::with_admins(&["boss"]).await;
+
+    // 未登录：200 而不是 303，且盖 off。
+    let (status, body, _) = api.get_text("/", None).await;
+    assert_eq!(status, StatusCode::OK, "首页应免认证可达");
+    assert!(body.contains(r#"data-pm-auth="off""#), "未登录时要盖 off");
+    // **未登录的首页上不许出现订阅地址**。这一页是公开的，它会被搜索引擎之外的
+    // 任何人打开——包括拿到链接的外部人。
+    assert!(!body.contains("/sub/"), "未登录的首页上出现了订阅路径");
+
+    // 已登录：同一个 URL，盖 on，并带上这一次求值出的角色。
+    let admin = api.user("boss", Role::Admin, "feishu").await;
+    let (status, body, _) = api.get_text("/", Some(&admin.cookie)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains(r#"data-pm-auth="on""#), "已登录时要盖 on");
+    assert!(body.contains(r#"data-principal="admin""#), "角色要跟着盖上");
+    // live 标记必须一起到：少了它，`neutralize()` 不会清页面上那条示例地址，
+    // 而那条地址是打码的圆点——看起来完全像个能用的地址。
+    assert!(body.contains(r#"data-pm-mode="live""#), "live 标记没盖上");
 }
 
 #[tokio::test]

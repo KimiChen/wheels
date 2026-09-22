@@ -38,13 +38,12 @@ fn front_end_never_converts_bytes_to_float() {
 #[test]
 fn every_authenticated_page_can_log_out() {
     for name in proxy_manager::web::page_names() {
-        if proxy_manager::web::is_public(name) {
-            continue; // 登录页与越权提示页没有会话可退
+        // 登录页与越权提示页没有会话可退。**判据不能写成 `is_public`**：
+        // 首页也是公开页，但它登录后就是一张有会话的页，退出按钮必须在。
+        if name == "login.html" || name == "unauthorized.html" {
+            continue;
         }
         let body = proxy_manager::web::page_body(name).expect("页面必须嵌进二进制");
-        if name == "index.html" {
-            continue; // 兼容跳转页，没有外壳
-        }
         assert!(body.contains("data-pm-logout"), "{name} 没有可用的退出按钮");
         assert!(!body.contains("原型页面不执行退出"), "{name} 还留着那个只弹提示的原型退出按钮");
     }
@@ -119,7 +118,8 @@ fn pages_have_no_inline_script_bodies() {
 #[test]
 fn authenticated_pages_carry_the_role_anchor() {
     for name in web::page_names() {
-        if web::is_public(name) {
+        // 同上：首页虽然是公开页，服务端照样要把这一次的角色与登录态盖进去。
+        if name == "login.html" || name == "unauthorized.html" {
             continue;
         }
         let body = web::page_body(name).expect("页面必须嵌入");
@@ -142,6 +142,49 @@ fn login_page_carries_the_sso_anchor() {
     let stamped = web::stamp_sso(body, true);
     assert!(stamped.contains(r#"data-pm-sso="on""#));
     assert!(stamped.contains(r#"class="pm-login""#), "盖属性不得把 class 顶掉");
+}
+
+/// **没配 SSO 时那条说明必须真的显示得出来。**
+///
+/// `stamp_sso` 会在 `<body>` 上盖 `data-pm-sso="off"`，样式据此把登录按钮藏掉、
+/// 把那条说明顶上来。原来那条说明在 HTML 里带 `hidden`，靠一条
+/// `[data-pm-sso-missing][hidden] { display: flex }` 掀开——而它**掀不开**：
+/// kit 的整份样式包在 `@layer wsk` 里，其中有 `[hidden] { display: none !important }`，
+/// 而按层叠规则，带 important 的**分层**声明压过带 important 的**未分层**声明。
+/// 加 `!important` 也没用。结果是「没配 SSO」时登录按钮被藏掉、说明也是 none：
+/// 使用者拿到一张既没有登录入口、也没有任何解释的登录页，
+/// 而那正是这套开关本来要防的状态。
+///
+/// 这是在浏览器里真打开才看见的——读 CSS 时那两行看着完全是对的。
+/// 所以按文本锁住这次的改法：**不许再给它加回 `hidden`**。
+#[test]
+fn 没配sso时那条说明必须真的显示得出来() {
+    let body = web::page_body("login.html").expect("登录页必须嵌入");
+    let at = body.find("data-pm-sso-missing").expect("登录页上没有那条说明");
+    let tag_end = body[at..].find('>').unwrap() + at;
+    assert!(
+        !body[at..tag_end].contains("hidden"),
+        "那条说明又带上了 hidden：kit 的 [hidden] 在 @layer 里带 important，\
+         未分层的样式压不过它，这条说明会永远显示不出来"
+    );
+
+    // 显隐由 console.css 的两条普通声明表达：默认藏，服务端说 off 时显示。
+    let (css, _) = web::asset("assets/console.css").expect("console.css 必须嵌入");
+    assert!(
+        css.contains("[data-pm-sso-missing] { display: none; }"),
+        "少了默认藏起来那条：没配 SSO 之外的情况下这条说明会一直露着"
+    );
+    assert!(
+        css.contains(r#"body[data-pm-sso="off"] [data-pm-sso-missing] { display: flex; }"#),
+        "少了 off 时显示那条"
+    );
+
+    // 前提：kit 仍然把 `[hidden]` 写成 important，而且整份在 `@layer` 里。
+    // 哪天不是了，上面那套绕法就不必要（但也无害）——先红一次，让人重看一遍。
+    let (kit, _) = web::asset("web-standard-kit/style.css").expect("kit 必须嵌入");
+    assert!(kit.contains("@layer wsk"), "kit 不再用层叠层：请重看上面那套绕法还需不需要");
+    let flat = kit.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(flat.contains("[hidden] { display: none !important; }"), "kit 的 [hidden] 规则变了");
 }
 
 /// 页面上的 `data-roles` 与服务端的 `PAGES` 可见性表必须一致。

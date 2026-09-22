@@ -48,6 +48,10 @@
   // 两份表一定会漂移，这是本项目自己的纪律（见 docs/integration-contract.md）。
   function pageAllowed(page, principal) {
     if (page === "login.html") return true;
+    // 首页不在侧栏里，两种角色都该看得到。少了这一条，`applyPrincipal` 会
+    // 判它「当前主体看不到」然后 `location.replace` 走——**首页一打开就被弹掉**，
+    // 而且没有任何报错。（它原来确实是一张跳转页，所以这个行为曾经是对的。）
+    if (page === "index.html") return true;
     const link = document.querySelector(`.wsk-reference-nav a[href="${page}"]`);
     if (!link) return false;
     return (link.dataset.roles || "").split(/\s+/).includes(principal);

@@ -1,19 +1,33 @@
 <!doctype html>
 <!--
-  proxy-manager 控制台 · 登录页（静态原型）
+  proxy-manager · 登录页
 
-  单独成页而不是 index.html 的一个视图：它是未认证页面，缓存头与已登录页不同
-  （README §4.11：登录态页面 private, no-store + Vary: Cookie）。
+  单独成页而不是首页的一个视图：它是未认证页面，而且**首页已经是公开页**了——
+  两者的分工是「首页说这是什么」「登录页只做登录这一件事」。
 
-  样式与脚本暂时相对引用同仓的 web-standard-kit；M4 打包时按 §5 的口径
-  vendored 进 assets/ 随二进制发布。
+  参考 proxy.paoyou.work 原站重做。原站没有登录页，`/login` 是一条直接跳 SSO 的
+  302，所以这里能抄的只有它的版式与口吻；能不能登录这件事本身，原站不需要解释，
+  本系统需要——SSO 是可选配置段，没配时那个按钮会 404。
+
+  这一版删掉的三块都是**原型内容**，它们出现在每个人看到的第一页上：
+   * 「演示环境」徽标与两个「预览普通用户 / 预览管理员」入口
+     （live 模式下 app.js 会在运行时把它们摘走，但按本项目自己的纪律，
+      靠运行时摘走不如一开始就别有）；
+   * 「部署提示」面板，讲的是对外基址、回调地址、出口 IP 登记——
+     那是运维要知道的事，而它写在使用者的登录页上；
+   * 「本地应急管理员」折叠块。它默认禁用，而把「存在这样一条后门、
+     它的角色取自数据库而不走名单」写在公开页上，对使用者没有任何用处。
+
+  这三件事该在的地方是仓库里的文档。真正与「现在能不能登录」有关的那一条
+  （没配 SSO），保留在下面那条只在服务端说 off 时才出现的提示里。
 -->
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light dark" />
-    <meta name="robots" content="noindex, nofollow" />
+    <meta name="robots" content="noindex, nofollow, noarchive" />
+    <meta name="referrer" content="no-referrer" />
     <title>登录 · proxy-manager</title>
     <script src="assets/theme.js"></script>
     <link rel="stylesheet" href="../../web-standard-kit/style.css" />
@@ -40,27 +54,24 @@
         <symbol id="moon" viewBox="0 0 24 24">
           <path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8Z" />
         </symbol>
-        <symbol id="lock" viewBox="0 0 24 24">
-          <rect x="3" y="11" width="18" height="11" rx="2" />
-          <path d="M7 11V7a5 5 0 0 1 10 0v4" />
-        </symbol>
         <symbol id="warning" viewBox="0 0 24 24">
           <path
             d="m21.73 18-8-14a2 2 0 0 0-3.46 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"
           />
           <path d="M12 9v4M12 17h.01" />
         </symbol>
+        <symbol id="check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6" /></symbol>
       </defs>
     </svg>
 
-    <header class="wsk-topbar">
-      <div class="wsk-brand">
+    <header class="wsk-topbar pm-home-topbar">
+      <a class="wsk-brand" href="index.html" aria-label="返回首页">
         <span class="wsk-brand-mark" aria-hidden="true">PM</span>
         <span class="wsk-brand-copy"><strong>proxy-manager</strong></span>
-      </div>
-      <span class="wsk-badge wsk-warning" data-demo-badge
-        ><span class="wsk-dot"></span>演示环境</span
-      >
+      </a>
+      <nav class="pm-home-nav" aria-label="主导航">
+        <a href="index.html">首页</a>
+      </nav>
       <button
         class="wsk-icon-button"
         type="button"
@@ -69,15 +80,9 @@
         aria-label="主题：跟随系统，切换到浅色"
         title="主题：跟随系统，切换到浅色"
       >
-        <svg class="wsk-icon wsk-theme-system" aria-hidden="true">
-          <use href="#system"></use>
-        </svg>
-        <svg class="wsk-icon wsk-theme-sun" aria-hidden="true">
-          <use href="#sun"></use>
-        </svg>
-        <svg class="wsk-icon wsk-theme-moon" aria-hidden="true">
-          <use href="#moon"></use>
-        </svg>
+        <svg class="wsk-icon wsk-theme-system" aria-hidden="true"><use href="#system"></use></svg>
+        <svg class="wsk-icon wsk-theme-sun" aria-hidden="true"><use href="#sun"></use></svg>
+        <svg class="wsk-icon wsk-theme-moon" aria-hidden="true"><use href="#moon"></use></svg>
       </button>
     </header>
 
@@ -88,8 +93,26 @@
             <p class="wsk-panel-title">SIGN IN</p>
             <h1 tabindex="-1">欢迎回来</h1>
             <p class="wsk-help wsk-mt-2">
-              使用企业账号登录，统一管理你的订阅、节点与用量。
+              用泡游账号登录，之后订阅、用量、自定义节点都在同一个地方。
             </p>
+
+            <!--
+              **登录失败要说出来。** 回调失败时服务端跳的是
+              `/login.html?login=failed`（`src/api/auth.rs` 的 FAILED_LOCATION）。
+              页面不认这个参数的话，那个人看到的是一张和第一次一模一样的登录页，
+              于是他再点一次、再失败一次——全程没有任何异常出现在屏幕上。
+              由 api.js 按查询参数掀开。
+            -->
+            <div class="wsk-alert wsk-danger wsk-mt-5" role="alert" data-pm-login-failed hidden>
+              <svg class="wsk-icon" aria-hidden="true"><use href="#warning"></use></svg>
+              <div>
+                <strong>刚才这次登录没成功</strong>
+                <p>
+                  可以再试一次。连续失败请联系管理员——服务端已经记下了这次失败，
+                  但出于安全不会在这里说明原因。
+                </p>
+              </div>
+            </div>
 
             <!-- 真实入口。服务端在 <body> 上盖 data-pm-sso，
                  没配 [sso] 时这条链接会 404，所以那时页面把它换成说明。 -->
@@ -101,90 +124,61 @@
               <strong>不取手机号与头像</strong>——主控不需要也不存这些字段。
             </p>
 
-            <div class="wsk-alert wsk-warning wsk-mt-5" data-pm-sso-missing hidden>
+            <!-- **没有 `hidden`**：显隐整个交给 console.css 那两条规则。
+                 带 hidden 的话就要靠 CSS 去掀开它，而 kit 的
+                 `[hidden] { display: none !important }` 在 `@layer wsk` 里，
+                 未分层的 important 压不过它——这条说明会永远显示不出来。 -->
+            <div class="wsk-alert wsk-warning wsk-mt-5" data-pm-sso-missing>
               <svg class="wsk-icon" aria-hidden="true">
                 <use href="#warning"></use>
               </svg>
               <div>
-                <strong>尚未配置 SSO</strong>
+                <strong>尚未配置 SSO，现在登不进来</strong>
                 <p>
                   服务端没有 <code>[sso]</code> 配置段，登录入口未挂载。
-                  它依赖对外域名、回调地址与出口 IP 登记——这些不在主控仓库里。
+                  这是部署侧的事，不是你的账号问题——请联系管理员。
                 </p>
               </div>
             </div>
 
             <p class="wsk-help wsk-mt-5">
-              普通用户首次登录即获得默认节点访问，直接进入个人中心。
-              管理员进入控制台，管理节点、用户与授权设置。
+              首次登录即获得默认节点访问，直接进入个人中心；
+              管理员另有控制台，管理节点、用户与授权设置。
             </p>
-            <div class="pm-demo-links" data-js-only>
-              <span data-pm-when="prototype">体验静态原型 · 不进行真实登录或授权</span><span data-pm-when="live">用泡游账号登录（承载飞书实名）</span>
-              <a class="wsk-button" href="me.html" data-demo-principal="user">预览普通用户</a>
-              <a class="wsk-button wsk-secondary" href="overview.html" data-demo-principal="admin">预览管理员</a>
-            </div>
           </div>
 
-          <div>
-            <div class="wsk-panel">
-              <p class="wsk-panel-title">部署提示</p>
-              <h2>登录能不能用，取决于三件仓库外的事</h2>
-              <p class="wsk-help wsk-mt-2">
-                主控绑回环，对外域名由反代决定；回调地址要拼得出来，
-                会话 cookie 带 <code>__Host-</code> 前缀因而必须走 HTTPS。
-                任一项没落实，登录都会以「登录成功但立刻又没登录」的形式失败。
-              </p>
-              <div class="wsk-status-list wsk-mt-5">
-                <div>
-                  <span>对外基址<small>sso.public_base_url，必须 https</small></span>
-                  <strong class="wsk-success-text">见配置</strong>
-                </div>
-                <div>
-                  <span>回调地址<small>基址 + /auth/sso/callback</small></span>
-                  <strong class="wsk-success-text">自动拼出</strong>
-                </div>
-                <div>
-                  <span>出口 IP 登记<small>上游是否要求白名单，待确认</small></span>
-                  <strong>待确认</strong>
-                </div>
-              </div>
-              <p class="wsk-help wsk-mt-5">
-                飞书 / 企业微信的直连 OAuth 属于 README §7 的 M5 另一半，尚未实现。
-                本系统的实名身份由泡游侧承载。
-              </p>
-            </div>
-
-            <details class="wsk-panel wsk-mt-5">
-              <summary>
-                <strong>本地应急管理员</strong>
-              </summary>
-              <p class="wsk-help wsk-mt-2">
-                默认禁用。存在的理由很具体：上游 SSO 一旦因回调域名、出口 IP 或
-                对端故障而不可用，登录会整体失效，那时不能把所有人锁在门外。
-                启用需改配置文件，登录后强制二次确认。
-              </p>
-              <p class="wsk-help wsk-mt-2">
-                注意它与其他人的区别：<strong>本地应急管理员的角色取自数据库</strong>，
-                不走成员名单——名单那条路走不通正是它存在的场景。
-              </p>
-              <div class="wsk-alert wsk-warning wsk-mt-5">
-                <svg class="wsk-icon" aria-hidden="true">
-                  <use href="#warning"></use>
-                </svg>
-                <div>
-                  <strong>当前已禁用</strong>
-                  <p>启用后每次登录都会写入审计，并在控制台顶部常驻提示。</p>
-                </div>
-              </div>
-            </details>
-          </div>
+          <aside class="wsk-panel pm-login-aside">
+            <p class="wsk-panel-title">WHAT YOU GET</p>
+            <h2>登录之后有什么</h2>
+            <ul class="pm-login-list">
+              <li>
+                <svg class="wsk-icon" aria-hidden="true"><use href="#check"></use></svg>
+                <div><strong>个人订阅地址</strong><p>固定不变，导进客户端就能用。</p></div>
+              </li>
+              <li>
+                <svg class="wsk-icon" aria-hidden="true"><use href="#check"></use></svg>
+                <div><strong>本周期用量</strong><p>与客户端里显示的是同一组数。</p></div>
+              </li>
+              <li>
+                <svg class="wsk-icon" aria-hidden="true"><use href="#check"></use></svg>
+                <div><strong>自定义节点与 SOCKS5 落地</strong><p>贴一条分享链接就进你自己的订阅。</p></div>
+              </li>
+              <li>
+                <svg class="wsk-icon" aria-hidden="true"><use href="#check"></use></svg>
+                <div><strong>自己的分流规则</strong><p>指定哪些域名或网段走哪一档。</p></div>
+              </li>
+            </ul>
+            <p class="wsk-help wsk-mt-5">
+              还没决定要不要登录？<a href="index.html">首页</a>有客户端下载和导入步骤。
+            </p>
+          </aside>
         </div>
       </div>
     </main>
 
-    <footer class="wsk-footer">
+    <footer class="wsk-footer pm-home-footer">
       <div class="wsk-footer-inner">
-        <div class="wsk-footer-legal"><span data-pm-when="prototype">proxy-manager · 静态原型 / 示例数据</span><span data-pm-when="live">proxy-manager</span></div>
+        <div class="wsk-footer-legal"><span>proxy-manager</span></div>
         <a
           class="wsk-footer-link"
           href="https://github.com/KimiChen/wheels/tree/main/web-standard-kit"

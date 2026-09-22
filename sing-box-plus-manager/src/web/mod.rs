@@ -22,7 +22,11 @@ use crate::api::session::{Role, Subject};
 /// 这一份是服务端的拦截，那一份只是让界面讲得通。
 /// 前端隐藏不是安全边界——两份都要有，而且服务端这份说了算。
 const PAGES: &[(&str, Visibility)] = &[
-    ("index.html", Visibility::Authenticated),
+    // 首页是**公开页**，与原站逐字相同的口径：没登录也看得到「这是什么、
+    // 去哪下客户端、怎么导入」，登录后同一个 URL 上多出订阅地址与入口清单。
+    // 做成 Authenticated 的话，未登录访问 `/` 会被弹去登录页——
+    // 于是这个系统对外的第一印象是一张表单，而不是一句说明。
+    ("index.html", Visibility::Public),
     ("login.html", Visibility::Public),
     ("unauthorized.html", Visibility::Public),
     // 个人中心：两种角色都可见。
@@ -168,12 +172,18 @@ pub async fn serve_page(
         let body = page_body(name).unwrap_or_default();
         // 登录页要知道服务端到底有没有挂载 SSO：没挂载时那个按钮会 404，
         // 而「点了没反应」是最难自查的一种故障。让服务端直说，不让页面去猜。
-        let body = if name == "login.html" {
-            stamp_sso(body, state.sso.is_some())
-        } else {
-            body.to_string()
-        };
-        return html_response(body, StatusCode::OK);
+        if name == "login.html" {
+            return html_response(stamp_sso(body, state.sso.is_some()), StatusCode::OK);
+        }
+        // 带角色锚点的公开页（首页）**同样要盖**：它登录前后是两套内容，
+        // 而「这一次有没有会话」只有服务端知道。让页面自己去问一次 `/me`
+        // 也能得到答案，但那答案要等一个来回——中间这段时间里，
+        // 一个已登录的人看到的是「请登录」。
+        if body.contains(BODY_ANCHOR) {
+            let role = resolve_subject(&state, &headers).await.map(|subject| subject.role);
+            return html_response(stamp(body, role), StatusCode::OK);
+        }
+        return html_response(body.to_string(), StatusCode::OK);
     }
 
     let subject = resolve_subject(&state, &headers).await;
@@ -188,7 +198,7 @@ pub async fn serve_page(
             StatusCode::FORBIDDEN,
         );
     }
-    html_response(stamp(page_body(name).unwrap_or_default(), subject.role), StatusCode::OK)
+    html_response(stamp(page_body(name).unwrap_or_default(), Some(subject.role)), StatusCode::OK)
 }
 
 /// 把**服务端这一次求值出的角色**写进 `<body>`，并标上 live 模式。
@@ -198,8 +208,12 @@ pub async fn serve_page(
 /// 就被自己的浏览器从 `/nodes.html` 弹到 `/me.html`。
 /// 角色必须与页面同步到达，不能等一个异步探测。
 ///
+/// 同时盖上 `data-pm-auth`：**这一次求值的结果是「有会话」还是「没有」**。
+/// 首页是公开页，登录前后是两套内容，而它必须在首字节到达时就已经是对的那一套——
+/// 让页面等一次 `/me` 再切，已登录的人会先看见一瞬间的「请登录」。
+///
 /// 这**不是**权限边界——边界是上面那两个分支。这里只让界面别讲错话。
-fn stamp(body: &'static str, role: Role) -> String {
+fn stamp(body: &str, role: Option<Role>) -> String {
     let Some(start) = body.find(BODY_ANCHOR) else {
         // 锚点缺失由 `tests/m4/assets.rs` 在编译期之外机械拦住；
         // 运行时退回原文，宁可界面退化成原型分流，也不发一个空页面。
@@ -209,9 +223,12 @@ fn stamp(body: &'static str, role: Role) -> String {
         return body.to_string();
     };
     format!(
-        "{}<body data-principal=\"{}\" data-pm-mode=\"live\"{}",
+        "{}<body data-principal=\"{}\" data-pm-mode=\"live\" data-pm-auth=\"{}\"{}",
         &body[..start],
-        role.as_str(),
+        // 没有会话时给一个 `user`：`app.js` 只认 admin / user 两个值，
+        // 而首页对未登录的人本来就只显示公开的那一半。
+        role.unwrap_or(Role::User).as_str(),
+        if role.is_some() { "on" } else { "off" },
         &body[end..]
     )
 }

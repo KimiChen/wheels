@@ -133,8 +133,13 @@ svg[role="img"] { max-width: 100%; }
 .pm-login .wsk-auth-card { padding: 36px; }
 .pm-login .wsk-auth-card h1 { font-size: 30px; letter-spacing: -.04em; }
 .pm-login .wsk-footer { margin-left: 0; }
-.pm-login .pm-demo-links { border-top: 1px solid var(--border); padding-top: 20px; margin-top: 26px; display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
-.pm-demo-links > span { width: 100%; color: var(--muted); font-size: 11px; }
+.pm-login .wsk-auth-grid { align-items: start; }
+.pm-login-aside h2 { font-size: 18px; letter-spacing: -.03em; margin-top: 8px; }
+.pm-login-list { list-style: none; margin: 20px 0 0; padding: 0; display: grid; gap: 14px; }
+.pm-login-list li { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 12px; align-items: start; }
+.pm-login-list .wsk-icon { width: 16px; height: 16px; margin-top: 2px; color: var(--accent); }
+.pm-login-list strong { display: block; font-size: 13px; }
+.pm-login-list p { color: var(--muted); font-size: 12px; line-height: 1.7; margin-top: 3px; }
 .pm-subscription-entry + .pm-subscription-entry { border-top: 1px solid var(--border); padding-top: 18px; }
 .pm-subscription-entry h3 { font-size: 14px; }
 .pm-subscription-address { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: none; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; padding: 18px; font-size: 12px; }
@@ -199,12 +204,20 @@ svg[role="img"] { max-width: 100%; }
    未盖属性时（直接打开文件的原型模式）两者都按 HTML 里的默认值走：
    链接可见、缺失提示带 hidden。 */
 body[data-pm-sso="off"] [data-pm-sso-link] { display: none; }
-body[data-pm-sso="off"] [data-pm-sso-missing][hidden] { display: flex; }
-/* 登录页是 Public 页，不经 stamp()，所以 app.js 的 live 清理够不到它的
-   「演示环境」徽标。`data-pm-sso` 只要存在就说明这一页是主控服务出来的
-   （stamp_sso 总会盖上 on 或 off），据此把徽标藏掉——纯 CSS，
-   因为这是一条服务端事实，不该等脚本跑完才正确。 */
-body[data-pm-sso] [data-demo-badge] { display: none; }
+/* **这条说明的显隐不能用 `hidden` 属性来表达。**
+   原来它在 HTML 里带 `hidden`，靠 `[data-pm-sso-missing][hidden] { display: flex }`
+   掀开。掀不开：kit 的整份样式包在 `@layer wsk` 里，而它有一条
+   `[hidden] { display: none !important }`——按层叠规则，**带 important 的分层声明
+   压过带 important 的未分层声明**，所以无论这边写不写 `!important` 都赢不了。
+   于是「没配 SSO」时登录按钮被上一条藏掉、说明也是 none：
+   使用者拿到一张既没有登录入口、也没有任何解释的登录页，
+   而那正是这套开关本来要防的状态。
+
+   改成两条普通声明：默认藏，服务端说 off 时显示。未分层的普通声明压过
+   分层的普通声明，这条路不经过 `[hidden]`，也就不受那条 important 影响。
+   由 tests/m4 的 `没配sso时那条说明必须真的显示得出来` 钉住。 */
+[data-pm-sso-missing] { display: none; }
+body[data-pm-sso="off"] [data-pm-sso-missing] { display: flex; }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; animation: none !important; }
@@ -249,3 +262,118 @@ body[data-pm-sso] [data-pm-when="prototype"] { display: none; }
 }
 .pm-custom-page .wsk-table:has([data-table-empty]:not([hidden])) { min-width: 0; }
 .pm-custom-page .wsk-table:has([data-table-empty]:not([hidden])) thead { display: none; }
+
+/* ------------------------------------------------------------------ 首页
+   参考 proxy.paoyou.work 原站的首页版式，配色换成 kit 的 token。
+   两处**故意保留字面色值**：快速开始面板与出口那一段是两块在浅色深色下
+   都反相的区域（原站也是这么做的），跟着主题走会让它们在深色下与页面同色，
+   那条视觉分节就没有了。 */
+
+/* 登录前后两套内容。判据是服务端盖的 data-pm-auth（src/web/mod.rs::stamp），
+   它与页面同步到达——不等脚本，也不等一次 /me 的往返。
+   直接从仓库打开（没有服务端）时这个属性不存在，两套都显示：原型本该如此。 */
+body[data-pm-auth="off"] [data-pm-auth-on] { display: none !important; }
+body[data-pm-auth="on"] [data-pm-auth-off] { display: none !important; }
+
+.pm-home-topbar { display: flex; gap: 16px; padding-inline: clamp(16px, 4vw, 48px); }
+.pm-home-nav { display: flex; gap: 2px; margin-right: auto; }
+.pm-home-nav a { border-radius: var(--radius-sm); color: var(--muted); font-size: 13px; font-weight: 600; padding: 7px 11px; text-decoration: none; }
+.pm-home-nav a:hover { background: var(--surface-soft); color: var(--text); }
+.pm-home-footer { margin-left: 0; }
+.pm-home-alert { max-width: 78rem; margin: 20px auto 0; padding-inline: clamp(20px, 4vw, 64px); }
+.pm-home .wsk-panel-title { color: var(--accent); font-size: 10px; font-weight: 650; letter-spacing: .14em; margin: 0 0 8px; }
+
+.pm-eyebrow { align-items: center; color: var(--muted); display: flex; font: 650 11px/1 var(--font-mono); gap: 7px; letter-spacing: .12em; text-transform: uppercase; }
+.pm-status-dot { background: var(--success); border-radius: 50%; box-shadow: 0 0 0 4px color-mix(in srgb, var(--success) 15%, transparent); height: 7px; width: 7px; }
+.pm-meta { color: var(--muted-soft); font: 600 11px var(--font-mono); letter-spacing: .08em; text-transform: uppercase; }
+
+.pm-hero { display: grid; gap: clamp(28px, 5vw, 64px); grid-template-columns: minmax(0, 1.2fr) minmax(19rem, .8fr); margin: 0 auto; max-width: 78rem; padding: clamp(40px, 5vw, 72px) clamp(20px, 4vw, 64px) 52px; }
+.pm-hero-copy { align-self: center; min-width: 0; }
+.pm-hero h1 { font-size: clamp(38px, 6vw, 72px); font-weight: 750; letter-spacing: -.04em; line-height: 1; margin-top: 16px; max-width: 12ch; }
+.pm-hero-lede { color: var(--muted); font-size: clamp(15px, 1.3vw, 18px); line-height: 1.7; margin-top: 20px; max-width: 34rem; }
+.pm-hero-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 26px; }
+.pm-hero-stats { border-top: 1px solid var(--border); display: flex; flex-wrap: wrap; gap: clamp(20px, 5vw, 56px); margin-top: 36px; max-width: 38rem; padding-top: 16px; }
+.pm-hero-stats div { display: grid; min-width: 0; }
+.pm-hero-stats strong { font: 700 16px var(--font-mono); overflow-wrap: anywhere; }
+.pm-hero-stats span { color: var(--muted); font-size: 11px; margin-top: 3px; }
+
+.pm-quick-panel { align-self: center; background: #252b52; border-radius: var(--radius-lg); color: #f4f5ff; overflow: hidden; padding: 24px; position: relative; }
+.pm-quick-panel::after { border: 1px solid rgb(255 255 255 / 14%); border-radius: 50%; content: ""; height: 18rem; position: absolute; right: -8rem; top: -8rem; width: 18rem; }
+.pm-quick-kicker { color: rgb(244 245 255 / 55%); font: 11px var(--font-mono); letter-spacing: .14em; }
+.pm-quick-steps { display: grid; list-style: none; margin: 20px 0 0; padding: 0; }
+.pm-quick-steps li { border-bottom: 1px solid rgb(244 245 255 / 14%); display: grid; gap: 14px; grid-template-columns: 2rem minmax(0, 1fr); padding: 15px 0; }
+.pm-quick-steps li > span { color: #a5b4fc; font: 800 11px var(--font-mono); padding-top: 2px; }
+.pm-quick-steps strong { font-size: 14px; }
+.pm-quick-steps p { color: rgb(244 245 255 / 62%); font-size: 12px; line-height: 1.6; margin-top: 4px; }
+.pm-quick-note { color: rgb(244 245 255 / 58%); font-size: 11px; line-height: 1.7; margin-top: 18px; }
+
+.pm-home-section { margin: 0 auto; max-width: 78rem; padding: clamp(40px, 5vw, 64px) clamp(20px, 4vw, 64px); }
+.pm-section-heading { align-items: end; display: flex; gap: 24px; justify-content: space-between; margin-bottom: 22px; }
+.pm-section-heading h2 { font-size: clamp(24px, 3.2vw, 40px); letter-spacing: -.04em; line-height: 1.1; margin-top: 10px; }
+.pm-section-heading > p { color: var(--muted); font-size: 13px; line-height: 1.7; max-width: 26rem; text-align: right; }
+
+.pm-download-grid { display: grid; gap: 16px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.pm-download-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: var(--pm-card-shadow); display: grid; padding: clamp(20px, 2.5vw, 30px); }
+.pm-platform-mark { align-items: center; background: var(--surface-soft); border-radius: 50%; color: var(--accent); display: flex; font-size: 24px; height: 52px; justify-content: center; width: 52px; }
+.pm-download-copy { align-self: end; margin-top: 26px; }
+.pm-download-copy h3 { font-size: 19px; letter-spacing: -.03em; margin-top: 7px; }
+.pm-download-copy > p { color: var(--muted); font-size: 13px; line-height: 1.7; margin-top: 8px; }
+.pm-download-card > .wsk-button { justify-self: start; margin-top: 20px; }
+
+.pm-sub-card { align-items: center; background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 18%, transparent); border-radius: var(--radius-lg); display: grid; gap: 20px 24px; grid-template-columns: auto minmax(0, 1fr) auto; padding: clamp(20px, 3vw, 32px); }
+.pm-file-symbol { align-items: center; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; display: flex; height: 72px; justify-content: center; position: relative; width: 60px; }
+.pm-file-symbol::after { border-left: 11px solid transparent; border-top: 11px solid var(--accent); content: ""; position: absolute; right: 7px; top: 7px; }
+.pm-file-symbol span { color: var(--accent); font: 800 10px var(--font-mono); letter-spacing: .05em; }
+.pm-sub-copy h3 { font-size: 20px; letter-spacing: -.035em; margin-top: 5px; }
+.pm-sub-copy > p { color: var(--muted); font-size: 13px; line-height: 1.7; margin-top: 6px; }
+.pm-sub-url { border-top: 1px solid color-mix(in srgb, var(--accent) 18%, var(--border)); display: grid; gap: 10px; grid-column: 1 / -1; grid-template-columns: 9rem minmax(0, 1fr); padding-top: 18px; }
+.pm-sub-url span { color: var(--muted); font: 10px var(--font-mono); letter-spacing: .08em; }
+.pm-sub-url code { font: 12px var(--font-mono); overflow-wrap: anywhere; }
+
+.pm-import-steps { display: grid; gap: 16px; grid-template-columns: repeat(3, minmax(0, 1fr)); list-style: none; margin: 26px 0 0; padding: 0; }
+.pm-import-steps li { align-items: start; border: 1px solid var(--border); border-radius: var(--radius); display: grid; gap: 14px; grid-template-columns: 26px minmax(0, 1fr); padding: 18px; }
+.pm-import-steps li > span { align-items: center; background: var(--surface-soft); border-radius: 50%; display: flex; font: 800 11px var(--font-mono); height: 26px; justify-content: center; width: 26px; }
+.pm-import-steps strong { font-size: 13px; }
+.pm-import-steps p { color: var(--muted); font-size: 12px; line-height: 1.7; margin-top: 4px; }
+
+.pm-entries-section { background: #11142b; color: #f3f4ff; padding: clamp(44px, 5vw, 72px) 0; }
+.pm-entries-inner { margin: 0 auto; max-width: 78rem; padding: 0 clamp(20px, 4vw, 64px); }
+.pm-inverse .pm-eyebrow, .pm-inverse > p { color: #a6a9c8; }
+.pm-entry-grid { display: grid; gap: 1px; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.pm-entry-card { background: #1c203b; min-height: 8.5rem; padding: 18px; display: grid; align-content: start; }
+.pm-entry-index { color: #8e90a8; font: 10px var(--font-mono); letter-spacing: .1em; }
+.pm-entry-card h3 { font-size: 14px; letter-spacing: -.02em; margin-top: 22px; overflow-wrap: anywhere; }
+.pm-entry-card > code { align-self: end; color: #cfd0e4; font: 11px var(--font-mono); margin-top: 14px; overflow-wrap: anywhere; }
+.pm-entry-empty { color: #a6a9c8; font-size: 12px; grid-column: 1 / -1; padding: 28px 0; }
+.pm-entries-locked { color: #a6a9c8; font-size: 13px; line-height: 1.8; }
+.pm-transit-note { align-items: flex-start; background: #292b55; border-radius: var(--radius); box-shadow: inset 0 2px 0 #818cf8; display: grid; gap: 14px; grid-template-columns: 2rem minmax(0, 1fr); margin-top: 16px; padding: 16px 18px; }
+.pm-transit-mark { align-items: center; background: #818cf8; border-radius: 50%; color: #11132c; display: flex; font: 800 12px var(--font-mono); height: 2rem; justify-content: center; width: 2rem; }
+.pm-transit-note strong { font-size: 13px; }
+.pm-transit-note p { color: #c7cafa; font-size: 12px; line-height: 1.7; margin-top: 4px; }
+
+.pm-ssh-layout { display: grid; gap: 16px; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; }
+.pm-ssh-layout h3 { font-size: 16px; letter-spacing: -.025em; }
+/* `min-width: 0` 不能省：网格项的默认最小尺寸是 min-content，而里面那段
+   ProxyCommand 是一行长命令——没有这一条，轨道会被它撑到比视口还宽，
+   窄屏上整页横向滚动，而 `overflow-x: auto` 也就永远轮不到生效。 */
+.pm-ssh-layout > * { min-width: 0; }
+.pm-ssh-layout .wsk-code-panel { font-size: 12px; overflow-x: auto; }
+
+/* 所有单列写法都用 `minmax(0, 1fr)` 而不是 `1fr`：后者等于
+   `minmax(auto, 1fr)`，同样会被里面最宽的那个不可换行元素顶开。 */
+@media (max-width: 1000px) {
+  .pm-hero { grid-template-columns: minmax(0, 1fr); }
+  .pm-download-grid, .pm-ssh-layout { grid-template-columns: minmax(0, 1fr); }
+  .pm-entry-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .pm-import-steps { grid-template-columns: minmax(0, 1fr); }
+  .pm-section-heading { align-items: start; flex-direction: column; gap: 12px; }
+  .pm-section-heading > p { text-align: left; }
+  .pm-sub-card { grid-template-columns: minmax(0, 1fr); }
+  .pm-sub-url { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 620px) {
+  .pm-home-nav { display: none; }
+  .pm-entry-grid { grid-template-columns: minmax(0, 1fr); }
+  .pm-hero { padding-bottom: 36px; }
+  .pm-hero-stats { gap: 18px 28px; }
+}

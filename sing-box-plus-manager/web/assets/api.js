@@ -292,6 +292,32 @@
   // 渲染发生在比对序号之前，晚到的旧响应照样覆盖界面。
 
   const PAGES = {
+    // 首页。登录后在同一个 URL 上多出订阅地址与入口清单——
+    // 与原站逐字相同的口径：一个地址，登录前后两套内容。
+    //
+    // **只取 `/me/subscription` 一个端点。** 这一页要的四样东西
+    // （地址、入口清单、身份名、本周期已用）它全都带着；
+    // 再拉一个 `/me` 只会多一次往返，并多一处两边字段对不对得上的风险
+    // （me.html 的那条注释记着这个坑是怎么炸的）。
+    "index.html": {
+      load: () => getJson("/me/subscription"),
+      render: (sub) => {
+        applyBindings(document, sub);
+        renderCollection("subscriptions", sub.enabled ? sub.subscriptions : [], "还没有订阅地址");
+        // 入口清单**只在这份订阅真的能用时才列**。没有身份或缺凭据时
+        // 订阅正文是 `proxies: []`，那时列出一排入口名就是在告诉人
+        // 「你有这些节点」——而他一条都连不上。
+        renderCollection(
+          "home-entries",
+          sub.enabled && sub.usable ? sub.entries : [],
+          "还没有可用的入口，详情见个人中心"
+        );
+        toggle("[data-pm-sub-disabled]", !sub.enabled);
+        toggle("[data-pm-sub-ready]", sub.enabled && sub.usable);
+        toggle("[data-pm-sub-blocked]", sub.enabled && !sub.usable);
+      },
+    },
+
     "me.html": {
       // 三个端点：`/me` 给身份与额度，`/me/subscription` 给订阅地址，
       // `/me/usage` 给按节点的公网/内网用量。
@@ -1041,7 +1067,21 @@
   }
 
   async function start() {
+    // SSO 回调失败时服务端跳的是 `/login.html?login=failed`（`src/api/auth.rs`）。
+    // 页面不认这个参数的话，那个人看到的是一张**和第一次完全一样的登录页**——
+    // 他会再点一次、再失败一次，而屏幕上从头到尾没有出现过任何异常。
+    if (new URLSearchParams(location.search).get("login") === "failed") {
+      const banner = document.querySelector("[data-pm-login-failed]");
+      if (banner) banner.hidden = false;
+    }
+
     neutralize();
+
+    // 首页是公开页，服务端已经把「这一次有没有会话」盖在 `<body>` 上。
+    // 没有会话时不必再问一次 `/me`：那只会换回一个 401，
+    // 而登录后才有的那几块由 CSS 按同一个属性藏着。
+    if (document.body.dataset.pmAuth === "off") return;
+
     let me;
     try {
       me = await getJson("/me");

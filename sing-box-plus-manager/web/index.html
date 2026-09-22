@@ -1,18 +1,386 @@
 <!doctype html>
 <!--
-  原型入口。首次体验默认普通用户；已有演示角色由 app.js 恢复。
-  管理员进入总览，普通用户进入个人中心查看默认授权节点。
+  proxy-manager · 首页
+
+  参考 proxy.paoyou.work 原站的首页做的：同一个 URL，未登录是一份说明，
+  登录后在原地多出订阅地址与入口清单。**服务端在 <body> 上盖 data-pm-auth**
+  （src/web/mod.rs::stamp），两套内容由 CSS 按那个属性切换——
+  不等脚本、不等一次 /me，所以已登录的人不会先看见一瞬间的「请登录」。
+
+  与原站的三处**故意不同**，每一处都有理由：
+
+  1. 原站首页列了 8 个节点的公网 IP。这里一个地址都不列：地址在订阅正文里，
+     那是给客户端的；页面会被截图、会被投屏（口径同 me.html 与 §4.11）。
+     这一段改成列**入口名**，而且数据是真的，来自 /me/subscription。
+  2. 原站自托管 Clash Verge 的 dmg / exe。本系统是单二进制 + systemd（§5），
+     静态资源全部 include_str! 进二进制——把两个上百兆的安装包塞进去不成立。
+     所以这里外链官方发布页，并在页面上说清「本站不托管安装包」。
+  3. 原站有一个「平台默认 SOCKS5」，凭据直接显示在首页上。本系统没有这个概念，
+     SOCKS5 是每个人自己在「我的自定义节点」里建的，所以这一段只讲怎么用，
+     不显示任何凭据。
 -->
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="robots" content="noindex, nofollow" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="robots" content="noindex, nofollow, noarchive" />
+    <meta name="referrer" content="no-referrer" />
+    <title>proxy-manager · 团队网络入口</title>
+    <script src="assets/theme.js"></script>
+    <link rel="stylesheet" href="../../web-standard-kit/style.css" />
+    <link rel="stylesheet" href="assets/console.css" />
+    <script src="../../web-standard-kit/script.js" defer></script>
     <script src="assets/app.js" defer></script>
     <script src="assets/api.js" defer></script>
-    <title>proxy-manager 控制台</title>
   </head>
   <body data-principal="user">
-    <p><a href="me.html">进入个人中心</a></p>
+    <a class="wsk-skip-link" href="#main-content">跳到主要内容</a>
+
+    <svg class="wsk-icon-sprite" aria-hidden="true">
+      <defs>
+        <symbol id="sun" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="4" />
+          <path
+            d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.66 6.34l1.41-1.41"
+          />
+        </symbol>
+        <symbol id="system" viewBox="0 0 24 24">
+          <rect x="2" y="3" width="20" height="14" rx="2" />
+          <path d="M8 21h8M12 17v4" />
+        </symbol>
+        <symbol id="moon" viewBox="0 0 24 24">
+          <path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8Z" />
+        </symbol>
+        <symbol id="warning" viewBox="0 0 24 24">
+          <path
+            d="m21.73 18-8-14a2 2 0 0 0-3.46 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"
+          />
+          <path d="M12 9v4M12 17h.01" />
+        </symbol>
+        <symbol id="external" viewBox="0 0 24 24">
+          <path d="M14 4h6v6M20 4l-8.5 8.5M18 13.5V19a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5.5" />
+        </symbol>
+      </defs>
+    </svg>
+
+    <header class="wsk-topbar pm-home-topbar">
+      <a class="wsk-brand" href="#top" aria-label="proxy-manager 首页">
+        <span class="wsk-brand-mark" aria-hidden="true">PM</span>
+        <span class="wsk-brand-copy"><strong>proxy-manager</strong></span>
+      </a>
+
+      <nav class="pm-home-nav" aria-label="主导航">
+        <a href="#downloads">客户端</a>
+        <a href="#subscription">订阅</a>
+        <a href="#entries">出口</a>
+        <a href="#ssh">SSH 接入</a>
+      </nav>
+
+      <div class="wsk-button-row">
+        <a class="wsk-button" href="login.html" data-pm-auth-off>登录</a>
+        <a class="wsk-button" href="me.html" data-pm-auth-on>个人中心</a>
+        <a class="wsk-button wsk-secondary" href="overview.html" data-roles="admin">控制台</a>
+        <button class="wsk-button wsk-secondary" type="button" data-pm-logout data-js-only
+                data-pm-auth-on>退出</button>
+      </div>
+
+      <button
+        class="wsk-icon-button"
+        type="button"
+        data-theme-toggle
+        data-js-only
+        aria-label="主题：跟随系统，切换到浅色"
+        title="主题：跟随系统，切换到浅色"
+      >
+        <svg class="wsk-icon wsk-theme-system" aria-hidden="true"><use href="#system"></use></svg>
+        <svg class="wsk-icon wsk-theme-sun" aria-hidden="true"><use href="#sun"></use></svg>
+        <svg class="wsk-icon wsk-theme-moon" aria-hidden="true"><use href="#moon"></use></svg>
+      </button>
+    </header>
+
+    <main id="main-content" class="pm-home" tabindex="-1">
+      <!-- 取数失败必须可见。静默失效的界面会让人以为「我没有订阅」，
+           而真相是「没取到」，然后他会去找管理员要一个本来就有的地址。 -->
+      <div class="wsk-alert wsk-danger pm-home-alert" role="alert" data-pm-error hidden>
+        <svg class="wsk-icon" aria-hidden="true"><use href="#warning"></use></svg>
+        <div>
+          <strong>订阅信息没能取到</strong>
+          <p data-pm-error-text>请稍后重试；持续失败请联系管理员。</p>
+        </div>
+      </div>
+
+      <section class="pm-hero" id="top" aria-labelledby="hero-title">
+        <div class="pm-hero-copy">
+          <p class="pm-eyebrow"><span class="pm-status-dot" aria-hidden="true"></span>团队专用 · 服务在线</p>
+          <h1 id="hero-title" tabindex="-1">连接变简单</h1>
+          <p class="pm-hero-lede">
+            客户端、订阅、分流规则都在这里。配好一次，之后就不用再想它。
+          </p>
+          <div class="pm-hero-actions">
+            <a class="wsk-button" href="#downloads">选择客户端</a>
+            <a class="wsk-button wsk-secondary" href="login.html" data-pm-auth-off>登录获取个人订阅</a>
+            <a class="wsk-button wsk-secondary" href="#subscription" data-pm-auth-on>查看我的订阅</a>
+          </div>
+
+          <!-- 三个数都是真的，来自 /me/subscription。未登录时整块不显示：
+               在这里写死一个「8 个出口」，改配置之后不会有任何东西报错。 -->
+          <div class="pm-hero-stats" data-pm-auth-on aria-label="我的服务概览">
+            <div><strong data-pm="entry_count">—</strong><span>订阅入口</span></div>
+            <div><strong data-pm="identity">—</strong><span>计费身份</span></div>
+            <div><strong data-pm-bytes="cycle.used_bytes">—</strong><span>本周期已用</span></div>
+          </div>
+        </div>
+
+        <aside class="pm-quick-panel" aria-label="快速开始">
+          <p class="pm-quick-kicker">QUICK START</p>
+          <ol class="pm-quick-steps">
+            <li><span>01</span><div><strong>下载客户端</strong><p>macOS 或 Windows，选对应架构</p></div></li>
+            <li><span>02</span><div><strong>复制个人订阅地址</strong><p>登录后在这一页或个人中心取</p></div></li>
+            <li><span>03</span><div><strong>导入并选择出口</strong><p>按地区或访问场景切换</p></div></li>
+          </ol>
+          <p class="pm-quick-note">仅供团队内部使用。订阅地址本身就是凭据，请勿转发。</p>
+        </aside>
+      </section>
+
+      <section class="pm-home-section" id="downloads" aria-labelledby="downloads-title">
+        <div class="pm-section-heading">
+          <div>
+            <p class="pm-eyebrow">01 · GET THE APP</p>
+            <h2 id="downloads-title">下载 Clash Verge</h2>
+          </div>
+          <p>本站不托管安装包，下面两个入口指向官方发布页。</p>
+        </div>
+
+        <div class="pm-download-grid">
+          <article class="pm-download-card">
+            <div class="pm-platform-mark" aria-hidden="true">⌘</div>
+            <div class="pm-download-copy">
+              <p class="pm-meta">macOS · Apple Silicon</p>
+              <h3>Clash Verge for Mac</h3>
+              <p>M 系列芯片选文件名带 <code>aarch64</code> 的 dmg；Intel 机型选 <code>x64</code>。</p>
+            </div>
+            <a class="wsk-button" href="https://github.com/clash-verge-rev/clash-verge-rev/releases"
+               target="_blank" rel="noopener noreferrer">
+              前往发布页<svg class="wsk-icon" aria-hidden="true"><use href="#external"></use></svg>
+            </a>
+          </article>
+
+          <article class="pm-download-card">
+            <div class="pm-platform-mark" aria-hidden="true">⊞</div>
+            <div class="pm-download-copy">
+              <p class="pm-meta">Windows · x64</p>
+              <h3>Clash Verge for Windows</h3>
+              <p>64 位 Windows 10 / 11，选文件名带 <code>x64-setup</code> 的 exe。</p>
+            </div>
+            <a class="wsk-button" href="https://github.com/clash-verge-rev/clash-verge-rev/releases"
+               target="_blank" rel="noopener noreferrer">
+              前往发布页<svg class="wsk-icon" aria-hidden="true"><use href="#external"></use></svg>
+            </a>
+          </article>
+        </div>
+      </section>
+
+      <section class="pm-home-section" id="subscription" aria-labelledby="subscription-title">
+        <div class="pm-section-heading">
+          <div>
+            <p class="pm-eyebrow">02 · SUBSCRIPTION</p>
+            <h2 id="subscription-title">一份订阅，配置全在里面</h2>
+          </div>
+          <p>节点、分流规则、你自己加的自定义节点，都打包在同一个文件里。</p>
+        </div>
+
+        <!-- 未登录：不显示地址，也不显示一个看起来像地址的占位符。 -->
+        <div class="pm-sub-card" data-pm-auth-off>
+          <div class="pm-file-symbol" aria-hidden="true"><span>YAML</span></div>
+          <div class="pm-sub-copy">
+            <p class="pm-meta">PERSONAL CLASH PROFILE</p>
+            <h3>个人专属订阅</h3>
+            <p>登录后获得独立令牌与节点凭据。地址是固定的，换客户端不用重新申请。</p>
+          </div>
+          <a class="wsk-button" href="login.html">登录获取订阅</a>
+          <div class="pm-sub-url"><span>SUBSCRIPTION URL</span><code>登录后显示 · 个人固定地址</code></div>
+        </div>
+
+        <div data-pm-auth-on>
+          <p class="wsk-help" data-pm-sub-disabled data-pm-state hidden>
+            主控没有配置订阅出口（<code>[subscription]</code>），所以现在没有订阅地址可发。
+            这是一项服务端配置，不是你的账号问题。
+          </p>
+          <div class="wsk-alert wsk-warning" role="status" data-pm-sub-blocked data-pm-state hidden>
+            <svg class="wsk-icon" aria-hidden="true"><use href="#warning"></use></svg>
+            <div>
+              <strong>这份订阅现在拿不到能用的节点</strong>
+              <p>地址照样下载得到，但里面会是一份空配置。具体是哪一种原因，
+                 <a href="me.html">个人中心</a>那一页写着。</p>
+            </div>
+          </div>
+
+          <!--
+            一种拨法一条地址：内网与公网走同一条规则、同一份凭据、同一个 token，
+            差别只有客户端拨哪个 host。所以这是同一份订阅的两种拨法，不是两份订阅。
+            页面上不显示那两个 IP——「公网 / 内网」这句话已经够人判断该用哪一份。
+          -->
+          <div data-pm-collection="subscriptions">
+            <!--
+              **这里没有示例行。** me.html 上那条打码的示例订阅地址在这一页不能留：
+              首页是公开页，它整份都会发给未登录的人，而下面这一块只是被 CSS
+              藏起来。一个看起来像订阅地址的串出现在公开页的源码里，
+              没有任何好处——由 tests/m4 的 `首页公开可达且盖着这一次的登录态` 钉住，
+              那条断言连注释一起查，所以这段话里也不写那个路径。
+
+              空态**不带 hidden**：直接从仓库打开（没有服务端）时没有东西会掀开它，
+              那时这一块会是彻底空的一片，看起来像渲染失败。
+            -->
+            <div data-table-empty class="wsk-help"><span data-pm-empty-text>登录后在这里显示你的订阅地址</span></div>
+            <template data-pm-template>
+              <div class="pm-subscription-entry wsk-mt-5">
+                <div class="wsk-section-head wsk-compact">
+                  <h3 data-pm="note">—</h3>
+                  <div class="wsk-button-row">
+                    <span class="wsk-badge" data-pm="profile_name">—</span>
+                    <button class="wsk-button wsk-secondary" type="button"
+                            data-pm-copy-self data-js-only>复制</button>
+                  </div>
+                </div>
+                <pre class="wsk-code-panel pm-subscription-address"><code data-pm="url">—</code></pre>
+              </div>
+            </template>
+          </div>
+          <p class="wsk-help wsk-mt-2">
+            <strong>这个地址本身就是凭据</strong>——拿到它的人就能用你的额度上网。
+            不要发进任何群，也不要贴进工单。
+          </p>
+        </div>
+
+        <ol class="pm-import-steps" aria-label="导入订阅步骤">
+          <li><span>1</span><div><strong>打开订阅页</strong><p>在 Clash Verge 里进入「订阅」。</p></div></li>
+          <li><span>2</span><div><strong>粘贴个人地址</strong><p>点上面的「复制」，在客户端里新建订阅。</p></div></li>
+          <li><span>3</span><div><strong>启用配置</strong><p>选中这份配置，然后挑一个出口。</p></div></li>
+        </ol>
+      </section>
+
+      <section class="pm-entries-section" id="entries" aria-labelledby="entries-title">
+        <div class="pm-entries-inner">
+          <div class="pm-section-heading pm-inverse">
+            <div>
+              <p class="pm-eyebrow">03 · EXIT NODES</p>
+              <h2 id="entries-title">出口与链路</h2>
+            </div>
+            <p>入口名与订阅里逐字一致，连接参数由订阅统一下发。</p>
+          </div>
+
+          <!-- 登录后列的是**真实入口名**，来源 /me/subscription 的 entries，
+               而那份清单与订阅正文用的是同一套可见性过滤（quota::level）。
+               页面上多列一条而正文里没有，人会以为是客户端没同步，然后反复重新导入。 -->
+          <div class="pm-entry-grid" data-pm-auth-on data-pm-collection="home-entries">
+            <article class="pm-entry-card">
+              <p class="pm-entry-index">ENTRY</p>
+              <h3>—</h3>
+              <code>—</code>
+            </article>
+            <p data-table-empty hidden class="pm-entry-empty"><span data-pm-empty-text>还没有可用的入口</span></p>
+            <template data-pm-template>
+              <article class="pm-entry-card">
+                <p class="pm-entry-index">ENTRY</p>
+                <h3 data-pm="name">—</h3>
+                <code data-pm="node_id">—</code>
+              </article>
+            </template>
+          </div>
+
+          <p class="pm-entries-locked" data-pm-auth-off>
+            入口清单按账号下发，登录后在这里显示。
+          </p>
+
+          <aside class="pm-transit-note" aria-label="链路说明">
+            <span class="pm-transit-mark" aria-hidden="true">↗</span>
+            <div>
+              <strong>直连与中转是两类链路</strong>
+              <p>
+                直连入口直接落到目标机房；中转入口在几台之间保持加密长连接，
+                少一次重复握手，绕远但更稳。选哪一类由你按访问场景决定。
+              </p>
+            </div>
+          </aside>
+
+          <aside class="pm-transit-note" aria-label="为什么不列地址">
+            <span class="pm-transit-mark" aria-hidden="true">·</span>
+            <div>
+              <strong>这一页不列节点地址</strong>
+              <p>
+                地址与端口在订阅正文里，那是发给客户端的。页面会被截图、会被投屏，
+                所以个人页面一律不带连接细节。
+              </p>
+            </div>
+          </aside>
+        </div>
+      </section>
+
+      <section class="pm-home-section" id="ssh" aria-labelledby="ssh-title">
+        <div class="pm-section-heading">
+          <div>
+            <p class="pm-eyebrow">04 · SSH ACCESS</p>
+            <h2 id="ssh-title">用 SOCKS5 走 SSH</h2>
+          </div>
+          <p>SOCKS5 落地由你自己建，凭据只在个人中心里，不出现在这一页。</p>
+        </div>
+
+        <div class="pm-ssh-layout">
+          <div class="wsk-panel">
+            <p class="wsk-panel-title">怎么建</p>
+            <h3>在「我的自定义节点」里加一条 SOCKS5 落地</h3>
+            <p class="wsk-help wsk-mt-2">
+              填服务器、端口、用户名口令，再选一个<strong>前置节点</strong>——
+              连到那台 SOCKS5 服务器的这条连接本身就从前置拨出去。
+            </p>
+            <div class="wsk-alert wsk-warning wsk-mt-5">
+              <svg class="wsk-icon" aria-hidden="true"><use href="#warning"></use></svg>
+              <div>
+                <strong>前置选了受管入口，这条流量照常计费</strong>
+                <p>
+                  它整条都经过我们的节点，照常计入用量、照常受额度约束。
+                  前置是 DIRECT 或你自己的自定义上游时才不计费。
+                </p>
+              </div>
+            </div>
+            <a class="wsk-button wsk-mt-5" href="me-custom.html" data-pm-auth-on>打开我的自定义节点</a>
+            <a class="wsk-button wsk-mt-5" href="login.html" data-pm-auth-off>登录后配置</a>
+          </div>
+
+          <div class="wsk-panel">
+            <p class="wsk-panel-title">~/.ssh/config</p>
+            <h3>把它挂到一条 SSH 别名上</h3>
+            <p class="wsk-help wsk-mt-2">
+              需要本机装 Ncat。把尖括号里的四处换成自己的值，之后
+              <code>ssh target-via-proxy</code> 就走这条落地。
+            </p>
+            <pre class="wsk-code-panel wsk-mt-5"><code>Host target-via-proxy
+  HostName &lt;目标服务器&gt;
+  User &lt;SSH用户名&gt;
+  ProxyCommand ncat --proxy &lt;SOCKS服务器&gt;:&lt;端口&gt; \
+    --proxy-type socks5 --proxy-auth &lt;用户名&gt;:&lt;密码&gt; %h %p</code></pre>
+            <p class="wsk-help wsk-mt-2">
+              这条链路只有 TCP CONNECT，没有 UDP。
+            </p>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="wsk-footer pm-home-footer">
+      <div class="wsk-footer-inner">
+        <div class="wsk-footer-legal"><span>proxy-manager</span></div>
+        <a
+          class="wsk-footer-link"
+          href="https://github.com/KimiChen/wheels/tree/main/web-standard-kit"
+          target="_blank"
+          rel="noopener noreferrer"
+          >web-standard-kit</a
+        >
+      </div>
+    </footer>
+
+    <div class="wsk-toast-region" id="toast-region" aria-live="polite"></div>
   </body>
 </html>
