@@ -180,10 +180,25 @@ pub fn clash_yaml(
         }
     }
 
+    custom.render_rules_group(&mut out, &managed_nodes);
     custom.render_dialer_groups(&mut out, &managed_nodes);
 
     out.push('\n');
-    out.push_str(RULES);
+    // 自定义规则插在 `rules:` 之后、内建规则之前——**首条匹配即生效**，
+    // 插在后面等于完全不起作用。切点取 `rules:` 那一行的行尾。
+    match RULES.find("\nrules:") {
+        Some(at) => {
+            let cut = at + "\nrules:".len();
+            out.push_str(&RULES[..cut]);
+            custom.render_rules(&mut out);
+            out.push_str(&RULES[cut..]);
+        }
+        None => {
+            // 模板里没有 `rules:` 这一行说明它被改坏了。**不自己补一个**：
+            // 补出来的那份会让一份坏模板看起来是好的。
+            out.push_str(RULES);
+        }
+    }
     out
 }
 

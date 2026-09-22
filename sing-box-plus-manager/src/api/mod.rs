@@ -166,6 +166,8 @@ pub fn router(
             "/api/v1/me/custom/proxies/{id}",
             axum::routing::put(custom::update_proxy).delete(custom::delete_proxy),
         )
+        // 分流规则：**整份替换**，因为顺序即优先级。
+        .route("/api/v1/me/custom/rules", get(custom::list_rules).put(custom::replace_rules))
         .route("/api/v1/me/custom/socks5", axum::routing::post(custom::create_socks5))
         .route(
             "/api/v1/me/custom/socks5/{id}",

@@ -329,3 +329,114 @@ async fn 脚本取的端点存在() {
     let (status, _, _) = api.get("/api/v1/me/custom", Some(&alice)).await;
     assert_eq!(status, StatusCode::OK, "脚本要取的端点不存在");
 }
+
+// ============ 分流规则 ============
+
+const RULES_PAGE: &str = include_str!("../../web/me-custom-rules.html");
+
+#[tokio::test]
+async fn 规则整份替换并保序() {
+    let api = api().await;
+    let alice = api.user("alice", Role::User, "local").await;
+
+    let (status, body, _) = api
+        .put_json(
+            "/api/v1/me/custom/rules",
+            &alice,
+            json!({ "rules": [
+                { "kind": "domain-suffix", "value": "First.Example" },
+                { "kind": "ip-cidr", "value": "10.0.0.0/8" }
+            ] }),
+            Some(&alice.csrf),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["count"], 2);
+
+    let (_, body, _) = api.get("/api/v1/me/custom/rules", Some(&alice)).await;
+    assert_eq!(body["enabled"], true);
+    assert_eq!(body["group_name"], "Rules-alice");
+    // 顺序就是优先级，读回来必须原样。
+    assert_eq!(body["rules"][0]["value"], "first.example", "要规范化成小写：{body}");
+    assert_eq!(body["rules"][1]["value"], "10.0.0.0/8");
+}
+
+/// 报错要说清**是第几条**。整份提交时只说「规则无效」，
+/// 用户要在几十条里自己找是哪一条。
+#[tokio::test]
+async fn 规则报错要指出第几条() {
+    let api = api().await;
+    let alice = api.user("alice", Role::User, "local").await;
+    let (status, body, _) = api
+        .put_json(
+            "/api/v1/me/custom/rules",
+            &alice,
+            json!({ "rules": [
+                { "kind": "domain-suffix", "value": "ok.example" },
+                { "kind": "ip-cidr", "value": "192.168.1.5/16" }
+            ] }),
+            Some(&alice.csrf),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("第 2 条"), "要指出是第几条：{message}");
+    // 而且要给出**正确的写法**，不能只说「错了」。
+    assert!(message.contains("192.168.0.0/16"), "{message}");
+}
+
+/// 空表把那一行删掉，不留一个装着 `[]` 的行——
+/// 「有没有规则」要看两处的话，两处迟早会给出不同的答案。
+#[tokio::test]
+async fn 清空规则等于删掉那一行() {
+    use sqlx::Row;
+    let api = api().await;
+    let alice = api.user("alice", Role::User, "local").await;
+    let csrf = alice.csrf.clone();
+    let (status, _, _) = api
+        .put_json(
+            "/api/v1/me/custom/rules",
+            &alice,
+            json!({ "rules": [{ "kind": "domain", "value": "a.example" }] }),
+            Some(&csrf),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let n: i64 = sqlx::query("SELECT count(*) FROM custom_rules")
+        .fetch_one(api.store.readers())
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(n, 1);
+
+    let (status, _, _) = api
+        .put_json("/api/v1/me/custom/rules", &alice, json!({ "rules": [] }), Some(&csrf), None)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let n: i64 = sqlx::query("SELECT count(*) FROM custom_rules")
+        .fetch_one(api.store.readers())
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(n, 0, "空表该把那一行删掉");
+}
+
+/// 页面与脚本的契约：集合有人填、端点存在、类型下拉与服务端的闭集对得上。
+#[tokio::test]
+async fn 规则页与脚本对得上() {
+    assert!(SCRIPT.contains("\"me-custom-rules.html\": {"), "api.js 里没有这一页的处理器");
+    assert!(SCRIPT.contains("getJson(\"/me/custom/rules\")"), "处理器没取 /me/custom/rules");
+    assert!(
+        SCRIPT.contains("renderCollection(\"custom-rules\""),
+        "规则表没人填，会永远停在「加载中…」"
+    );
+    // **页面下拉里的每个类型，服务端都要认。** 少一个的症状是
+    // 用户选了它、提交、收到一句「unknown variant」。
+    for kind in ["domain-suffix", "domain", "domain-keyword", "ip-cidr", "ip-cidr6"] {
+        assert!(RULES_PAGE.contains(&format!("value=\"{kind}\"")), "页面缺类型 {kind}");
+        assert!(SCRIPT.contains(kind), "脚本的显示名表里缺 {kind}");
+    }
+}

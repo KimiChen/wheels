@@ -366,6 +366,33 @@
       },
     },
 
+    "me-custom-rules.html": {
+      load: () => getJson("/me/custom/rules"),
+      render: (data) => {
+        toggle("[data-pm-rules-disabled]", !data.enabled);
+        toggle("[data-pm-rules-enabled]", data.enabled);
+        applyBindings(document, data);
+        if (!data.enabled) return;
+
+        // **本地留一份当前规则表。** 上移/下移/删除都是「算出新的整份表再提交」，
+        // 而不是让服务端理解「把第 3 条往上挪」——顺序的语义只在一个地方，
+        // 两处各实现一遍迟早会对「第 3 条」是谁有不同的理解。
+        ruleState = data.rules ?? [];
+        const rows = ruleState.map((rule, index) => ({
+          ...rule,
+          position: index + 1,
+          kind_label: RULE_LABELS[rule.kind] ?? rule.kind,
+          label: `${RULE_LABELS[rule.kind] ?? rule.kind} ${rule.value}`,
+        }));
+        renderCollection("custom-rules", rows, "还没有规则。");
+        document.querySelectorAll("[data-pm-rule-count]").forEach((node) => {
+          node.textContent = String(ruleState.length);
+        });
+
+        bindCustomRules();
+      },
+    },
+
     "me-usage.html": {
       load: () => getJson("/me/usage"),
       render: (usage) => {
@@ -738,6 +765,85 @@
   // 两者口径不一致时，页面上会出现「这个组写着 37 人，点开只有 20 个」，
   // 而那看起来像丢数据，不像分页。
   let groupExpandBound = false;
+  // 规则类型的显示名。**与服务端那个闭集一一对应**——
+  // 服务端加一种而这里没加，页面上会显示成原始的 kebab-case 串。
+  const RULE_LABELS = {
+    "domain-suffix": "域名及子域",
+    domain: "仅此域名",
+    "domain-keyword": "含关键字",
+    "ip-cidr": "IPv4 网段",
+    "ip-cidr6": "IPv6 网段",
+  };
+
+  let ruleState = [];
+  let customRulesBound = false;
+
+  function bindCustomRules() {
+    if (customRulesBound) return;
+    customRulesBound = true;
+
+    const status = document.querySelector("[data-pm-rules-status]");
+    const say = (text, ok) => {
+      if (!status) return;
+      status.hidden = false;
+      status.textContent = text;
+      status.classList.toggle("wsk-success", ok === true);
+      status.classList.toggle("wsk-danger", ok === false);
+    };
+
+    // **每一次改动立刻提交整份表。** 不做「改完再保存」：那会多一个
+    // 「编辑了但没保存就离开」的失败模式，而规则改得不频繁，
+    // 多几次请求换掉一整类丢数据的可能是划算的。
+    const submit = async (label, next) => {
+      try {
+        await sendJson("PUT", "/me/custom/rules", { rules: next });
+        const entry = PAGES["me-custom-rules.html"];
+        await guarded("me-custom-rules.html", entry.load, entry.render);
+        say(`${label}成功。改完记得在客户端里重新拉一次订阅。`, true);
+      } catch (error) {
+        say(`${label}失败：${error.message}`, false);
+      }
+    };
+
+    document.addEventListener("submit", (event) => {
+      const form = event.target;
+      if (!form?.matches?.("[data-pm-add-rule]")) return;
+      event.preventDefault();
+      const data = new FormData(form);
+      const next = ruleState.concat([
+        { kind: String(data.get("kind") ?? ""), value: String(data.get("value") ?? "") },
+      ]);
+      submit("添加", next).then(() => form.reset());
+    });
+
+    document.addEventListener("click", (event) => {
+      const button = event.target?.closest?.("[data-pm-rule-move], [data-pm-rule-delete]");
+      if (!button) return;
+      // **按「类型 + 内容」定位，不按下标。** 下标在渲染与点击之间会失效
+      // （另一个标签页改了规则、上一次提交刚好回来），而失效的下标不会报错，
+      // 它会安静地删掉或挪动**另一条**规则。这两个字段服务端保证唯一。
+      const kind = button.getAttribute("data-kind");
+      const value = button.getAttribute("data-value");
+      const index = ruleState.findIndex((rule) => rule.kind === kind && rule.value === value);
+      if (index < 0) return;
+      const next = ruleState.slice();
+      if (button.hasAttribute("data-pm-rule-delete")) {
+        const label = button.getAttribute("data-label") ?? "";
+        if (!window.confirm(`删除规则「${label}」？`)) return;
+        next.splice(index, 1);
+        submit("删除", next);
+        return;
+      }
+      // 换位。到顶到底就什么都不做——**不回绕**：回绕会让一次误点
+      // 把最高优先级的规则扔到最低。
+      const step = button.getAttribute("data-pm-rule-move") === "up" ? -1 : 1;
+      const target = index + step;
+      if (target < 0 || target >= next.length) return;
+      [next[index], next[target]] = [next[target], next[index]];
+      submit("调整顺序", next);
+    });
+  }
+
   let customNodesBound = false;
 
   /// 自定义节点页的写操作。
