@@ -101,7 +101,7 @@ func newAuditWriter(nodeID string, runtimeID string, options AccessLogOptions, i
 	if err := checkAuditNameCollisions(identities); err != nil {
 		return nil, err
 	}
-	exclude, err := newExcludeFilter(options.ExcludeHosts, options.ExcludeIPs)
+	exclude, err := newExcludeFilter(options.ExcludeHosts, options.ExcludeIPs, options.ExcludePorts)
 	if err != nil {
 		return nil, err
 	}
@@ -127,8 +127,8 @@ func newAuditWriter(nodeID string, runtimeID string, options AccessLogOptions, i
 //
 // 调用点在 newConnState，即**连接建立时**：命中的连接根本不挂 audit，
 // 于是连每个数据块两次 connUp/connDown 原子加都省掉了。计费不经过这里。
-func (w *auditWriter) excluded(host string, source string) bool {
-	return w.exclude.match(host, source)
+func (w *auditWriter) excluded(host string, source string, port uint16) bool {
+	return w.exclude.match(host, source, port)
 }
 
 // checkAuditDirectory 要求目录已存在、是目录、且不是符号链接。
@@ -351,13 +351,14 @@ func (w *auditWriter) encode(file *auditFile, record auditRecord) []byte {
 // 它与 gap 行共用 seq 空间：seq 的语义是「这个文件里写出的第 n 行」，
 // 跳过它会让下游的连续性校验失效。
 func (w *auditWriter) encodeFilterEvent(file *auditFile) []byte {
-	hosts, ips := w.exclude.describe()
+	hosts, ips, ports := w.exclude.describe()
 	file.seq++
 	payload := map[string]any{
 		"seq":   file.seq,
 		"ev":    "filter",
 		"hosts": hosts,
 		"ips":   ips,
+		"ports": ports,
 	}
 	line, err := json.Marshal(payload)
 	if err != nil {

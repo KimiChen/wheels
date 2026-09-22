@@ -2,6 +2,7 @@ package userstats
 
 import (
 	"net/netip"
+	"sort"
 	"strings"
 
 	E "github.com/sagernet/sing/common/exceptions"
@@ -22,9 +23,19 @@ type excludeFilter struct {
 	// 不做子串匹配——"evilgithub.com" 不该被 "github.com" 命中。
 	suffixes []string
 	prefixes []netip.Prefix
+	// ports 按**目的端口**排，与 host 无关。
+	//
+	// 存在的理由是 hosts/ips 排不掉的那一类：NTP 客户端从一个轮询的池子里取
+	// 服务器，每次拿到的 IP 都不同——按地址排是排不完的，今天列 53 条，
+	// 明天换成另外 53 条。而它们的共同点只有端口。
+	//
+	// **它比另外两条钝得多**：排掉一个端口就是排掉走那个端口的一切，
+	// 与目标是谁无关。排 443 等于让审计整个失明。配置由人写、随部署提交，
+	// 这里只校验形状不猜意图——但这句话要在配置那一侧也写着。
+	ports map[uint16]struct{}
 }
 
-func newExcludeFilter(hosts []string, ips []string) (*excludeFilter, error) {
+func newExcludeFilter(hosts []string, ips []string, ports []uint16) (*excludeFilter, error) {
 	filter := &excludeFilter{}
 	seenHost := make(map[string]struct{}, len(hosts))
 	for _, item := range hosts {
@@ -65,6 +76,20 @@ func newExcludeFilter(hosts []string, ips []string) (*excludeFilter, error) {
 		seenPrefix[key] = struct{}{}
 		filter.prefixes = append(filter.prefixes, prefix)
 	}
+	seenPort := make(map[uint16]struct{}, len(ports))
+	for _, port := range ports {
+		// 0 不是一个可连接的端口。收下它只会让人以为自己排掉了什么。
+		if port == 0 {
+			return nil, E.New("user_stats.access_log.exclude_ports 不接受 0")
+		}
+		if _, duplicate := seenPort[port]; duplicate {
+			return nil, E.New("user_stats.access_log.exclude_ports 出现重复项：", port)
+		}
+		seenPort[port] = struct{}{}
+	}
+	if len(seenPort) > 0 {
+		filter.ports = seenPort
+	}
 	if filter.empty() {
 		return nil, nil
 	}
@@ -96,14 +121,23 @@ func parseExcludePrefix(entry string) (netip.Prefix, error) {
 }
 
 func (f *excludeFilter) empty() bool {
-	return f == nil || (len(f.suffixes) == 0 && len(f.prefixes) == 0)
+	return f == nil || (len(f.suffixes) == 0 && len(f.prefixes) == 0 && len(f.ports) == 0)
 }
 
 // match 在每条连接建立时各调一次，不在字节热路径上。
 //
 // 规则条数是配置量级（十几条），线性扫描比建索引更便宜也更好读。
-func (f *excludeFilter) match(host string, source string) bool {
-	if f.empty() || host == "" {
+func (f *excludeFilter) match(host string, source string, port uint16) bool {
+	if f.empty() {
+		return false
+	}
+	// **端口先判，而且不要求 host 非空。** 另外两条都以 host 为对象，
+	// 所以它们在 host 为空时无从判起；端口不是——一条没嗅探出域名、
+	// 也拿不到地址的连接，它的目的端口仍然是确定的。
+	if _, hit := f.ports[port]; hit {
+		return true
+	}
+	if host == "" {
 		return false
 	}
 	if source == auditHostSourceIP {
@@ -129,13 +163,20 @@ func (f *excludeFilter) match(host string, source string) bool {
 }
 
 // describe 供文件头的 filter 事件行使用：把生效规则随数据一起留痕。
-func (f *excludeFilter) describe() (hosts []string, ips []string) {
+func (f *excludeFilter) describe() (hosts []string, ips []string, ports []uint16) {
 	if f.empty() {
-		return nil, nil
+		return nil, nil, nil
 	}
 	hosts = append(hosts, f.suffixes...)
 	for _, prefix := range f.prefixes {
 		ips = append(ips, prefix.String())
 	}
-	return hosts, ips
+	for port := range f.ports {
+		ports = append(ports, port)
+	}
+	// **排序。** 它进的是文件头那行留痕，而 map 的遍历顺序每次都不同——
+	// 不排序的话，两份规则完全相同的日志会写出两行看着不一样的 filter 事件，
+	// 而下游要靠这行判断「规则变过没有」。
+	sort.Slice(ports, func(i, j int) bool { return ports[i] < ports[j] })
+	return hosts, ips, ports
 }
