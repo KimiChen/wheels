@@ -146,6 +146,11 @@ pub struct Answer {
     /// 解析不了的行数，以及带了未知键的行数。上游形状漂移的唯一信号。
     pub unparsed: usize,
     pub unexpected_keys: usize,
+    /// 这个人**在筛选之前**有记录的全部节点，用来填页面上的筛选下拉框。
+    ///
+    /// **必须是筛选之前的那一份。** 用筛选之后的算，选中某台之后下拉框里
+    /// 就只剩那一台了，人再也选不回「全部」——一个把自己锁死的界面。
+    pub nodes: Vec<String>,
 }
 
 /// 这个人可能持有过的身份名。**取当前绑定与历史事件的并集。**
@@ -169,12 +174,15 @@ async fn candidate_identities(store: &Store, user_id: i64) -> Result<Vec<String>
 ///
 /// `subject` 是**数据主体**，不是调用者。管理员按用户查与本人自助查走同一个函数，
 /// 只是这个参数的来源不同（C35 明写两者执行同一套过滤规则）。
+/// `node` 为 `None` 表示不筛。筛选**在归属裁剪之后**做：
+/// 裁剪是安全边界，任何筛选都不该有机会绕过它。
 pub async fn access(
     store: &Store,
     root: &Path,
     subject: i64,
     range: Range,
     now_ms: i64,
+    node: Option<&str>,
 ) -> Result<Answer> {
     let identities = candidate_identities(store, subject).await?;
     // 前缀是 `access-<b64url>.jsonl`，匹配方式是 `starts_with`——于是它同时命中
@@ -280,8 +288,21 @@ pub async fn access(
 
     // **裁剪在聚合之前**（C35）。
     let filtered = filter::for_user(store, subject, records).await?;
+
+    // 下拉框的选项。取的是**裁剪之后、筛选之前**的那一份：
+    //   * 裁剪之后 —— 不能列出这个人根本无权看到的节点，那是一次信息泄露；
+    //   * 筛选之前 —— 否则选中一台之后选项就只剩它自己（见 `Answer::nodes`）。
+    let nodes: Vec<String> = filtered
+        .rows
+        .iter()
+        .map(|record| record.node.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+
+    let keep = |name: &str| node.is_none_or(|wanted| wanted == name);
     let mut buckets: BTreeMap<(String, u16, &'static str), Row> = BTreeMap::new();
-    for record in &filtered.rows {
+    for record in filtered.rows.iter().filter(|record| keep(&record.node)) {
         let at = bucket::to_rfc3339(
             time::OffsetDateTime::from_unix_timestamp_nanos(record.ts as i128 * 1_000_000)
                 .unwrap_or(time::OffsetDateTime::UNIX_EPOCH),
@@ -308,6 +329,9 @@ pub async fn access(
             row.last_seen = at;
         }
     }
+
+    // 缺口也跟着筛。筛到某一台时还显示别台的缺口，读者会把它读成这一台的。
+    gaps.retain(|gap| keep(&gap.node_id));
 
     let mut rows: Vec<Row> = buckets.into_values().collect();
     // 次数多的在前；同次数按最近一次访问排。人找「陌生的目标」时，
@@ -352,6 +376,7 @@ pub async fn access(
         dropped: filtered,
         unparsed,
         unexpected_keys,
+        nodes,
     })
 }
 
@@ -368,6 +393,7 @@ fn empty(range: Range, state: &'static str) -> Answer {
         latest_available_event_at: None,
         archive_delay_bounded: false,
         dropped: Filtered::default(),
+        nodes: Vec::new(),
         unparsed: 0,
         unexpected_keys: 0,
     }

@@ -503,9 +503,12 @@
       // 而门禁比对的是「这一次请求发出时的选择」——把选择记在别处，
       // 晚到的旧响应会带着旧范围覆盖新选择，页面上就出现
       // 「单选框指着 24h、表格是 30d 的数据」。
-      load: () => getJson(`/me/audit/access?range=${auditRange()}`),
+      load: () =>
+        getJson(
+          `/me/audit/access?range=${auditRange()}&node=${encodeURIComponent(auditNode())}`
+        ),
       render: renderAudit,
-      reloadOn: "input[name='audit-range']",
+      reloadOn: "input[name='audit-range'], select[name='audit-node']",
     },
 
     "usage.html": {
@@ -547,6 +550,37 @@
   function auditRange() {
     const picked = document.querySelector("input[name='audit-range']:checked");
     return picked?.value ?? "7d";
+  }
+
+  // 与 auditRange 同一条理由：**读 DOM，不记在模块变量里**。
+  // 记在别处的话，晚到的旧响应会带着旧筛选覆盖新选择，
+  // 页面上就出现「下拉框指着 A、表格是 B 的数据」。
+  function auditNode() {
+    return document.querySelector("select[name='audit-node']")?.value ?? "";
+  }
+
+  /// 把筛选下拉框填成「这个人真的有记录的那些节点」。
+  //
+  // **每次渲染都重建，但保留当前选择。** 服务端给的 `nodes` 是筛选**之前**
+  // 算的，所以选中某一台之后它不会缩成一项——那会把人锁死在一个选项里。
+  function renderAuditNodes(nodes) {
+    const select = document.querySelector("select[name='audit-node']");
+    if (!select) return;
+    const previous = select.value;
+    select.textContent = "";
+    const all = document.createElement("option");
+    all.value = "";
+    all.textContent = "全部节点";
+    select.append(all);
+    for (const node of nodes ?? []) {
+      const option = document.createElement("option");
+      option.value = node;
+      option.textContent = node;
+      select.append(option);
+    }
+    // 选中的那一台如果这次不在清单里（比如换了时间范围之后它没有记录了），
+    // 回落到「全部」——留着一个选不中的值，表格会一直是空的而没人知道为什么。
+    select.value = (nodes ?? []).includes(previous) ? previous : "";
   }
 
   // 「最近记录」那一列的排序。
@@ -595,6 +629,7 @@
     // 会让人以为自己点错了地方。
     auditState.rows = data.rows ?? [];
     auditState.data = data;
+    renderAuditNodes(data.nodes);
     applyAuditSort();
     renderCollection("audit-gaps", data.gaps ?? [], "没有缺口");
     const gaps = (data.gaps ?? []).length > 0;

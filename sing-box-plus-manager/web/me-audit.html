@@ -208,6 +208,16 @@
                     ><label><input type="radio" name="audit-range" value="7d" checked /><span>近 7 天</span></label
                     ><label><input type="radio" name="audit-range" value="30d" /><span>近 30 天</span></label>
                   </fieldset>
+                  <!--
+                    按节点筛。选项由服务端给（`nodes`），**不是全部节点**——
+                    列出一个这个人根本没有记录的节点，会让他以为自己走过那里。
+                  -->
+                  <label class="wsk-field wsk-field-inline">
+                    <span class="wsk-sr-only">按节点筛选</span>
+                    <select name="audit-node" data-pm-audit-nodes>
+                      <option value="">全部节点</option>
+                    </select>
+                  </label>
                 </div>
               </div>
 

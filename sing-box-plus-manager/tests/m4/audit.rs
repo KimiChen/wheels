@@ -19,6 +19,23 @@ const NODE: &str = "node-example-01";
 const RUN: &str = "0123456789abcdef0123456789abcdef";
 const GEN: &str = "00000000000000000001";
 
+/// 指定节点的一行。`line` 是它在默认节点上的特例。
+#[allow(clippy::too_many_arguments)]
+fn line_on(
+    node: &str,
+    user: &str,
+    inbound: &str,
+    host: &str,
+    seq: u64,
+    ts: i64,
+    up: u64,
+    down: u64,
+) -> String {
+    format!(
+        r#"{{"down":{down},"host":"{host}","host_src":"sniff","in":"{inbound}","ms":12,"net":"tcp","node":"{node}","port":443,"run":"{RUN}","seq":{seq},"ts":{ts},"up":{up},"user":"{user}"}}"#
+    )
+}
+
 fn line(user: &str, inbound: &str, host: &str, seq: u64, ts: i64, up: u64, down: u64) -> String {
     format!(
         r#"{{"down":{down},"host":"{host}","host_src":"sniff","in":"{inbound}","ms":12,"net":"tcp","node":"{NODE}","port":443,"run":"{RUN}","seq":{seq},"ts":{ts},"up":{up},"user":"{user}"}}"#
@@ -31,6 +48,11 @@ fn now_ms() -> i64 {
 
 /// 铺一条完整的归属链：runtime → service → identity → route → assigned 事件。
 async fn wire_identity(api: &Api, user_id: i64, inbound: &str, identity: &str) {
+    wire_identity_on(api, NODE, user_id, inbound, identity).await;
+}
+
+/// 同上，但指定节点。按节点筛选的用例要在两台上各铺一份。
+async fn wire_identity_on(api: &Api, node: &str, user_id: i64, inbound: &str, identity: &str) {
     // 持有起点放得足够早。用「昨天」当起点的话，任何一条几天前的记录都会被
     // 正确地判成「持有之前」而不返回——那时用例失败的原因与它要测的东西无关。
     let now = "2026-01-01T00:00:00Z";
@@ -40,7 +62,7 @@ async fn wire_identity(api: &Api, user_id: i64, inbound: &str, identity: &str) {
          agent_spki_sha256, quota_enabled, status, created_at, updated_at) \
          VALUES (?, 'plus_v3', 'node-01.example.com:8443', 'baseline', ?, 1, 'active', ?, ?)",
     )
-    .bind(NODE)
+    .bind(node)
     .bind("0".repeat(64))
     .bind(now)
     .bind(now)
@@ -54,7 +76,7 @@ async fn wire_identity(api: &Api, user_id: i64, inbound: &str, identity: &str) {
          ON CONFLICT(node_id, runtime_id) DO UPDATE SET last_seen_at = excluded.last_seen_at \
          RETURNING runtime_pk",
     )
-    .bind(NODE)
+    .bind(node)
     .bind(RUN)
     .bind(now)
     .bind(now)
@@ -91,7 +113,7 @@ async fn wire_identity(api: &Api, user_id: i64, inbound: &str, identity: &str) {
         "INSERT INTO identity_routes(node_id, identity_name, state, user_id, \
          claimed_at, created_at) VALUES (?, ?, 'claimed', ?, ?, ?) RETURNING route_id",
     )
-    .bind(NODE)
+    .bind(node)
     .bind(identity)
     .bind(user_id)
     .bind(now)
@@ -742,4 +764,145 @@ async fn 没有ports键的旧filter行照常解析() {
     assert_eq!(body["unparsed"], 0, "旧格式不该解析失败：{body}");
     assert_eq!(body["excluded"]["hosts"][0], "old.example");
     assert!(body["excluded"]["ports"].as_array().unwrap().is_empty());
+}
+
+// ============ 按节点筛选 ============
+
+const NODE_B: &str = "node-example-02";
+
+/// 在两台节点上各给 alice 铺一份记录。
+async fn seeded_two_nodes(api: &Api) -> crate::harness::Actor {
+    let alice = api.user("alice", Role::User, "local").await;
+    wire_identity_on(api, NODE, alice.user_id, "ss-entry", "id-01").await;
+    wire_identity_on(api, NODE_B, alice.user_id, "ss-entry", "id-01").await;
+    let ts = now_ms() - 60_000;
+    api.seed_audit(
+        NODE,
+        "id-01",
+        &[line_on(NODE, "id-01", "ss-entry", "only-on-a.example", 1, ts, 10, 20)],
+    );
+    api.seed_audit(
+        NODE_B,
+        "id-01",
+        &[line_on(NODE_B, "id-01", "ss-entry", "only-on-b.example", 1, ts, 30, 40)],
+    );
+    alice
+}
+
+#[tokio::test]
+async fn 按节点筛掉别台的记录() {
+    let api = Api::new().await;
+    let alice = seeded_two_nodes(&api).await;
+
+    // 不筛：两台的都在。**这一半是控制组**——少了它，下面那条断言
+    // 在「筛选把什么都筛没了」时同样是绿的。
+    let (_, body, _) = api.get("/api/v1/me/audit/access", Some(&alice)).await;
+    assert_eq!(hosts(&body).len(), 2, "{body}");
+
+    let (status, body, _) =
+        api.get(&format!("/api/v1/me/audit/access?node={NODE}"), Some(&alice)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(hosts(&body), vec!["only-on-a.example"], "只该剩这一台的：{body}");
+
+    let (_, body, _) =
+        api.get(&format!("/api/v1/me/audit/access?node={NODE_B}"), Some(&alice)).await;
+    assert_eq!(hosts(&body), vec!["only-on-b.example"], "{body}");
+}
+
+/// **下拉框的选项在筛选之前算。**
+///
+/// 用筛选之后的算，选中某一台之后选项就只剩那一台，人再也选不回「全部」——
+/// 一个把自己锁死的界面，而且它不报错，只是越点越少。
+#[tokio::test]
+async fn 节点清单不随筛选缩水() {
+    let api = Api::new().await;
+    let alice = seeded_two_nodes(&api).await;
+
+    let (_, body, _) = api.get("/api/v1/me/audit/access", Some(&alice)).await;
+    let all: Vec<&str> =
+        body["nodes"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+    assert_eq!(all, vec![NODE, NODE_B], "{body}");
+
+    // 筛到一台之后，清单**仍然**是两台。
+    let (_, body, _) = api.get(&format!("/api/v1/me/audit/access?node={NODE}"), Some(&alice)).await;
+    let after: Vec<&str> =
+        body["nodes"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+    assert_eq!(after, vec![NODE, NODE_B], "筛选后清单不该缩水：{body}");
+    assert_eq!(hosts(&body), vec!["only-on-a.example"], "但行要筛：{body}");
+}
+
+/// **筛选不是绕过归属裁剪的口子。**
+///
+/// 指定一个自己没有记录的节点，拿到的是空，不是别人的记录。
+#[tokio::test]
+async fn 筛选绕不过归属裁剪() {
+    let api = Api::new().await;
+    let alice = api.user("alice", Role::User, "local").await;
+    let bob = api.user("bob", Role::User, "local").await;
+    wire_identity_on(&api, NODE, alice.user_id, "ss-entry", "id-01").await;
+    wire_identity_on(&api, NODE_B, bob.user_id, "ss-entry", "id-02").await;
+    let ts = now_ms() - 60_000;
+    api.seed_audit(
+        NODE,
+        "id-01",
+        &[line_on(NODE, "id-01", "ss-entry", "alice.example", 1, ts, 1, 1)],
+    );
+    api.seed_audit(
+        NODE_B,
+        "id-02",
+        &[line_on(NODE_B, "id-02", "ss-entry", "bob.example", 1, ts, 1, 1)],
+    );
+
+    // alice 指名要 bob 那台。
+    let (status, body, _) =
+        api.get(&format!("/api/v1/me/audit/access?node={NODE_B}"), Some(&alice)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(hosts(&body).is_empty(), "不该看到别人的记录：{body}");
+    // 而且那台压根不该出现在他的清单里。
+    let nodes: Vec<&str> =
+        body["nodes"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+    assert!(!nodes.contains(&NODE_B), "别人的节点不该列给他：{body}");
+}
+
+/// 不认识的节点名**不是错误**，是一个空结果。
+///
+/// 回 400 会让人以为自己填错了，而真实情况可能是这台刚加进来、他还没走过。
+#[tokio::test]
+async fn 不认识的节点名返回空而不是报错() {
+    let api = Api::new().await;
+    let alice = seeded_two_nodes(&api).await;
+    let (status, body, _) =
+        api.get("/api/v1/me/audit/access?node=并不存在的节点", Some(&alice)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(hosts(&body).is_empty(), "{body}");
+}
+
+/// 空串 = 不筛。下拉框的「全部节点」那一项 value 就是空串。
+#[tokio::test]
+async fn 空串按不筛处理() {
+    let api = Api::new().await;
+    let alice = seeded_two_nodes(&api).await;
+    let (_, body, _) = api.get("/api/v1/me/audit/access?node=", Some(&alice)).await;
+    assert_eq!(hosts(&body).len(), 2, "{body}");
+}
+
+/// 页面上的筛选控件与脚本必须对得上。
+///
+/// 加了下拉框却没接 `reloadOn`，症状是「选了没反应」且不报错——
+/// 本项目为这一类「服务端知道，界面不说」吃过亏。
+#[test]
+fn 节点筛选控件已接线() {
+    let page = proxy_manager::web::page_body("me-audit.html").expect("页面该在");
+    let (script, _) = proxy_manager::web::asset("assets/api.js").expect("脚本该在");
+
+    assert!(page.contains(r#"select name="audit-node""#), "页面上没有节点下拉框");
+    // 换成 change 之外的事件、或者漏了这个选择器，切换就不会重新取数。
+    assert!(
+        script.contains("select[name='audit-node']"),
+        "reloadOn 没有把下拉框算进去，选了不会重新取数"
+    );
+    // 取数要带上它，否则筛选永远是「全部」。
+    assert!(script.contains("auditNode()"), "取数没带 node 参数");
+    // 选项要由服务端给的 nodes 填，而不是前端自己编一份。
+    assert!(script.contains("renderAuditNodes(data.nodes)"), "下拉框没有被填");
 }

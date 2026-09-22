@@ -929,6 +929,13 @@ fn unusable_reason(
 pub struct AuditQuery {
     #[serde(default)]
     range: Option<String>,
+    /// 只看这一台节点的记录。缺省或空串 = 全部。
+    ///
+    /// **不校验它是不是一个真节点**：不认识的名字筛出空结果，而那正是
+    /// 诚实的答案（「这台上你没有记录」）。回 400 只会让人以为自己填错了，
+    /// 而真实情况可能是这台刚加进来、他还没走过。
+    #[serde(default)]
+    node: Option<String>,
 }
 
 /// 本人自助查（D18）。
@@ -994,12 +1001,15 @@ async fn audit_access(
         return Err(ApiError::new(ApiCode::Internal, "审计查询日志不可写"));
     }
 
+    // 空串按「不筛」处理：下拉框的「全部节点」那一项 value 就是空串，
+    // 表单会把它原样发上来。
+    let node = query.node.as_deref().filter(|name| !name.is_empty());
     let answer =
-        crate::audit::query::access(&state.store, &config.dir, data_subject, range, now_ms)
+        crate::audit::query::access(&state.store, &config.dir, data_subject, range, now_ms, node)
             .await
             .map_err(|error| {
-            tracing::error!(%error, "读审计镜像失败");
-            ApiError::new(ApiCode::Internal, "读取审计明细失败")
-        })?;
+                tracing::error!(%error, "读审计镜像失败");
+                ApiError::new(ApiCode::Internal, "读取审计明细失败")
+            })?;
     Ok(Json(serde_json::to_value(answer).unwrap_or_else(|_| json!({}))))
 }
