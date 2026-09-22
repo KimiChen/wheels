@@ -1581,3 +1581,26 @@ async fn 规则保序() {
     let c = yaml.find("third.example").unwrap();
     assert!(a < b && b < c, "规则顺序必须保持");
 }
+
+/// **档位过滤只在订阅那两处，不在用量那一处。**
+///
+/// 这条钉住的是一个容易被「修」掉的东西：有人看到用量页列出了一台
+/// 级别高于该用户档位的节点，会以为是漏判，然后去给 `me_usage` 加过滤。
+/// 加了之后那个人看到的总量对不上自己的明细，而没有任何报错——
+/// 正是本项目定义的「服务端知道，界面不说」。
+///
+/// 口径对照见 `quota::level` 的模块文档。
+#[test]
+fn 用量接口不按档位过滤() {
+    let source = include_str!("../../src/api/routes.rs");
+    let at = source.find("pub async fn me_usage").expect("me_usage 该在");
+    let body = &source[at..at + 1600];
+    assert!(
+        !body.contains("can_see") && !body.contains("quota::level"),
+        "me_usage 不该按档位过滤：用量是计费事实，藏一台会让人对不上账"
+    );
+    // 反向：订阅那一处**必须**过滤，否则这条用例会在两边都没有过滤时也绿。
+    let sub = source.find("pub async fn me_subscription").expect("me_subscription 该在");
+    let sub_view = source.find("async fn subscription_view").unwrap_or(sub);
+    assert!(source[sub_view..].contains("can_see"), "订阅那一处必须按档位过滤");
+}

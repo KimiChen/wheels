@@ -155,13 +155,9 @@ fn 排序按钮排的键在模板行上() {
             // 它们写死了 `data-node="node-a"` 这类属性——按整页搜的话
             // 会被那些行命中，于是 live 模式下模板缺绑定也照样绿。
             // （第一版就是这么写的，去掉绑定后用例没红才发现。）
-            let bound = templates(body)
-                .iter()
-                .any(|block| block.contains(&format!("data-{key}:")));
+            let bound = templates(body).iter().any(|block| block.contains(&format!("data-{key}:")));
             if !bound {
-                missing.push(format!(
-                    "{name} 的排序按钮排 {key}，但模板行没有绑 data-{key}"
-                ));
+                missing.push(format!("{name} 的排序按钮排 {key}，但模板行没有绑 data-{key}"));
             }
         }
     }
