@@ -272,3 +272,60 @@ async fn 写操作要校验csrf() {
     let (status, _, _) = api.post_without_csrf("/api/v1/me/custom/proxies", &alice).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 }
+
+// ============ 页面与脚本的契约 ============
+
+const PAGE: &str = include_str!("../../web/me-custom.html");
+const SCRIPT: &str = include_str!("../../web/assets/api.js");
+
+/// 页面能发出来，而且导航里有它。
+///
+/// 加了页面忘了登记 `PAGES`，症状是 404；登记了忘了加导航，
+/// 症状是「功能做完了但没人找得到」——后者不会有人报错。
+#[tokio::test]
+async fn 页面发得出来且导航里有() {
+    let api = api().await;
+    let alice = api.user("alice", Role::User, "local").await;
+    let (status, body, _) = api.get_text("/me-custom.html", Some(&alice.cookie)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("我的自定义节点"), "发出来的不是这一页：{body}");
+
+    // 每一个个人中心页面都要能走到它。
+    for page in ["me.html", "me-usage.html", "me-audit.html"] {
+        let body = proxy_manager::web::page_body(page).expect("页面该在");
+        assert!(body.contains("me-custom.html"), "{page} 的导航里没有自定义节点");
+    }
+}
+
+/// **页面上的每个集合都要有脚本在填。**
+///
+/// 少一个的结果是那张表永远停在「加载中…」，而没有任何报错——
+/// 本项目为这一类「服务端知道，界面不说」吃过亏。
+#[tokio::test]
+async fn 页面上的集合都有脚本在填() {
+    let mut collections = Vec::new();
+    let mut rest = PAGE;
+    while let Some(at) = rest.find("data-pm-collection=\"") {
+        rest = &rest[at + "data-pm-collection=\"".len()..];
+        let name = &rest[..rest.find('"').expect("属性该闭合")];
+        collections.push(name.to_string());
+    }
+    assert!(!collections.is_empty(), "页面上一个集合都没有，用例本身失效了");
+    for name in collections {
+        assert!(
+            SCRIPT.contains(&format!("renderCollection(\"{name}\"")),
+            "集合「{name}」没有对应的 renderCollection，那张表会永远停在「加载中…」"
+        );
+    }
+}
+
+/// 脚本里那个页面处理器**取的路径必须真的存在**。
+#[tokio::test]
+async fn 脚本取的端点存在() {
+    assert!(SCRIPT.contains("\"me-custom.html\": {"), "api.js 里没有这一页的处理器");
+    assert!(SCRIPT.contains("getJson(\"/me/custom\")"), "处理器没取 /me/custom");
+    let api = api().await;
+    let alice = api.user("alice", Role::User, "local").await;
+    let (status, _, _) = api.get("/api/v1/me/custom", Some(&alice)).await;
+    assert_eq!(status, StatusCode::OK, "脚本要取的端点不存在");
+}

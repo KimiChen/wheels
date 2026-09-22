@@ -88,6 +88,37 @@
     return body;
   }
 
+  // 写请求。**CSRF 在这里统一带上**，不在各个调用点手写——
+  // 漏一处就是一个安静的漏洞，而漏了也不会有任何症状，直到有人利用它。
+  async function sendJson(method, path, body) {
+    const csrf = readCookie("__Host-pm_csrf");
+    if (!csrf) {
+      const error = new Error("会话已失效，请重新登录");
+      error.code = "csrf_invalid";
+      throw error;
+    }
+    const init = {
+      method,
+      credentials: "same-origin",
+      headers: { accept: "application/json", "x-csrf-token": csrf },
+    };
+    if (body !== undefined) {
+      init.headers["content-type"] = "application/json";
+      init.body = JSON.stringify(body);
+    }
+    const response = await fetch(`${API_BASE}${path}`, init);
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) {
+      // **服务端的话原样用。** 它区分了「格式错」「重名」「不是你的」，
+      // 前端再编一句「操作失败」就把这些区分全抹掉了。
+      const error = new Error(payload?.error?.message ?? `HTTP ${response.status}`);
+      error.code = payload?.error?.code ?? "unknown";
+      error.status = response.status;
+      throw error;
+    }
+    return payload;
+  }
+
   // 按点号路径取值。取不到返回 undefined，调用方决定显示什么。
   function pick(source, path) {
     return path.split(".").reduce((value, key) => (value == null ? value : value[key]), source);
@@ -124,6 +155,21 @@
   function applyBindings(root, data) {
     root.querySelectorAll("[data-pm]").forEach((node) => {
       setText(node, display(pick(data, node.dataset.pm)));
+    });
+    // 属性绑定：`data-pm-attr="data-id:id data-name:name"`。
+    //
+    // 行里的按钮需要知道自己属于哪一条，而那个值不能写进可见文本。
+    // 做成通用绑定而不是在页面脚本里逐个 querySelector：后者要在两处维护
+    // 同一份字段表，而两份表一定会漂移——这是本项目自己的纪律。
+    root.querySelectorAll("[data-pm-attr]").forEach((node) => {
+      for (const pair of node.dataset.pmAttr.split(/\s+/)) {
+        if (!pair) continue;
+        const separator = pair.indexOf(":");
+        const attr = pair.slice(0, separator);
+        const value = pick(data, pair.slice(separator + 1));
+        if (value == null) node.removeAttribute(attr);
+        else node.setAttribute(attr, String(value));
+      }
     });
     root.querySelectorAll("[data-pm-bytes]").forEach((node) => {
       const value = pick(data, node.dataset.pmBytes);
@@ -284,6 +330,39 @@
           node.hidden = !sub.enabled || !sub.unusable_reason ||
             !reasons.includes(sub.unusable_reason);
         });
+      },
+    },
+
+    "me-custom.html": {
+      load: () => getJson("/me/custom"),
+      render: (data) => {
+        toggle("[data-pm-custom-disabled]", !data.enabled);
+        toggle("[data-pm-custom-enabled]", data.enabled);
+        if (!data.enabled) return;
+
+        // 服务器与端口合成一格显示。**在这里拼而不是让服务端拼**：
+        // 服务端回的是结构化字段，页面决定怎么展示——反过来会让
+        // 「换个展示方式」变成一次后端改动。
+        const withEndpoint = (rows) =>
+          rows.map((row) => ({ ...row, endpoint: `${row.server}:${row.port}` }));
+        renderCollection("custom-proxies", withEndpoint(data.proxies), "还没有自定义上游。");
+        renderCollection("custom-socks5", withEndpoint(data.socks5), "还没有 SOCKS5 落地。");
+
+        // 前置候选。**每次渲染都重建**：刚加的那条上游要立刻能被选中，
+        // 而刚删掉的那条不能还留在选项里。
+        document.querySelectorAll("[data-pm-dialer-options]").forEach((select) => {
+          const previous = select.value;
+          select.textContent = "";
+          for (const name of data.dialer_options ?? []) {
+            const option = document.createElement("option");
+            option.value = name;
+            option.textContent = name;
+            select.append(option);
+          }
+          if (previous && (data.dialer_options ?? []).includes(previous)) select.value = previous;
+        });
+
+        bindCustomNodes();
       },
     },
 
@@ -659,6 +738,96 @@
   // 两者口径不一致时，页面上会出现「这个组写着 37 人，点开只有 20 个」，
   // 而那看起来像丢数据，不像分页。
   let groupExpandBound = false;
+  let customNodesBound = false;
+
+  /// 自定义节点页的写操作。
+  //
+  // **一处报结果，成功与失败共用同一个位置。** 分两处的话，一次成功提示
+  // 会留在页面上，而下一次失败显示在别处——两条相反的结论同时在屏幕上。
+  function bindCustomNodes() {
+    if (customNodesBound) return;
+    customNodesBound = true;
+
+    const status = document.querySelector("[data-pm-custom-status]");
+    const say = (text, ok) => {
+      if (!status) return;
+      status.hidden = false;
+      status.textContent = text;
+      status.classList.toggle("wsk-success", ok === true);
+      status.classList.toggle("wsk-danger", ok === false);
+    };
+
+    // 每次写完都重新取一遍，**不在前端拼接结果**：服务端才知道改完之后
+    // 拨号候选长什么样、名字最终是什么。前端自己拼一份迟早与服务端分叉。
+    const refresh = async () => {
+      const entry = PAGES["me-custom.html"];
+      await guarded("me-custom.html", entry.load, entry.render);
+    };
+
+    const run = async (label, action) => {
+      try {
+        await action();
+        await refresh();
+        say(`${label}成功。改完记得在客户端里重新拉一次订阅。`, true);
+      } catch (error) {
+        say(`${label}失败：${error.message}`, false);
+      }
+    };
+
+    document.addEventListener("submit", (event) => {
+      const form = event.target;
+      if (form?.matches?.("[data-pm-add-proxy]")) {
+        event.preventDefault();
+        const data = new FormData(form);
+        run("添加上游", async () => {
+          await sendJson("POST", "/me/custom/proxies", {
+            name: String(data.get("name") ?? ""),
+            share_url: String(data.get("share_url") ?? ""),
+          });
+          form.reset();
+        });
+      } else if (form?.matches?.("[data-pm-add-socks]")) {
+        event.preventDefault();
+        const data = new FormData(form);
+        const password = String(data.get("password") ?? "");
+        run("添加 SOCKS5", async () => {
+          await sendJson("POST", "/me/custom/socks5", {
+            name: String(data.get("name") ?? ""),
+            server: String(data.get("server") ?? ""),
+            port: String(data.get("port") ?? ""),
+            username: String(data.get("username") ?? ""),
+            password,
+            dialer_proxy: String(data.get("dialer_proxy") ?? ""),
+          });
+          form.reset();
+        });
+      }
+    });
+
+    document.addEventListener("click", (event) => {
+      const button = event.target?.closest?.(
+        "[data-pm-delete-proxy], [data-pm-rename-proxy], [data-pm-delete-socks]"
+      );
+      if (!button) return;
+      const id = button.getAttribute("data-id");
+      const name = button.getAttribute("data-name") ?? "";
+      if (button.hasAttribute("data-pm-delete-proxy")) {
+        // 删除是不可逆的，而这一条的配置**页面上取不回来**（列表不回链接）。
+        // 所以必须问一次，而且要把名字念出来。
+        if (!window.confirm(`删除自定义上游「${name}」？删掉之后要重新贴一次链接才能恢复。`)) return;
+        run("删除上游", () => sendJson("DELETE", `/me/custom/proxies/${id}`));
+      } else if (button.hasAttribute("data-pm-rename-proxy")) {
+        const next = window.prompt(`把「${name}」改成什么名字？`, name);
+        if (next == null || next === name) return;
+        // 只传 name：服务端据此判定「只改名字，配置原样保留」。
+        run("改名", () => sendJson("PUT", `/me/custom/proxies/${id}`, { name: next }));
+      } else {
+        if (!window.confirm(`删除 SOCKS5 落地「${name}」？`)) return;
+        run("删除 SOCKS5", () => sendJson("DELETE", `/me/custom/socks5/${id}`));
+      }
+    });
+  }
+
   function bindGroupExpand() {
     const panel = document.querySelector("[data-group-panel]");
     if (!panel || groupExpandBound) return;
