@@ -669,3 +669,77 @@ async fn 没有filter行时说不知道而不是说没有排除() {
     let (_, empty, _) = api.get("/api/v1/me/audit/access", Some(&bob)).await;
     assert_eq!(empty["excluded"]["observed"], false);
 }
+
+/// 节点侧 2026-09-22 起在 `ev=filter` 行里多写一个 `ports`。
+/// 主控要把它**一路带到页面上**，否则一个看到零条 NTP 的人
+/// 无从知道那是被排掉了，而不是他真的没同步过时间。
+#[tokio::test]
+async fn 排除规则里的端口要带到页面上() {
+    let api = Api::new().await;
+    let alice = api.user("alice", Role::User, "local").await;
+    wire_identity(&api, alice.user_id, "ss-entry", "id-01").await;
+    let ts = now_ms() - 60_000;
+    api.seed_audit(
+        NODE,
+        "id-01",
+        &[
+            r#"{"seq":1,"ev":"filter","hosts":["ubuntu.com"],"ips":["198.18.0.0/15"],"ports":[123,4460]}"#.to_string(),
+            line("id-01", "ss-entry", "www.example.com", 2, ts, 100, 200),
+        ],
+    );
+
+    let (status, body, _) = api.get("/api/v1/me/audit/access", Some(&alice)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["excluded"]["observed"], true);
+    assert_eq!(body["excluded"]["hosts"][0], "ubuntu.com");
+    assert_eq!(body["excluded"]["ports"][0], 123);
+    assert_eq!(body["excluded"]["ports"][1], 4460);
+}
+
+/// **只在端口上不同的两套规则，必须判成「规则变过」。**
+///
+/// 少把 ports 纳入比较的话，这两行会塌成一条，`consistent` 报「没变过」——
+/// 一个静默的错误答案，而页面据此决定说哪句话。
+#[tokio::test]
+async fn 只有端口不同也算规则变过() {
+    let api = Api::new().await;
+    let alice = api.user("alice", Role::User, "local").await;
+    wire_identity(&api, alice.user_id, "ss-entry", "id-01").await;
+    let ts = now_ms() - 60_000;
+    api.seed_audit(
+        NODE,
+        "id-01",
+        &[
+            r#"{"seq":1,"ev":"filter","hosts":["a.example"],"ips":[],"ports":[123]}"#.to_string(),
+            line("id-01", "ss-entry", "www.example.com", 2, ts, 100, 200),
+            // 同样的 hosts/ips，只有 ports 变了——重启后续写那一行。
+            r#"{"seq":3,"ev":"filter","hosts":["a.example"],"ips":[],"ports":[123,4460]}"#
+                .to_string(),
+        ],
+    );
+
+    let (_, body, _) = api.get("/api/v1/me/audit/access", Some(&alice)).await;
+    assert_eq!(body["excluded"]["consistent"], false, "只有端口变了也是变了：{body}");
+    // 不一致时取并集：宁可多说几个「不记录」，也不能少说。
+    let ports: Vec<i64> =
+        body["excluded"]["ports"].as_array().unwrap().iter().map(|v| v.as_i64().unwrap()).collect();
+    assert_eq!(ports, vec![123, 4460], "{body}");
+}
+
+/// 旧节点写的 filter 行没有 `ports` 键。**照常解析**，不能整行落进 unparsed——
+/// 主控可能先于节点升级，那时全部诊断行会一起失效。
+#[tokio::test]
+async fn 没有ports键的旧filter行照常解析() {
+    let api = Api::new().await;
+    let alice = api.user("alice", Role::User, "local").await;
+    wire_identity(&api, alice.user_id, "ss-entry", "id-01").await;
+    api.seed_audit(
+        NODE,
+        "id-01",
+        &[r#"{"seq":1,"ev":"filter","hosts":["old.example"],"ips":[]}"#.to_string()],
+    );
+    let (_, body, _) = api.get("/api/v1/me/audit/access", Some(&alice)).await;
+    assert_eq!(body["unparsed"], 0, "旧格式不该解析失败：{body}");
+    assert_eq!(body["excluded"]["hosts"][0], "old.example");
+    assert!(body["excluded"]["ports"].as_array().unwrap().is_empty());
+}

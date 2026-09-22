@@ -266,6 +266,13 @@
                   <p data-pm-excluded-hosts>—</p>
                   <strong class="wsk-help">网段（只对没有域名、只记得下 IP 的连接生效）</strong>
                   <p data-pm-excluded-ips>—</p>
+                  <!--
+                    **端口这一条必须和上面两条并排说。** 少说它的后果是：
+                    一个看到零条 NTP 的人无从知道那是被排掉了，
+                    而不是他真的没同步过时间。
+                  -->
+                  <strong class="wsk-help">端口（与目标是谁无关，走这个端口的一律不记）</strong>
+                  <p data-pm-excluded-ports>—</p>
                 </div>
               </details>
 

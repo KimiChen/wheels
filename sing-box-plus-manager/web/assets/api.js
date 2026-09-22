@@ -594,6 +594,10 @@
       document.querySelector("[data-pm-excluded-ips]"),
       (excluded.ips ?? []).join("、") || "（没有网段规则）",
     );
+    setText(
+      document.querySelector("[data-pm-excluded-ports]"),
+      (excluded.ports ?? []).join("、") || "（没有端口规则）",
+    );
   }
 
   // 空表要说清楚是哪一种空。三种情况在页面上的含义完全不同：

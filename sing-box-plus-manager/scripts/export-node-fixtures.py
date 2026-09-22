@@ -39,6 +39,10 @@ CONSUMED = [
     # 不补上的话，JSONL 形状漂移时**没有任何机械门禁会红**，
     # 而出站目标那一页的每一行都建立在那 13 个键上。
     "internal/userstats/audit.go",
+    # 排除规则的**匹配语义**在这里：后缀匹配而非子串、ips 只对 host_src=ip
+    # 生效、ports 与 host 无关。主控的注释与页面文案都写着这几条，
+    # 而它此前不在清单里——上游把后缀匹配改成子串匹配不会有任何门禁变红。
+    "internal/userstats/audit_exclude.go",
     "internal/userstats/audit_file.go",
     "internal/userstats/audit_test.go",
     "internal/userstats/audit_integration_test.go",

@@ -109,6 +109,10 @@ pub struct Gap {
 pub struct Excluded {
     pub hosts: Vec<String>,
     pub ips: Vec<String>,
+    /// 按目的端口排掉的那一类。**必须和上面两项一起说**——
+    /// 少说它的后果是：一个看到零条 NTP 的人无从知道那是被排掉了，
+    /// 而不是他真的没同步过时间。
+    pub ports: Vec<u16>,
     /// 这段时间里读到的全部 `filter` 行是否都是同一套规则。
     pub consistent: bool,
     /// 有没有读到过 `filter` 行。**假不等于「没有排除」**——它也可能是
@@ -186,7 +190,7 @@ pub async fn access(
     let mut records: Vec<AccessRecord> = Vec::new();
     let mut gaps: Vec<Gap> = Vec::new();
     // 用集合而不是「记下第一套」：不同文件可能带不同规则，而那件事本身要报出来。
-    let mut rule_sets: std::collections::BTreeSet<(Vec<String>, Vec<String>)> =
+    let mut rule_sets: std::collections::BTreeSet<(Vec<String>, Vec<String>, Vec<u16>)> =
         std::collections::BTreeSet::new();
     let mut unparsed = 0usize;
     let mut unexpected_keys = 0usize;
@@ -245,10 +249,14 @@ pub async fn access(
                     }),
                     // 排除规则的留痕。**排序后入集**：名单顺序对节点没有意义
                     // （线性扫描），不排序会把「顺序不同」误报成「规则变过」。
-                    Diagnostic::Filter { mut hosts, mut ips, .. } => {
+                    Diagnostic::Filter { mut hosts, mut ips, mut ports, .. } => {
                         hosts.sort();
                         ips.sort();
-                        rule_sets.insert((hosts, ips));
+                        ports.sort();
+                        // **端口也进这个元组。** 少了它，两行只在 ports 上
+                        // 不同的 filter 会塌成一条，于是 `consistent` 报
+                        // 「规则没变过」——一个静默的错误答案。
+                        rule_sets.insert((hosts, ips, ports));
                     }
                     Diagnostic::Stop { .. } => {}
                 }
@@ -318,14 +326,17 @@ pub async fn access(
     // 少说的那几个正是读者会以为「我没去过」的目标。
     let mut excluded = Excluded { observed: !rule_sets.is_empty(), ..Excluded::default() };
     excluded.consistent = rule_sets.len() <= 1;
-    for (hosts, ips) in &rule_sets {
+    for (hosts, ips, ports) in &rule_sets {
         excluded.hosts.extend(hosts.iter().cloned());
         excluded.ips.extend(ips.iter().cloned());
+        excluded.ports.extend(ports.iter().copied());
     }
     excluded.hosts.sort();
     excluded.hosts.dedup();
     excluded.ips.sort();
     excluded.ips.dedup();
+    excluded.ports.sort();
+    excluded.ports.dedup();
 
     Ok(Answer {
         enabled: true,

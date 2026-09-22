@@ -96,14 +96,20 @@ impl AccessRecord {
 pub enum Diagnostic {
     /// 每次**打开物理文件**都写一行：新建、轮转后续写、重启续写各一份。
     ///
-    /// 只在配了 `exclude_hosts` / `exclude_ips` 时才写——`stampFilter` 在排除名单
-    /// 为空时直接返回。当前四台都没配排除，所以这套部署里不会出现 filter 行。
+    /// 只在配了排除名单时才写——`stampFilter` 在名单为空时直接返回。
     Filter {
         seq: u64,
         #[serde(default)]
         hosts: Vec<String>,
         #[serde(default)]
         ips: Vec<String>,
+        /// 按目的端口排的那一类（节点侧 2026-09-22 起支持 `exclude_ports`）。
+        ///
+        /// **`serde(default)` 不是宽容，是推送顺序的保护**：旧节点写的 filter 行
+        /// 没有这个键，而主控可能先于节点升级。缺省成空表让老行照常解析，
+        /// 而不是让整个文件的诊断行全部落进 `unparsed`。
+        #[serde(default)]
+        ports: Vec<u16>,
     },
     /// 队列满（`reason="queue_full"`）或总量封顶删掉最老归档（`reason="total_cap"`）。
     Gap {
@@ -295,7 +301,7 @@ mod tests {
     #[test]
     fn 线上真实的filter行解析得了() {
         match parse_line(REAL_FILTER).expect("应当解析成功").0 {
-            Line::Diagnostic(Diagnostic::Filter { seq, hosts, ips }) => {
+            Line::Diagnostic(Diagnostic::Filter { seq, hosts, ips, .. }) => {
                 assert_eq!(seq, 1);
                 assert_eq!(hosts.len(), 35);
                 assert_eq!(ips.len(), 5);
@@ -315,7 +321,7 @@ mod tests {
     fn filter与stop两种诊断行() {
         let filter = r#"{"seq":1,"ev":"filter","hosts":["example.com"],"ips":["203.0.113.0/24"]}"#;
         match parse_line(filter).unwrap().0 {
-            Line::Diagnostic(Diagnostic::Filter { hosts, ips, seq }) => {
+            Line::Diagnostic(Diagnostic::Filter { hosts, ips, seq, .. }) => {
                 assert_eq!(seq, 1);
                 assert_eq!(hosts, vec!["example.com"]);
                 assert_eq!(ips, vec!["203.0.113.0/24"]);

@@ -10,12 +10,12 @@
 [node]
 repo = "sing-box-plus"
 # 最近一次改动下面 [consumed] 里任一文件的提交。
-implementation_commit = "c1102a4edaffedbeaf2a22208a5328267738bd43"
+implementation_commit = "91d7467e026e60b65001f1b8b4dbd693b6da1e2f"
 # 以 internal/userstats/snapshot.go 的 Go 常量为准，不以任何 README 为准。
 schema_version = 3
 snapshot_path = "/v3/snapshot"
 quota_path = "/v3/quota"
-checked_at = "2026-09-19"
+checked_at = "2026-09-22"
 
 # 计量与配额链路应消费的文件（docs/integration-contract.md §3 第一、二行）。
 [consumed]
@@ -28,11 +28,13 @@ checked_at = "2026-09-19"
 # 审计链路。docs/integration-contract.md §3 一直列着这四个文件，而这张清单从来
 # 没有包含它们——于是计量与配额链路有锁，审计链路没有。不补上的话，JSONL 形状
 # 漂移时没有任何机械门禁会红，而出站目标那一页的每一行都建立在那 13 个键上。
-"internal/userstats/audit.go" = "8978f83f74e9db6e02cef51710aaf358b7ea83d4e1c37210db277ded9d93f4ca"
+"internal/userstats/audit.go" = "931d19d6d3c2129e570ba842e13c2a3368195f7bd8e555e2071d91b735d6b366"
+# 匹配语义在这个文件里，2026-09-22 补进清单——见导出脚本里的理由。
+"internal/userstats/audit_exclude.go" = "4c5197af3b771ac2686b532d6e65634ef39dd9c10596ed3951632e39f606dee7"
 "internal/userstats/audit_file.go" = "73d76c87248f606f9783b07143915862f21b4fd3ee00d9d40d8da85769ebd7a0"
 "internal/userstats/audit_test.go" = "a54639e4389952e9f431e137af348151f528b2738d108bcf84364c9c61e28ae6"
 "internal/userstats/audit_integration_test.go" = "b2ec060451530cef7b1f624529658b036841125cac9a59eb341ce6f6269b8d8d"
 
 [export]
 # scripts/export-node-fixtures.py 的完整输出。上游改了样例形状，这一条先变。
-document_sha256 = "1191b959f98e52a3feb20b93c68a783741b94fc3130d4780bdad44855fc39c20"
+document_sha256 = "61c7b651ebc3f7aa78372635b216df680769489f75a6909b515ccd96f26f77d5"
