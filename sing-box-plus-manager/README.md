@@ -1608,3 +1608,9 @@ worker 崩溃后任务回到 `pending` 且不留中间态；重复领取同一�
 **本计划书的设计来源**：节点契约来自 `sing-box-plus`；主控侧的数据模型、结算事务与聚合口径
 参考 `shadowsocks-rust-plus/docs/CONTROL_PLANE_USAGE_STATISTICS.md`；
 排空、PKI 与订阅的运维口径来自组织内一套已在生产运行的同类主控的经验总结。
+
+### 自定义节点页面布局
+
+`web/me-custom.html` 使用控制台统一表单控件，已保存列表与新增表单分区。
+桌面 SOCKS5 表单为三列，窄屏改为单列；空列表隐藏表头，有记录的列表允许横向滚动。
+页面样式限定在 `.pm-custom-page`，导航图标统一由 `web/assets/app.js` 提供。

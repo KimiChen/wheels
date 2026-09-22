@@ -171,12 +171,12 @@
             同一条假 P1——看几天之后就再也不会认真看告警了。整块删掉，
             而不是靠 app.js 在运行时把它摘走。 -->
 
-          <div class="wsk-page">
+          <div class="wsk-page pm-custom-page">
             <div class="wsk-page-head" id="me-custom">
               <div>
                 <p class="wsk-panel-title">MY NODES</p>
                 <h1 tabindex="-1">我的自定义节点</h1>
-                <p>贴一条自己的分享链接，或加一个 SOCKS5 落地，它们只进你自己的订阅。</p>
+                <p>管理专属节点与 SOCKS5 落地，添加后同步到你的个人订阅。</p>
               </div>
             </div>
 
@@ -187,8 +187,8 @@
               那个数字是真的，只是含义和他以为的不一样。
             -->
             <section class="wsk-section" aria-labelledby="me-custom-note">
-              <div class="wsk-panel">
-                <h2 id="me-custom-note" class="wsk-panel-title">先说清楚</h2>
+              <div class="wsk-panel pm-custom-note">
+                <h2 id="me-custom-note" class="wsk-panel-title">使用须知</h2>
                 <ul>
                   <li>走自定义节点的流量<strong>不计入用量、不受额度约束、也不出现在「我的出站目标」里</strong>——它没有经过我们的节点。</li>
                   <li>改完之后要在客户端里<strong>重新拉一次订阅</strong>才会生效。</li>
@@ -210,6 +210,7 @@
                 <h2 id="me-custom-proxies">自定义上游</h2>
               </div>
               <div class="wsk-panel">
+                <div class="wsk-table-wrap" role="region" aria-label="节点列表" tabindex="0">
                 <table class="wsk-table">
                   <caption class="wsk-sr-only">我的自定义上游</caption>
                   <thead>
@@ -230,25 +231,26 @@
                         <td data-pm="endpoint"></td>
                         <td><code data-pm="rendered_name"></code></td>
                         <td>
-                          <button type="button" class="wsk-button" data-pm-rename-proxy data-pm-attr="data-id:id data-name:name">改名</button>
-                          <button type="button" class="wsk-button" data-pm-delete-proxy data-pm-attr="data-id:id data-name:name">删除</button>
+                          <button type="button" class="wsk-button wsk-secondary" data-pm-rename-proxy data-pm-attr="data-id:id data-name:name">改名</button>
+                          <button type="button" class="wsk-button wsk-secondary" data-pm-delete-proxy data-pm-attr="data-id:id data-name:name">删除</button>
                         </td>
                       </tr>
                     </template>
                   </tbody>
                 </table>
+                </div>
 
-                <form class="wsk-form" data-pm-add-proxy>
-                  <h3 class="wsk-panel-title">加一条</h3>
-                  <label>名称
-                    <input type="text" name="name" required maxlength="80" placeholder="家里" />
+                <form class="pm-custom-form" data-pm-add-proxy>
+                  <h3>添加自定义上游</h3>
+                  <label class="wsk-field">名称
+                    <input class="wsk-control" type="text" name="name" required maxlength="80" placeholder="家里" />
                   </label>
-                  <label>分享链接
-                    <input type="text" name="share_url" required placeholder="ss:// · trojan:// · vmess:// · vless://" />
+                  <label class="wsk-field pm-custom-wide">分享链接
+                    <input class="wsk-control" type="text" name="share_url" required placeholder="ss:// · trojan:// · vmess:// · vless://" />
                   </label>
                   <!-- 链接里带着密码，所以它**只上行不下行**：列表里不会再回显它。 -->
-                  <p class="wsk-form-hint">支持 SS、Trojan、VMess、VLESS。链接只用于解析，不会在页面上回显。</p>
-                  <button type="submit" class="wsk-button wsk-button-primary">添加</button>
+                  <p class="pm-custom-hint">支持 SS、Trojan、VMess、VLESS。链接只用于解析，不会在页面上回显。</p>
+                  <button type="submit" class="wsk-button">添加节点</button>
                 </form>
               </div>
             </section>
@@ -258,10 +260,11 @@
                 <h2 id="me-custom-socks">SOCKS5 落地</h2>
               </div>
               <div class="wsk-panel">
-                <p>
+                <p class="pm-custom-description">
                   落地会从你选的<strong>前置节点</strong>拨出去。前置在客户端里是一个可以随时切换的组
                   （<code>Socks5-名字-先选前置节点</code>），换前置<strong>不用</strong>回这里改、也不用重发订阅。
                 </p>
+                <div class="wsk-table-wrap" role="region" aria-label="节点列表" tabindex="0">
                 <table class="wsk-table">
                   <caption class="wsk-sr-only">我的 SOCKS5 落地</caption>
                   <thead>
@@ -282,34 +285,35 @@
                         <td data-pm="dialer_proxy"></td>
                         <td><code data-pm="rendered_name"></code></td>
                         <td>
-                          <button type="button" class="wsk-button" data-pm-delete-socks data-pm-attr="data-id:id data-name:name">删除</button>
+                          <button type="button" class="wsk-button wsk-secondary" data-pm-delete-socks data-pm-attr="data-id:id data-name:name">删除</button>
                         </td>
                       </tr>
                     </template>
                   </tbody>
                 </table>
+                </div>
 
-                <form class="wsk-form" data-pm-add-socks>
-                  <h3 class="wsk-panel-title">加一条</h3>
-                  <label>名称
-                    <input type="text" name="name" required maxlength="80" placeholder="落地" />
+                <form class="pm-custom-form" data-pm-add-socks>
+                  <h3>添加 SOCKS5 落地</h3>
+                  <label class="wsk-field">名称
+                    <input class="wsk-control" type="text" name="name" required maxlength="80" placeholder="落地" />
                   </label>
-                  <label>服务器
-                    <input type="text" name="server" required placeholder="socks.example.com" />
+                  <label class="wsk-field">服务器
+                    <input class="wsk-control" type="text" name="server" required placeholder="socks.example.com" />
                   </label>
-                  <label>端口
-                    <input type="text" name="port" required inputmode="numeric" placeholder="1080" />
+                  <label class="wsk-field">端口
+                    <input class="wsk-control" type="number" name="port" min="1" max="65535" required inputmode="numeric" placeholder="1080" />
                   </label>
-                  <label>用户名（可留空）
-                    <input type="text" name="username" autocomplete="off" />
+                  <label class="wsk-field">用户名（可留空）
+                    <input class="wsk-control" type="text" name="username" autocomplete="off" />
                   </label>
-                  <label>口令（可留空）
-                    <input type="password" name="password" autocomplete="new-password" />
+                  <label class="wsk-field">口令（可留空）
+                    <input class="wsk-control" type="password" name="password" autocomplete="new-password" />
                   </label>
-                  <label>前置节点
-                    <select name="dialer_proxy" data-pm-dialer-options required></select>
+                  <label class="wsk-field">前置节点
+                    <select class="wsk-select" name="dialer_proxy" data-pm-dialer-options required></select>
                   </label>
-                  <button type="submit" class="wsk-button wsk-button-primary">添加</button>
+                  <button type="submit" class="wsk-button">添加节点</button>
                 </form>
               </div>
             </section>
