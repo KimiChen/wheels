@@ -133,3 +133,50 @@ fn 对话框按钮都指向存在的对话框() {
     }
     assert!(dangling.is_empty(), "{dangling:#?}");
 }
+
+/// **每个排序按钮排的那个键，模板行上必须真的有。**
+///
+/// kit 的 `[data-sort]` 处理器比的是 `row.dataset[key]`
+/// （`web-standard-kit/script.js`）。键不在行上时它取到 `undefined`，
+/// `?? ""` 之后所有行比较起来**全部相等**——于是按钮照常响应、
+/// `aria-sort` 照常切、图标照常变成箭头，只有顺序一动不动。
+///
+/// 这比一个没接线的按钮更糟：它看着在工作。2026-09-22 nodes.html 上
+/// 那个「节点」排序按钮就是这个状态，接了 kit 却没绑 `data-node`。
+#[test]
+fn 排序按钮排的键在模板行上() {
+    let mut missing = Vec::new();
+    for name in proxy_manager::web::page_names() {
+        let body = proxy_manager::web::page_body(name).expect("页面该在");
+        for (at, _) in body.match_indices("data-sort=\"") {
+            let rest = &body[at + "data-sort=\"".len()..];
+            let key = &rest[..rest.find('"').expect("属性该闭合")];
+            // **只看 `<template>` 里面。** 页面上还躺着原型示例行，
+            // 它们写死了 `data-node="node-a"` 这类属性——按整页搜的话
+            // 会被那些行命中，于是 live 模式下模板缺绑定也照样绿。
+            // （第一版就是这么写的，去掉绑定后用例没红才发现。）
+            let bound = templates(body)
+                .iter()
+                .any(|block| block.contains(&format!("data-{key}:")));
+            if !bound {
+                missing.push(format!(
+                    "{name} 的排序按钮排 {key}，但模板行没有绑 data-{key}"
+                ));
+            }
+        }
+    }
+    assert!(missing.is_empty(), "{missing:#?}");
+}
+
+/// 一个页面里全部 `<template data-pm-template>` 的内容。
+fn templates(body: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut rest = body;
+    while let Some(at) = rest.find("<template data-pm-template>") {
+        rest = &rest[at + "<template data-pm-template>".len()..];
+        let Some(end) = rest.find("</template>") else { break };
+        out.push(&rest[..end]);
+        rest = &rest[end..];
+    }
+    out
+}
