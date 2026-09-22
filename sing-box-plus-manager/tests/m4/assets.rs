@@ -187,6 +187,55 @@ fn 没配sso时那条说明必须真的显示得出来() {
     assert!(flat.contains("[hidden] { display: none !important; }"), "kit 的 [hidden] 规则变了");
 }
 
+/// **公开页的注释也会发给每一个访客。**
+///
+/// 这几页免认证可取，view-source 就能读到全文——注释一起。
+/// 于是「把一块运维内容从正文里删掉、再在注释里解释一遍它讲了什么」
+/// 等于没删：内容换了个地方，照样随每一次请求发出去。
+///
+/// 2026-09-22 真的这么写了一次：登录页正文里的「本地应急管理员」折叠块删掉了，
+/// 而删它的理由——「存在这样一条后门、它的角色取自数据库而不走名单」——
+/// 被写进了同一页的注释里，并且推上了线。
+///
+/// 这里只钉住最该钉的那一条。改动理由属于 `operations` 仓的文档，不属于公开页。
+#[test]
+fn 公开页连注释都不提应急管理员() {
+    for name in web::page_names() {
+        if !web::is_public(name) {
+            continue;
+        }
+        let body = web::page_body(name).expect("页面必须嵌入");
+        assert!(
+            !body.contains("应急管理员"),
+            "{name} 是公开页，正文与注释都会发给未登录的人——\
+             这件事该写在 operations 仓的文档里"
+        );
+    }
+}
+
+/// **两个前端脚本对「路径是 `/` 时算哪一页」必须与服务端同一个答案。**
+///
+/// `serve_page` 把空路径解成 `index.html`。app.js 原来兜底成 `overview.html`，
+/// 而这在首页还是一张跳转桩的年代看不出问题——那张桩本来就该把人弹走。
+/// 首页变成真页面之后，从 `https://…/` 打开会走成：
+/// PAGE 认作 overview.html → 首页里没有侧栏 → `pageAllowed` 判 false →
+/// `location.replace` 到 me.html → 未登录 → 303 跳登录页。
+///
+/// `curl /` 拿到的是首页，浏览器打开 `/` 却停在登录页，中间没有任何报错。
+/// **这个 bug 逃过了两轮验证**：本地预览走的是带文件名的
+/// `/…/web/index.html`，服务端验证用的是 curl——两者都不经过那条兜底。
+#[test]
+fn 两个脚本对根路径的兜底与服务端一致() {
+    for name in ["assets/app.js", "assets/api.js"] {
+        let (script, _) = web::asset(name).expect("脚本必须嵌入");
+        assert!(
+            script.contains(r#"location.pathname.split("/").pop() || "index.html""#),
+            "{name} 对 `/` 的兜底与服务端（serve_page：空路径即 index.html）不一致"
+        );
+        assert!(!script.contains(r#".pop() || "overview.html""#), "{name} 又把 `/` 兜底成了管理页");
+    }
+}
+
 /// 页面上的 `data-roles` 与服务端的 `PAGES` 可见性表必须一致。
 ///
 /// 两份表职责不同（一份拦截、一份让界面讲得通），但**不能互相矛盾**：

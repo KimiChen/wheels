@@ -10,7 +10,15 @@
   "use strict";
 
   const body = document.body;
-  const PAGE = location.pathname.split("/").pop() || "overview.html";
+  // 路径为 `/` 时 pop() 得到空串，**兜底必须是 `index.html`**——服务端就是这么
+  // 解的（`serve_page`：path 为空即 index.html），api.js 那份兜底也是它。
+  //
+  // 原来这里写的是 `overview.html`，而它在首页还是一张跳转桩的年代看不出问题：
+  // 那张桩本来就该把人弹走。首页变成真页面之后，从 `https://…/` 打开会得到
+  // 「PAGE 认作 overview.html → 首页里没有侧栏 → pageAllowed 判 false →
+  //   location.replace 到 me.html → 未登录 → 303 跳登录页」。
+  // 于是 curl `/` 拿到的是首页，浏览器打开 `/` 却停在登录页，而中间没有任何报错。
+  const PAGE = location.pathname.split("/").pop() || "index.html";
 
   /* ----------------------------------------------------------- 侧栏选中态 */
 
