@@ -108,6 +108,7 @@
   const NAV_ICONS = {
     "me.html": "M9 15l6-6M8 17l-1 1a4 4 0 01-6-6l4-4a4 4 0 015 0M16 7l1-1a4 4 0 016 6l-4 4a4 4 0 01-5 0",
     "me-usage.html": "M4 19V9m8 10V5m8 14v-7",
+    "me-custom.html": "M9 3h6v6H9zM3 15h6v6H3zM15 15h6v6h-6zM12 9v3M6 15v-3h12v3",
     "me-audit.html": "M2 12h4l3 8 4-16 3 8h6",
     "overview.html": "M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z",
     "nodes.html": "M3 4h18v6H3zM3 14h18v6H3zM7 7h.01M7 17h.01",

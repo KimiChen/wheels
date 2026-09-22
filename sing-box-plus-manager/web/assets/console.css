@@ -220,3 +220,32 @@ body[data-pm-mode="live"] [data-pm-when="live"],
 body[data-pm-sso] [data-pm-when="live"] { display: inline; }
 body[data-pm-mode="live"] [data-pm-when="prototype"],
 body[data-pm-sso] [data-pm-when="prototype"] { display: none; }
+
+/* Personal custom nodes: keep credential entry separate from the saved list. */
+.pm-custom-page .pm-custom-note { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 20%, var(--border)); }
+.pm-custom-note .wsk-panel-title { color: var(--accent); margin-bottom: 10px; }
+.pm-custom-note ul { margin: 0; padding-left: 18px; color: var(--muted); font-size: 12px; line-height: 1.9; }
+.pm-custom-note strong { color: var(--text); }
+.pm-custom-page [data-pm-custom-enabled] > .wsk-section > .wsk-panel { padding: 0; overflow: hidden; }
+.pm-custom-page .wsk-table-wrap { border: 0; border-radius: 0; box-shadow: none; }
+.pm-custom-page .wsk-table { width: 100%; min-width: 660px; }
+.pm-custom-page .wsk-table td, .pm-custom-page .wsk-table th { overflow-wrap: anywhere; }
+.pm-custom-page .wsk-table td:last-child { white-space: nowrap; }
+.pm-custom-page [data-table-empty] td { padding: 32px 20px; text-align: center; color: var(--muted); }
+.pm-custom-form { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; padding: 24px; border-top: 1px solid var(--border); background: var(--surface-soft); }
+.pm-custom-form h3 { grid-column: 1 / -1; margin: 0; font-size: 14px; }
+.pm-custom-form .wsk-field { min-width: 0; font-size: 12px; font-weight: 550; gap: 8px; }
+.pm-custom-form .wsk-control, .pm-custom-form .wsk-select { width: 100%; min-width: 0; min-height: 42px; background-color: var(--surface); }
+.pm-custom-wide { grid-column: span 2; }
+.pm-custom-hint { grid-column: 1 / -1; margin: 0; font-size: 12px; color: var(--muted); line-height: 1.7; }
+.pm-custom-form > button { grid-column: 1 / -1; justify-self: start; min-width: 112px; }
+.pm-custom-description { padding: 20px 24px; margin: 0; color: var(--muted); font-size: 12px; line-height: 1.9; }
+@media (max-width: 760px) {
+  .pm-custom-form { grid-template-columns: 1fr; padding: 20px; gap: 16px; }
+  .pm-custom-wide { grid-column: auto; }
+  .pm-custom-form .wsk-control, .pm-custom-form .wsk-select { font-size: 16px; }
+  .pm-custom-form > button { justify-self: stretch; }
+  .pm-custom-description { padding: 18px 20px; }
+}
+.pm-custom-page .wsk-table:has([data-table-empty]:not([hidden])) { min-width: 0; }
+.pm-custom-page .wsk-table:has([data-table-empty]:not([hidden])) thead { display: none; }
