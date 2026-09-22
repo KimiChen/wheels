@@ -282,12 +282,16 @@ impl Api {
             interval_secs: 600,
         });
         let credentials_path = subscription.as_ref().map(|c| c.credentials_path.clone());
+        // 固定测试密钥。真部署里它来自配置目录下的 0600 文件。
+        let custom_key =
+            Arc::new(proxy_manager::custom::crypto::CryptoBox::from_bytes(&[42u8; 32]).unwrap());
         let router = proxy_manager::api::router(
             store.clone(),
             Arc::new(Vec::new()),
             sso,
             subscription,
             audit,
+            Some(custom_key),
         );
         Api { _dir: Some(dir), store, router, sso_path, audit_dir, credentials_path }
     }

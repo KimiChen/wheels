@@ -16,6 +16,7 @@
 //! 引用了不存在节点的配置，而 Clash 对此的报错是「订阅格式错误」。
 
 use crate::config::{Credentials, Transport};
+use crate::subscription::custom::CustomNodes;
 
 /// 旧站模板的两半，构建时嵌入。**逐字节不动。**
 const HEAD: &str = include_str!("../../web/subscription-head.yaml");
@@ -24,6 +25,10 @@ const RULES: &str = include_str!("../../web/subscription-rules.yaml");
 /// 订阅正文：Clash / mihomo YAML。
 ///
 /// `head + proxies + proxy-groups + rules`，中间两段是生成的。
+// 八个参数。**不打包成一个结构体**：它们来自八个互不相干的地方
+// （配置、来源、凭据文件、身份、档位、自定义节点），打包只会造出一个
+// 除了「凑参数」之外没有含义的类型，而调用方仍然要逐个填。
+#[allow(clippy::too_many_arguments)]
 pub fn clash_yaml(
     config: &crate::config::SubscriptionConfig,
     source: &crate::config::EntrySource,
@@ -31,6 +36,7 @@ pub fn clash_yaml(
     identity: &str,
     profile_name: &str,
     visible: &std::collections::BTreeSet<&str>,
+    custom: crate::subscription::custom::CustomNodes<'_>,
 ) -> String {
     // **级别不够的节点整条入口不出现**（`quota::level`）。
     //
@@ -66,9 +72,23 @@ pub fn clash_yaml(
     // SS2022 带 EIH 时，Clash 的 password 是 `<iPSK>:<uPSK>`。
     let password = format!("{}:{}", credentials.ipsk, upsk);
 
+    // **自定义节点在渲染前自己查一遍。** Clash 对重名或悬空引用的反应是拒绝
+    // 整份配置，用户只会看到一句「订阅格式错误」。查不过就丢掉全部自定义节点、
+    // 只发受管那部分，并把原因写进文件头——不发坏配置，也不静默丢。
+    let managed_nodes: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
+    let managed_groups: Vec<&str> = groups.iter().map(|group| group.name.as_str()).collect();
+    let custom_problem = custom.check(&managed_nodes, &managed_groups).err();
+    let custom = if custom_problem.is_some() { CustomNodes::NONE } else { custom };
+
     let mut out = String::with_capacity(HEAD.len() + RULES.len() + 4096);
     out.push_str(&format!("# {profile_name}\n"));
     out.push_str("# 由 sing-box-plus-manager 生成。节点与密码随本人账号绑定，**请勿转发**。\n");
+    if let Some(reason) = &custom_problem {
+        out.push_str(&format!(
+            "# **你的自定义节点这次没有发出来**：{reason}。\n\
+             # 受管节点不受影响。请到控制台改掉冲突的那一条，再重新拉一次订阅。\n"
+        ));
+    }
     out.push_str(HEAD);
 
     out.push_str("\nproxies:\n");
@@ -125,7 +145,10 @@ pub fn clash_yaml(
         }
     }
 
+    custom.render_proxies(&mut out);
+
     out.push_str("\nproxy-groups:\n");
+    let extra_nodes = custom.node_names();
     for group in groups {
         out.push_str(&format!("  - name: {}\n", yaml_string(&group.name)));
         if let Some(icon) = &group.icon {
@@ -143,12 +166,21 @@ pub fn clash_yaml(
             out.push_str(&format!("      - {}\n", yaml_string(member)));
             written += 1;
         }
+        // **每个现有组都追加自定义节点。** 不追加的话它们只出现在 `proxies:` 里、
+        // 任何组都选不到，而 Clash 的选路是按组走的——用户会看到节点列在那儿
+        // 却怎么也切不过去。
+        for name in &extra_nodes {
+            out.push_str(&format!("      - {}\n", yaml_string(name)));
+            written += 1;
+        }
         // **空组同样会让 Clash 拒绝整份配置。** 三个组现在都带 DIRECT，
         // 所以走不到这里；但「现在都带」不是约束，加一个纯节点组就会走到。
         if written == 0 {
             out.push_str("      - \"DIRECT\"\n");
         }
     }
+
+    custom.render_dialer_groups(&mut out, &managed_nodes);
 
     out.push('\n');
     out.push_str(RULES);
@@ -160,7 +192,7 @@ pub fn clash_yaml(
 /// 不做「看起来安全就不加引号」的判断：密码是 base64，含 `+` `/` `=`，
 /// 而 `=` 开头在 YAML 里有特殊含义；节点名可能含中文与空格。
 /// 少加一次引号的代价是整份配置解析失败，而客户端只说「订阅格式错误」。
-fn yaml_string(value: &str) -> String {
+pub(super) fn yaml_string(value: &str) -> String {
     let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
     format!("\"{escaped}\"")
 }

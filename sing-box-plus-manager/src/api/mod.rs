@@ -46,6 +46,9 @@ pub struct AppState {
     /// 审计镜像树。`None` 表示没配 `[audit]`——那时审计端点回 `audit_not_enabled`，
     /// **不是 403 也不是 404**：没有记录可看和不让你看是两回事（D18）。
     pub audit: Option<Arc<crate::config::AuditConfig>>,
+    /// 自定义节点的密钥。`None` 表示没配 `[custom_nodes]`——那时相关端点不挂载，
+    /// 订阅里也不会出现自定义节点。
+    pub custom_key: Option<Arc<crate::custom::crypto::CryptoBox>>,
     /// 没配 SSO 时求值用的空名单。**所有人都是普通用户**，不是所有人都是管理员——
     /// 认证代码的失败模式是沉默地放行，空名单最容易被误当成「还没配，先都放行」。
     empty_roster: Arc<crate::sso::roster::Roster>,
@@ -125,6 +128,7 @@ pub fn router(
     sso: Option<crate::sso::Sso>,
     subscription: Option<crate::config::SubscriptionConfig>,
     audit: Option<crate::config::AuditConfig>,
+    custom_key: Option<Arc<crate::custom::crypto::CryptoBox>>,
 ) -> Router {
     let sso_enabled = sso.is_some();
     let credentials = subscription
@@ -139,6 +143,7 @@ pub fn router(
         subscription,
         credentials,
         audit: audit.map(Arc::new),
+        custom_key,
         empty_roster: Arc::new(crate::sso::roster::Roster::empty()),
     };
     let router = Router::new()
@@ -217,16 +222,20 @@ async fn private_cache_headers(
 }
 
 /// 起 HTTP 服务。绑回环；公网访问经本机反代（§5）。
+// 八个参数都是**可选段的开关兼配置**（sso / subscription / audit / custom_nodes）
+// 加上 store、nodes、listener、shutdown。打包成结构体只会多一个没有含义的类型。
+#[allow(clippy::too_many_arguments)]
 pub async fn serve(
     store: Arc<Store>,
     nodes: Arc<Vec<NodeConfig>>,
     sso: Option<crate::sso::Sso>,
     subscription: Option<crate::config::SubscriptionConfig>,
     audit: Option<crate::config::AuditConfig>,
+    custom_key: Option<Arc<crate::custom::crypto::CryptoBox>>,
     listener: tokio::net::TcpListener,
     shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> std::io::Result<()> {
-    let app = router(store, nodes, sso, subscription, audit);
+    let app = router(store, nodes, sso, subscription, audit, custom_key);
     let mut shutdown = shutdown;
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
