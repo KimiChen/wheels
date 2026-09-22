@@ -23,6 +23,7 @@ const PARTS: &[(&str, &str)] = &[
     ("05_rollup", include_str!("../../schema/05_rollup.sql")),
     ("06_session", include_str!("../../schema/06_session.sql")),
     ("07_subscription", include_str!("../../schema/07_subscription.sql")),
+    ("08_custom_nodes", include_str!("../../schema/08_custom_nodes.sql")),
 ];
 
 /// 期望的表集合。与 `schema/` 下的 DDL 手工对齐，
@@ -30,6 +31,8 @@ const PARTS: &[(&str, &str)] = &[
 /// 一份会漂移的清单比没有清单更糟。
 pub const EXPECTED_TABLES: &[&str] = &[
     "counter_cursors",
+    "custom_proxies",
+    "custom_socks5",
     "identity_assignment_events",
     "identity_routes",
     "node_runtimes",

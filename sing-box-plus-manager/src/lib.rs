@@ -30,6 +30,7 @@ pub mod audit;
 pub mod collect;
 pub mod config;
 pub mod crash;
+pub mod custom;
 pub mod error;
 pub mod identity;
 pub mod im;
