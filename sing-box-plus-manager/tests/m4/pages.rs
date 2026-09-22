@@ -99,3 +99,37 @@ async fn unknown_page_is_404_not_a_redirect_loop() {
     let (status, _, _) = api.get_text("/nope.html", None).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "未知路径不应跳登录页——那会变成死循环");
 }
+
+/// **每个 `data-dialog-open` 都要指向同一页里真实存在的 `<dialog>`。**
+///
+/// 指不到的后果不是报错，是**点了什么都不发生**——kit 那一行是
+/// `document.getElementById(...)?.showModal()`，问号把失败吞掉了
+/// （`web-standard-kit/script.js`）。一个按了没反应的按钮比一个没有的按钮
+/// 更让人困惑，而且不会有任何东西报出来。
+///
+/// 2026-09-22 删原型遗留的吊销对话框时差点造出这个状态：对话框在 7 个页面里，
+/// 而打开它的三个按钮在 users.html，只删对话框就会留下三个哑按钮。
+#[test]
+fn 对话框按钮都指向存在的对话框() {
+    let mut dangling = Vec::new();
+    for name in proxy_manager::web::page_names() {
+        let body = proxy_manager::web::page_body(name).expect("页面该在");
+        let ids: Vec<&str> = body
+            .match_indices("<dialog")
+            .filter_map(|(at, _)| {
+                let tag = &body[at..body[at..].find('>').map(|i| at + i).unwrap_or(body.len())];
+                let key = tag.find("id=\"")? + 4;
+                let rest = &tag[key..];
+                Some(&rest[..rest.find('"')?])
+            })
+            .collect();
+        for (at, _) in body.match_indices("data-dialog-open=\"") {
+            let rest = &body[at + "data-dialog-open=\"".len()..];
+            let target = &rest[..rest.find('"').expect("属性该闭合")];
+            if !ids.contains(&target) {
+                dangling.push(format!("{name} 里的按钮指向不存在的 #{target}"));
+            }
+        }
+    }
+    assert!(dangling.is_empty(), "{dangling:#?}");
+}
