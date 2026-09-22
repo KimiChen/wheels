@@ -295,7 +295,14 @@
                     <tr data-table-empty hidden><td colspan="7" class="wsk-help" data-pm-empty-text>暂无数据</td></tr>
                     <!-- 真实模式下按此模板逐行克隆；原型行在 live 模式由 app.js 移除 -->
                     <template data-pm-template>
-                      <tr data-row>
+                      <!--
+                        **`data-node` 是排序按钮真正读的那个值**（kit 的
+                        `[data-sort]` 处理器比的是 `row.dataset[key]`）。
+                        少了它，按钮照常响应、`aria-sort` 照常切、图标照常变，
+                        只有顺序不动——因为每行的键都取到 undefined、
+                        比较起来全部相等。一个「看着在工作」的排序按钮。
+                      -->
+                      <tr data-row data-pm-attr="data-node:node_id">
                         <th scope="row" data-pm="node_id"></th>
                         <td><span class="wsk-badge wsk-accent" data-pm="provider"></span></td>
                         <td data-pm="address"></td>

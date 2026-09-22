@@ -152,8 +152,21 @@
     return String(value);
   }
 
+  // **包含根元素自己**，不只是后代。
+  //
+  // `querySelectorAll` 只找后代。而行渲染时 root 就是那个 `<tr>`，
+  // 写在 `<tr>` 上的绑定因此被整个跳过——比如 kit 排序要读的
+  // `data-node`：属性写了、用例（查 HTML 文本的那种）也绿，
+  // 而页面上排序按钮一点反应都没有，因为每行的键都取到 undefined。
+  // 2026-09-22 就是这么撞上的，静态断言看不出来，跑一遍才看得出来。
+  function within(root, selector) {
+    const found = Array.from(root.querySelectorAll(selector));
+    if (root instanceof Element && root.matches(selector)) found.unshift(root);
+    return found;
+  }
+
   function applyBindings(root, data) {
-    root.querySelectorAll("[data-pm]").forEach((node) => {
+    within(root, "[data-pm]").forEach((node) => {
       setText(node, display(pick(data, node.dataset.pm)));
     });
     // 属性绑定：`data-pm-attr="data-id:id data-name:name"`。
@@ -161,7 +174,7 @@
     // 行里的按钮需要知道自己属于哪一条，而那个值不能写进可见文本。
     // 做成通用绑定而不是在页面脚本里逐个 querySelector：后者要在两处维护
     // 同一份字段表，而两份表一定会漂移——这是本项目自己的纪律。
-    root.querySelectorAll("[data-pm-attr]").forEach((node) => {
+    within(root, "[data-pm-attr]").forEach((node) => {
       for (const pair of node.dataset.pmAttr.split(/\s+/)) {
         if (!pair) continue;
         const separator = pair.indexOf(":");
@@ -171,17 +184,17 @@
         else node.setAttribute(attr, String(value));
       }
     });
-    root.querySelectorAll("[data-pm-bytes]").forEach((node) => {
+    within(root, "[data-pm-bytes]").forEach((node) => {
       const value = pick(data, node.dataset.pmBytes);
       setText(node, value == null ? "—" : formatBytes(value));
     });
     // 纯数字（千分位，无单位后缀）。整列都是字节时，每格再写一遍「字节」
     // 会把列挤到换行，而列头已经说明了单位。
-    root.querySelectorAll("[data-pm-digits]").forEach((node) => {
+    within(root, "[data-pm-digits]").forEach((node) => {
       const value = pick(data, node.dataset.pmDigits);
       setText(node, value == null ? "—" : groupDigits(value));
     });
-    root.querySelectorAll("[data-pm-exact]").forEach((node) => {
+    within(root, "[data-pm-exact]").forEach((node) => {
       const value = pick(data, node.dataset.pmExact);
       setText(node, value == null ? "—" : exactBytes(value));
     });
@@ -191,7 +204,7 @@
     // 走一遍 Date 就会按浏览器时区重算，而那个时区与节点、与主控都可能不同——
     // 于是同一条记录在三个地方显示出三个时刻，且没有任何地方标着这是哪个时区。
     // 列头写明 UTC，这里只负责把它变短。
-    root.querySelectorAll("[data-pm-time]").forEach((node) => {
+    within(root, "[data-pm-time]").forEach((node) => {
       const value = pick(data, node.dataset.pmTime);
       if (value == null) {
         setText(node, "—");
@@ -208,7 +221,7 @@
     // 但值来自服务端，而 `href="javascript:…"` 这类属性能把一个值变成代码。
     // 限死在 `data-*` 上，这条路就不存在——需要别的属性时，应当再想一次
     // 那个值凭什么可以直接落进 DOM 属性。
-    root.querySelectorAll("[data-pm-attr]").forEach((node) => {
+    within(root, "[data-pm-attr]").forEach((node) => {
       for (const pair of node.dataset.pmAttr.split(",")) {
         const [source, target] = pair.split("->").map((part) => part.trim());
         if (!source || !target || !target.startsWith("data-")) continue;
