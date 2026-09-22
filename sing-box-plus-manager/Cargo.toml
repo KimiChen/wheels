@@ -55,6 +55,13 @@ argon2 = "0.5"                                      # break-glass 口令哈希�
 # hyper-util / http-body-util / tower-http 一整串，为一次外呼不值当。
 # 取 webpki-roots 而非 rustls-native-certs：无平台依赖，构建可复现。
 webpki-roots = "1"
+# 个人自定义节点的配置要**加密落库**（schema/08）。取 ring 而不是 RustCrypto 的
+# chacha20poly1305：ring 已经是 rustls 的 provider、早就在依赖树里，直接用它
+# 等于零新增传递依赖，也不违反 D9 的「全栈单一 provider」。
+# 用 CHACHA20_POLY1305（96 位 nonce）而不是 XChaCha20：ring 不提供后者，
+# 而每条记录一个随机 nonce、总量以千计，离 96 位的生日界还差十几个数量级。
+ring = { version = "0.17", default-features = false, features = ["alloc"] }
+base64 = "0.22"
 
 # 集成测试用的依赖。集成测试是独立 crate，用不到 [dependencies] 里的条目，
 # 需要的必须在这里再声明一次。
