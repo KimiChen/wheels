@@ -304,31 +304,6 @@
       </div>
     </footer>
 
-    <dialog class="wsk-dialog" data-roles="admin" id="revoke-dialog" aria-labelledby="revoke-title">
-      <div class="wsk-dialog-head">
-        <h2 id="revoke-title">吊销订阅 token</h2>
-        <button class="wsk-icon-button" type="button" data-dialog-close aria-label="关闭" title="关闭">
-          <svg class="wsk-icon" aria-hidden="true"><use href="#x"></use></svg>
-        </button>
-      </div>
-      <div class="wsk-dialog-body">
-        <p>用户 <strong>kimi</strong> 的订阅地址将立即失效。</p>
-        <div class="wsk-alert wsk-danger wsk-mt-5">
-          <svg class="wsk-icon" aria-hidden="true"><use href="#warning"></use></svg>
-          <div>
-            <strong>该用户所有已导入的客户端会静默失效</strong>
-            <p>他们不会收到任何提示，只会发现节点全部消失。吊销前请先通知本人。</p>
-          </div>
-        </div>
-      </div>
-      <div class="wsk-dialog-foot">
-        <button class="wsk-button wsk-secondary" type="button" data-dialog-close>取消</button
-        ><button class="wsk-button" type="button" data-dialog-close data-toast="原型页面不执行吊销。" data-js-only>
-          确认吊销
-        </button>
-      </div>
-    </dialog>
-
     <div class="wsk-toast-region" id="toast-region" aria-live="polite"></div>
   </body>
 </html>
