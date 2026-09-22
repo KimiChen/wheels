@@ -27,7 +27,8 @@
         "queue_size": 8192,
         "max_open_files": 256,
         "exclude_hosts": ["google.com", "github.com"],
-        "exclude_ips": ["198.18.0.0/15"]
+        "exclude_ips": ["198.18.0.0/15"],
+        "exclude_ports": [123, 4460]
       }
     }
   ]
@@ -37,7 +38,7 @@
 域名维度需要在计费 inbound 上配 `action: "sniff"`；未配置时 `host_src` 恒为 `fqdn` 或 `ip`，
 这是正常降级而非故障。
 
-## 排除规则（`exclude_hosts` / `exclude_ips`）
+## 排除规则（`exclude_hosts` / `exclude_ips` / `exclude_ports`）
 
 ### 它不影响计费
 
@@ -58,11 +59,31 @@
 |---|---|---|
 | `exclude_hosts` | `host_src` 为 `sniff` 或 `fqdn` 的记录 | 域名后缀。`github.com` 命中 `github.com` 与 `api.github.com`，不命中 `evilgithub.com` 与 `raw.githubusercontent.com` |
 | `exclude_ips` | `host_src` 为 `ip` 的记录 | CIDR 或裸地址（裸地址按 /32、/128） |
+| `exclude_ports` | **全部记录，与 host 无关** | 目的端口，逐个列 |
 
-两项都在启动时编译，非法写法硬失败而不是静默忽略：IP 字面量写进 `exclude_hosts`、
-域名写进 `exclude_ips`、网段带主机位（`198.18.7.1/15`）、重复项、空项，一律拒绝启动。
+三项都在启动时编译，非法写法硬失败而不是静默忽略：IP 字面量写进 `exclude_hosts`、
+域名写进 `exclude_ips`、网段带主机位（`198.18.7.1/15`）、`exclude_ports` 里写 0、
+重复项、空项，一律拒绝启动。
 带主机位的网段之所以不静默 `Masked()`，是因为那几乎总是位数写错了，而静默取整会让生效范围
 远大于作者以为的。
+
+### `exclude_ports` 为什么存在，以及它为什么更危险
+
+前两项都以 `host` 为对象，而有一类流量按 host 根本排不掉：**NTP**。
+客户端从一个轮询的池子里取服务器，每次拿到的 IP 都不同——线上实测
+2720 条 UDP/123 分散在 **53 个地址**上，而它们明天会换成另外一批。
+逐个列地址是排不完的，今天列 53 条，下周还得再来一次。
+它们唯一的共同点是端口。
+
+**它比另外两项钝得多，而且钝在一个危险的方向上。**
+排一个端口就是排掉走那个端口的一切，与目标是谁无关——
+`exclude_ports: [443]` 等于让审计整个失明，而这件事不会有任何报错。
+只写「确实只承载一种用途」的端口（123、4460 这类），
+而且写之前先在现有日志里数一遍它当前盖住多少条、都是些什么。
+
+它还有一个另外两项没有的能力：**`host` 为空时它仍然判得了**。
+一条既没嗅探出域名、也拿不到地址的连接，前两项都无从判起，
+而它的目的端口始终是确定的。
 
 **匹配的是将要落盘的 `host` 字段，不是路由最终解析出的地址。** 嗅探到域名的连接永远走
 `exclude_hosts`，即使它解析出来的 IP 就在 `exclude_ips` 的网段里；反过来，`exclude_ips`

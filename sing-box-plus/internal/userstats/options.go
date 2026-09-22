@@ -85,6 +85,16 @@ type AccessLogOptions struct {
 	// 出现用量争议时解释不了被排掉的那部分——取舍见 docs/ACCESS_AUDIT.md。
 	ExcludeHosts []string `json:"exclude_hosts,omitempty"`
 	ExcludeIPs   []string `json:"exclude_ips,omitempty"`
+	// ExcludePorts 按**目的端口**排，与目标是谁无关。
+	//
+	// 为 NTP 这一类加的：客户端从一个轮询的池子里取服务器，每次拿到的 IP
+	// 都不同，按地址排是排不完的——实测 2720 条分散在 53 个地址上，
+	// 而它们明天会换成另外一批。共同点只有端口。
+	//
+	// **它比另外两条钝得多。** 排一个端口就是排掉走那个端口的一切：
+	// 排 443 等于让审计整个失明。只写「确实只承载一种用途」的端口，
+	// 而且写之前先数一遍它当前盖住多少条、都是些什么。
+	ExcludePorts []uint16 `json:"exclude_ports,omitempty"`
 }
 
 // QuotaControlOptions 是 §4.9 配额闸断的配置，缺省即整个能力关闭。
@@ -221,7 +231,7 @@ func (o *AccessLogOptions) normalize() error {
 		return E.New("user_stats.access_log.queue_size 必须为正数")
 	}
 	// 在 normalize 阶段就编译一次，让非法规则在启动时硬失败而不是运行到一半才发现。
-	if _, err := newExcludeFilter(o.ExcludeHosts, o.ExcludeIPs); err != nil {
+	if _, err := newExcludeFilter(o.ExcludeHosts, o.ExcludeIPs, o.ExcludePorts); err != nil {
 		return err
 	}
 	return nil
