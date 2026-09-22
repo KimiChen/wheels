@@ -806,6 +806,13 @@ impl DrainedRuntime {
 ///
 /// 按 `started_at_unix_ms` 排序再按 `runtime_id` 兜底：顺序必须是确定的，
 /// 否则两次空跑给出的报告可能行序不同，而预演要拿来逐项比对。
+///
+/// **代价随运行天数线性增长，而且现在修不了。** 采集每一轮都会跑一次这个查询，
+/// 但 `idx_snapshot_batches_settle` 用不上（`status` 排在 `runtime_pk` 后面），
+/// 计划退化成按 `node_id` 搜出该节点全部批次再逐行过滤；而 `snapshot_batches`
+/// 只增不删。干净的修法是一条 `WHERE status = 'pending'` 的部分索引，
+/// 但指纹门禁认索引（`store::schema` 的 DDL 段），加它等于要求重建生产库——
+/// 为今天这几毫秒不划算。留在 `schema/03_settlement.sql` 里等下次重建。
 pub async fn backlog(store: &Store, node_id: &str) -> Result<Vec<(String, usize)>> {
     let rows = sqlx::query(
         "SELECT b.runtime_id, count(*) FROM snapshot_batches b \

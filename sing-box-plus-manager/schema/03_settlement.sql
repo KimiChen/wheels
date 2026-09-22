@@ -166,6 +166,20 @@ CREATE TABLE usage_cycle_totals (
 -- 本轮不做保留期清理，账本只增不删，所以它没有写入者；而一个恒为空的
 -- purged_through 会让「这段区间的账本还在不在」这个问题得到一个假的肯定答案。
 -- 做清理时再加回来——它要和「清理不改变 lifetime 合计」的不变量测试一起加。
+--
+-- **下次重建库时在这里补一条部分索引**（现在加不了，加了就等于要求重建）：
+--
+--     CREATE INDEX idx_snapshot_batches_pending
+--         ON snapshot_batches(node_id) WHERE status = 'pending';
+--
+-- 采集每一轮都会跑一次 `settle::backlog()`，按 node_id 找这台节点还有没有积压。
+-- 下面那条 idx_snapshot_batches_settle 用不上——status 排在 runtime_pk 后面，
+-- 所以计划退化成「按 node_id 搜出该节点全部批次，再逐行过滤 status」。
+-- 而这张表**只增不删**（就是上面那段），于是这次扫描的代价随运行天数线性增长，
+-- 为的是回答一个绝大多数时候是「无事可做」的问题。2026-09-23 实测约 1.2 µs/行：
+-- 最忙的节点 4,310 行约 5 ms，照当时速率推一年约 0.6 s。今天不值得为它重建库，
+-- 一年以后值得，而到那时没人会想起来这里有过这回事——所以写在这儿。
+-- 部分索引在稳态下几乎是空的：pending 通常是 0 行。
 
 CREATE INDEX idx_snapshot_batches_settle
     ON snapshot_batches(node_id, runtime_pk, status, sequence);
