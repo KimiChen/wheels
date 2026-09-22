@@ -396,6 +396,25 @@ enum LedgerCommand {
         #[arg(long, default_value_t = 200)]
         batch: i64,
     },
+
+    /// 排空 `pending` 批次——**不按收据**，按「已批准且还有积压的 runtime」扫。
+    ///
+    /// 采集每一轮都会做同一件事，所以正常情况下这条命令无事可做。它是给
+    /// **等不到下一轮采集**的场合：节点已经下线、或者刚批准完一段早就结束的
+    /// 历史 runtime——那一段不会再产生收据，而收据驱动的排空因此永远够不到它。
+    ///
+    /// 默认空跑。空跑走**同一条实现**跑完再回滚，报出的行数与字节数就是
+    /// 真跑会写的那些：批量写账之前先拿它与预期核对，对不上就停手。
+    Drain {
+        #[arg(long, default_value = "/etc/proxy-manager")]
+        config_dir: PathBuf,
+        /// 只处理这一台节点。不给就扫所有还有积压的节点。
+        #[arg(long)]
+        node: Option<String>,
+        /// 不加就是空跑：跑完回滚，不写库。
+        #[arg(long)]
+        apply: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -916,6 +935,80 @@ async fn ledger_command(command: LedgerCommand) -> anyhow::Result<ExitCode> {
                 println!("这是空跑，没有写库。确认之后加 --apply。");
             }
             Ok(ExitCode::SUCCESS)
+        }
+
+        LedgerCommand::Drain { config_dir, node, apply } => {
+            let (_, store) = open_store(&config_dir).await?;
+            let nodes = match node {
+                Some(node) => vec![node],
+                None => settle::backlog_nodes(&store).await?,
+            };
+
+            let mut batches = 0usize;
+            let mut ledger_rows = 0usize;
+            let mut bytes = 0u128;
+            let mut blocked = 0usize;
+            let mut unclean = false;
+
+            for node_id in &nodes {
+                let drained = settle::drain_backlog(&store, node_id, apply).await?;
+                let awaiting = settle::backlog_awaiting_approval(&store, node_id).await?;
+                if drained.is_empty() && awaiting == 0 {
+                    continue;
+                }
+                println!("节点 {node_id}");
+                for runtime in &drained {
+                    println!(
+                        "  {}  积压 {}  入账 {}  取代 {}  拒绝 {}  账本行 {}  字节 {}",
+                        runtime.runtime_id,
+                        runtime.pending_before,
+                        runtime.applied,
+                        runtime.superseded,
+                        runtime.rejected.len(),
+                        runtime.ledger_rows,
+                        runtime.bytes,
+                    );
+                    for (batch_pk, reason) in &runtime.rejected {
+                        println!("    批次 {batch_pk} 整份拒绝：{reason}");
+                        unclean = true;
+                    }
+                    if let Some(reason) = &runtime.deferred {
+                        println!("    停在这里（批次仍是 pending）：{reason}");
+                        unclean = true;
+                    }
+                    batches += runtime.applied + runtime.superseded + runtime.rejected.len();
+                    ledger_rows += runtime.ledger_rows;
+                    bytes += runtime.bytes;
+                }
+                if awaiting > 0 {
+                    // 不说这一句，一份「无事可做」的报告会被读成「一个批次都不剩」。
+                    println!(
+                        "  另有 {awaiting} 个 pending 批次的 runtime 还没批准，排空够不到它们。"
+                    );
+                    println!("  先跑 `proxy-manager runtime pending` 看清单，确认不是影子 runtime 再批。");
+                    blocked += awaiting;
+                }
+            }
+
+            if batches == 0 && blocked == 0 {
+                println!("没有可排空的积压。");
+                store.close().await;
+                return Ok(ExitCode::SUCCESS);
+            }
+
+            println!();
+            println!("合计：批次 {batches}  账本行 {ledger_rows}  字节 {bytes}");
+            if blocked > 0 {
+                println!("      另有 {blocked} 个批次卡在未批准的 runtime 上。");
+            }
+            if !apply {
+                println!();
+                println!("**这是空跑，事务已回滚，一个字节都没写。**");
+                println!("上面的字节数就是真跑会写进账本的那个——与预期核对，");
+                println!("对不上就停手，不要先 --apply 再解释。");
+            }
+            store.close().await;
+            Ok(if unclean { ExitCode::from(2) } else { ExitCode::SUCCESS })
         }
     }
 }

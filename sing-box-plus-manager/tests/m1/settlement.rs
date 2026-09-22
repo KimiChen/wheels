@@ -5,7 +5,7 @@
 //! 只断言「被拒绝了」不够：一个「拒绝但顺手推了游标」的实现同样能让前半变绿，
 //! 而它在生产上表现为静默漏记。
 
-use proxy_manager::ledger::settle::{FirstSnapshot, RejectReason, SettleOutcome};
+use proxy_manager::ledger::settle::{self, FirstSnapshot, RejectReason, SettleOutcome};
 
 use super::ledger_harness::{Ledger, Snapshot, NODE, RUNTIME, STARTED_AT_MS};
 
@@ -603,4 +603,142 @@ async fn 压缩之后结算结果不变() {
     let expected: u128 = target.iter().map(|v| *v as u128).sum::<u128>()
         - base.iter().map(|v| *v as u128).sum::<u128>();
     assert_eq!(ledger.lifetime_total("u_example_01").await, expected);
+}
+
+// ============ 积压排空：不按收据 ============
+//
+// 「先收到、后批准」这条设计隐含了一个前提：**批准的时候 runtime 还活着**。
+// 收据驱动的排空（`collect::scheduler` 的循环、`ledger ingest`）只结算
+// 收据里那个 runtime，于是节点一旦重启换了 `runtime_id`，旧段的 pending 批次
+// 就没有任何驱动源了——不报错、不掉链子，只是有一段账静静地不存在。
+// 2026-09-22 一次部署期重启链留下的 27 个批次就是这个形态。
+
+/// 一段**已经结束**的 runtime。它不会再产生任何收据。
+const DEAD: &str = "fedcba9876543210fedcba9876543210";
+/// 它比当前这段早一小时启动。
+const DEAD_STARTED_AT_MS: u64 = STARTED_AT_MS - 3_600_000;
+
+/// 这条钉的就是原先测不到的那道缝：**runtime 已经不再发快照，
+/// 但它的 pending 批次仍被结算。**
+#[tokio::test]
+async fn 已不再发快照的runtime其积压在批准之后仍会被结算() {
+    let ledger = Ledger::new().await;
+
+    // 旧段收下两份快照——**当时还没批准**，批次停在 pending。
+    let first = ledger.receive(&Snapshot::new().runtime(DEAD)).await.expect("回执要留");
+    let second = ledger
+        .receive(&Snapshot::new().runtime(DEAD).sequence(2).counter(
+            "u_example_01",
+            "tcp_uplink_bytes",
+            1_100,
+        ))
+        .await
+        .expect("回执要留");
+
+    // 节点重启：新段接手，正常批准、正常结算。**旧段从此不会再有收据。**
+    ledger.approve(FirstSnapshot::Baseline).await;
+    let live = ledger.ingest(&Snapshot::new()).await;
+    assert!(matches!(live, SettleOutcome::Applied { .. }), "实际：{live:?}");
+
+    // 运维事后批准旧段。批是批了——
+    ledger.approve_runtime_at(DEAD, DEAD_STARTED_AT_MS, FirstSnapshot::Baseline).await;
+    // ——但收据驱动的那条路径够不到它：它结的永远是收据里那个 runtime。
+    assert!(matches!(ledger.settle().await, SettleOutcome::Nothing));
+    assert_eq!(ledger.batch_status(first.batch_pk).await, "pending", "这就是那道缝");
+    assert_eq!(ledger.batch_status(second.batch_pk).await, "pending");
+
+    // 不按收据的排空：按「这台节点上全部已批准且有积压的 runtime」扫一遍。
+    let drained = settle::drain_backlog(&ledger.store, NODE, true).await.expect("排空不该报错");
+    let dead = drained.iter().find(|d| d.runtime_id == DEAD).expect("旧段必须在单子里");
+    assert_eq!(dead.pending_before, 2);
+    assert_eq!(dead.applied, 2);
+    assert!(dead.deferred.is_none(), "实际：{dead:?}");
+    assert!(dead.rejected.is_empty(), "实际：{dead:?}");
+    // baseline：首份记 0，第二份记差值 1100 - 100。
+    assert_eq!(dead.ledger_rows, 1);
+    assert_eq!(dead.bytes, 1_000);
+
+    assert_eq!(ledger.batch_status(first.batch_pk).await, "applied");
+    assert_eq!(ledger.batch_status(second.batch_pk).await, "applied");
+}
+
+/// 一段**登记了但没批准**的 runtime。
+const HELD: &str = "aaaabbbbccccddddaaaabbbbccccdddd";
+
+/// C8 的口径落在排空上：**只结算已批准的**。
+///
+/// 这里要分开验两件事，它们由**不同的**机制挡住，很容易只挡住一件：
+/// 未登记的（影子 runtime）根本没有 `node_runtimes` 行，
+/// 而登记了没批准的有行、只是 `approval_status` 不对。
+/// 只造前一种的话，把批准状态那道过滤整条删掉，用例照样是绿的。
+#[tokio::test]
+async fn 排空不碰未批准的runtime() {
+    let ledger = Ledger::new().await;
+
+    // 一、影子 runtime：收到过快照，压根没登记。
+    let shadow = ledger.receive(&Snapshot::new().runtime(DEAD)).await.expect("回执要留");
+
+    // 二、登记了，但停在 pending 审批上（不走 approve）。
+    let held = ledger.receive(&Snapshot::new().runtime(HELD)).await.expect("回执要留");
+    let mut txn = ledger.store.begin_immediate().await.unwrap();
+    sqlx::query(
+        "INSERT INTO node_runtimes(node_id, runtime_id, started_at_unix_ms, first_snapshot, \
+         approval_status, first_seen_at, last_seen_at) \
+         VALUES (?, ?, ?, 'baseline', 'pending', ?, ?)",
+    )
+    .bind(NODE)
+    .bind(HELD)
+    .bind(format!("{:020}", STARTED_AT_MS - 7_200_000))
+    .bind("2026-09-18T00:00:00Z")
+    .bind("2026-09-18T00:00:00Z")
+    .execute(txn.conn())
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+
+    // 三、正常批准的那段。
+    let approved = ledger.receive(&Snapshot::new()).await.expect("回执要留");
+    ledger.approve(FirstSnapshot::Include).await;
+
+    let drained = settle::drain_backlog(&ledger.store, NODE, true).await.expect("排空不该报错");
+    assert_eq!(drained.len(), 1, "未批准的两段都不该进单子：{drained:?}");
+    assert_eq!(drained[0].runtime_id, RUNTIME);
+    assert_eq!(ledger.batch_status(approved.batch_pk).await, "applied");
+    // 排空是补驱动，不是代人批准。
+    assert_eq!(ledger.batch_status(shadow.batch_pk).await, "pending", "影子 runtime 原样留着");
+    assert_eq!(ledger.batch_status(held.batch_pk).await, "pending", "登记未批准的原样留着");
+
+    // 而且要能说出「还有多少够不到」——不说这一句，一份「无事可做」的报告
+    // 会被读成「一个批次都不剩」，而那正是这个缺口当初被漏掉的读法。
+    let awaiting = settle::backlog_awaiting_approval(&ledger.store, NODE).await.unwrap();
+    assert_eq!(awaiting, 2);
+}
+
+/// 空跑走**同一条实现**再回滚：它报的字节数就是真跑会写的那个。
+///
+/// 「批量写入前先预演，预演计数与预期对不上就停」需要的是这个等号，
+/// 而不是一个另写的估算器——两份实现只要有一处分岔，预演对上了也不说明什么。
+#[tokio::test]
+async fn 排空空跑报出真实数字但一个字节都不写() {
+    let ledger = Ledger::new().await;
+    let receipt = ledger.receive(&Snapshot::new()).await.expect("回执要留");
+    ledger.approve(FirstSnapshot::Include).await;
+
+    let preview = settle::drain_backlog(&ledger.store, NODE, false).await.expect("空跑不该报错");
+    assert_eq!(preview.len(), 1);
+    assert_eq!(preview[0].applied, 1);
+    assert_eq!(preview[0].ledger_rows, 2);
+    assert_eq!(preview[0].bytes, 312, "样例里两个非零身份合计 300 + 12");
+
+    // 空跑之后库必须原样。
+    assert_eq!(ledger.ledger_rows().await, 0);
+    assert_eq!(ledger.cursor_count().await, 0);
+    assert_eq!(ledger.last_sequence().await, None);
+    assert_eq!(ledger.batch_status(receipt.batch_pk).await, "pending");
+
+    // 真跑与预演**逐项一致**。
+    let applied = settle::drain_backlog(&ledger.store, NODE, true).await.expect("排空不该报错");
+    assert_eq!(applied, preview);
+    assert_eq!(ledger.ledger_rows().await, 2);
+    assert_eq!(ledger.batch_status(receipt.batch_pk).await, "applied");
 }

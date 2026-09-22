@@ -165,8 +165,78 @@ impl NodeCollector {
         }
     }
 
+    /// 把这台节点上**已批准 runtime 的积压**排空。不按收据。
+    ///
+    /// 下面那个收据驱动的循环只结算**收据里那个 runtime**，所以它排的积压
+    /// 隐含一个前提：批准的时候 runtime 还活着。节点重启换了 `runtime_id` 之后，
+    /// 旧段永远不会再产生收据，它的 pending 批次就没有任何驱动源了
+    /// （见 `settle::drain_backlog`）。这一段补的就是那条缝。
+    ///
+    /// 返回 `(结算批次数, 账本行数)`，由 [`NodeCollector::tick`] 计进 [`Tick::Applied`]——
+    /// `settled` 的含义一直是「这一轮结算了几份，**含积压**」，不是「这次采到几份」。
+    ///
+    /// **失败只告警，不改变这次 tick 的结果**：它补的是历史窗口，
+    /// 让它连带毁掉一次正常采集是本末倒置。
+    async fn drain_backlog(&self, store: &Store) -> (usize, usize) {
+        let drained = match settle::drain_backlog(store, &self.node_id, true).await {
+            Ok(drained) => drained,
+            Err(error) => {
+                tracing::error!(node_id = %self.node_id, error = %error, "排空积压失败");
+                return (0, 0);
+            }
+        };
+        let mut settled = 0usize;
+        let mut ledger_rows = 0usize;
+        for runtime in drained {
+            if runtime.audit_dropped {
+                self.note_audit_dropped(&runtime.runtime_id);
+            }
+            for (batch_pk, reason) in &runtime.rejected {
+                tracing::warn!(
+                    node_id = %self.node_id, runtime_id = %runtime.runtime_id, batch_pk,
+                    "排空积压时整份拒绝：{reason}"
+                );
+            }
+            if let Some(reason) = &runtime.deferred {
+                // 走到这里说明批准状态在两次查询之间变了——单子是按 approved 选的。
+                tracing::warn!(
+                    node_id = %self.node_id, runtime_id = %runtime.runtime_id,
+                    "排空积压时暂不结算：{reason}"
+                );
+            }
+            if runtime.is_noop() {
+                continue;
+            }
+            settled += runtime.applied + runtime.superseded;
+            ledger_rows += runtime.ledger_rows;
+            tracing::info!(
+                node_id = %self.node_id,
+                runtime_id = %runtime.runtime_id,
+                settled = runtime.applied,
+                superseded = runtime.superseded,
+                ledger_rows = runtime.ledger_rows,
+                bytes = %runtime.bytes,
+                "排空了一段积压（该 runtime 可能早已不再发快照）"
+            );
+        }
+        (settled, ledger_rows)
+    }
+
     /// 一次采集 + 入账。可单独调用，便于测试与将来的手动采集端点。
     pub async fn tick(&self, store: &Store) -> Tick {
+        // **先排空不按收据的积压，再取快照。**
+        //
+        // 放在前面不是随手排的：这一段覆盖的批次属于**不会再产生收据**的 runtime，
+        // 跟在下面那个循环后面就要同时赌两件事——这次取快照成功、且当前 runtime
+        // 已批准。而那两件恰恰是它要补的缺（节点失联、或重启后的新 runtime 还没批，
+        // 两种情形下 `tick` 都会在到达那个循环之前就返回）。
+        //
+        // 排空的数目计进下面的 `Tick::Applied`：`settled` 的含义是「这一轮结算了
+        // 几份，**含积压**」，从来不是「这次采到几份」。取快照失败时这一次的数目
+        // 只进日志——那几个分支没有能承载它的 `Tick` 变体，而硬塞一个 `Applied`
+        // 会把「这次没采到」说成采到了。
+        let (mut settled, mut ledger_rows) = self.drain_backlog(store).await;
+
         let response = match self.client.snapshot().await {
             Ok(response) => response,
             Err(error) => {
@@ -215,8 +285,6 @@ impl NodeCollector {
 
         // **把积压排空**：一次 tick 可能要结算不止一份。
         // 常见来源是「先收到、后批准」——批准之前攒下的批次都还在 pending。
-        let mut settled = 0usize;
-        let mut ledger_rows = 0usize;
         loop {
             match settle::settle_next(store, &self.node_id, &receipt.runtime_id).await {
                 Ok(SettleOutcome::Applied {

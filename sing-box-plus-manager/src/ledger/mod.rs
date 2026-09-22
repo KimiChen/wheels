@@ -13,4 +13,7 @@ pub mod settle;
 
 pub use bucket::{hour_bucket, TimeDecision, TimeQuality};
 pub use canonical::{batch_id, source_event_hash, LineageDelta, HASH_VERSION};
-pub use settle::{receive, settle_next, FirstSnapshot, Receipt, RejectReason, SettleOutcome};
+pub use settle::{
+    drain_backlog, receive, settle_next, DrainedRuntime, FirstSnapshot, Receipt, RejectReason,
+    SettleOutcome,
+};

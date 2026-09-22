@@ -749,6 +749,242 @@ async fn settle_in_txn(
     Ok(SettleOutcome::Applied { batch_pk, sequence, ledger_rows, sequence_gap, audit_dropped })
 }
 
+// ============================ 积压排空：不按收据 ============================
+
+/// 一个 runtime 的积压排空结果。
+///
+/// 空跑与真跑走**同一条实现**，所以这个结构体的两份实例可以直接比对——
+/// 「预演计数与预期对不上就停」需要的正是这个等号。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DrainedRuntime {
+    pub runtime_id: String,
+    /// 开始排空时这个 runtime 还有多少 pending 批次。
+    pub pending_before: usize,
+    /// 实际入账的批次数。
+    pub applied: usize,
+    /// 乱序到达、已被更新批次取代的。
+    pub superseded: usize,
+    /// 终态拒绝，批次已烧掉：`(batch_pk, 成因)`。
+    pub rejected: Vec<(i64, RejectReason)>,
+    /// 写进账本的行数。
+    pub ledger_rows: usize,
+    /// 这些账本行的**四向字节合计**。批量写账之前拿它与预期核对。
+    pub bytes: u128,
+    /// 这一轮里有批次报了 `audit_dropped`。调用方据此写审计旁路记录。
+    pub audit_dropped: bool,
+    /// 停在这里的原因。**批次仍是 pending**，不是错误。
+    pub deferred: Option<RejectReason>,
+}
+
+impl DrainedRuntime {
+    fn new(runtime_id: String, pending_before: usize) -> Self {
+        DrainedRuntime {
+            runtime_id,
+            pending_before,
+            applied: 0,
+            superseded: 0,
+            rejected: Vec::new(),
+            ledger_rows: 0,
+            bytes: 0,
+            audit_dropped: false,
+            deferred: None,
+        }
+    }
+
+    /// 这一轮一个批次都没动过。
+    pub fn is_noop(&self) -> bool {
+        self.applied == 0 && self.superseded == 0 && self.rejected.is_empty()
+    }
+}
+
+/// 这台节点上**已批准、且仍有 pending 批次**的 runtime，按启动时刻从旧到新。
+///
+/// 「已批准」这道过滤就是 C8 的口径落在这里的形态：未登记的（含影子 runtime）
+/// 与登记了但没批准的一律不进这张单子——它们该出现在 `runtime pending` 里，
+/// 等人看过再批。`settle_in_txn` 自己在事务内还会复查一次批准状态，
+/// 这里过滤是为了不去敲注定 `Deferred` 的 runtime，**不是**替代那道复查。
+///
+/// 按 `started_at_unix_ms` 排序再按 `runtime_id` 兜底：顺序必须是确定的，
+/// 否则两次空跑给出的报告可能行序不同，而预演要拿来逐项比对。
+pub async fn backlog(store: &Store, node_id: &str) -> Result<Vec<(String, usize)>> {
+    let rows = sqlx::query(
+        "SELECT b.runtime_id, count(*) FROM snapshot_batches b \
+         JOIN node_runtimes r ON r.node_id = b.node_id AND r.runtime_id = b.runtime_id \
+         WHERE b.node_id = ? AND b.status = 'pending' AND r.approval_status = 'approved' \
+         GROUP BY b.runtime_id ORDER BY r.started_at_unix_ms, b.runtime_id",
+    )
+    .bind(node_id)
+    .fetch_all(store.readers())
+    .await?;
+    Ok(rows.into_iter().map(|row| (row.get(0), row.get::<i64, _>(1) as usize)).collect())
+}
+
+/// 这台节点上**还没资格排空**的 pending 批次数：runtime 未登记或登记未批准。
+///
+/// 只用来在报告里说一句「这里还有 N 个，但要先批准」。没有它，
+/// 一份「无事可做」的排空报告会被读成「一个批次都不剩」，而那正是
+/// 这个缺口当初被漏掉的读法。
+pub async fn backlog_awaiting_approval(store: &Store, node_id: &str) -> Result<usize> {
+    let row = sqlx::query(
+        "SELECT count(*) FROM snapshot_batches b \
+         LEFT JOIN node_runtimes r ON r.node_id = b.node_id AND r.runtime_id = b.runtime_id \
+         WHERE b.node_id = ? AND b.status = 'pending' \
+           AND (r.runtime_pk IS NULL OR r.approval_status != 'approved')",
+    )
+    .bind(node_id)
+    .fetch_one(store.readers())
+    .await?;
+    Ok(row.get::<i64, _>(0) as usize)
+}
+
+/// 还有 pending 批次的节点（含尚未批准的那些）。`ledger drain` 不带 `--node` 时扫它。
+pub async fn backlog_nodes(store: &Store) -> Result<Vec<String>> {
+    let rows = sqlx::query(
+        "SELECT DISTINCT node_id FROM snapshot_batches WHERE status = 'pending' ORDER BY node_id",
+    )
+    .fetch_all(store.readers())
+    .await?;
+    Ok(rows.into_iter().map(|row| row.get(0)).collect())
+}
+
+/// 排空一台节点上**全部已批准 runtime** 的 pending 批次。
+///
+/// 这是 [`settle_next`] 的**第二个驱动源，而且是不按收据的那个**。
+///
+/// 收据驱动的那条（`collect::scheduler` 的排空循环、`ledger ingest`）只结算
+/// **收据里那个 `runtime_id`**，于是「先收到、后批准」这条设计隐含了一个前提：
+/// **批准的时候 runtime 还活着**。节点一旦重启换了 `runtime_id`，旧段就永远
+/// 不会再产生收据——批准得再及时，它的 pending 批次也没有任何东西会去结算它。
+/// 那不报错、不掉链子，只是有一段账静静地不存在
+/// （2026-09-22 一次部署期重启链留下的 27 个批次就是这个形态）。
+///
+/// `apply = false` 是**空跑**：走同一条实现，跑在一个最后回滚掉的事务里。
+/// 另写一个估算器等于把 11 步再写一遍，而预演要预的正是真实实现的行为——
+/// 两份实现只要有一处分岔，预演对上了也不说明什么。
+///
+/// 空跑把单写者占住到扫完为止（真跑是一个批次一个事务，中间让得开）。
+/// 积压很大时这会让在途采集排在后面，所以空跑该当成一次运维动作来安排，
+/// 不要塞进定时任务。
+pub async fn drain_backlog(
+    store: &Store,
+    node_id: &str,
+    apply: bool,
+) -> Result<Vec<DrainedRuntime>> {
+    let backlog = backlog(store, node_id).await?;
+    if backlog.is_empty() {
+        return Ok(Vec::new());
+    }
+    if !apply {
+        let mut txn = store.begin_immediate().await?;
+        let result = drain_in_txn(txn.conn(), node_id, &backlog).await;
+        // **先回滚再看结果**：空跑绝不能因为返回值是 Err 就把事务留着。
+        txn.rollback().await?;
+        return result;
+    }
+
+    let mut out = Vec::with_capacity(backlog.len());
+    for (runtime_id, pending_before) in backlog {
+        let mut drained = DrainedRuntime::new(runtime_id, pending_before);
+        let mut settled_batches = Vec::new();
+        // 上界取开始时的 pending 计数：每一轮要么把一个批次移出 pending，
+        // 要么跳出循环。它同时保证「实现哪天不推进状态了，循环也会停」——
+        // 一个停不下来的排空会把单写者永远占住。
+        for _ in 0..pending_before {
+            // 每个批次一个事务，与采集走的是同一个 `settle_next`。
+            let outcome = settle_next(store, node_id, &drained.runtime_id).await?;
+            if !record(&mut drained, &mut settled_batches, outcome) {
+                break;
+            }
+        }
+        let mut conn = store.readers().acquire().await?;
+        drained.bytes = ledger_bytes(&mut conn, &settled_batches).await?;
+        out.push(drained);
+    }
+    Ok(out)
+}
+
+/// 空跑：整轮在一个事务里跑完，由调用方回滚。
+async fn drain_in_txn(
+    conn: &mut SqliteConnection,
+    node_id: &str,
+    backlog: &[(String, usize)],
+) -> Result<Vec<DrainedRuntime>> {
+    let mut out = Vec::with_capacity(backlog.len());
+    for (runtime_id, pending_before) in backlog {
+        let mut drained = DrainedRuntime::new(runtime_id.clone(), *pending_before);
+        let mut settled_batches = Vec::new();
+        for _ in 0..*pending_before {
+            let outcome = settle_in_txn(conn, node_id, runtime_id).await?;
+            if !record(&mut drained, &mut settled_batches, outcome) {
+                break;
+            }
+        }
+        drained.bytes = ledger_bytes(conn, &settled_batches).await?;
+        out.push(drained);
+    }
+    Ok(out)
+}
+
+/// 记一次结算结果。返回 `false` 表示这个 runtime 排到头了。
+///
+/// `Rejected` **继续往下走**而不是停：那个批次已经落到 `rejected`，不会再被选中，
+/// 队列后面的批次与它无关。采集那条循环在这里返回，是因为它还要把成因带回
+/// `Tick` 去告警；这里不需要，成因收进 `rejected` 里一起报。
+fn record(
+    drained: &mut DrainedRuntime,
+    settled_batches: &mut Vec<i64>,
+    outcome: SettleOutcome,
+) -> bool {
+    match outcome {
+        SettleOutcome::Applied { batch_pk, ledger_rows, audit_dropped, .. } => {
+            drained.applied += 1;
+            drained.ledger_rows += ledger_rows;
+            drained.audit_dropped |= audit_dropped;
+            settled_batches.push(batch_pk);
+            true
+        }
+        SettleOutcome::Superseded { .. } => {
+            drained.superseded += 1;
+            true
+        }
+        SettleOutcome::Rejected { batch_pk, reason } => {
+            drained.rejected.push((batch_pk, reason));
+            true
+        }
+        // 前置条件没满足：批次仍是 pending，这个 runtime 到此为止。
+        SettleOutcome::Deferred { reason } => {
+            drained.deferred = Some(reason);
+            false
+        }
+        SettleOutcome::Nothing => false,
+    }
+}
+
+/// 这些批次写进账本的四向字节合计。
+///
+/// **不在 SQL 里 SUM**：账本的四向列是定宽文本（`store::codec` 的原话是
+/// 「禁止对这些列使用 SQL SUM、加减乘除或 CAST」），SQL 的隐式数值转换经 REAL
+/// 丢精度。这里逐行解码，用 u128 checked 累加。
+async fn ledger_bytes(conn: &mut SqliteConnection, batch_pks: &[i64]) -> Result<u128> {
+    let mut total = U128Text::new(0);
+    for batch_pk in batch_pks {
+        let rows = sqlx::query(
+            "SELECT tcp_uplink_bytes, tcp_downlink_bytes, udp_uplink_bytes, udp_downlink_bytes \
+             FROM usage_ledger WHERE batch_pk = ?",
+        )
+        .bind(batch_pk)
+        .fetch_all(&mut *conn)
+        .await?;
+        for row in rows {
+            for index in 0..4 {
+                total =
+                    total.checked_add(U64Text::decode(&row.get::<String, _>(index))?.widen())?;
+            }
+        }
+    }
+    Ok(total.get())
+}
+
 // ============================ 辅助 ============================
 
 struct RuntimeRow {

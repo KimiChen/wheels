@@ -55,11 +55,22 @@ impl Ledger {
     }
 
     pub async fn approve_runtime(&self, runtime_id: &str, policy: FirstSnapshot) {
+        self.approve_runtime_at(runtime_id, STARTED_AT_MS, policy).await;
+    }
+
+    /// 带启动时刻的批准。**一台节点上的多段 runtime 各有自己的窗口**，
+    /// 而排空的顺序按启动时刻从旧到新——同一个时刻会把那个顺序变成巧合。
+    pub async fn approve_runtime_at(
+        &self,
+        runtime_id: &str,
+        started_at_ms: u64,
+        policy: FirstSnapshot,
+    ) {
         runtime::approve(
             &self.store,
             NODE,
             runtime_id,
-            STARTED_AT_MS,
+            started_at_ms,
             policy,
             "用例：已确认是预期的进程窗口",
             "test",

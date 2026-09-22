@@ -16,7 +16,7 @@ use proxy_manager_agent::{commands::Executor, config::AgentConfig, server::Serve
 
 use super::fake_node::{FakeNode, TransportFault};
 use super::harness::{self, DNS_NAME};
-use super::ledger_harness::{NODE, RUNTIME, STARTED_AT_MS};
+use super::ledger_harness::{Snapshot, NODE, RUNTIME, STARTED_AT_MS};
 
 struct Stack {
     audit_dir: std::path::PathBuf,
@@ -192,6 +192,67 @@ async fn 批准之后一次tick排空积压() {
     );
     // 首份按 baseline 记 0，之后按差值：1000 + 1000 + 0（第四次没加流量）。
     assert_eq!(stack.lifetime_sum().await, 2_000);
+}
+
+/// **已经不再发快照的那一段**：它的积压也要在一次 tick 里被排空。
+///
+/// 与上一条的区别是全部：上面排的是**当前** runtime 的积压，由这次采集的收据
+/// 驱动；这里的旧段永远不会再产生收据，收据驱动的排空**够不到它**。
+/// 节点重启换 runtime_id 是部署期的常态，所以这不是边角情形。
+#[tokio::test]
+async fn 一次tick也排空已不再发快照的runtime的积压() {
+    use proxy_manager::ledger::settle;
+
+    /// 一段早就结束的 runtime。
+    const DEAD: &str = "fedcba9876543210fedcba9876543210";
+
+    let stack = stack().await;
+    stack.approve(FirstSnapshot::Baseline).await;
+
+    // 它的两份快照当时收下了，**当时还没批准**，批次停在 pending。
+    let now = time::OffsetDateTime::now_utc();
+    for sequence in 1..=2u64 {
+        let snapshot = Snapshot::new().runtime(DEAD).sequence(sequence).counter(
+            "u_example_01",
+            "tcp_uplink_bytes",
+            100 + sequence * 1_000,
+        );
+        settle::receive(&stack.store, NODE, &snapshot.bytes(), now, now, 120)
+            .await
+            .expect("接收不该失败")
+            .expect("回执要留");
+    }
+    // 运维事后批准它——比当前这段早一小时启动。
+    runtime::approve(
+        &stack.store,
+        NODE,
+        DEAD,
+        STARTED_AT_MS - 3_600_000,
+        FirstSnapshot::Baseline,
+        "用例：确认是部署期重启链里的一段",
+        "test",
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        stack.scalar("SELECT count(*) FROM snapshot_batches WHERE status = 'pending'").await,
+        2
+    );
+
+    // 节点现在报的是另一个 runtime，旧段不会再出现在任何收据里。
+    // 2 份旧的 + 这一次新采的 = 3。旧段那份差值是唯一的账本行。
+    let tick = stack.collector.tick(&stack.store).await;
+    assert!(matches!(tick, Tick::Applied { settled: 3, ledger_rows: 1 }), "实际：{tick:?}");
+
+    assert_eq!(
+        stack.scalar("SELECT count(*) FROM snapshot_batches WHERE status = 'pending'").await,
+        0,
+        "旧段的积压必须一起排空"
+    );
+    // 旧段 baseline：首份记 0，第二份记差值 2100 - 1100。
+    // 当前这段也是 baseline 且这是它的首份，不产生账本行。
+    assert_eq!(stack.scalar("SELECT count(*) FROM usage_ledger").await, 1);
+    assert_eq!(stack.lifetime_sum().await, 1_000);
 }
 
 // ============ C7：可重试且不得入账 ============
