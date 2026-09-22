@@ -318,7 +318,12 @@ body[data-pm-auth="on"] [data-pm-auth-off] { display: none !important; }
 .pm-download-copy { align-self: end; margin-top: 26px; }
 .pm-download-copy h3 { font-size: 19px; letter-spacing: -.03em; margin-top: 7px; }
 .pm-download-copy > p { color: var(--muted); font-size: 13px; line-height: 1.7; margin-top: 8px; }
-.pm-download-card > .wsk-button { justify-self: start; margin-top: 20px; }
+.pm-file-meta { color: var(--muted-soft); display: flex; font: 11px var(--font-mono); gap: 16px; margin-top: 16px; }
+.pm-download-card > .wsk-button { justify-self: start; margin-top: 14px; }
+/* 64 位十六进制必须能换行：不换行会把卡片顶宽，窄屏上整页横向滚动。 */
+.pm-file-hash { border-top: 1px solid var(--border); display: grid; gap: 5px; margin-top: 18px; padding-top: 14px; }
+.pm-file-hash span { color: var(--muted); font: 10px var(--font-mono); letter-spacing: .08em; }
+.pm-file-hash code { color: var(--muted-soft); font: 11px/1.6 var(--font-mono); overflow-wrap: anywhere; }
 
 .pm-sub-card { align-items: center; background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 18%, transparent); border-radius: var(--radius-lg); display: grid; gap: 20px 24px; grid-template-columns: auto minmax(0, 1fr) auto; padding: clamp(20px, 3vw, 32px); }
 .pm-file-symbol { align-items: center; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; display: flex; height: 72px; justify-content: center; position: relative; width: 60px; }

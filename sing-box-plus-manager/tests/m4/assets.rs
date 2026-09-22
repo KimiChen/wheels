@@ -236,6 +236,53 @@ fn 两个脚本对根路径的兜底与服务端一致() {
     }
 }
 
+/// **客户端安装包必须由本站自己发，不能外链。**
+///
+/// 外链 github.com 是一个死循环：还没配好代理的人访问不了它，
+/// 而他正是为了配代理才来下客户端的。第一版就是这么写的，
+/// 使用者一眼看出来了：「不然同事用的时候 github 访问不了，也订阅不了」。
+///
+/// 顺带钉住那三个属性的写法：`operations` 仓的 `publish-downloads.py`
+/// 把这一页当作清单来读（正则按 href → data-sha256 → data-size-bytes 的顺序匹配），
+/// 解析不出来它会报错而不是静默什么都不做——但那要等到下一次发布才发现。
+#[test]
+fn 安装包由本站自己发且清单能被解析() {
+    let body = web::page_body("index.html").expect("首页必须嵌入");
+    let count = body.matches("data-pm-download").count();
+    assert!(count >= 2, "首页上只有 {count} 个下载按钮：至少要有 macOS 与 Windows 两个");
+
+    // 三个属性按 publish-downloads.py 的顺序出现，且 href 指向本站。
+    let mut checked = 0;
+    let mut rest = body;
+    while let Some(at) = rest.find("data-pm-download") {
+        let tail = &rest[at..];
+        let end = tail.find('>').expect("下载按钮的标签未闭合");
+        let tag = &tail[..end];
+        let href = tag
+            .split("href=\"")
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .unwrap_or_else(|| panic!("下载按钮没有 href：{tag}"));
+        assert!(
+            href.starts_with("/downloads/"),
+            "下载按钮指向了 `{href}`。安装包必须由本站自己发——\
+             外链的话，还没配好代理的人根本打不开那个地址，而他正是为此而来"
+        );
+        let sha = tag.find("data-sha256=\"").unwrap_or_else(|| panic!("缺 data-sha256：{tag}"));
+        let size =
+            tag.find("data-size-bytes=\"").unwrap_or_else(|| panic!("缺 data-size-bytes：{tag}"));
+        let href_at = tag.find("href=\"").unwrap();
+        assert!(
+            href_at < sha && sha < size,
+            "三个属性的顺序变了（href → data-sha256 → data-size-bytes）：\
+             publish-downloads.py 的正则按这个顺序匹配，解析不出来就发不了版"
+        );
+        checked += 1;
+        rest = &tail[end..];
+    }
+    assert_eq!(checked, count, "有下载按钮没被检查到");
+}
+
 /// 页面上的 `data-roles` 与服务端的 `PAGES` 可见性表必须一致。
 ///
 /// 两份表职责不同（一份拦截、一份让界面讲得通），但**不能互相矛盾**：

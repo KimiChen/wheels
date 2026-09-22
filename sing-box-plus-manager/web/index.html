@@ -143,13 +143,27 @@
         </aside>
       </section>
 
+      <!--
+        **安装包由本站自己发**，不外链 GitHub。理由是一个死循环：
+        还没配好代理的人访问不了 github.com，而他正是为了配代理才来下客户端的。
+        外链等于把「第一次怎么用上」这件事推给一个他现在够不到的地方。
+
+        文件不在二进制里（单二进制装不下 100MB），由入口机的 nginx 从
+        `/www/wwwroot/proxy-manager-downloads/` 直接发，URL 与原站逐字相同
+        （`/downloads/<文件名>`），所以旧链接照样能用。
+        nginx 那几条 location 由 `operations` 仓的 `switch-site.py` 生成。
+
+        `data-sha256` / `data-size-bytes` **不是装饰**：`publish-downloads.py`
+        把这一页当作清单来读，按这两个值核对服务器上的文件。
+        改版本时改这里，脚本会跟着核对——反过来（只换服务器上的文件）会被它拦下。
+      -->
       <section class="pm-home-section" id="downloads" aria-labelledby="downloads-title">
         <div class="pm-section-heading">
           <div>
             <p class="pm-eyebrow">01 · GET THE APP</p>
             <h2 id="downloads-title">下载 Clash Verge</h2>
           </div>
-          <p>本站不托管安装包，下面两个入口指向官方发布页。</p>
+          <p>安装包在本站上，不用翻墙也下得动——不然就成了死循环。</p>
         </div>
 
         <div class="pm-download-grid">
@@ -158,12 +172,16 @@
             <div class="pm-download-copy">
               <p class="pm-meta">macOS · Apple Silicon</p>
               <h3>Clash Verge for Mac</h3>
-              <p>M 系列芯片选文件名带 <code>aarch64</code> 的 dmg；Intel 机型选 <code>x64</code>。</p>
+              <p>适用于 M1、M2、M3、M4 及后续 Apple 芯片机型。</p>
             </div>
-            <a class="wsk-button" href="https://github.com/clash-verge-rev/clash-verge-rev/releases"
-               target="_blank" rel="noopener noreferrer">
-              前往发布页<svg class="wsk-icon" aria-hidden="true"><use href="#external"></use></svg>
+            <p class="pm-file-meta"><span>v2.5.2</span><span>58.1 MiB</span></p>
+            <a class="wsk-button" data-pm-download
+               href="/downloads/Clash.Verge_2.5.2_aarch64.dmg"
+               data-sha256="94d29405980b5d1d3419dd1de485db3a234d35cef058f79dcce595e01b697219"
+               data-size-bytes="60935420" download>
+              下载 DMG <span aria-hidden="true">↓</span>
             </a>
+            <p class="pm-file-hash"><span>SHA-256</span><code>94d29405980b5d1d3419dd1de485db3a234d35cef058f79dcce595e01b697219</code></p>
           </article>
 
           <article class="pm-download-card">
@@ -171,14 +189,24 @@
             <div class="pm-download-copy">
               <p class="pm-meta">Windows · x64</p>
               <h3>Clash Verge for Windows</h3>
-              <p>64 位 Windows 10 / 11，选文件名带 <code>x64-setup</code> 的 exe。</p>
+              <p>适用于 64 位 Windows 10 与 Windows 11。</p>
             </div>
-            <a class="wsk-button" href="https://github.com/clash-verge-rev/clash-verge-rev/releases"
-               target="_blank" rel="noopener noreferrer">
-              前往发布页<svg class="wsk-icon" aria-hidden="true"><use href="#external"></use></svg>
+            <p class="pm-file-meta"><span>v2.5.2</span><span>44.8 MiB</span></p>
+            <a class="wsk-button" data-pm-download
+               href="/downloads/Clash.Verge_2.5.2_x64-setup.exe"
+               data-sha256="ba42f00b1082e352352080170fe86ae411bcc854cb13f1b8bebc9025e8a7cbf4"
+               data-size-bytes="46964366" download>
+              下载 EXE <span aria-hidden="true">↓</span>
             </a>
+            <p class="pm-file-hash"><span>SHA-256</span><code>ba42f00b1082e352352080170fe86ae411bcc854cb13f1b8bebc9025e8a7cbf4</code></p>
           </article>
         </div>
+
+        <p class="wsk-help wsk-mt-5">
+          校验（可选）：macOS <code>shasum -a 256 &lt;文件&gt;</code>，
+          Windows <code>certutil -hashfile &lt;文件&gt; SHA256</code>，
+          与上面那串对上即可。
+        </p>
       </section>
 
       <section class="pm-home-section" id="subscription" aria-labelledby="subscription-title">
