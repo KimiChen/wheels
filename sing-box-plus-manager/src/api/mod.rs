@@ -11,6 +11,7 @@
 //! - **时间是 RFC 3339（UTC）**。
 
 pub mod auth;
+pub mod custom;
 pub mod error;
 pub mod routes;
 pub mod session;
@@ -157,6 +158,19 @@ pub fn router(
         // `/me` 每页都会取一次（前端靠它判定 live 模式），塞进去等于把 token
         // 复制进每一个页面的内存与每一条响应里。这里只有 me.html 会取。
         .route("/api/v1/me/subscription", get(routes::me_subscription))
+        // 个人自定义节点。**一次取全**：拨号候选依赖上游列表，
+        // 分两次取会出现「候选里还没有刚建的那条上游」的中间态。
+        .route("/api/v1/me/custom", get(custom::list))
+        .route("/api/v1/me/custom/proxies", axum::routing::post(custom::create_proxy))
+        .route(
+            "/api/v1/me/custom/proxies/{id}",
+            axum::routing::put(custom::update_proxy).delete(custom::delete_proxy),
+        )
+        .route("/api/v1/me/custom/socks5", axum::routing::post(custom::create_socks5))
+        .route(
+            "/api/v1/me/custom/socks5/{id}",
+            axum::routing::put(custom::update_socks5).delete(custom::delete_socks5),
+        )
         // 管理面。每个 handler 第一件事就是 require_admin()。
         .route("/api/v1/nodes", get(routes::list_nodes))
         .route("/api/v1/nodes/{node_id}", get(routes::get_node))
