@@ -47,6 +47,12 @@ pub struct AppState {
     /// 审计镜像树。`None` 表示没配 `[audit]`——那时审计端点回 `audit_not_enabled`，
     /// **不是 403 也不是 404**：没有记录可看和不让你看是两回事（D18）。
     pub audit: Option<Arc<crate::config::AuditConfig>>,
+    /// 控制台上时刻的展示时区（`[quota] display_timezone`）。
+    ///
+    /// **落库一律 UTC，这个只管发给界面的那一份。** 放在 AppState 而不是每次
+    /// 从配置现读：它是启动时就解析好的（解析不了直接启动失败），
+    /// 让每个 handler 再解析一次只会多出几处可以各自失败的地方。
+    pub display_offset: time::UtcOffset,
     /// 自定义节点的密钥。`None` 表示没配 `[custom_nodes]`——那时相关端点不挂载，
     /// 订阅里也不会出现自定义节点。
     pub custom_key: Option<Arc<crate::custom::crypto::CryptoBox>>,
@@ -130,6 +136,7 @@ pub fn router(
     subscription: Option<crate::config::SubscriptionConfig>,
     audit: Option<crate::config::AuditConfig>,
     custom_key: Option<Arc<crate::custom::crypto::CryptoBox>>,
+    display_offset: time::UtcOffset,
 ) -> Router {
     let sso_enabled = sso.is_some();
     let credentials = subscription
@@ -145,6 +152,7 @@ pub fn router(
         credentials,
         audit: audit.map(Arc::new),
         custom_key,
+        display_offset,
         empty_roster: Arc::new(crate::sso::roster::Roster::empty()),
     };
     let router = Router::new()
@@ -248,10 +256,11 @@ pub async fn serve(
     subscription: Option<crate::config::SubscriptionConfig>,
     audit: Option<crate::config::AuditConfig>,
     custom_key: Option<Arc<crate::custom::crypto::CryptoBox>>,
+    display_offset: time::UtcOffset,
     listener: tokio::net::TcpListener,
     shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> std::io::Result<()> {
-    let app = router(store, nodes, sso, subscription, audit, custom_key);
+    let app = router(store, nodes, sso, subscription, audit, custom_key, display_offset);
     let mut shutdown = shutdown;
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {

@@ -906,3 +906,122 @@ fn 节点筛选控件已接线() {
     // 选项要由服务端给的 nodes 填，而不是前端自己编一份。
     assert!(script.contains("renderAuditNodes(data.nodes)"), "下拉框没有被填");
 }
+
+// ---- 展示时区 ----
+//
+// 2026-09-23：使用者报「访问时间不对」。数据是对的——时刻是 unix 毫秒，
+// 七台节点与主控的钟零偏差。**错的是渲染**：服务端一律按 UTC 发，
+// 而使用者在 +08:00，于是页面上的时刻比他的钟慢 8 小时、日期还退回前一天。
+//
+// `[quota] display_timezone` 这个配置**一直存在且一直写着 +08:00**，
+// 但从来没有被解析过——只校验了非空。下面这几条钉的就是它不再是死配置。
+
+/// 夹具的展示时区（见 `harness.rs` 的 `router` 调用）。
+///
+/// **不是 UTC，这是有意的**：夹具用 UTC 的话，「按展示时区渲染」这件事
+/// 对用例完全不可见，把实现退回 `to_rfc3339` 也不会有人红。
+const TZ_SUFFIX: &str = "+08:00";
+
+fn parse_ms(text: &str) -> i64 {
+    let at = time::OffsetDateTime::parse(text, &time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|e| panic!("{text:?} 不是合法的 RFC 3339：{e}"));
+    (at.unix_timestamp_nanos() / 1_000_000) as i64
+}
+
+/// **时刻按展示时区渲染，而且是换算不是平移。**
+///
+/// 两条断言缺一不可：
+///   * 后缀 —— 退回 `to_rfc3339` 会发出 `…Z`，这一条红；
+///   * 往返 —— 「把墙上时间加 8 小时、后缀还留着 Z」这类假修法能过上一条，
+///     但解回来的瞬时会偏 8 小时，这一条红。
+#[tokio::test]
+async fn 时刻按展示时区渲染而不是utc() {
+    let api = Api::new().await;
+    let alice = api.user("alice", Role::User, "local").await;
+    wire_identity(&api, alice.user_id, "ss-entry", "id-01").await;
+    let ts = now_ms() - 60_000;
+    api.seed_audit(NODE, "id-01", &[line("id-01", "ss-entry", "a.example", 1, ts, 10, 20)]);
+
+    let (status, body, _) = api.get("/api/v1/me/audit/access", Some(&alice)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    for field in ["first_seen", "last_seen"] {
+        let text =
+            body["rows"][0][field].as_str().unwrap_or_else(|| panic!("{field} 缺失：{body}"));
+        assert!(text.ends_with(TZ_SUFFIX), "{field} 不是按展示时区渲染的：{text}");
+        assert_eq!(parse_ms(text), ts, "{field} 换算错了瞬时：{text}");
+    }
+
+    // 页面拿它写列头。写死在 HTML 里的话，改了配置界面会继续宣称
+    // 一个它已经不再使用的时区。
+    assert_eq!(body["display_timezone"], "UTC+8", "{body}");
+}
+
+/// **缺口的时刻与行的时刻必须同一个时区。**
+///
+/// 缺口的 `at` 是落盘的 UTC 串，不换算的话同一页上两个时刻差 8 小时，
+/// 读者会把缺口读到另一个时段去——比整页一致地错更难发现。
+#[tokio::test]
+async fn 缺口时刻与行时刻同一个时区() {
+    let api = Api::new().await;
+    let alice = api.user("alice", Role::User, "local").await;
+    wire_identity(&api, alice.user_id, "ss-entry", "id-01").await;
+    let ts = now_ms() - 60_000;
+    api.seed_audit(NODE, "id-01", &[line("id-01", "ss-entry", "a.example", 1, ts, 10, 20)]);
+
+    // 落盘的是 UTC —— 与 `scheduler::note_audit_dropped` 写的格式逐字相同。
+    let stored = "2026-09-22T17:08:00Z";
+    proxy_manager::audit::health::note_dropped(&api.audit_dir.join(NODE), NODE, RUN, stored)
+        .unwrap();
+
+    let (_, body, _) = api.get("/api/v1/me/audit/access", Some(&alice)).await;
+    let gap = body["gaps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|g| g["kind"] == "audit_dropped")
+        .unwrap_or_else(|| panic!("缺口没出来：{body}"));
+
+    let at = gap["at"].as_str().unwrap();
+    assert!(at.ends_with(TZ_SUFFIX), "缺口时刻还是落盘的那个时区：{at}");
+    // 同一个瞬时，换了个说法——17:08Z 就是次日 01:08+08:00，日期跨了一天。
+    assert_eq!(at, "2026-09-23T01:08:00+08:00", "{at}");
+    assert_eq!(parse_ms(at), parse_ms(stored), "换算改掉了瞬时：{at}");
+}
+
+/// 一条记录都没有时**也要报得出时区**。
+///
+/// 回空串的话页面上的列头会变成「首次记录（）」——一个读者说不清是
+/// 「没配时区」还是「页面坏了」的状态。
+#[tokio::test]
+async fn 没有记录时也报得出时区() {
+    let api = Api::new().await;
+    let alice = api.user("alice", Role::User, "local").await;
+
+    let (status, body, _) = api.get("/api/v1/me/audit/access", Some(&alice)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["rows"].as_array().unwrap().is_empty(), "这条要走没有记录那一支：{body}");
+    assert_eq!(body["display_timezone"], "UTC+8", "{body}");
+}
+
+/// 列头上的时区标签接线了，而且**不是写死的**。
+#[test]
+fn 时区标签接进了列头() {
+    let page = proxy_manager::web::page_body("me-audit.html").expect("页面该在");
+    let (script, _) = proxy_manager::web::asset("assets/api.js").expect("脚本该在");
+
+    // 三处时刻列：首次记录、最近记录、缺口的观察时刻。
+    assert_eq!(
+        page.matches("data-pm-audit-tz").count(),
+        3,
+        "时刻列不是三处都挂上了标记——漏掉的那一列会一直显示旧时区"
+    );
+    assert!(script.contains("[data-pm-audit-tz]"), "脚本没有去写这些列头");
+    assert!(
+        script.contains("renderAuditTimezone(data.display_timezone)"),
+        "列头没有跟着服务端给的时区走"
+    );
+    // 时刻不能在浏览器里重算：那会把服务端刚定好的口径覆盖掉，
+    // 同一条记录于是在不同人的机器上显示成不同时刻，而列头还统一写着服务端那个时区。
+    assert!(!script.contains("new Date(value)"), "时刻被浏览器重算了");
+}

@@ -1004,12 +1004,19 @@ async fn audit_access(
     // 空串按「不筛」处理：下拉框的「全部节点」那一项 value 就是空串，
     // 表单会把它原样发上来。
     let node = query.node.as_deref().filter(|name| !name.is_empty());
-    let answer =
-        crate::audit::query::access(&state.store, &config.dir, data_subject, range, now_ms, node)
-            .await
-            .map_err(|error| {
-                tracing::error!(%error, "读审计镜像失败");
-                ApiError::new(ApiCode::Internal, "读取审计明细失败")
-            })?;
+    let answer = crate::audit::query::access(
+        &state.store,
+        &config.dir,
+        data_subject,
+        range,
+        now_ms,
+        node,
+        state.display_offset,
+    )
+    .await
+    .map_err(|error| {
+        tracing::error!(%error, "读审计镜像失败");
+        ApiError::new(ApiCode::Internal, "读取审计明细失败")
+    })?;
     Ok(Json(serde_json::to_value(answer).unwrap_or_else(|_| json!({}))))
 }

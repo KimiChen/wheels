@@ -46,7 +46,7 @@ interval_secs = 60
 min_interval_secs = 10
 snapshot_max_age_secs = 120
 [quota]
-display_timezone = "Asia/Shanghai"
+display_timezone = "+08:00"
 "#,
             db.display()
         ),

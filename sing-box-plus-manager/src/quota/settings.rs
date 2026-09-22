@@ -98,7 +98,9 @@ pub async fn load(store: &Store) -> Result<Option<QuotaSettings>> {
 /// 与 UTC+8 的计费周期不一致，会让某一天的用量显示进错误的月份。
 pub async fn ensure_initialized(store: &Store, display_timezone: &str) -> Result<()> {
     if display_timezone.trim().is_empty() {
-        return Err(Error::Quota("display_timezone 不能为空：日桶按它的日历日计算".into()));
+        return Err(Error::Quota(
+            "display_timezone 不能为空：控制台上的时刻按它渲染，缺省就没有口径".into(),
+        ));
     }
     let now = bucket::to_rfc3339(OffsetDateTime::now_utc());
     let mut txn = store.begin_immediate().await?;

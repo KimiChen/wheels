@@ -292,6 +292,9 @@ impl Api {
             subscription,
             audit,
             Some(custom_key),
+            // **不用 UTC。** 用 UTC 的话「时刻按展示时区渲染」这件事对用例
+            // 完全不可见——退回 UTC 也不会有人红。取 +08:00 与生产一致。
+            time::macros::offset!(+8),
         );
         Api { _dir: Some(dir), store, router, sso_path, audit_dir, credentials_path }
     }

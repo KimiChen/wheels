@@ -131,6 +131,46 @@ pub fn to_rfc3339(at: OffsetDateTime) -> String {
         .expect("OffsetDateTime 总能格式化成 RFC 3339")
 }
 
+/// RFC 3339，但按给定偏移量渲染。给**人看的时刻**用它。
+///
+/// 落库一律用 `to_rfc3339`（UTC）——存储的口径不该随展示设置变。
+/// 这个函数只服务于「发给界面的那一份」。
+pub fn to_rfc3339_at(at: OffsetDateTime, offset: time::UtcOffset) -> String {
+    at.to_offset(offset)
+        .format(&time::format_description::well_known::Rfc3339)
+        .expect("OffsetDateTime 总能格式化成 RFC 3339")
+}
+
+/// 解析 `+08:00` / `-05:30` / `UTC` / `Z` 这类偏移量。
+///
+/// **只认固定偏移，不认 IANA 名字**（`Asia/Shanghai`）：认了就要引一个时区库
+/// 并处理夏令时，而配置里写的一直是固定偏移。认不出来返回 `None`，
+/// 由调用方失败关闭——一个拼错的时区会让全站时刻**静默**偏几个小时，
+/// 那是最难被发现的一类错。
+pub fn parse_offset(text: &str) -> Option<time::UtcOffset> {
+    let text = text.trim();
+    if text.eq_ignore_ascii_case("utc") || text == "Z" || text == "z" {
+        return Some(time::UtcOffset::UTC);
+    }
+    let (sign, rest) = match text.as_bytes().first()? {
+        b'+' => (1i8, &text[1..]),
+        b'-' => (-1i8, &text[1..]),
+        _ => return None,
+    };
+    let (hours, minutes) = match rest.split_once(':') {
+        Some((h, m)) => (h, m),
+        // `+0800` 与 `+08` 两种写法也收：配置是人手写的。
+        None if rest.len() == 4 => (&rest[..2], &rest[2..]),
+        None => (rest, "0"),
+    };
+    let hours: i8 = hours.parse().ok()?;
+    let minutes: i8 = minutes.parse().ok()?;
+    if !(0..=23).contains(&hours) || !(0..=59).contains(&minutes) {
+        return None;
+    }
+    time::UtcOffset::from_hms(sign * hours, sign * minutes, 0).ok()
+}
+
 pub fn parse_rfc3339(text: &str) -> Option<OffsetDateTime> {
     OffsetDateTime::parse(text, &time::format_description::well_known::Rfc3339).ok()
 }
@@ -245,5 +285,43 @@ mod tests {
         assert!(text.ends_with('Z'), "统一编码为 UTC：{text}");
         assert_eq!(parse_rfc3339(&text), Some(at));
         assert_eq!(parse_rfc3339("不是时间"), None);
+    }
+}
+
+#[cfg(test)]
+mod offset_tests {
+    use super::*;
+
+    #[test]
+    fn 认得配置里写得出来的几种写法() {
+        for (text, hours) in [("+08:00", 8), ("+0800", 8), ("+08", 8), ("-05:00", -5)] {
+            let offset = parse_offset(text).unwrap_or_else(|| panic!("{text} 该认得"));
+            assert_eq!(offset.whole_hours(), hours, "{text}");
+        }
+        assert_eq!(parse_offset("UTC"), Some(time::UtcOffset::UTC));
+        assert_eq!(parse_offset("Z"), Some(time::UtcOffset::UTC));
+        assert_eq!(parse_offset("+05:30").unwrap().whole_minutes(), 330);
+    }
+
+    /// **认不出来要返回 None，不能回落到 UTC。**
+    ///
+    /// 回落的后果是一个拼错的时区让全站时刻静默偏几个小时，而没有任何东西报错。
+    #[test]
+    fn 认不出来的一律拒绝() {
+        for text in ["Asia/Shanghai", "", "08:00", "+25:00", "+08:99", "abc", "+"] {
+            assert!(parse_offset(text).is_none(), "{text:?} 不该被认成一个偏移量");
+        }
+    }
+
+    /// 存储用 UTC，展示用配置的偏移——**同一个时刻，两种写法**。
+    #[test]
+    fn 同一时刻两种写法指的是同一瞬间() {
+        let at = parse_rfc3339("2026-09-22T17:08:00Z").unwrap();
+        let shown = to_rfc3339_at(at, parse_offset("+08:00").unwrap());
+        assert_eq!(shown, "2026-09-23T01:08:00+08:00");
+        assert_eq!(parse_rfc3339(&shown).unwrap(), at, "换个写法不该换时刻");
+        // 前端按固定位置截串，新格式必须仍然截得对。
+        assert_eq!(&shown[5..10], "09-23");
+        assert_eq!(&shown[11..16], "01:08");
     }
 }

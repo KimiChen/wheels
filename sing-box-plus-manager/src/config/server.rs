@@ -116,10 +116,14 @@ fn default_max_clock_skew_secs() -> i64 {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct QuotaConfig {
-    /// 日桶所用的展示时区（data-model.md §6）。改它必须完整重建日缓存。
+    /// **控制台上的时刻按它渲染。** 落库一律是 UTC，这个只管展示。
     ///
-    /// 计费周期是 UTC+8（`CYCLE_RULE_VERSION = 2`），这里要与之对齐，
-    /// 否则某一天的用量会显示进「错误的月份」。
+    /// 计费周期是 UTC+8（`CYCLE_RULE_VERSION = 2`，一个与版本号绑死的编译期常量），
+    /// 这里要与之对齐，否则页面上的时刻与「这笔算哪个月」会各说各的。
+    /// 但两者**不是同一个东西**：改这里不会动计费口径，改计费口径要推进版本号。
+    ///
+    /// 只认固定偏移（`+08:00` / `-05:00` / `UTC`），不认 IANA 名字——
+    /// 认了就要引时区库并处理夏令时，而这里从来写的就是固定偏移。
     pub display_timezone: String,
 
     /// 拿不到新鲜已结算 sequence 时，是否下发 C33 的全零安全表。
@@ -221,7 +225,20 @@ impl ServerConfig {
         if self.quota.display_timezone.is_empty() {
             return Err(Error::invalid_config(
                 "§6",
-                "quota.display_timezone 不能为空：日桶按它的日历日计算，缺省会让日缓存无法重建",
+                "quota.display_timezone 不能为空：控制台上的时刻按它渲染，缺省就没有口径",
+            ));
+        }
+        // **解析它，不只是判非空。** 在 2026-09-23 之前这里只判了非空，于是
+        // `Asia/Shanghai`、`+8:00`、`08:00` 这类写法全都顺利通过，而没有任何
+        // 地方真的用它——症状是「配置里写着 +08:00，页面却是 UTC」。
+        // 现在它有了真实消费者（审计时刻），拼错必须在启动时就炸。
+        if crate::ledger::bucket::parse_offset(&self.quota.display_timezone).is_none() {
+            return Err(Error::invalid_config(
+                "§6",
+                format!(
+                    "quota.display_timezone = {:?} 解析不了：只认固定偏移（+08:00 / -05:00 / UTC），                     不认 IANA 时区名。认不出来就失败关闭——一个拼错的时区会让全站时刻                     静默偏几个小时，而那是最难发现的一类错",
+                    self.quota.display_timezone
+                ),
             ));
         }
         Ok(())

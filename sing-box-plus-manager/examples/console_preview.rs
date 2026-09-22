@@ -73,6 +73,7 @@ async fn main() -> anyhow::Result<()> {
         None,
         Some(proxy_manager::config::AuditConfig { dir: audit_dir, interval_secs: 600 }),
         None,
+        time::macros::offset!(+8),
         listener,
         rx,
     )

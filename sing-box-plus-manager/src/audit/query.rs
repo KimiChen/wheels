@@ -146,6 +146,9 @@ pub struct Answer {
     /// 解析不了的行数，以及带了未知键的行数。上游形状漂移的唯一信号。
     pub unparsed: usize,
     pub unexpected_keys: usize,
+    /// 页面上那些时刻用的是哪个时区。**页面据此写列头**，不写死——
+    /// 写死的话改了配置，界面会继续宣称一个它已经不再使用的时区。
+    pub display_timezone: String,
     /// 这个人**在筛选之前**有记录的全部节点，用来填页面上的筛选下拉框。
     ///
     /// **必须是筛选之前的那一份。** 用筛选之后的算，选中某台之后下拉框里
@@ -183,6 +186,7 @@ pub async fn access(
     range: Range,
     now_ms: i64,
     node: Option<&str>,
+    offset: time::UtcOffset,
 ) -> Result<Answer> {
     let identities = candidate_identities(store, subject).await?;
     // 前缀是 `access-<b64url>.jsonl`，匹配方式是 `starts_with`——于是它同时命中
@@ -210,7 +214,7 @@ pub async fn access(
         // 目录不存在 = 同步从没跑过。**这与「没有访问」是两回事**，
         // 所以回 unavailable 而不是一个空的 available。
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(empty(range, "unavailable"))
+            return Ok(empty(range, "unavailable", offset))
         }
         Err(error) => return Err(Error::Audit(format!("列审计树：{error}"))),
     };
@@ -277,13 +281,16 @@ pub async fn access(
                 node_id: node_id.clone(),
                 after_seq: None,
                 n: None,
-                at: Some(dropped.at),
+                // **缺口的时刻也要换算。** 它是落盘的 UTC 串，而行时刻已经按
+                // 展示时区渲染了——不换算的话同一页上两个时刻差 8 小时，
+                // 读者会把缺口读到另一个时段去，比整页一致地错更难发现。
+                at: Some(restate(&dropped.at, offset)),
             });
         }
     }
 
     if readable_nodes == 0 {
-        return Ok(empty(range, "unavailable"));
+        return Ok(empty(range, "unavailable", offset));
     }
 
     // **裁剪在聚合之前**（C35）。
@@ -303,9 +310,13 @@ pub async fn access(
     let keep = |name: &str| node.is_none_or(|wanted| wanted == name);
     let mut buckets: BTreeMap<(String, u16, &'static str), Row> = BTreeMap::new();
     for record in filtered.rows.iter().filter(|record| keep(&record.node)) {
-        let at = bucket::to_rfc3339(
+        // **按展示时区渲染。** 之前这里是 UTC，而使用者在 +08:00——
+        // 页面上的时刻比他的钟慢 8 小时、日期还退回前一天，看上去就是错的。
+        // 落库仍然是 UTC（`to_rfc3339`），改的只有发给界面的这一份。
+        let at = bucket::to_rfc3339_at(
             time::OffsetDateTime::from_unix_timestamp_nanos(record.ts as i128 * 1_000_000)
                 .unwrap_or(time::OffsetDateTime::UNIX_EPOCH),
+            offset,
         );
         let row = buckets
             .entry((record.host.clone(), record.port, record.host_src.as_str()))
@@ -376,11 +387,35 @@ pub async fn access(
         dropped: filtered,
         unparsed,
         unexpected_keys,
+        display_timezone: label(offset),
         nodes,
     })
 }
 
-fn empty(range: Range, state: &'static str) -> Answer {
+/// 把一个**落盘的** RFC 3339 串按展示时区重新渲染。
+///
+/// 解析不了就原样返回。缺口记录是旁路诊断信息，为了一个它自己格式不对的
+/// 时刻把整次查询判失败，等于让一条诊断记录能遮住它要诊断的那些数据。
+fn restate(stored: &str, offset: time::UtcOffset) -> String {
+    match bucket::parse_rfc3339(stored) {
+        Some(at) => bucket::to_rfc3339_at(at, offset),
+        None => stored.to_string(),
+    }
+}
+
+/// 给人看的时区标签：`UTC` / `UTC+8` / `UTC-5:30`。
+///
+/// 不直接回 `+08:00`：列头上写「UTC+8」比写「+08:00」少一次心算。
+fn label(offset: time::UtcOffset) -> String {
+    let (h, m, _) = offset.as_hms();
+    match (h, m) {
+        (0, 0) => "UTC".to_string(),
+        (h, 0) => format!("UTC{h:+}"),
+        (h, m) => format!("UTC{h:+}:{:02}", m.abs()),
+    }
+}
+
+fn empty(range: Range, state: &'static str, offset: time::UtcOffset) -> Answer {
     Answer {
         enabled: true,
         range: range.as_str().to_string(),
@@ -393,6 +428,9 @@ fn empty(range: Range, state: &'static str) -> Answer {
         latest_available_event_at: None,
         archive_delay_bounded: false,
         dropped: Filtered::default(),
+        // **不是空串。** 页面拿它写列头，空串会让列头变成「时刻（）」——
+        // 一个读者说不清是「没配时区」还是「页面坏了」的状态。
+        display_timezone: label(offset),
         nodes: Vec::new(),
         unparsed: 0,
         unexpected_keys: 0,

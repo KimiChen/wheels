@@ -198,12 +198,16 @@
       const value = pick(data, node.dataset.pmExact);
       setText(node, value == null ? "—" : exactBytes(value));
     });
-    // 紧凑时刻：`2026-09-19T06:37:20Z` → `09-19 06:37`，完整串放进 title。
+    // 紧凑时刻：`2026-09-19T14:37:20+08:00` → `09-19 14:37`，完整串放进 title。
     //
-    // **截串，不解析成 Date。** 值一律来自服务端的 `to_rfc3339`，永远是 UTC；
-    // 走一遍 Date 就会按浏览器时区重算，而那个时区与节点、与主控都可能不同——
-    // 于是同一条记录在三个地方显示出三个时刻，且没有任何地方标着这是哪个时区。
-    // 列头写明 UTC，这里只负责把它变短。
+    // **截串，不解析成 Date。** 服务端已经按 `[quota] display_timezone` 渲染好了
+    // （`bucket::to_rfc3339_at`），这里再走一遍 Date 就会按**浏览器**时区重算，
+    // 把服务端刚定好的口径覆盖掉——同一条记录于是在不同人的机器上显示成不同时刻，
+    // 而列头还统一写着服务端那个时区。这里只负责把它变短。
+    //
+    // 时区由服务端随数据一起给（`display_timezone`），列头照它写，见下面的
+    // `data-pm-audit-tz`。**页面不写死时区**：写死的话改了配置，
+    // 界面会继续宣称一个它已经不再使用的时区。
     within(root, "[data-pm-time]").forEach((node) => {
       const value = pick(data, node.dataset.pmTime);
       if (value == null) {
@@ -563,6 +567,19 @@
   //
   // **每次渲染都重建，但保留当前选择。** 服务端给的 `nodes` 是筛选**之前**
   // 算的，所以选中某一台之后它不会缩成一项——那会把人锁死在一个选项里。
+  // 列头上那个时区标签。三处时刻列共用一份，取自服务端。
+  //
+  // **空值时留着 HTML 里的字面量不动**，不要清成空字符串：清空之后列头变成
+  // 「首次记录」后面跟一个空的 `<small>`，读者说不清那是「没配时区」
+  // 还是页面坏了。服务端在任何一条返回路径上都会给出标签（连 `empty()` 都给），
+  // 所以走到这个分支本身就说明数据不对劲，此时保守显示旧值。
+  function renderAuditTimezone(label) {
+    if (!label) return;
+    for (const node of document.querySelectorAll("[data-pm-audit-tz]")) {
+      setText(node, label);
+    }
+  }
+
   function renderAuditNodes(nodes) {
     const select = document.querySelector("select[name='audit-node']");
     if (!select) return;
@@ -629,6 +646,7 @@
     // 会让人以为自己点错了地方。
     auditState.rows = data.rows ?? [];
     auditState.data = data;
+    renderAuditTimezone(data.display_timezone);
     renderAuditNodes(data.nodes);
     applyAuditSort();
     renderCollection("audit-gaps", data.gaps ?? [], "没有缺口");

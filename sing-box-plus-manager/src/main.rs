@@ -645,6 +645,12 @@ async fn run_service(config_dir: &std::path::Path) -> anyhow::Result<ExitCode> {
             Some(std::sync::Arc::new(key))
         }
     };
+    // 展示时区在**启动时**解析一次。配置校验已经保证它解析得了，
+    // 所以这里的 expect 不是在赌运气——它断言的是「校验跑过了」。
+    let display_offset =
+        proxy_manager::ledger::bucket::parse_offset(&config.server.quota.display_timezone)
+            .expect("display_timezone 已由配置校验保证可解析");
+    tracing::info!(timezone = %config.server.quota.display_timezone, "控制台时刻的展示时区");
     let api = tokio::spawn(proxy_manager::api::serve(
         store.clone(),
         nodes,
@@ -652,6 +658,7 @@ async fn run_service(config_dir: &std::path::Path) -> anyhow::Result<ExitCode> {
         config.server.subscription.clone(),
         config.server.audit.clone(),
         custom_key,
+        display_offset,
         listener,
         shutdown_rx.clone(),
     ));
