@@ -40,6 +40,7 @@ pub fn purpose(kind: Kind, user_id: i64) -> String {
 pub enum Kind {
     Proxy,
     Socks5,
+    Rules,
 }
 
 impl Kind {
@@ -47,6 +48,7 @@ impl Kind {
         match self {
             Kind::Proxy => "proxy",
             Kind::Socks5 => "socks5",
+            Kind::Rules => "rules",
         }
     }
 }

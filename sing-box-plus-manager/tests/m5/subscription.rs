@@ -1378,7 +1378,12 @@ fn render_with(custom: CustomNodes<'_>) -> String {
 #[tokio::test]
 async fn 自定义上游进订阅且带前缀() {
     let proxies = vec![stored_proxy(1, "ss://YWVzLTI1Ni1nY206cHc@up.example:8388", "家里")];
-    let yaml = render_with(CustomNodes { proxies: &proxies, socks5: &[] });
+    let yaml = render_with(CustomNodes {
+        proxies: &proxies,
+        socks5: &[],
+        rules: &[],
+        login_name: "alice",
+    });
 
     assert!(yaml.contains(r#"- name: "Custom-家里""#), "该带 Custom- 前缀：{yaml}");
     assert!(yaml.contains("server: \"up.example\""), "{yaml}");
@@ -1399,7 +1404,12 @@ async fn 自定义上游进订阅且带前缀() {
 async fn socks5带自动生成的拨号组() {
     let proxies = vec![stored_proxy(1, "ss://YWVzLTI1Ni1nY206cHc@up.example:8388", "家里")];
     let socks = vec![stored_socks(1, "落地", "家里")];
-    let yaml = render_with(CustomNodes { proxies: &proxies, socks5: &socks });
+    let yaml = render_with(CustomNodes {
+        proxies: &proxies,
+        socks5: &socks,
+        rules: &[],
+        login_name: "alice",
+    });
 
     assert!(yaml.contains(r#"- name: "Socks5-落地""#), "{yaml}");
     assert!(
@@ -1423,7 +1433,8 @@ async fn socks5带自动生成的拨号组() {
 #[tokio::test]
 async fn socks5的前置可以是direct() {
     let socks = vec![stored_socks(1, "落地", "DIRECT")];
-    let yaml = render_with(CustomNodes { proxies: &[], socks5: &socks });
+    let yaml =
+        render_with(CustomNodes { proxies: &[], socks5: &socks, rules: &[], login_name: "alice" });
     let groups = &yaml[yaml.find("\nproxy-groups:").expect("应当有代理组段")..];
     let block = &groups[groups.find(r#"- name: "Socks5-落地-先选前置节点""#).unwrap()..];
     let direct = block.find(r#"- "DIRECT""#).unwrap();
@@ -1445,9 +1456,16 @@ async fn 自定义节点与受管入口重名时整体丢弃并说明() {
         stored_proxy(2, "ss://YWVzLTI1Ni1nY206cHc@other.example:8388", "家里"),
     ];
     // 先证明不重名时它是进得去的——否则下面那条断言可能是因为别的原因绿的。
-    assert!(render_with(CustomNodes { proxies: &proxies, socks5: &[] }).contains("Custom-家里"));
+    assert!(render_with(CustomNodes {
+        proxies: &proxies,
+        socks5: &[],
+        rules: &[],
+        login_name: "alice"
+    })
+    .contains("Custom-家里"));
 
-    let yaml = render_with(CustomNodes { proxies: &dup, socks5: &[] });
+    let yaml =
+        render_with(CustomNodes { proxies: &dup, socks5: &[], rules: &[], login_name: "alice" });
     // 断的是「不作为节点出现」而不是「文本里没有这个词」——
     // 文件头那句说明里**会**带上冲突的名字，那是它该有的样子。
     assert!(!yaml.contains(r#"- name: "Custom-家里""#), "重名时该整体丢弃：{yaml}");
@@ -1460,7 +1478,8 @@ async fn 自定义节点与受管入口重名时整体丢弃并说明() {
 #[tokio::test]
 async fn socks5前置不存在时整体丢弃() {
     let socks = vec![stored_socks(1, "落地", "并不存在的上游")];
-    let yaml = render_with(CustomNodes { proxies: &[], socks5: &socks });
+    let yaml =
+        render_with(CustomNodes { proxies: &[], socks5: &socks, rules: &[], login_name: "alice" });
     assert!(!yaml.contains(r#"- name: "Socks5-落地""#), "{yaml}");
     assert!(yaml.contains("你的自定义节点这次没有发出来"), "{yaml}");
     assert!(yaml.contains(r#"- name: "HK""#), "受管入口不该被牵连：{yaml}");
@@ -1471,9 +1490,94 @@ async fn socks5前置不存在时整体丢弃() {
 #[tokio::test]
 async fn 没有自定义节点时订阅不变() {
     let with_none = render_with(CustomNodes::NONE);
-    let with_empty = render_with(CustomNodes { proxies: &[], socks5: &[] });
+    let with_empty =
+        render_with(CustomNodes { proxies: &[], socks5: &[], rules: &[], login_name: "alice" });
     assert_eq!(with_none, with_empty);
     assert!(!with_none.contains("Custom-"), "{with_none}");
     assert!(!with_none.contains("Socks5-"), "{with_none}");
     assert!(!with_none.contains("你的自定义节点"), "没有就不该有那句说明：{with_none}");
+}
+
+// ============ 自定义分流规则 ============
+
+use proxy_manager::custom::rules::{normalize, RuleKind};
+
+fn render_rules(rules: &[proxy_manager::custom::rules::Rule]) -> String {
+    let config = fixture_config();
+    let credentials = proxy_manager::config::Credentials {
+        method: "2022-blake3-aes-128-gcm".into(),
+        ipsk: "aXBzaw==".into(),
+        upsk: [("slot-01".to_string(), "dXBzaw==".to_string())].into_iter().collect(),
+        uuid: [("slot-01".to_string(), "9ba335c9-0d3e-48a4-9f2e-28614c264a2d".to_string())]
+            .into_iter()
+            .collect(),
+    };
+    let visible = std::collections::BTreeSet::from(["n"]);
+    proxy_manager::subscription::render::clash_yaml(
+        &config,
+        ss_source(&config),
+        &credentials,
+        "slot-01",
+        "Lan-alice",
+        &visible,
+        CustomNodes { proxies: &[], socks5: &[], rules, login_name: "alice" },
+    )
+}
+
+/// **规则必须排在内建规则之前。**
+///
+/// Clash 首条匹配即生效，而内建那 262 条已经把常见域名全匹配走了。
+/// 排在后面等于完全不起作用，而用户看到的是「规则加了但没反应」——
+/// 一个没有任何报错的失败。这条用例是这个功能能不能用的前提。
+#[tokio::test]
+async fn 自定义规则排在内建规则之前() {
+    let rules = vec![normalize(RuleKind::DomainSuffix, "anthropic.com").unwrap()];
+    let yaml = render_rules(&rules);
+
+    let mine = yaml.find("DOMAIN-SUFFIX,anthropic.com,Rules-alice").expect("自定义规则该在");
+    let builtin = yaml.find("DOMAIN-SUFFIX,anthropic.com,海外AI").expect("内建那条也该在");
+    assert!(mine < builtin, "自定义规则必须排在内建之前，否则永远不生效");
+
+    // 而且要在 `rules:` 之后——插错位置会让它落进 proxy-groups 段里。
+    let head = yaml.find("\nrules:").expect("该有 rules 段");
+    assert!(head < mine, "规则要在 rules: 段里");
+}
+
+#[tokio::test]
+async fn 规则组带全部可选出口() {
+    let rules = vec![normalize(RuleKind::IpCidr, "10.0.0.0/8").unwrap()];
+    let yaml = render_rules(&rules);
+    let groups = &yaml[yaml.find("\nproxy-groups:").expect("该有代理组段")
+        ..yaml.find("\nrules:").expect("该有规则段")];
+    let start = groups.find(r#"- name: "Rules-alice""#).expect("该有规则组");
+    let block = &groups[start..];
+    assert!(block.contains(r#"- "HK""#), "受管入口该是候选：{block}");
+    // **DIRECT 一定在**：组空了 Clash 拒整份配置，而低档位用户可能一个入口都看不见。
+    assert!(block.contains(r#"- "DIRECT""#), "DIRECT 该兜底：{block}");
+    assert!(yaml.contains("IP-CIDR,10.0.0.0/8,Rules-alice"), "{yaml}");
+}
+
+/// 没有规则时**一个字都不多**：不生成组、不插规则、订阅与从前逐字节相同。
+#[tokio::test]
+async fn 没有规则时订阅不变() {
+    let with_rules = render_rules(&[]);
+    let baseline = render_with(CustomNodes::NONE);
+    assert_eq!(with_rules, baseline, "没有规则就不该有任何差异");
+    assert!(!with_rules.contains("Rules-"), "{with_rules}");
+    assert!(!with_rules.contains("我的自定义规则"), "{with_rules}");
+}
+
+/// 规则之间**保序**——顺序就是优先级，乱序等于改了语义。
+#[tokio::test]
+async fn 规则保序() {
+    let rules = vec![
+        normalize(RuleKind::DomainSuffix, "first.example").unwrap(),
+        normalize(RuleKind::DomainSuffix, "second.example").unwrap(),
+        normalize(RuleKind::DomainSuffix, "third.example").unwrap(),
+    ];
+    let yaml = render_rules(&rules);
+    let a = yaml.find("first.example").unwrap();
+    let b = yaml.find("second.example").unwrap();
+    let c = yaml.find("third.example").unwrap();
+    assert!(a < b && b < c, "规则顺序必须保持");
 }

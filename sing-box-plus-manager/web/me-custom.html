@@ -144,6 +144,7 @@
                    而不是显示成「无权访问」——没有记录可看和不让你看是两回事。 -->
               <a href="me-audit.html" data-roles="admin user">我的出站目标</a>
               <a href="me-custom.html" data-roles="admin user">我的自定义节点</a>
+              <a href="me-custom-rules.html" data-roles="admin user">我的分流规则</a>
             </div>
 
             <p class="wsk-panel-title" data-roles="admin">运行监控</p>
@@ -190,7 +191,26 @@
               <div class="wsk-panel pm-custom-note">
                 <h2 id="me-custom-note" class="wsk-panel-title">使用须知</h2>
                 <ul>
-                  <li>走自定义节点的流量<strong>不计入用量、不受额度约束、也不出现在「我的出站目标」里</strong>——它没有经过我们的节点。</li>
+                  <!--
+                    **别写成「走自定义节点的流量都不计费」。** 那是把两种情形
+                    混成一句，而其中一种是反的：SOCKS5 的 dialer-proxy 语义是
+                    「连到 SOCKS5 服务器的这条连接本身从前置节点拨出去」，
+                    所以前置选了受管入口时，流量整条都经过我们的节点、全额计费。
+                    判据是**前置选了谁**，不是「是不是自定义节点」。
+                  -->
+                  <li>
+                    <strong>自定义上游</strong>的流量不经过我们的节点：<strong>不计入用量、不受额度约束、也不出现在「我的出站目标」里</strong>。
+                  </li>
+                  <li>
+                    <strong>SOCKS5 落地要看前置节点选了谁</strong>——连到 SOCKS5 服务器的那条连接是从前置拨出去的：
+                    <ul>
+                      <li>前置是 <code>DIRECT</code> 或你自己的自定义上游 → 不经过我们的节点，<strong>不计费</strong>。</li>
+                      <li>前置是我们的受管入口 → 流量整条经过我们的节点，<strong>照常计入用量、照常受额度约束</strong>。</li>
+                    </ul>
+                  </li>
+                  <li>
+                    这种情况下「我的出站目标」里出现的是<strong>你那台 SOCKS5 服务器的地址</strong>，不是你实际访问的站点——真实目标在 SOCKS5 协议内部，我们的节点看不见。
+                  </li>
                   <li>改完之后要在客户端里<strong>重新拉一次订阅</strong>才会生效。</li>
                   <li>节点在客户端里显示为 <code>Custom-你的名字</code> 与 <code>Socks5-你的名字</code>。</li>
                 </ul>

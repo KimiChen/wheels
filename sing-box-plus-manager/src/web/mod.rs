@@ -30,6 +30,7 @@ const PAGES: &[(&str, Visibility)] = &[
     ("me-usage.html", Visibility::Authenticated),
     ("me-audit.html", Visibility::Authenticated),
     ("me-custom.html", Visibility::Authenticated),
+    ("me-custom-rules.html", Visibility::Authenticated),
     // 管理面。
     ("overview.html", Visibility::AdminOnly),
     ("nodes.html", Visibility::AdminOnly),
@@ -61,6 +62,7 @@ const PAGE_BODIES: &[(&str, &str)] = &[
     page!("me-usage.html"),
     page!("me-audit.html"),
     page!("me-custom.html"),
+    page!("me-custom-rules.html"),
     page!("overview.html"),
     page!("nodes.html"),
     page!("alerts.html"),

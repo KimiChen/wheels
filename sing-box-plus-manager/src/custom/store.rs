@@ -440,3 +440,67 @@ fn seal<T: serde::Serialize>(
         .map_err(|error| CustomError::Internal(Error::Codec(format!("配置编码失败：{error}"))))?;
     crypto.encrypt(&plain, &crypto::purpose(kind, user_id)).map_err(CustomError::Internal)
 }
+
+// ============ 分流规则 ============
+//
+// **一人一行**，整份规则表存成一个加密 blob（`schema/09`）。
+// 顺序即优先级，所以它是一个有序列表而不是一组行。
+
+/// 读这个人的规则表。没有那一行就是空表——**不是错误**：
+/// 「还没加过规则」是常态，不是需要处置的状态。
+pub async fn load_rules(
+    store: &Store,
+    crypto: &CryptoBox,
+    user_id: i64,
+) -> Result<crate::custom::rules::RuleSet> {
+    let row: Option<(String,)> =
+        sqlx::query_as("SELECT config_ciphertext FROM custom_rules WHERE user_id = ?")
+            .bind(user_id)
+            .fetch_optional(store.readers())
+            .await?;
+    let Some((ciphertext,)) = row else { return Ok(Vec::new()) };
+    let plain = crypto
+        .decrypt(&ciphertext, &crypto::purpose(Kind::Rules, user_id))
+        .map_err(CustomError::Internal)?;
+    serde_json::from_str(&plain)
+        .map_err(|error| CustomError::Internal(Error::Codec(format!("规则解码失败：{error}"))))
+}
+
+/// 整份替换。**没有「加一条」的接口**：规则是有序的，
+/// 而「加在哪」「删哪一条」「换个顺序」在一个有序列表上是同一件事——
+/// 做成三个接口只会让它们在某次改动里对顺序的理解分家。
+pub async fn save_rules(
+    store: &Store,
+    crypto: &CryptoBox,
+    user_id: i64,
+    rules: &crate::custom::rules::RuleSet,
+) -> Result<()> {
+    crate::custom::rules::validate_set(rules)?;
+    let sealed = seal(crypto, Kind::Rules, user_id, rules)?;
+    let stamp = now();
+    let mut txn = store.begin_immediate().await.map_err(CustomError::Internal)?;
+    if rules.is_empty() {
+        // 空表就把那一行删掉，不留一个装着 `[]` 的行。
+        // 留着的话「有没有规则」要看两处（行在不在、数组空不空），
+        // 而两处迟早会给出不同的答案。
+        sqlx::query("DELETE FROM custom_rules WHERE user_id = ?")
+            .bind(user_id)
+            .execute(txn.conn())
+            .await?;
+    } else {
+        sqlx::query(
+            "INSERT INTO custom_rules(user_id, config_version, config_ciphertext, \
+             created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?4) \
+             ON CONFLICT(user_id) DO UPDATE SET \
+               config_version = ?2, config_ciphertext = ?3, updated_at = ?4",
+        )
+        .bind(user_id)
+        .bind(crypto::CURRENT_VERSION)
+        .bind(&sealed)
+        .bind(&stamp)
+        .execute(txn.conn())
+        .await?;
+    }
+    txn.commit().await.map_err(CustomError::Internal)?;
+    Ok(())
+}

@@ -304,3 +304,63 @@ pub async fn delete_socks5(
     store::delete_socks5(&state.store, crypto, subject.user_id, id).await.map_err(map_error)?;
     Ok(Json(json!({ "ok": true })))
 }
+
+// ============ 分流规则 ============
+
+/// `GET /api/v1/me/custom/rules`
+pub async fn list_rules(
+    State(state): State<AppState>,
+    subject: Subject,
+) -> ApiResult<impl IntoResponse> {
+    let Ok(crypto) = key(&state) else {
+        return Ok(Json(json!({ "enabled": false, "rules": [], "group_name": null })));
+    };
+    let rules = crate::custom::store::load_rules(&state.store, crypto, subject.user_id)
+        .await
+        .map_err(map_error)?;
+    Ok(Json(json!({
+        "enabled": true,
+        "rules": rules,
+        // 页面要告诉用户「这些规则会送进哪个组」，而那个名字由登录名决定。
+        "group_name": crate::custom::rules::group_name(&subject.login_name),
+        "max": crate::custom::rules::MAX_RULES,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RulesBody {
+    pub rules: Vec<RuleInput>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuleInput {
+    pub kind: crate::custom::rules::RuleKind,
+    pub value: String,
+}
+
+/// `PUT /api/v1/me/custom/rules` —— **整份替换**。
+///
+/// 没有「加一条 / 删一条」的接口：规则是有序的，而增删改序在一个有序列表上
+/// 是同一件事。拆成三个接口只会让它们在某次改动里对顺序的理解分家。
+pub async fn replace_rules(
+    State(state): State<AppState>,
+    WriteSubject(subject): WriteSubject,
+    Json(body): Json<RulesBody>,
+) -> ApiResult<impl IntoResponse> {
+    let crypto = key(&state)?;
+    let mut rules = Vec::with_capacity(body.rules.len());
+    for (index, input) in body.rules.iter().enumerate() {
+        // 报错要说清是**第几条**。整份提交时只说「规则无效」，
+        // 用户要在几十条里自己找是哪一条。
+        rules.push(
+            crate::custom::rules::normalize(input.kind, &input.value)
+                .map_err(|error| ApiError::invalid(format!("第 {} 条：{error}", index + 1)))?,
+        );
+    }
+    crate::custom::store::save_rules(&state.store, crypto, subject.user_id, &rules)
+        .await
+        .map_err(map_error)?;
+    Ok(Json(json!({ "ok": true, "count": rules.len() })))
+}

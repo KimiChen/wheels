@@ -20,6 +20,7 @@
 //! 与「有身份没凭据」时发一份明说的空配置是同一条口径。
 
 use crate::custom::parse::{CustomProxy, CustomSocks5, Protocol};
+use crate::custom::rules::{group_name, Rule};
 use crate::custom::store::{
     custom_proxy_name, dialer_group_name, socks5_node_name, StoredProxy, StoredSocks5,
 };
@@ -30,14 +31,25 @@ use crate::subscription::render::yaml_string;
 pub struct CustomNodes<'a> {
     pub proxies: &'a [StoredProxy],
     pub socks5: &'a [StoredSocks5],
+    /// 分流规则，**顺序即优先级**。空表示这个人没加过规则。
+    pub rules: &'a [Rule],
+    /// 登录名。只用来拼 `Rules-<登录名>` 那个组的名字。
+    pub login_name: &'a str,
 }
 
 impl CustomNodes<'_> {
     /// 没有自定义节点。受管订阅与用例走这一条。
-    pub const NONE: CustomNodes<'static> = CustomNodes { proxies: &[], socks5: &[] };
+    pub const NONE: CustomNodes<'static> =
+        CustomNodes { proxies: &[], socks5: &[], rules: &[], login_name: "" };
 
     pub fn is_empty(&self) -> bool {
-        self.proxies.is_empty() && self.socks5.is_empty()
+        self.proxies.is_empty() && self.socks5.is_empty() && self.rules.is_empty()
+    }
+
+    /// 分流规则那个组叫什么。没有规则时不生成这个组——
+    /// 一个没有任何规则指向它的组在客户端里是纯粹的干扰项。
+    pub fn rules_group(&self) -> Option<String> {
+        (!self.rules.is_empty() && !self.login_name.is_empty()).then(|| group_name(self.login_name))
     }
 
     /// 渲染后额外出现的**节点**名（不含拨号组）。要追加进每个现有代理组。
@@ -71,6 +83,11 @@ impl CustomNodes<'_> {
         for socks in self.socks5 {
             push(socks5_node_name(&socks.config.name), &mut seen)?;
             push(dialer_group_name(&socks.config.name), &mut seen)?;
+        }
+        // 规则组同样进重名判定。`Rules-` 与 `Custom-` / `Socks5-` 分属三个
+        // 命名空间，今天撞不上——但「今天撞不上」不是约束，改前缀就会撞。
+        if let Some(name) = self.rules_group() {
+            push(name, &mut seen)?;
         }
         // 每条 SOCKS5 的前置必须指向一个**渲染后真实存在**的名字。
         // 指不到就是悬空引用，而悬空引用让 Clash 拒绝整份配置。
@@ -123,6 +140,40 @@ impl CustomNodes<'_> {
             for option in options {
                 out.push_str(&format!("      - {}\n", yaml_string(&option)));
             }
+        }
+    }
+}
+
+impl CustomNodes<'_> {
+    /// `Rules-<登录名>` 那个组。成员是「这个人能选的全部出口」：
+    /// 受管入口 + 自己的自定义节点 + DIRECT。
+    ///
+    /// **DIRECT 一定在**：组空了 Clash 会拒绝整份配置，而一个连受管入口
+    /// 都看不见的低档位用户恰好会走到那一支。
+    pub fn render_rules_group(&self, out: &mut String, managed_nodes: &[&str]) {
+        let Some(name) = self.rules_group() else { return };
+        out.push_str(&format!("  - name: {}\n", yaml_string(&name)));
+        out.push_str("    type: select\n    proxies:\n");
+        let mut members: Vec<String> = managed_nodes.iter().map(|s| s.to_string()).collect();
+        members.extend(self.node_names());
+        members.push("DIRECT".to_string());
+        for member in members {
+            out.push_str(&format!("      - {}\n", yaml_string(&member)));
+        }
+    }
+
+    /// 自定义规则的文本，**要插在 `rules:` 的第一条**。
+    ///
+    /// Clash 首条匹配即生效，而内建那 262 条已经把常见域名全匹配走了。
+    /// 插在后面的话「我想让 claude.ai 走自己的节点」完全不起作用，
+    /// 而用户看到的是「规则加了但没反应」——一个没有任何报错的失败。
+    pub fn render_rules(&self, out: &mut String) {
+        let Some(group) = self.rules_group() else { return };
+        out.push_str("\n  # ========== 我的自定义规则（优先级最高） ==========\n");
+        for rule in self.rules {
+            // 内容里的逗号在入库时就挡掉了（`rules::normalize`），
+            // 所以这里拼出来的一定是三段。
+            out.push_str(&format!("  - {},{},{}\n", rule.kind.as_clash(), rule.value, group));
         }
     }
 }

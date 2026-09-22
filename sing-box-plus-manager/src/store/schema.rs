@@ -24,6 +24,7 @@ const PARTS: &[(&str, &str)] = &[
     ("06_session", include_str!("../../schema/06_session.sql")),
     ("07_subscription", include_str!("../../schema/07_subscription.sql")),
     ("08_custom_nodes", include_str!("../../schema/08_custom_nodes.sql")),
+    ("09_custom_rules", include_str!("../../schema/09_custom_rules.sql")),
 ];
 
 /// 期望的表集合。与 `schema/` 下的 DDL 手工对齐，
@@ -32,6 +33,7 @@ const PARTS: &[(&str, &str)] = &[
 pub const EXPECTED_TABLES: &[&str] = &[
     "counter_cursors",
     "custom_proxies",
+    "custom_rules",
     "custom_socks5",
     "identity_assignment_events",
     "identity_routes",

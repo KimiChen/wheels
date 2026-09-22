@@ -18,7 +18,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light dark" />
     <meta name="robots" content="noindex, nofollow" />
-    <title>我的用量 · proxy-manager 控制台</title>
+    <title>我的分流规则 · proxy-manager 控制台</title>
     <script src="assets/theme.js"></script>
     <link rel="stylesheet" href="../../web-standard-kit/style.css" />
     <link rel="stylesheet" href="assets/console.css" />
@@ -172,97 +172,102 @@
             同一条假 P1——看几天之后就再也不会认真看告警了。整块删掉，
             而不是靠 app.js 在运行时把它摘走。 -->
 
-          <div class="wsk-page">
-            <div class="wsk-page-head" id="me-usage">
+          <div class="wsk-page pm-custom-page">
+            <div class="wsk-page-head" id="me-custom-rules">
               <div>
-                <p class="wsk-panel-title">MY TRAFFIC</p>
-                <h1 tabindex="-1">我的用量</h1>
-                <p>当前计费周期内的个人流量与节点分布。</p>
+                <p class="wsk-panel-title">MY RULES</p>
+                <h1 tabindex="-1">我的分流规则</h1>
+                <p>指定某个域名或网段走哪里，规则会进一个只属于你的代理组。</p>
               </div>
             </div>
 
-            <!--
-              这张图在真实模式下画的也是 app.js 里那组硬编码的点，三个时间范围按钮
-              一个都不接线：`/api/v1/usage/trend` 是**管理员端点**，本人没有对应的趋势端点。
-              一张按自己名字画出来的假曲线，比没有这张图糟得多。
-            -->
-            <section class="wsk-section" aria-labelledby="me-trend"
-                     data-pm-prototype="个人趋势图还没有对应端点（/api/v1/usage/trend 是管理员端点）。下面「按节点分布」那张表是真实数据">
+            <section class="wsk-section" aria-labelledby="me-rules-note">
+              <div class="wsk-panel pm-custom-note">
+                <h2 id="me-rules-note" class="wsk-panel-title">使用须知</h2>
+                <ul>
+                  <li>命中规则的流量送进 <code data-pm="group_name">Rules-你的名字</code> 这个组，<strong>从哪里出去在客户端里选</strong>——候选是全部受管入口、你自己的自定义节点，以及 DIRECT。</li>
+                  <!--
+                    **优先级这一条必须说，而且必须连代价一起说。**
+                    它排在内建 262 条之前，所以能覆盖既有分流——这正是它有用的
+                    原因，也正是它能把事情搞砸的原因。不说的话，一个人用
+                    DOMAIN-KEYWORD,google 会把搜索、邮箱、网盘一起改了道，
+                    而他只想改一个站点。
+                  -->
+                  <li>你的规则<strong>排在所有内建规则之前</strong>，所以能覆盖它们；反过来说，<strong>写错一条能把已有分流搞乱</strong>，关键字匹配尤其容易。</li>
+                  <li>计不计费<strong>看你在那个组里选了谁</strong>：选受管入口照常计入用量，选 DIRECT 或自己的自定义上游则不计。详见<a href="me-custom.html">我的自定义节点</a>。</li>
+                  <li>改完之后要在客户端里<strong>重新拉一次订阅</strong>才会生效。</li>
+                </ul>
+              </div>
+            </section>
+
+            <section class="wsk-section" aria-labelledby="me-rules-disabled" hidden data-pm-rules-disabled>
+              <div class="wsk-panel">
+                <h2 id="me-rules-disabled" class="wsk-panel-title">未启用</h2>
+                <p class="pm-custom-description">服务端没有开启自定义节点功能。这不是加载失败，刷新也不会变——请联系管理员。</p>
+              </div>
+            </section>
+
+            <div data-pm-rules-enabled hidden>
+            <section class="wsk-section" aria-labelledby="me-rules-list">
               <div class="wsk-section-head">
-                <h2 id="me-trend">趋势</h2>
-                <fieldset class="wsk-segmented">
-                  <legend class="wsk-sr-only">时间范围</legend>
-                  <label><input type="radio" name="me-range" value="24h" checked /><span>近 24 小时</span></label
-                  ><label><input type="radio" name="me-range" value="7d" /><span>近 7 天</span></label
-                  ><label><input type="radio" name="me-range" value="30d" /><span>近 30 天</span></label>
-                </fieldset>
+                <h2 id="me-rules-list">规则</h2>
+                <p class="wsk-help"><span data-pm-rule-count>0</span> / <span data-pm="max">200</span> 条</p>
               </div>
               <div class="wsk-panel">
-                <svg
-                  id="me-chart-svg"
-                  viewBox="0 0 720 220"
-                  role="img"
-                  aria-label="我的近 24 小时流量趋势"
-                  style="width: 100%; height: auto"
-                ></svg>
-              </div>
-            </section>
-
-            <section class="wsk-section" aria-labelledby="me-nodes">
-              <div class="wsk-section-head">
-                <h3 id="me-nodes">按节点分布</h3>
-              </div>
-              <div class="wsk-table-wrap">
-                <table class="wsk-table pm-personal-usage" data-pm-collection="me-usage">
-                  <caption class="wsk-sr-only">我在各节点的用量</caption>
+                <p class="pm-custom-description">从上到下依次匹配，<strong>第一条命中的说了算</strong>。用 ↑ ↓ 调整顺序。</p>
+                <div class="wsk-table-wrap" role="region" aria-label="规则列表" tabindex="0">
+                <table class="wsk-table">
+                  <caption class="wsk-sr-only">我的分流规则，按优先级从高到低</caption>
                   <thead>
-                    <tr><th scope="col">节点</th><th scope="col">本周期用量</th><th scope="col">量级</th></tr>
+                    <tr>
+                      <th scope="col">#</th>
+                      <th scope="col">类型</th>
+                      <th scope="col">内容</th>
+                      <th scope="col"><span class="wsk-sr-only">操作</span></th>
+                    </tr>
                   </thead>
-                  <tbody>
-                    <tr><th scope="row">node-a</th><td class="wsk-tok-number">620,144,220,160</td><td>69%</td></tr>
-                    <tr><th scope="row">node-b</th><td class="wsk-tok-number">208,077,109,760</td><td>23%</td></tr>
-                    <tr><th scope="row">node-c<small>历史授权</small></th><td class="wsk-tok-number">73,003,000,192</td><td>8%</td></tr>
-                    <tr data-table-empty hidden><td colspan="3" class="wsk-help" data-pm-empty-text>暂无数据</td></tr>
+                  <tbody data-pm-collection="custom-rules">
+                    <tr data-table-empty hidden><td colspan="4" data-pm-empty-text>还没有规则。</td></tr>
                     <template data-pm-template>
-                      <tr data-row>
-                        <th scope="row" data-pm="node_id"></th>
-                        <td class="wsk-tok-number" data-pm-exact="total_bytes"></td>
-                        <td data-pm-bytes="total_bytes"></td>
+                      <tr>
+                        <th scope="row" data-pm="position"></th>
+                        <td data-pm="kind_label"></td>
+                        <td><code data-pm="value"></code></td>
+                        <td>
+                          <!-- 顺序即优先级，所以上移下移是真操作，不是装饰。 -->
+                          <button type="button" class="wsk-button wsk-secondary" data-pm-rule-move="up" data-pm-attr="data-kind:kind data-value:value" aria-label="上移">↑</button>
+                          <button type="button" class="wsk-button wsk-secondary" data-pm-rule-move="down" data-pm-attr="data-kind:kind data-value:value" aria-label="下移">↓</button>
+                          <button type="button" class="wsk-button wsk-secondary" data-pm-rule-delete data-pm-attr="data-kind:kind data-value:value data-label:label">删除</button>
+                        </td>
                       </tr>
                     </template>
                   </tbody>
                 </table>
-              </div>
-              <p class="wsk-help wsk-mt-2">
-                包含本周期曾使用过的节点，停止授权后历史用量仍会保留。
-              </p>
-            </section>
+                </div>
 
-            <section class="wsk-section" aria-labelledby="me-sources">
-              <div class="wsk-section-head">
-                <h3 id="me-sources">按来源分布</h3>
-              </div>
-              <div class="wsk-table-wrap">
-                <table class="wsk-table pm-personal-usage" data-pm-collection="me-sources">
-                  <caption class="wsk-sr-only">我在各来源的用量</caption>
-                  <thead>
-                    <tr><th scope="col">来源</th><th scope="col">本周期用量</th><th scope="col">量级</th></tr>
-                  </thead>
-                  <tbody>
-                    <tr><th scope="row">公网</th><td class="wsk-tok-number">620,144,220,160</td><td>69%</td></tr>
-                    <tr><th scope="row">公司内网</th><td class="wsk-tok-number">208,077,109,760</td><td>23%</td></tr>
-                    <tr data-table-empty hidden><td colspan="3" class="wsk-help" data-pm-empty-text>暂无数据</td></tr>
-                    <template data-pm-template>
-                      <tr data-row>
-                        <th scope="row" data-pm="label"></th>
-                        <td class="wsk-tok-number" data-pm-exact="total_bytes"></td>
-                        <td data-pm-bytes="total_bytes"></td>
-                      </tr>
-                    </template>
-                  </tbody>
-                </table>
+                <form class="pm-custom-form" data-pm-add-rule>
+                  <h3>添加规则</h3>
+                  <label class="wsk-field">类型
+                    <select class="wsk-select" name="kind" required>
+                      <option value="domain-suffix">域名及其子域（DOMAIN-SUFFIX）</option>
+                      <option value="domain">仅这一个域名（DOMAIN）</option>
+                      <option value="domain-keyword">域名含关键字（DOMAIN-KEYWORD）</option>
+                      <option value="ip-cidr">IPv4 网段（IP-CIDR）</option>
+                      <option value="ip-cidr6">IPv6 网段（IP-CIDR6）</option>
+                    </select>
+                  </label>
+                  <label class="wsk-field pm-custom-wide">内容
+                    <input class="wsk-control" type="text" name="value" required placeholder="example.com 或 10.0.0.0/8" />
+                  </label>
+                  <p class="pm-custom-hint">网段要写成已取整的形式（<code>10.0.0.0/8</code>，不是 <code>10.0.0.5/8</code>）。关键字匹配<strong>最容易误伤</strong>：<code>google</code> 会同时命中搜索、邮箱和网盘。</p>
+                  <button type="submit" class="wsk-button">添加规则</button>
+                </form>
               </div>
             </section>
+            </div>
+
+            <!-- 操作结果。成功与失败共用一个位置，免得两条相反的结论同时在屏幕上。 -->
+            <p class="wsk-callout" role="status" data-pm-rules-status hidden></p>
           </div>
         </div>
       </div>
@@ -280,6 +285,7 @@
         >
       </div>
     </footer>
+
 
     <div class="wsk-toast-region" id="toast-region" aria-live="polite"></div>
   </body>

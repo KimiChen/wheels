@@ -5,4 +5,5 @@
 
 pub mod crypto;
 pub mod parse;
+pub mod rules;
 pub mod store;

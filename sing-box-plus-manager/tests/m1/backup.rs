@@ -681,3 +681,52 @@ async fn 改注释与排版不算漂移() {
     let empty = fingerprint_of("CREATE TABLE t(a TEXT NOT NULL DEFAULT '', b TEXT) STRICT;").await;
     assert_ne!(dashes, empty, "默认值里的两横不是注释");
 }
+
+/// **改 schema 文件里的注释，不会让已有的库漂移。**
+///
+/// 指纹的规范化会剥掉 `--` 与 `/* */`（`store::schema::normalize_ddl`），
+/// 所以 `schema/` 下那些长注释是可以改的——这正是它们敢写这么长的前提。
+///
+/// 不钉住的话，哪天有人「顺手」把规范化里剥注释那一步去掉，后果不是用例变红，
+/// 是**下一次改注释之后主控起不来**，而原因看着与注释毫无关系。
+///
+/// 2026-09-22 改 `schema/08` 的计费说明时实测过这条路径。
+#[tokio::test]
+async fn 只改注释不会让已有库漂移() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("commented.db");
+    let config =
+        proxy_manager::config::StorageConfig { path: path.clone(), busy_timeout_ms: 5_000 };
+    let store = Store::open(&config).await.unwrap();
+    store.init_schema().await.unwrap();
+
+    // 建好之后，往其中一张表的 DDL 里塞一段注释——用重建的方式，
+    // 因为 SQLite 不允许直接改 sqlite_master。
+    // 这里走的是**真实形状**：把整张表按「带新注释的 DDL」重建一遍。
+    let mut txn = store.begin_immediate().await.unwrap();
+    sqlx::query("DROP TABLE custom_socks5").execute(txn.conn()).await.unwrap();
+    sqlx::raw_sql(
+        "-- 一段全新的注释，讲一件与结构无关的事。\n\
+         -- 第二行，里面还有 'CREATE TABLE' 这种会骗到粗糙解析器的字样。\n\
+         CREATE TABLE custom_socks5 (\n\
+             custom_socks5_id  INTEGER PRIMARY KEY AUTOINCREMENT,\n\
+             user_id           INTEGER NOT NULL REFERENCES users(user_id),\n\
+             name              TEXT NOT NULL, -- 行尾注释也要能剥掉\n\
+             config_version    INTEGER NOT NULL CHECK(config_version >= 1),\n\
+             config_ciphertext TEXT NOT NULL,\n\
+             created_at        TEXT NOT NULL,\n\
+             updated_at        TEXT NOT NULL,\n\
+             UNIQUE(user_id, name)\n\
+         ) STRICT;\n\
+         CREATE INDEX idx_custom_socks5_user ON custom_socks5(user_id, custom_socks5_id);",
+    )
+    .execute(txn.conn())
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+
+    // 走与生产同一条路：`store::verify` 就是这么取连接、这么判的。
+    let report = verify(&store).await.unwrap();
+    assert!(report.schema_drift.is_empty(), "只改注释不该漂移，实际：{:?}", report.schema_drift);
+    store.close().await;
+}
