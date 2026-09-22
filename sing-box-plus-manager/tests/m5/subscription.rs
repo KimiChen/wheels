@@ -779,6 +779,7 @@ fn 密码在yaml里必须加引号() {
         "slot-01",
         "proxyWan-alice",
         &visible,
+        proxy_manager::subscription::custom::CustomNodes::NONE,
     );
     // SS2022 带 EIH 时 Clash 的 password 是 `<iPSK>:<uPSK>`。
     assert!(yaml.contains(r#"password: "a+b/c=:x+y/z=""#), "实际：{yaml}");
@@ -1214,6 +1215,7 @@ fn 看不见的节点连同组成员一起消失() {
         "slot-01",
         "Lan-alice",
         &nothing,
+        proxy_manager::subscription::custom::CustomNodes::NONE,
     );
 
     assert!(!yaml.contains("\"HK\""), "看不见的入口不该出现在 proxies 里：{yaml}");
@@ -1242,6 +1244,7 @@ fn 级别够时入口与组成员都在() {
         "slot-01",
         "Lan-alice",
         &all,
+        proxy_manager::subscription::custom::CustomNodes::NONE,
     );
     assert!(yaml.contains("  - name: \"HK\""), "{yaml}");
     let groups = &yaml[yaml.find("\nproxy-groups:").expect("应当有代理组段")..];
@@ -1314,4 +1317,163 @@ fn 只有normal够不到公网那一档() {
     for group in ["advanced", "manage", "admin"] {
         assert!(level::of(group) >= 10, "{group} 应当看得到");
     }
+}
+
+// ============ 个人自定义节点进订阅 ============
+
+use proxy_manager::custom::parse::{CustomProxy, CustomSocks5};
+use proxy_manager::custom::store::{StoredProxy, StoredSocks5};
+use proxy_manager::subscription::custom::CustomNodes;
+
+fn stored_proxy(id: i64, share_url: &str, name: &str) -> StoredProxy {
+    let config: CustomProxy = proxy_manager::custom::parse::parse_share_url(name, share_url)
+        .unwrap_or_else(|error| panic!("夹具链接解析失败：{error}"));
+    StoredProxy {
+        id,
+        protocol: config.protocol,
+        config,
+        created_at: "2026-09-22T00:00:00Z".into(),
+        updated_at: "2026-09-22T00:00:00Z".into(),
+    }
+}
+
+fn stored_socks(id: i64, name: &str, dialer: &str) -> StoredSocks5 {
+    StoredSocks5 {
+        id,
+        config: CustomSocks5 {
+            name: name.into(),
+            server: "socks.example".into(),
+            port: 1080,
+            username: String::new(),
+            password: String::new(),
+            dialer_proxy: dialer.into(),
+        },
+        created_at: "2026-09-22T00:00:00Z".into(),
+        updated_at: "2026-09-22T00:00:00Z".into(),
+    }
+}
+
+fn render_with(custom: CustomNodes<'_>) -> String {
+    let config = fixture_config();
+    let credentials = proxy_manager::config::Credentials {
+        method: "2022-blake3-aes-128-gcm".into(),
+        ipsk: "aXBzaw==".into(),
+        upsk: [("slot-01".to_string(), "dXBzaw==".to_string())].into_iter().collect(),
+        uuid: [("slot-01".to_string(), "9ba335c9-0d3e-48a4-9f2e-28614c264a2d".to_string())]
+            .into_iter()
+            .collect(),
+    };
+    let visible = std::collections::BTreeSet::from(["n"]);
+    proxy_manager::subscription::render::clash_yaml(
+        &config,
+        ss_source(&config),
+        &credentials,
+        "slot-01",
+        "Lan-alice",
+        &visible,
+        custom,
+    )
+}
+
+#[tokio::test]
+async fn 自定义上游进订阅且带前缀() {
+    let proxies = vec![stored_proxy(1, "ss://YWVzLTI1Ni1nY206cHc@up.example:8388", "家里")];
+    let yaml = render_with(CustomNodes { proxies: &proxies, socks5: &[] });
+
+    assert!(yaml.contains(r#"- name: "Custom-家里""#), "该带 Custom- 前缀：{yaml}");
+    assert!(yaml.contains("server: \"up.example\""), "{yaml}");
+    // **每个现有组都要能选到它。** 只进 proxies 不进组，用户会看到节点列在那儿
+    // 却怎么也切不过去。
+    let groups = &yaml[yaml.find("\nproxy-groups:").expect("应当有代理组段")..];
+    assert!(groups.contains(r#"- "Custom-家里""#), "现有组里该出现：{groups}");
+    // 受管入口一条都不能少。
+    assert!(yaml.contains(r#"- name: "HK""#), "{yaml}");
+}
+
+/// **SOCKS5 的 dialer-proxy 指向自动生成的组，不是直接指向上游。**
+///
+/// 这一层是旧站最值钱的设计：前置节点成了客户端里可点的选项，
+/// 用户换前置不用回控制台改配置、也不用重新导入订阅。
+/// 去掉这一层会红——那正是要守的东西。
+#[tokio::test]
+async fn socks5带自动生成的拨号组() {
+    let proxies = vec![stored_proxy(1, "ss://YWVzLTI1Ni1nY206cHc@up.example:8388", "家里")];
+    let socks = vec![stored_socks(1, "落地", "家里")];
+    let yaml = render_with(CustomNodes { proxies: &proxies, socks5: &socks });
+
+    assert!(yaml.contains(r#"- name: "Socks5-落地""#), "{yaml}");
+    assert!(
+        yaml.contains(r#"dialer-proxy: "Socks5-落地-先选前置节点""#),
+        "dialer 该指向自动生成的组而不是上游本身：{yaml}"
+    );
+    let groups = &yaml[yaml.find("\nproxy-groups:").expect("应当有代理组段")..];
+    assert!(groups.contains(r#"- name: "Socks5-落地-先选前置节点""#), "拨号组该在：{groups}");
+
+    // 组里第一项是用户选的那个（Clash 的 select 默认选第一项），
+    // 其余上游与 DIRECT 跟在后面当备选。
+    let start = groups.find(r#"- name: "Socks5-落地-先选前置节点""#).unwrap();
+    let block = &groups[start..];
+    let first = block.find(r#"- "Custom-家里""#).expect("选中的前置该在组里");
+    let hk = block.find(r#"- "HK""#).expect("受管入口该是备选");
+    let direct = block.find(r#"- "DIRECT""#).expect("DIRECT 该是备选");
+    assert!(first < hk && first < direct, "用户选的那个必须排第一：{block}");
+}
+
+/// SOCKS5 的前置就是 DIRECT 时，组里第一项是 DIRECT。
+#[tokio::test]
+async fn socks5的前置可以是direct() {
+    let socks = vec![stored_socks(1, "落地", "DIRECT")];
+    let yaml = render_with(CustomNodes { proxies: &[], socks5: &socks });
+    let groups = &yaml[yaml.find("\nproxy-groups:").expect("应当有代理组段")..];
+    let block = &groups[groups.find(r#"- name: "Socks5-落地-先选前置节点""#).unwrap()..];
+    let direct = block.find(r#"- "DIRECT""#).unwrap();
+    let hk = block.find(r#"- "HK""#).unwrap();
+    assert!(direct < hk, "选的是 DIRECT 就该排第一：{block}");
+}
+
+/// **兜底：重名时丢掉全部自定义节点，只发受管那部分，并在文件头说明。**
+///
+/// Clash 遇到重名会拒绝整份配置——用户看到的只有「订阅格式错误」。
+/// 所以这里宁可少发几个节点，也不发一份整体不可用的。
+#[tokio::test]
+async fn 自定义节点与受管入口重名时整体丢弃并说明() {
+    // 叫「HK」的自定义上游渲染后是 "Custom-HK"，不撞；
+    // 真正会撞的是有人把自定义上游直接叫成受管组名的情况。这里构造后者。
+    let proxies = vec![stored_proxy(1, "ss://YWVzLTI1Ni1nY206cHc@up.example:8388", "家里")];
+    let dup = vec![
+        stored_proxy(1, "ss://YWVzLTI1Ni1nY206cHc@up.example:8388", "家里"),
+        stored_proxy(2, "ss://YWVzLTI1Ni1nY206cHc@other.example:8388", "家里"),
+    ];
+    // 先证明不重名时它是进得去的——否则下面那条断言可能是因为别的原因绿的。
+    assert!(render_with(CustomNodes { proxies: &proxies, socks5: &[] }).contains("Custom-家里"));
+
+    let yaml = render_with(CustomNodes { proxies: &dup, socks5: &[] });
+    // 断的是「不作为节点出现」而不是「文本里没有这个词」——
+    // 文件头那句说明里**会**带上冲突的名字，那是它该有的样子。
+    assert!(!yaml.contains(r#"- name: "Custom-家里""#), "重名时该整体丢弃：{yaml}");
+    assert!(yaml.contains("你的自定义节点这次没有发出来"), "要在文件头说明原因：{yaml}");
+    // **受管节点不受影响**——这才是「宁可少发」的前提。
+    assert!(yaml.contains(r#"- name: "HK""#), "受管入口不该被牵连：{yaml}");
+}
+
+/// 前置指向一个不存在的上游 → 悬空引用，同样整体丢弃。
+#[tokio::test]
+async fn socks5前置不存在时整体丢弃() {
+    let socks = vec![stored_socks(1, "落地", "并不存在的上游")];
+    let yaml = render_with(CustomNodes { proxies: &[], socks5: &socks });
+    assert!(!yaml.contains(r#"- name: "Socks5-落地""#), "{yaml}");
+    assert!(yaml.contains("你的自定义节点这次没有发出来"), "{yaml}");
+    assert!(yaml.contains(r#"- name: "HK""#), "受管入口不该被牵连：{yaml}");
+}
+
+/// 没有自定义节点时，订阅与从前**逐字节相同**。
+/// 这条守的是「加了这个功能不会悄悄改变所有人已有的订阅」。
+#[tokio::test]
+async fn 没有自定义节点时订阅不变() {
+    let with_none = render_with(CustomNodes::NONE);
+    let with_empty = render_with(CustomNodes { proxies: &[], socks5: &[] });
+    assert_eq!(with_none, with_empty);
+    assert!(!with_none.contains("Custom-"), "{with_none}");
+    assert!(!with_none.contains("Socks5-"), "{with_none}");
+    assert!(!with_none.contains("你的自定义节点"), "没有就不该有那句说明：{with_none}");
 }

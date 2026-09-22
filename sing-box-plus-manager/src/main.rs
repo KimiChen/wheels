@@ -625,12 +625,33 @@ async fn run_service(config_dir: &std::path::Path) -> anyhow::Result<ExitCode> {
     } else {
         tracing::warn!("没有配置 [subscription]：/sub/… 不挂载，用户拿不到客户端配置");
     }
+    // 自定义节点的密钥。**读不出来是启动失败**，不是「这个功能今天不可用」：
+    // 已经存进去的配置需要它才解得开，降级运行会让用户看到自己的节点凭空消失，
+    // 而那比起不来难查得多。
+    let custom_key = match &config.server.custom_nodes {
+        None => {
+            tracing::warn!("没有配置 [custom_nodes]：自定义节点端点不挂载");
+            None
+        }
+        Some(settings) => {
+            let text = std::fs::read_to_string(&settings.key_path).map_err(|error| {
+                proxy_manager::error::Error::ReadFile {
+                    path: settings.key_path.clone(),
+                    source: error,
+                }
+            })?;
+            let key = proxy_manager::custom::crypto::CryptoBox::from_base64(&text)?;
+            tracing::info!(path = %settings.key_path.display(), "自定义节点已启用");
+            Some(std::sync::Arc::new(key))
+        }
+    };
     let api = tokio::spawn(proxy_manager::api::serve(
         store.clone(),
         nodes,
         sso,
         config.server.subscription.clone(),
         config.server.audit.clone(),
+        custom_key,
         listener,
         shutdown_rx.clone(),
     ));

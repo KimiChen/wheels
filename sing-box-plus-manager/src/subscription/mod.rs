@@ -8,6 +8,7 @@
 //! （删路由、删控制器、删仓储方法，不是 CSS 隐藏入口）。本项目沿用那个结论：
 //! 吊销是运维动作，走命令行、需理由、落审计。
 
+pub mod custom;
 pub mod render;
 
 use sha2::{Digest, Sha256};

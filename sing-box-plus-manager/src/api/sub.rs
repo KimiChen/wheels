@@ -90,7 +90,30 @@ async fn build(
         .map(|entry| entry.node_id.as_str())
         .filter(|node_id| crate::quota::level::can_see(&app.nodes, node_id, &group))
         .collect();
-    let yaml = render::clash_yaml(config, source, &credentials, &identity, &profile, &visible);
+    // 这个人的自定义节点。**读失败不挡整份订阅**：受管节点是主业，
+    // 一条解不开的自定义配置不该让人连不上网。丢了会在文件头说明——
+    // 那条说明由 `render::clash_yaml` 的兜底检查写，这里只负责取不到就当没有。
+    let (proxies, socks5) = match &app.custom_key {
+        None => (Vec::new(), Vec::new()),
+        Some(key) => {
+            let proxies = crate::custom::store::list_proxies(&app.store, key, subscriber.user_id)
+                .await
+                .unwrap_or_else(|error| {
+                    tracing::error!(?error, user_id = subscriber.user_id, "读自定义上游失败");
+                    Vec::new()
+                });
+            let socks5 = crate::custom::store::list_socks5(&app.store, key, subscriber.user_id)
+                .await
+                .unwrap_or_else(|error| {
+                    tracing::error!(?error, user_id = subscriber.user_id, "读自定义 SOCKS5 失败");
+                    Vec::new()
+                });
+            (proxies, socks5)
+        }
+    };
+    let custom = crate::subscription::custom::CustomNodes { proxies: &proxies, socks5: &socks5 };
+    let yaml =
+        render::clash_yaml(config, source, &credentials, &identity, &profile, &visible, custom);
 
     let usage = subscription::cycle_usage(&app.store, subscriber.user_id).await.unwrap_or_default();
     let expire = subscription::cycle_expire_unix().unwrap_or(0);

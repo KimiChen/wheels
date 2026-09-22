@@ -36,6 +36,24 @@ pub struct ServerConfig {
     /// `.db` 文件，于是「用户 → 域名」的明细不会被复制进每一份账本备份。
     #[serde(default)]
     pub audit: Option<AuditConfig>,
+    /// 个人自定义节点（`schema/08`）。**整段缺省即不启用**——那时
+    /// `/api/v1/me/custom/*` 不挂载，订阅里也不会出现任何自定义节点。
+    ///
+    /// 与上面几段同一条纪律：写了就必须写对。密钥读不出来是**启动失败**
+    /// 而不是「这个功能暂时不可用」——后者会让已经存进去的配置解不开，
+    /// 而用户看到的是自己的节点凭空消失了。
+    #[serde(default)]
+    pub custom_nodes: Option<CustomNodesConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CustomNodesConfig {
+    /// 32 字节密钥的 Base64，单独一个 0600 文件。
+    ///
+    /// **不放进 server.toml 本身**：那份文件会被贴进工单、会被 diff、
+    /// 会进部署脚本的输出。密钥要和它加密的东西一样难拿到。
+    pub key_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Deserialize)]
