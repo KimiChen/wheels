@@ -1025,3 +1025,48 @@ fn 时区标签接进了列头() {
     // 同一条记录于是在不同人的机器上显示成不同时刻，而列头还统一写着服务端那个时区。
     assert!(!script.contains("new Date(value)"), "时刻被浏览器重算了");
 }
+
+/// **凡是渲染审计时刻的页面，时区标签都不许写死。**
+///
+/// 2026-09-23 就是这么漏的：本人页改完了，`users.html`（管理员按用户查那一页）
+/// 的列头还写着 UTC，而两边走的是同一个 `access()`，于是那一页变成
+/// 「列头 UTC、格子 +08:00」——**比改之前更错**，因为改之前它至少自洽。
+///
+/// 所以这条不点名页面，按「谁渲染时刻谁就得挂标记」全仓扫。再加一页照样守得住。
+///
+/// 不波及 `usage.html`：它写的「时间桶（UTC）」是**真 UTC**——
+/// `hour_bucket` 就是硬编码 UTC 对齐的，那一页不该跟着展示时区变。
+#[test]
+fn 凡渲染审计时刻的页面时区都不写死() {
+    let mut checked = 0;
+    for name in proxy_manager::web::page_names() {
+        let page = proxy_manager::web::page_body(name).expect("页面该在");
+        if !page.contains("data-pm-time") {
+            continue;
+        }
+        checked += 1;
+        assert!(
+            !page.contains(r#"<small class="wsk-help">UTC</small>"#),
+            "{name} 渲染审计时刻，却把时区标签写死成 UTC"
+        );
+        assert!(
+            page.contains("data-pm-audit-tz"),
+            "{name} 渲染审计时刻，却没有一处列头跟着服务端给的时区走"
+        );
+    }
+    // 一页都没扫到的话上面两条断言是空转的——比如有人把 `data-pm-time`
+    // 改成了别的名字，这条用例会继续全绿。
+    assert!(checked >= 2, "只扫到 {checked} 页，本人页与管理员页至少该有两页");
+}
+
+/// 管理员按用户查那一页也接了线。
+#[test]
+fn 管理员页的时区标签也接线了() {
+    let (script, _) = proxy_manager::web::asset("assets/api.js").expect("脚本该在");
+    // 本人页一处、管理员页一处。只写一处的话另一页的列头永远停在 HTML 里那个字面量。
+    assert_eq!(
+        script.matches("renderAuditTimezone(data.display_timezone)").count(),
+        2,
+        "两处取数（本人页 / 管理员按用户查）都要写列头"
+    );
+}

@@ -712,6 +712,11 @@
         () => getJson(`/users/${current.id}/audit/access?range=${range}`),
         (data) => {
           panel.querySelector("[data-audit-error]").hidden = true;
+          // **管理员这一页与本人页同一个时区。** 两边走的是同一个
+          // `audit::query::access`，所以时刻的口径本来就一样；漏掉这一行
+          // 的后果不是「还是旧的」，是列头写着 UTC 而格子里是 +08:00——
+          // 比改之前更错，因为改之前它至少是自洽的。
+          renderAuditTimezone(data.display_timezone);
           renderCollection("user-audit", data.rows ?? [], emptyAuditText(data));
           panel.querySelector("[data-audit-gaps]").hidden = (data.gaps ?? []).length === 0;
           // 看别人的明细同样是不完整的，同一条纪律、同一个函数。
