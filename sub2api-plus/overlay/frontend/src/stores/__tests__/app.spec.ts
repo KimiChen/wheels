@@ -23,6 +23,15 @@ function createPublicSettings(overrides: Partial<PublicSettings> = {}): PublicSe
     site_name: 'Test Site',
     version: '1.0.0',
     channel_monitor_enabled: true,
+    channel_monitor_default_interval_seconds: 60,
+    available_channels_enabled: false,
+    subscription_enabled: true,
+    payment_balance_disabled: false,
+    model_plaza_enabled: false,
+    model_plaza_require_auth: false,
+    plugin_management_enabled: false,
+    service_quota_enabled: false,
+    affiliate_enabled: false,
     ...overrides,
   }
 }

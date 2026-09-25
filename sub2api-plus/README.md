@@ -10,12 +10,51 @@
 |---|---|
 | 上游仓库 | `https://github.com/Wei-Shaw/sub2api.git` |
 | Ref | `main` |
-| 应用版本 | `0.2.4.kim` |
+| 应用版本 | `0.2.8.kim` |
 | 源码 Commit | 见 `upstream.lock` 的 `commit` 字段 |
 | 上游许可证 | LGPL-3.0 |
 
 机器可读值以 [`upstream.lock`](upstream.lock) 为准。构建必须使用其中的固定提交，
 不能直接构建浮动的 `main`。
+
+### 0.2.8 升级记录（2026-09-26）
+
+上游基线从 `0116c5a1` 更新到 `a3eb7ef3`（更新时的 `main`，约 473 个提交），保留
+`.kim` 版本后缀、流量统计、定制页面、公开路由限制和精简 HTML 配置注入。主要冲突
+处理：
+
+- `http_upstream.go`：流量统计包装改接到上游新的 `doUpstreamRequest`（请求取消与
+  响应解压语义随上游更新）。
+- `setting_public.go`：精简注入 payload 接入两个新公共开关——`subscription_enabled`
+  为 opt-out（仅显式关闭时注入 `false`，前端默认 `true`），`payment_balance_disabled`
+  仅在禁用余额支付时注入 `true`；上游新增的两个注入断言测试改写为稀疏 map 语义。
+- 前端 `createDefaultPublicSettings` 补齐 `subscription_enabled: true` 和
+  `payment_balance_disabled: false`；`PaymentView.spec.ts` 订阅开关测试适配
+  “缺省即隐藏”的稀疏注入语义，该文件由此进入 Overlay。
+- `AppHeader.vue` / `KeyUsageView.vue` 继续不挂载 `LocaleSwitcher`，
+  `SubscriptionProgressMini` 采用上游新增的功能开关门控。
+- `KeysView.vue` 继续移除 `EndpointPopover`，同时接入上游新增的密钥批量编辑入口。
+
+本次上游新增五个 SQL 迁移，未修改历史 SQL 迁移：
+
+- `238_opencode_go_platform.sql`：扩展多个 CHECK 约束，允许 OpenCode 平台（Zen/GO）。
+- `238_purge_unlimited_user_platform_quotas.sql`：删除三档限额全为 NULL 的平台配额行；
+  大表需注意迁移超时。
+- `238b_content_moderation_engine_meta.sql`：内容审核日志新增可空 `engine_meta` 列。
+- `239_channel_reasoning_effort_multipliers.sql`：渠道模型定价新增推理强度倍率映射，
+  仅迁移显式配置的旧 max 定价。
+- `240_affiliate_ledger_operation_id.sql`： Affiliate 流水新增幂等标识列与唯一索引。
+
+配置变化：新增可选 `simple_mode.auto_create_default_groups`（默认 `true`）与
+`simple_mode_key_rate_limit_enabled`（默认 `false`）；默认允许域名列表新增
+`opencode.ai`；`gateway.openai_compact_model` 默认值从 `gpt-5.4` 改为 `gpt-5.5`；
+`gateway.openai_ws.oauth_max_conns_factor` 与 `apikey_max_conns_factor` 默认值从
+`1.0` 改为 `5.0`（冻结配置若显式设置了旧值不受影响）。Go 依赖更新
+`golang.org/x/crypto v0.55.0`、`google.golang.org/grpc v1.83.2` 等。
+
+本次验证：Overlay 树校验、`go test ./...`（含 `unit` 标签的注入回归）、前端 lint 与
+类型检查、关键测试套件和前端构建、Linux amd64 发布构建与 `SHA256SUMS` 校验通过。
+发布产物位于被忽略的 `dist/`；本次更新未执行生产部署或数据库迁移。
 
 ### 0.2.4 升级记录（2026-09-11）
 

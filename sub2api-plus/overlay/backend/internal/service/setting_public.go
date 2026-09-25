@@ -215,6 +215,7 @@ func (s *SettingService) GetPublicSettings(ctx context.Context) (*PublicSettings
 		SettingKeyWeChatConnectFrontendRedirectURL,
 		SettingKeyBackendModeEnabled,
 		SettingPaymentEnabled,
+		SettingBalancePayDisabled,
 		SettingKeyOIDCConnectEnabled,
 		SettingKeyOIDCConnectProviderName,
 		SettingKeyGitHubOAuthEnabled,
@@ -234,6 +235,7 @@ func (s *SettingService) GetPublicSettings(ctx context.Context) (*PublicSettings
 		SettingKeyChannelMonitorShowQuota,
 		SettingKeyChannelMonitorHideUserRanking,
 		SettingKeyAvailableChannelsEnabled,
+		SettingKeySubscriptionEnabled,
 		SettingKeyModelPlazaEnabled,
 		SettingKeyModelPlazaRequireAuth,
 		SettingKeyPluginManagementEnabled,
@@ -345,6 +347,7 @@ func (s *SettingService) GetPublicSettings(ctx context.Context) (*PublicSettings
 		WeChatOAuthMobileEnabled:            weChatMobileEnabled,
 		BackendModeEnabled:                  settings[SettingKeyBackendModeEnabled] == "true",
 		PaymentEnabled:                      settings[SettingPaymentEnabled] == "true",
+		PaymentBalanceDisabled:              settings[SettingBalancePayDisabled] == "true",
 		OIDCOAuthEnabled:                    oidcEnabled,
 		OIDCOAuthProviderName:               oidcProviderName,
 		GitHubOAuthEnabled:                  gitHubEnabled,
@@ -362,6 +365,8 @@ func (s *SettingService) GetPublicSettings(ctx context.Context) (*PublicSettings
 		ChannelMonitorHideUserRanking:        isTrueSettingValue(settings[SettingKeyChannelMonitorHideUserRanking]),
 
 		AvailableChannelsEnabled: settings[SettingKeyAvailableChannelsEnabled] == "true",
+
+		SubscriptionEnabled: !isFalseSettingValue(settings[SettingKeySubscriptionEnabled]),
 
 		ModelPlazaEnabled:       settings[SettingKeyModelPlazaEnabled] == "true",
 		ModelPlazaRequireAuth:   settings[SettingKeyModelPlazaRequireAuth] == "true",
@@ -600,6 +605,7 @@ func (s *SettingService) GetPublicSettingsForInjection(ctx context.Context) (any
 
 	addTrueSetting(payload, "backend_mode_enabled", settings.BackendModeEnabled)
 	addTrueSetting(payload, "payment_enabled", settings.PaymentEnabled)
+	addTrueSetting(payload, "payment_balance_disabled", settings.PaymentBalanceDisabled)
 	addTrueSetting(payload, "compact_home_enabled", settings.CompactHomeEnabled)
 	if settings.ChannelMonitorEnabled {
 		payload["channel_monitor_enabled"] = true
@@ -610,6 +616,9 @@ func (s *SettingService) GetPublicSettingsForInjection(ctx context.Context) (any
 		addTrueSetting(payload, "channel_monitor_hide_user_ranking", settings.ChannelMonitorHideUserRanking)
 	}
 	addTrueSetting(payload, "available_channels_enabled", settings.AvailableChannelsEnabled)
+	if !settings.SubscriptionEnabled {
+		payload["subscription_enabled"] = false
+	}
 	if settings.ModelPlazaEnabled {
 		payload["model_plaza_enabled"] = true
 		addTrueSetting(payload, "model_plaza_require_auth", settings.ModelPlazaRequireAuth)
