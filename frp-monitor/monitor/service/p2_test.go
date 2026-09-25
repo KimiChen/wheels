@@ -23,9 +23,15 @@ import (
 // pickPort 找一个可用端口并启动一次监控服务。
 func startOnFreePort(t *testing.T, ctx context.Context, cfg Config) int {
 	t.Helper()
+	return startOnFreePortWith(t, ctx, cfg, nil)
+}
+
+// startOnFreePortWith 与 startOnFreePort 相同，但可传入 FRPRegistrySource。
+func startOnFreePortWith(t *testing.T, ctx context.Context, cfg Config, src FRPRegistrySource) int {
+	t.Helper()
 	for port := 17500; port < 17550; port++ {
 		cfg.Addr = fmt.Sprintf("127.0.0.1:%d", port)
-		if err := Start(ctx, cfg, nil); err == nil {
+		if err := Start(ctx, cfg, src); err == nil {
 			return port
 		}
 	}

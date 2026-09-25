@@ -11,6 +11,7 @@ import {
   fillResources,
   fillStatus,
   fillTraffic,
+  fillTunnels,
 } from "./detail.js";
 import { createServerClock, sessionBadge, setBadge, setConnPill } from "./status.js";
 import { createTrends } from "./trends.js";
@@ -25,6 +26,8 @@ const proxyBody = document.getElementById("proxy-tbody");
 const proxyTemplate = document.getElementById("proxy-row-template");
 const probeBody = document.getElementById("probe-tbody");
 const probeTemplate = document.getElementById("probe-row-template");
+const tunnelBody = document.getElementById("tunnel-tbody");
+const tunnelTemplate = document.getElementById("tunnel-row-template");
 
 const nodeId = new URLSearchParams(location.search).get("id");
 
@@ -51,6 +54,7 @@ function fill(node, nowSec) {
   fillProxies(proxyBody, proxyTemplate, node.proxies);
   fillProbes(probeBody, probeTemplate, node.probes);
   fillTraffic(content, node.traffic);
+  fillTunnels(tunnelBody, tunnelTemplate, node.tunnels);
   trends.show(node.id);
 }
 
@@ -95,6 +99,16 @@ async function boot() {
       else showNotFound("节点不存在或已被移除。");
     },
     onNode: (node) => onNode(node, clock.now()),
+    // 隧道状态变化走 tunnels 事件（不一定伴随 node 事件）；按 node_id
+    // 过滤出本节点的隧道就地更新。节点未展示（404）时不动作。
+    onTunnels(tunnels) {
+      if (content.hidden) return;
+      fillTunnels(
+        tunnelBody,
+        tunnelTemplate,
+        tunnels.filter((tunnel) => tunnel?.node_id === nodeId),
+      );
+    },
     onStatus: (status) => setConnPill(pill, status),
   });
 }

@@ -152,6 +152,48 @@
     max-width: 26rem;
   }
 
+  /* 新凭据 Token 行：等宽输入框 + 复制 / 完成按钮。 */
+  .fm-token-row {
+    align-items: center;
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-8);
+  }
+
+  .fm-token-row .wsk-control {
+    flex: 1 1 16rem;
+    min-width: 0;
+  }
+
+  /* 禁用态下载链接（锚点无 disabled 属性）：去掉 href 后不可聚焦、
+     不可点击，视觉对齐 .wsk-button:disabled。 */
+  .fm-disabled {
+    background: var(--disabled-bg);
+    border-color: var(--disabled-bg);
+    box-shadow: none;
+    color: var(--disabled-text);
+    cursor: not-allowed;
+    pointer-events: none;
+  }
+
+  /* 表格行内危险操作（吊销）：文字按钮，外观对齐 .fm-node-link。 */
+  .fm-danger-link {
+    background: none;
+    border: 0;
+    color: var(--danger);
+    cursor: pointer;
+    font-size: inherit;
+    font-weight: 600;
+    padding: 0;
+    text-decoration: underline;
+    text-decoration-color: transparent;
+    text-underline-offset: 2px;
+  }
+
+  .fm-danger-link:hover {
+    text-decoration-color: currentColor;
+  }
+
   /* 趋势图：双栏卡片网格，SVG 自适应宽度。颜色只用套件令牌。 */
   .fm-chart-grid {
     align-items: start;

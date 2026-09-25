@@ -63,9 +63,14 @@ func TestStartBindFailure(t *testing.T) {
 	}
 }
 
-type fakeRegistry struct{ clients []FRPClientInfo }
+type fakeRegistry struct {
+	clients []FRPClientInfo
+	proxies []FRPProxyStat
+}
 
 func (f *fakeRegistry) ListClients() []FRPClientInfo { return f.clients }
+
+func (f *fakeRegistry) ListProxyStats() []FRPProxyStat { return f.proxies }
 
 func TestStartServeAndShutdown(t *testing.T) {
 	creds, _ := writeCreds(t)

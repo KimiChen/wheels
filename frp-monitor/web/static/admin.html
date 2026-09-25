@@ -89,6 +89,7 @@
 
       <nav class="fm-topnav" aria-label="页面">
         <a href="/">总览</a>
+        <a href="/tunnels.html">隧道</a>
         <a href="/admin.html" aria-current="page">管理</a>
       </nav>
 
@@ -214,6 +215,10 @@
                 <span>FRP 在线客户端</span
                 ><strong data-ov="frp_clients_online">—</strong
                 ><small>服务端控制连接</small>
+              </div>
+              <div class="wsk-metric">
+                <span>隧道</span><strong data-ov="tunnels">—</strong
+                ><small>在线 / 总数</small>
               </div>
               <div class="wsk-metric">
                 <span>聚合接收</span><strong data-ov="net_rx_bps">—</strong
@@ -627,6 +632,41 @@
             </div>
 
             <div class="wsk-section-head wsk-mt-5 wsk-compact">
+              <h3>隧道（服务端视角）</h3>
+              <span class="wsk-badge">含本地目标</span>
+            </div>
+            <div class="wsk-table-wrap">
+              <table class="wsk-table">
+                <caption class="wsk-sr-only">
+                  服务端观察到的该节点隧道（含用户、Client ID 与本地目标）
+                </caption>
+                <thead>
+                  <tr>
+                    <th scope="col">名称</th>
+                    <th scope="col">类型</th>
+                    <th scope="col">用户</th>
+                    <th scope="col">Client ID</th>
+                    <th scope="col">本地目标</th>
+                    <th scope="col">运行状态</th>
+                    <th scope="col" class="fm-num">连接数</th>
+                    <th scope="col" class="fm-num">今日收（服务端）</th>
+                    <th scope="col" class="fm-num">今日发（服务端）</th>
+                  </tr>
+                </thead>
+                <tbody id="tunnel-tbody">
+                  <tr>
+                    <td class="wsk-table-empty" colspan="9">等待数据…</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <p class="wsk-help wsk-mt-2">
+              今日收 / 发为服务端隧道口径，与上方「流量统计」的节点网卡流量
+              口径不同，两者不可相加。用户 + Client ID 为 FRP 关联键
+              （对账用途，不作认证）。
+            </p>
+
+            <div class="wsk-section-head wsk-mt-5 wsk-compact">
               <h3>FRP 客户端对账</h3>
               <span class="wsk-badge">服务端注册</span>
             </div>
@@ -653,6 +693,166 @@
                 </tbody>
               </table>
             </div>
+
+            <div class="wsk-section-head wsk-mt-5 wsk-compact">
+              <h3>最近事件</h3>
+              <span class="wsk-badge">选择节点时加载</span>
+            </div>
+            <div class="wsk-table-wrap">
+              <table class="wsk-table">
+                <caption class="wsk-sr-only">
+                  该节点最近的隧道与客户端上下线事件
+                </caption>
+                <thead>
+                  <tr>
+                    <th scope="col" class="fm-num">时间</th>
+                    <th scope="col">类型</th>
+                    <th scope="col">名称</th>
+                    <th scope="col">详情</th>
+                  </tr>
+                </thead>
+                <tbody id="event-tbody">
+                  <tr>
+                    <td class="wsk-table-empty" colspan="4">选择节点后加载…</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <section
+            class="wsk-section"
+            id="settings-section"
+            aria-labelledby="settings-title"
+          >
+            <div class="wsk-section-head">
+              <h2 id="settings-title">接入与设置</h2>
+              <span class="wsk-badge">管理</span>
+            </div>
+
+            <div class="fm-detail-grid">
+              <form class="wsk-panel" id="cred-form">
+                <p class="wsk-panel-title">新建节点凭据</p>
+                <div class="wsk-field">
+                  <label class="wsk-label" for="cred-id">凭据 ID</label>
+                  <input
+                    class="wsk-control"
+                    id="cred-id"
+                    name="id"
+                    type="text"
+                    required
+                    maxlength="64"
+                    pattern="[A-Za-z0-9._-]+"
+                    autocomplete="off"
+                    placeholder="例如 node-home-01"
+                  />
+                  <p class="wsk-help">
+                    字母、数字、点、下划线、连字符；创建后不可修改。
+                  </p>
+                </div>
+                <div class="wsk-field wsk-mt-2">
+                  <label class="wsk-label" for="cred-comment">备注</label>
+                  <input
+                    class="wsk-control"
+                    id="cred-comment"
+                    name="comment"
+                    type="text"
+                    maxlength="200"
+                    autocomplete="off"
+                    placeholder="用途说明（可选）"
+                  />
+                </div>
+                <p class="wsk-error wsk-mt-2" id="cred-error" role="alert" hidden></p>
+                <button class="wsk-button wsk-mt-5" type="submit">创建凭据</button>
+              </form>
+
+              <div class="wsk-panel">
+                <p class="wsk-panel-title">数据备份</p>
+                <p class="wsk-help">
+                  下载服务端 SQLite 数据（节点、历史、流量与凭据摘要），
+                  用于迁移或离线存档。
+                </p>
+                <p class="wsk-mt-5">
+                  <a
+                    class="wsk-button"
+                    id="backup-link"
+                    href="/api/admin/v1/backup"
+                    download
+                    >下载备份</a
+                  >
+                </p>
+                <p class="wsk-help wsk-mt-2" id="backup-note" hidden>
+                  服务端未开启持久化（未配置数据目录），暂无可下载的备份。
+                </p>
+              </div>
+            </div>
+
+            <div
+              class="wsk-alert wsk-success wsk-mt-5"
+              id="cred-token-box"
+              hidden
+            >
+              <svg class="wsk-icon" aria-hidden="true">
+                <use href="#check"></use>
+              </svg>
+              <div>
+                <strong id="cred-token-title">凭据创建成功</strong>
+                <p>
+                  Token 仅此一次明文展示，请立即复制并妥善保存；刷新或离开
+                  页面前务必保存，之后无法再次查看。
+                </p>
+                <div class="fm-token-row wsk-mt-2">
+                  <label class="wsk-sr-only" for="cred-token"
+                    >新凭据 Token</label
+                  >
+                  <input
+                    class="wsk-control fm-mono"
+                    id="cred-token"
+                    type="text"
+                    readonly
+                  />
+                  <button
+                    class="wsk-button wsk-secondary"
+                    type="button"
+                    id="cred-copy"
+                  >
+                    复制
+                  </button>
+                  <button
+                    class="wsk-button wsk-quiet"
+                    type="button"
+                    id="cred-token-done"
+                  >
+                    我已保存
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div class="wsk-table-wrap wsk-mt-5">
+              <table class="wsk-table">
+                <caption class="wsk-sr-only">
+                  节点监控凭据列表
+                </caption>
+                <thead>
+                  <tr>
+                    <th scope="col">凭据 ID</th>
+                    <th scope="col">备注</th>
+                    <th scope="col" class="fm-num">创建时间</th>
+                    <th scope="col" class="fm-num">操作</th>
+                  </tr>
+                </thead>
+                <tbody id="cred-tbody">
+                  <tr>
+                    <td class="wsk-table-empty" colspan="4">加载中…</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <p class="wsk-help wsk-mt-2">
+              凭据用于节点 agent 接入监控；吊销后使用该凭据的节点将无法再上报。
+              Token 只在创建时返回一次，服务端不保存明文。
+            </p>
           </section>
         </div>
       </div>
@@ -743,6 +943,61 @@
         <td class="fm-num" data-f="tx"></td>
       </tr>
     </template>
+
+    <template id="tunnel-row-template">
+      <tr>
+        <th scope="row" class="fm-mono" data-f="name"></th>
+        <td data-f="type"></td>
+        <td data-f="user"></td>
+        <td class="fm-mono" data-f="client_id"></td>
+        <td class="fm-mono" data-f="local_addr"></td>
+        <td data-f="status"></td>
+        <td class="fm-num" data-f="cur_conns"></td>
+        <td class="fm-num" data-f="today_rx"></td>
+        <td class="fm-num" data-f="today_tx"></td>
+      </tr>
+    </template>
+
+    <template id="event-row-template">
+      <tr>
+        <td class="fm-num" data-f="ts"></td>
+        <td data-f="kind"></td>
+        <td class="fm-mono" data-f="name"></td>
+        <td data-f="detail"></td>
+      </tr>
+    </template>
+
+    <template id="cred-row-template">
+      <tr>
+        <th scope="row" class="fm-mono" data-f="id"></th>
+        <td data-f="comment"></td>
+        <td class="fm-num" data-f="created_at"></td>
+        <td class="fm-num">
+          <button class="fm-danger-link" type="button" data-revoke>吊销</button>
+        </td>
+      </tr>
+    </template>
+
+    <dialog
+      class="wsk-dialog"
+      id="cred-revoke-dialog"
+      aria-labelledby="cred-revoke-title"
+    >
+      <div class="wsk-dialog-head">
+        <h3 id="cred-revoke-title">吊销凭据</h3>
+      </div>
+      <div class="wsk-dialog-body">
+        <p id="cred-revoke-text">确定吊销该凭据？</p>
+      </div>
+      <div class="wsk-dialog-foot">
+        <button class="wsk-button wsk-quiet" type="button" data-dialog-close>
+          取消
+        </button>
+        <button class="wsk-button wsk-danger" type="button" id="cred-revoke-confirm">
+          确认吊销
+        </button>
+      </div>
+    </dialog>
 
     <div class="wsk-toast-region" id="toast-region" aria-live="polite"></div>
   </body>

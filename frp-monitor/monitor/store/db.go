@@ -39,8 +39,9 @@ const (
 	retentionSweepInterval = time.Hour
 )
 
-// schemaVersion 为当前 schema 版本（PRAGMA user_version）。v1 为首个版本。
-const schemaVersion = 1
+// schemaVersion 为当前 schema 版本（PRAGMA user_version）。
+// v1 为首个版本；v2 新增 frp_snapshots（FRP 状态事件）。
+const schemaVersion = 2
 
 // writeJob 为一个写库任务，在 worker 单 goroutine 中执行。
 type writeJob func(db *sql.DB) error
@@ -262,7 +263,21 @@ CREATE TABLE IF NOT EXISTS probe_results (
 CREATE INDEX IF NOT EXISTS idx_probe_results_node_ts ON probe_results (node_id, ts);
 `
 
-// migrate 按 PRAGMA user_version 迁移到当前版本。重复执行幂等。
+// schemaV2 新增 frp_snapshots：需要保留的 FRP 状态变化（隧道/客户端
+// 上下线事件）。node_id 为空串表示事件未对账到节点。
+const schemaV2 = `
+CREATE TABLE IF NOT EXISTS frp_snapshots (
+  id      INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts      INTEGER NOT NULL,
+  node_id TEXT NOT NULL DEFAULT '',
+  kind    TEXT NOT NULL,
+  name    TEXT NOT NULL,
+  detail  TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_frp_snapshots_node_id ON frp_snapshots (node_id, id);
+`
+
+// migrate 按 PRAGMA user_version 逐级迁移到当前版本。重复执行幂等。
 func (db *DB) migrate() error {
 	var v int
 	if err := db.sql.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
@@ -274,8 +289,15 @@ func (db *DB) migrate() error {
 	if v == schemaVersion {
 		return nil
 	}
-	if _, err := db.sql.Exec(schemaV1); err != nil {
-		return fmt.Errorf("store: schema v1 迁移失败：%w", err)
+	if v < 1 {
+		if _, err := db.sql.Exec(schemaV1); err != nil {
+			return fmt.Errorf("store: schema v1 迁移失败：%w", err)
+		}
+	}
+	if v < 2 {
+		if _, err := db.sql.Exec(schemaV2); err != nil {
+			return fmt.Errorf("store: schema v2 迁移失败：%w", err)
+		}
 	}
 	if _, err := db.sql.Exec(fmt.Sprintf("PRAGMA user_version = %d", schemaVersion)); err != nil {
 		return fmt.Errorf("store: 写入 user_version 失败：%w", err)
@@ -634,4 +656,46 @@ func (db *DB) LoadProbeTasks() (versions map[string]uint64, tasks map[string][]p
 		tasks[id] = append(tasks[id], t)
 	}
 	return versions, tasks, trows.Err()
+}
+
+// ---------- frp_snapshots（FRP 状态事件） ----------
+
+// enqueueFRPEvent 持久化一条 FRP 状态事件（隧道/客户端上下线）。
+func (db *DB) enqueueFRPEvent(ev FRPEvent) {
+	db.enqueue(func(s *sql.DB) error {
+		_, err := s.Exec(`INSERT INTO frp_snapshots (ts, node_id, kind, name, detail)
+			VALUES (?, ?, ?, ?, ?)`, ev.TS, ev.NodeID, ev.Kind, ev.Name, ev.Detail)
+		return err
+	})
+}
+
+// LoadFRPEvents 读取节点最近 limit 条事件，新的在前（同刻 id 大者在前）。
+func (db *DB) LoadFRPEvents(nodeID string, limit int) ([]FRPEvent, error) {
+	rows, err := db.sql.Query(`SELECT ts, kind, name, detail FROM frp_snapshots
+		WHERE node_id = ? ORDER BY id DESC LIMIT ?`, nodeID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("store: frp_snapshots 查询失败：%w", err)
+	}
+	defer rows.Close()
+	out := make([]FRPEvent, 0, limit)
+	for rows.Next() {
+		var ev FRPEvent
+		ev.NodeID = nodeID
+		if err := rows.Scan(&ev.TS, &ev.Kind, &ev.Name, &ev.Detail); err != nil {
+			return nil, fmt.Errorf("store: frp_snapshots 扫描失败：%w", err)
+		}
+		out = append(out, ev)
+	}
+	return out, rows.Err()
+}
+
+// ---------- 备份 ----------
+
+// Backup 用 VACUUM INTO 把库的一致快照导出到 destPath（目标文件须不存在，
+// 调用方负责创建临时路径并清理）。
+func (db *DB) Backup(destPath string) error {
+	if _, err := db.sql.Exec("VACUUM INTO ?", destPath); err != nil {
+		return fmt.Errorf("store: VACUUM INTO 备份失败：%w", err)
+	}
+	return nil
 }

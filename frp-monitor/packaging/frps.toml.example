@@ -1,0 +1,19 @@
+# frp-monitor-server 示例配置（frps 兼容，含 [monitor] 监控扩展段）。
+# 复制到 /etc/frp-monitor/frps.toml 后修改；文件含秘密时应 0600。
+
+bindPort = 7000
+# FRP 认证凭据（与监控凭据分开）。建议用环境变量：auth.token = "{{ .Envs.FRP_AUTH_TOKEN }}"
+auth.token = "change-me"
+
+[monitor]
+enable = true
+# 独立监控 Listener，默认回环；公开访问由 HTTPS 反向代理发布（路径 /agent/v1/ws、
+# /api/...、/events/... 与页面）。
+addr = "127.0.0.1:7400"
+# 节点凭据文件（内容为 token 的 sha256 摘要，由管理端或 scripts 生成）。
+credentialsFile = "/var/lib/frp-monitor/credentials.json"
+# 管理密码的 sha256 十六进制小写；空 = 管理端禁用。生成：printf '%s' '密码' | shasum -a 256
+adminPasswordHash = ""
+# 历史数据目录（SQLite）；空 = 仅内存，不持久化。
+dataDir = "/var/lib/frp-monitor"
+historyRetentionDays = 7

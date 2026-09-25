@@ -44,9 +44,10 @@ var securityHeaders = map[string]string{
 
 // Handler 为 API/SSE/静态资源处理器。
 type Handler struct {
-	store  *store.Store
-	admin  *auth.Admin
-	static fs.FS // 页面静态资源；nil 时页面路由降级为 503（不 panic）
+	store    *store.Store
+	admin    *auth.Admin
+	nodeAuth *auth.NodeAuthenticator // 凭据管理 API；nil 时凭据端点降级 503
+	static   fs.FS                   // 页面静态资源；nil 时页面路由降级为 503（不 panic）
 
 	now func() time.Time // 测试可注入
 
@@ -55,9 +56,10 @@ type Handler struct {
 }
 
 // NewHandler 组装路由。static 为 web 包提供的静态资源 fs（index.html 位于根），
-// 传 nil 时 API/SSE 仍可用，页面路由返回 503。
-func NewHandler(st *store.Store, admin *auth.Admin, static fs.FS) *Handler {
-	h := &Handler{store: st, admin: admin, static: static, now: time.Now}
+// 传 nil 时 API/SSE 仍可用，页面路由返回 503。nodeAuth 为节点凭据管理入口，
+// 传 nil 时凭据端点返回 503。
+func NewHandler(st *store.Store, admin *auth.Admin, nodeAuth *auth.NodeAuthenticator, static fs.FS) *Handler {
+	h := &Handler{store: st, admin: admin, nodeAuth: nodeAuth, static: static, now: time.Now}
 	if static != nil {
 		h.fileServer = http.FileServer(http.FS(static))
 	}
@@ -67,6 +69,7 @@ func NewHandler(st *store.Store, admin *auth.Admin, static fs.FS) *Handler {
 	mux.HandleFunc("GET /api/public/v1/nodes", h.handlePublicNodes)
 	mux.HandleFunc("GET /api/public/v1/nodes/{id}", h.handlePublicNode)
 	mux.HandleFunc("GET /api/public/v1/nodes/{id}/metrics", h.handlePublicNodeMetrics)
+	mux.HandleFunc("GET /api/public/v1/tunnels", h.handlePublicTunnels)
 	mux.HandleFunc("POST /api/admin/v1/login", h.handleLogin)
 	mux.HandleFunc("POST /api/admin/v1/logout", h.handleLogout)
 	mux.HandleFunc("GET /api/admin/v1/session", h.handleAdminSession)
@@ -76,6 +79,11 @@ func NewHandler(st *store.Store, admin *auth.Admin, static fs.FS) *Handler {
 	mux.HandleFunc("GET /api/admin/v1/nodes/{id}/probe-tasks", h.handleAdminProbeTasksGet)
 	mux.HandleFunc("PUT /api/admin/v1/nodes/{id}/probe-tasks", h.handleAdminProbeTasksPut)
 	mux.HandleFunc("GET /api/admin/v1/nodes/{id}/traffic/daily", h.handleAdminTrafficDaily)
+	mux.HandleFunc("GET /api/admin/v1/nodes/{id}/events", h.handleAdminNodeEvents)
+	mux.HandleFunc("GET /api/admin/v1/credentials", h.handleAdminCredentialsList)
+	mux.HandleFunc("POST /api/admin/v1/credentials", h.handleAdminCredentialsCreate)
+	mux.HandleFunc("DELETE /api/admin/v1/credentials/{id}", h.handleAdminCredentialsDelete)
+	mux.HandleFunc("GET /api/admin/v1/backup", h.handleAdminBackup)
 	mux.HandleFunc("GET /events/public", h.handlePublicEvents)
 	mux.HandleFunc("GET /events/admin", h.handleAdminEvents)
 	// 路由形态的 README 约定为 /admin/，静态资源实际文件为 admin.html。
@@ -148,6 +156,8 @@ type publicNodeDTO struct {
 	Proxies []publicProxy `json:"proxies"`
 	// Probes 为探测任务滑窗统计（P2）；无任务时为空数组。
 	Probes []publicProbeDTO `json:"probes"`
+	// Tunnels 为该节点绑定键（user+clientID）匹配到的隧道（P3）；空数组兜底。
+	Tunnels []tunnelCore `json:"tunnels"`
 }
 
 // adminFactsDTO 为管理端资产信息；均输出 string|null（cpu_cores 为十进制
@@ -184,6 +194,8 @@ type adminNodeDTO struct {
 	Proxies []adminProxy `json:"proxies"`
 	// Probes 为探测任务滑窗统计（P2），额外含 target。
 	Probes []adminProbeDTO `json:"probes"`
+	// Tunnels 为该节点绑定键匹配到的隧道（P3），额外含 user/client_id/local_addr。
+	Tunnels []adminTunnelCore `json:"tunnels"`
 
 	Facts      *adminFactsDTO `json:"facts"`
 	BootID     *string        `json:"boot_id"`
@@ -204,6 +216,8 @@ type overviewDTO struct {
 	NodesOnline      int     `json:"nodes_online"`
 	NodesOffline     int     `json:"nodes_offline"`
 	FRPClientsOnline int     `json:"frp_clients_online"`
+	TunnelsTotal     int     `json:"tunnels_total"`
+	TunnelsOnline    int     `json:"tunnels_online"`
 	NetRXBps         float64 `json:"net_rx_bps"`
 	NetTXBps         float64 `json:"net_tx_bps"`
 }
@@ -307,8 +321,10 @@ func (h *Handler) commonFor(n store.NodeState, now time.Time) nodeCommon {
 	return c
 }
 
-func (h *Handler) publicNodeFor(n store.NodeState, now time.Time) publicNodeDTO {
-	d := publicNodeDTO{nodeCommon: h.commonFor(n, now), Probes: publicProbesFor(h.store.ProbeStats(n.NodeID, now))}
+func (h *Handler) publicNodeFor(n store.NodeState, tunnels []store.Tunnel, now time.Time) publicNodeDTO {
+	d := publicNodeDTO{nodeCommon: h.commonFor(n, now),
+		Probes:  publicProbesFor(h.store.ProbeStats(n.NodeID, now)),
+		Tunnels: nodeTunnelsFor(tunnels, n.NodeID)}
 	if n.FRP != nil {
 		d.Proxies = make([]publicProxy, 0, len(n.FRP.Proxies))
 		for _, p := range n.FRP.Proxies {
@@ -321,10 +337,11 @@ func (h *Handler) publicNodeFor(n store.NodeState, now time.Time) publicNodeDTO 
 }
 
 func (h *Handler) adminNodeFor(n store.NodeState, all []store.NodeState,
-	clients []store.FRPClient, now time.Time) adminNodeDTO {
+	clients []store.FRPClient, tunnels []store.Tunnel, now time.Time) adminNodeDTO {
 
 	d := adminNodeDTO{nodeCommon: h.commonFor(n, now), FRPClients: []frpClientDTO{},
-		Probes: adminProbesFor(h.store.ProbeStats(n.NodeID, now))}
+		Probes:  adminProbesFor(h.store.ProbeStats(n.NodeID, now)),
+		Tunnels: adminNodeTunnelsFor(tunnels, n.NodeID)}
 	if n.FRP != nil {
 		d.Proxies = make([]adminProxy, 0, len(n.FRP.Proxies))
 		for _, p := range n.FRP.Proxies {
@@ -396,6 +413,12 @@ func (h *Handler) overviewFor(now time.Time) overviewDTO {
 			o.FRPClientsOnline++
 		}
 	}
+	for _, t := range h.tunnels() {
+		o.TunnelsTotal++
+		if t.Proxy.Online {
+			o.TunnelsOnline++
+		}
+	}
 	return o
 }
 
@@ -427,9 +450,10 @@ func (h *Handler) handleOverview(w http.ResponseWriter, _ *http.Request) {
 func (h *Handler) handlePublicNodes(w http.ResponseWriter, _ *http.Request) {
 	now := h.now()
 	snap := h.store.Snapshot()
+	tunnels := store.ReconcileTunnels(snap, h.store.FRPProxies())
 	nodes := make([]publicNodeDTO, 0, len(snap))
 	for _, n := range snap {
-		nodes = append(nodes, h.publicNodeFor(n, now))
+		nodes = append(nodes, h.publicNodeFor(n, tunnels, now))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"now":   now.Unix(),
@@ -443,9 +467,10 @@ func (h *Handler) handlePublicNode(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found")
 		return
 	}
+	now := h.now()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"now":  h.now().Unix(),
-		"node": h.publicNodeFor(n, h.now()),
+		"now":  now.Unix(),
+		"node": h.publicNodeFor(n, store.ReconcileTunnels(h.store.Snapshot(), h.store.FRPProxies()), now),
 	})
 }
 
@@ -510,9 +535,10 @@ func (h *Handler) handleAdminNodes(w http.ResponseWriter, r *http.Request) {
 	now := h.now()
 	snap := h.store.Snapshot()
 	clients := h.store.FRPClients()
+	tunnels := store.ReconcileTunnels(snap, h.store.FRPProxies())
 	nodes := make([]adminNodeDTO, 0, len(snap))
 	for _, n := range snap {
-		nodes = append(nodes, h.adminNodeFor(n, snap, clients, now))
+		nodes = append(nodes, h.adminNodeFor(n, snap, clients, tunnels, now))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"now":   now.Unix(),
@@ -529,9 +555,11 @@ func (h *Handler) handleAdminNode(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found")
 		return
 	}
+	now := h.now()
+	snap := h.store.Snapshot()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"now":  h.now().Unix(),
-		"node": h.adminNodeFor(n, h.store.Snapshot(), h.store.FRPClients(), h.now()),
+		"now":  now.Unix(),
+		"node": h.adminNodeFor(n, snap, h.store.FRPClients(), store.ReconcileTunnels(snap, h.store.FRPProxies()), now),
 	})
 }
 
@@ -553,8 +581,8 @@ func (h *Handler) handleAdminEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 // serveEvents 推送 SSE：连接即发 snapshot 事件（overview + 全量节点 DTO），
-// 之后状态变化按 1 秒窗口合并发 node 事件（单节点 DTO），每 25 秒一行
-// `: ping` 心跳。
+// 之后状态变化按 1 秒窗口合并发 node 事件（单节点 DTO），隧道快照变化时
+// 增发 tunnels 事件（公开/管理各自裁剪版），每 25 秒一行 `: ping` 心跳。
 func (h *Handler) serveEvents(w http.ResponseWriter, r *http.Request, admin bool) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -574,6 +602,7 @@ func (h *Handler) serveEvents(w http.ResponseWriter, r *http.Request, admin bool
 
 	pending := make(map[string]struct{})
 	refreshAll := false
+	tunnelsChanged := false
 	merge := time.NewTicker(sseMergeWindow)
 	defer merge.Stop()
 	heartbeat := time.NewTicker(sseHeartbeat)
@@ -584,6 +613,9 @@ func (h *Handler) serveEvents(w http.ResponseWriter, r *http.Request, admin bool
 		case <-r.Context().Done():
 			return
 		case ev := <-events:
+			if ev.Tunnels {
+				tunnelsChanged = true
+			}
 			if ev.NodeID == "" {
 				refreshAll = true
 			} else {
@@ -596,32 +628,46 @@ func (h *Handler) serveEvents(w http.ResponseWriter, r *http.Request, admin bool
 				}
 				refreshAll = false
 			}
-			if len(pending) == 0 {
-				continue
-			}
-			ids := make([]string, 0, len(pending))
-			for id := range pending {
-				ids = append(ids, id)
-			}
-			sort.Strings(ids)
-			pending = make(map[string]struct{})
-			now := h.now()
-			var all []store.NodeState
-			var clients []store.FRPClient
-			if admin {
-				all = h.store.Snapshot()
-				clients = h.store.FRPClients()
-			}
-			for _, id := range ids {
-				n, ok := h.store.Get(id)
-				if !ok {
-					continue
-				}
-				if !h.sendNode(w, n, all, clients, now, admin) {
+			sent := false
+			if tunnelsChanged {
+				tunnelsChanged = false
+				if !h.sendTunnels(w, admin) {
 					return
 				}
+				sent = true
 			}
-			flusher.Flush()
+			if len(pending) > 0 {
+				ids := make([]string, 0, len(pending))
+				for id := range pending {
+					ids = append(ids, id)
+				}
+				sort.Strings(ids)
+				pending = make(map[string]struct{})
+				now := h.now()
+				var all []store.NodeState
+				var clients []store.FRPClient
+				var tunnels []store.Tunnel
+				if admin {
+					all = h.store.Snapshot()
+					clients = h.store.FRPClients()
+					tunnels = store.ReconcileTunnels(all, h.store.FRPProxies())
+				} else {
+					tunnels = store.ReconcileTunnels(h.store.Snapshot(), h.store.FRPProxies())
+				}
+				for _, id := range ids {
+					n, ok := h.store.Get(id)
+					if !ok {
+						continue
+					}
+					if !h.sendNode(w, n, all, clients, tunnels, now, admin) {
+						return
+					}
+				}
+				sent = true
+			}
+			if sent {
+				flusher.Flush()
+			}
 		case <-heartbeat.C:
 			if _, err := io.WriteString(w, ": ping\n\n"); err != nil {
 				return
@@ -635,18 +681,19 @@ func (h *Handler) serveEvents(w http.ResponseWriter, r *http.Request, admin bool
 func (h *Handler) sendSnapshot(w http.ResponseWriter, flusher http.Flusher, admin bool) bool {
 	now := h.now()
 	snap := h.store.Snapshot()
+	tunnels := store.ReconcileTunnels(snap, h.store.FRPProxies())
 	var nodes any
 	if admin {
 		clients := h.store.FRPClients()
 		list := make([]adminNodeDTO, 0, len(snap))
 		for _, n := range snap {
-			list = append(list, h.adminNodeFor(n, snap, clients, now))
+			list = append(list, h.adminNodeFor(n, snap, clients, tunnels, now))
 		}
 		nodes = list
 	} else {
 		list := make([]publicNodeDTO, 0, len(snap))
 		for _, n := range snap {
-			list = append(list, h.publicNodeFor(n, now))
+			list = append(list, h.publicNodeFor(n, tunnels, now))
 		}
 		nodes = list
 	}
@@ -659,12 +706,12 @@ func (h *Handler) sendSnapshot(w http.ResponseWriter, flusher http.Flusher, admi
 
 // sendNode 发送单个节点的 node 事件。
 func (h *Handler) sendNode(w http.ResponseWriter, n store.NodeState, all []store.NodeState,
-	clients []store.FRPClient, now time.Time, admin bool) bool {
+	clients []store.FRPClient, tunnels []store.Tunnel, now time.Time, admin bool) bool {
 
 	if admin {
-		return writeSSE(w, nil, "node", h.adminNodeFor(n, all, clients, now))
+		return writeSSE(w, nil, "node", h.adminNodeFor(n, all, clients, tunnels, now))
 	}
-	return writeSSE(w, nil, "node", h.publicNodeFor(n, now))
+	return writeSSE(w, nil, "node", h.publicNodeFor(n, tunnels, now))
 }
 
 // writeSSE 写一条 SSE 事件；flusher 非 nil 时立即冲刷。

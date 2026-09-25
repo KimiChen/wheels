@@ -94,6 +94,8 @@ www.sqlite.org                             # 构建与页面引用
 dev.mysql.com                              # 构建与页面引用
 www.slimframework.com                      # 构建与页面引用
 modernc.org                                # frp-monitor 的 SQLite 驱动依赖声明
+k8s.io                                     # go.sum 依赖声明（上游 go.mod 既有依赖）
+sigs.k8s.io                                # 同上
 
 # —— 腾讯云验证码与云服务（sub2api-plus 的验证码接入）
 turing.captcha.qcloud.com                  # sub2api-plus 的验证码接入

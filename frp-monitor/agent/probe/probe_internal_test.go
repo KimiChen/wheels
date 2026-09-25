@@ -84,7 +84,7 @@ func (d *recordDialer) DialContext(ctx context.Context, _, address string) (net.
 }
 
 func TestProbeOnceSuccess(t *testing.T) {
-	m := newTestManager(okResolver("10.0.0.1"), fakeDialer{dial: func(context.Context, string, string) (net.Conn, error) {
+	m := newTestManager(okResolver("192.0.2.1"), fakeDialer{dial: func(context.Context, string, string) (net.Conn, error) {
 		return fakeConn{}, nil
 	}})
 	latency, missing := m.probeOnce(context.Background(), "example.com:443")
@@ -97,7 +97,7 @@ func TestProbeOnceSuccess(t *testing.T) {
 }
 
 func TestProbeOnceRefused(t *testing.T) {
-	m := newTestManager(okResolver("10.0.0.1"), fakeDialer{dial: func(context.Context, string, string) (net.Conn, error) {
+	m := newTestManager(okResolver("192.0.2.1"), fakeDialer{dial: func(context.Context, string, string) (net.Conn, error) {
 		return nil, errors.New("connection refused")
 	}})
 	latency, missing := m.probeOnce(context.Background(), "example.com:443")
@@ -107,7 +107,7 @@ func TestProbeOnceRefused(t *testing.T) {
 }
 
 func TestProbeOnceDialTimeout(t *testing.T) {
-	m := newTestManager(okResolver("10.0.0.1"), fakeDialer{dial: func(context.Context, string, string) (net.Conn, error) {
+	m := newTestManager(okResolver("192.0.2.1"), fakeDialer{dial: func(context.Context, string, string) (net.Conn, error) {
 		return nil, context.DeadlineExceeded
 	}})
 	latency, missing := m.probeOnce(context.Background(), "example.com:443")
@@ -144,15 +144,15 @@ func TestProbeOnceResolveError(t *testing.T) {
 
 func TestProbeOnceMultiAddrFallback(t *testing.T) {
 	d := &recordDialer{perAddr: map[string]func(context.Context) (net.Conn, error){
-		"10.0.0.1:443": func(context.Context) (net.Conn, error) { return nil, errors.New("refused") },
-		"10.0.0.2:443": func(context.Context) (net.Conn, error) { return nil, context.DeadlineExceeded },
+		"192.0.2.1:443": func(context.Context) (net.Conn, error) { return nil, errors.New("refused") },
+		"192.0.2.2:443": func(context.Context) (net.Conn, error) { return nil, context.DeadlineExceeded },
 	}}
-	m := newTestManager(okResolver("10.0.0.1", "10.0.0.2", "10.0.0.3"), d)
+	m := newTestManager(okResolver("192.0.2.1", "192.0.2.2", "192.0.2.3"), d)
 	latency, missing := m.probeOnce(context.Background(), "example.com:443")
 	if missing || latency < 0 {
 		t.Fatalf("第三地址成功须返回其延迟，得到 latency=%d missing=%v", latency, missing)
 	}
-	want := []string{"10.0.0.1:443", "10.0.0.2:443", "10.0.0.3:443"}
+	want := []string{"192.0.2.1:443", "192.0.2.2:443", "192.0.2.3:443"}
 	if fmt.Sprint(d.attempted) != fmt.Sprint(want) {
 		t.Fatalf("须按序尝试前两个失败地址后命中第三，实际 %v", d.attempted)
 	}
@@ -160,7 +160,7 @@ func TestProbeOnceMultiAddrFallback(t *testing.T) {
 
 func TestProbeOnceMaxThreeAddrs(t *testing.T) {
 	d := &recordDialer{def: func(context.Context) (net.Conn, error) { return nil, errors.New("refused") }}
-	m := newTestManager(okResolver("10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4", "10.0.0.5"), d)
+	m := newTestManager(okResolver("192.0.2.1", "192.0.2.2", "192.0.2.3", "192.0.2.4", "192.0.2.5"), d)
 	latency, missing := m.probeOnce(context.Background(), "example.com:443")
 	if missing || latency != protocol.LatencyFailed {
 		t.Fatalf("全部地址失败须为 -1，得到 latency=%d missing=%v", latency, missing)
@@ -173,10 +173,10 @@ func TestProbeOnceMaxThreeAddrs(t *testing.T) {
 func TestProbeOnceLatencyExcludesDNSAndPriorFailures(t *testing.T) {
 	resolver := fakeResolver{lookup: func(ctx context.Context, host string) ([]string, error) {
 		time.Sleep(150 * time.Millisecond) // DNS 耗时不计入
-		return []string{"10.0.0.1", "10.0.0.2"}, nil
+		return []string{"192.0.2.1", "192.0.2.2"}, nil
 	}}
 	dialer := fakeDialer{dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-		if address == "10.0.0.1:443" {
+		if address == "192.0.2.1:443" {
 			time.Sleep(150 * time.Millisecond) // 此前地址失败耗时不计入
 			return nil, errors.New("refused")
 		}
@@ -199,7 +199,7 @@ func TestProbeOnceLatencyExcludesDNSAndPriorFailures(t *testing.T) {
 }
 
 func TestProbeOnceInvalidTarget(t *testing.T) {
-	m := newTestManager(okResolver("10.0.0.1"), nil)
+	m := newTestManager(okResolver("192.0.2.1"), nil)
 	latency, missing := m.probeOnce(context.Background(), "no-port")
 	if missing || latency != protocol.LatencyFailed {
 		t.Fatalf("非法目标须为失败(-1)，得到 latency=%d missing=%v", latency, missing)
@@ -297,7 +297,7 @@ func collectResults(t *testing.T, m *Manager) (chan protocol.PingResult, func())
 }
 
 func TestRunSchedulesAndStops(t *testing.T) {
-	m := newTestManager(okResolver("10.0.0.1"), fakeDialer{dial: func(context.Context, string, string) (net.Conn, error) {
+	m := newTestManager(okResolver("192.0.2.1"), fakeDialer{dial: func(context.Context, string, string) (net.Conn, error) {
 		return fakeConn{}, nil
 	}})
 	if err := m.apply(1, []task{{id: "a", target: "h:80", interval: 100 * time.Millisecond}}); err != nil {
@@ -333,7 +333,7 @@ drain:
 }
 
 func TestRunRestartsOnApply(t *testing.T) {
-	m := newTestManager(okResolver("10.0.0.1"), fakeDialer{dial: func(context.Context, string, string) (net.Conn, error) {
+	m := newTestManager(okResolver("192.0.2.1"), fakeDialer{dial: func(context.Context, string, string) (net.Conn, error) {
 		return fakeConn{}, nil
 	}})
 	if err := m.apply(1, []task{{id: "a", target: "h:80", interval: 100 * time.Millisecond}}); err != nil {
@@ -383,7 +383,7 @@ sawB:
 
 func TestRunSkipsWhenInflightFull(t *testing.T) {
 	// dialer 阻塞到 ctx 取消，占满 16 个在飞名额后其余轮次须跳过。
-	m := newTestManager(okResolver("10.0.0.1"), fakeDialer{dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
+	m := newTestManager(okResolver("192.0.2.1"), fakeDialer{dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}})

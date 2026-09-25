@@ -90,8 +90,8 @@ export function fillRow(row, node, nowSec, { hrefFor } = {}) {
   }
 }
 
-/** 重新应用表格上保存的排序状态（全量重建行之后调用）。 */
-function applyStoredSort(table) {
+/** 重新应用表格上保存的排序状态（全量重建行之后调用）。隧道页复用。 */
+export function applyStoredSort(table) {
   const key = table.dataset.wskSortKey;
   const direction = table.dataset.wskSortDirection;
   if (!key || !direction) return;

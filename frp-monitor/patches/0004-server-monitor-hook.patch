@@ -1,6 +1,6 @@
 --- /dev/null
 +++ b/server/frpmonitor_hook.go
-@@ -0,0 +1,77 @@
+@@ -0,0 +1,105 @@
 +// Copyright 2016 fatedier, fatedier@gmail.com
 +//
 +// Licensed under the Apache License, Version 2.0 (the "License");
@@ -26,6 +26,8 @@
 +import (
 +	"context"
 +
++	v1 "github.com/fatedier/frp/pkg/config/v1"
++	"github.com/fatedier/frp/pkg/metrics/mem"
 +	"github.com/fatedier/frp/pkg/util/log"
 +
 +	monitorservice "github.com/fatedier/frp/extension/frpmonitor/monitor/service"
@@ -75,6 +77,32 @@
 +			FirstConnectedAt: info.FirstConnectedAt.Unix(),
 +			LastConnectedAt:  info.LastConnectedAt.Unix(),
 +		})
++	}
++	return out
++}
++
++// ListProxyStats 读取内存统计 collector 的逐 Proxy 快照（隧道对账与流量）。
++// monitor 开启时 EnableMem 已被强制注册（见 service.go），此处直接可读。
++func (s frpRegistrySource) ListProxyStats() []monitorservice.FRPProxyStat {
++	_ = s.svr
++	var out []monitorservice.FRPProxyStat
++	for _, pt := range []v1.ProxyType{
++		v1.ProxyTypeTCP, v1.ProxyTypeUDP, v1.ProxyTypeTCPMUX,
++		v1.ProxyTypeHTTP, v1.ProxyTypeHTTPS,
++		v1.ProxyTypeSTCP, v1.ProxyTypeXTCP, v1.ProxyTypeSUDP,
++	} {
++		for _, ps := range mem.StatsCollector.GetProxiesByType(string(pt)) {
++			out = append(out, monitorservice.FRPProxyStat{
++				Name:            ps.Name,
++				Type:            ps.Type,
++				User:            ps.User,
++				ClientID:        ps.ClientID,
++				Online:          ps.LastStartAt > ps.LastCloseAt,
++				CurConns:        ps.CurConns,
++				TodayTrafficIn:  ps.TodayTrafficIn,
++				TodayTrafficOut: ps.TodayTrafficOut,
++			})
++		}
 +	}
 +	return out
 +}

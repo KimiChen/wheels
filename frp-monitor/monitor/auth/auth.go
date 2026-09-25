@@ -19,14 +19,18 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 )
 
 const (
@@ -36,13 +40,43 @@ const (
 	AdminSessionTTL = 12 * time.Hour
 )
 
+// nodeCredential 为凭据文件中的单条节点凭据。服务端只保存 token 的
+// sha256 摘要；created_at 为创建时间（Unix 秒），旧版文件缺失时为 0。
+type nodeCredential struct {
+	ID          string `json:"id"`
+	TokenSHA256 string `json:"token_sha256"`
+	Comment     string `json:"comment,omitempty"`
+	CreatedAt   int64  `json:"created_at,omitempty"`
+}
+
 // nodeCredentialsFile 为节点凭据文件的 JSON 结构。
 type nodeCredentialsFile struct {
-	Nodes []struct {
-		ID          string `json:"id"`
-		TokenSHA256 string `json:"token_sha256"`
-		Comment     string `json:"comment"`
-	} `json:"nodes"`
+	Nodes []nodeCredential `json:"nodes"`
+}
+
+// maxCredentialIDLen 为凭据 ID 长度上限（字节）。
+const maxCredentialIDLen = 64
+
+// 凭据管理错误。ErrCredentialConflict 映射 409，ErrInvalidCredentialID 映射 400。
+var (
+	ErrCredentialConflict  = errors.New("auth: 节点 id 已存在")
+	ErrInvalidCredentialID = errors.New("auth: 节点 id 非法（空、超长或含空白）")
+)
+
+// ValidateCredentialID 校验凭据 ID：非空、不超过 64 字节、不含空白。
+func ValidateCredentialID(id string) error {
+	if id == "" || len(id) > maxCredentialIDLen ||
+		strings.IndexFunc(id, unicode.IsSpace) >= 0 {
+		return ErrInvalidCredentialID
+	}
+	return nil
+}
+
+// CredentialInfo 为凭据的管理视图（不含摘要）。
+type CredentialInfo struct {
+	ID        string
+	Comment   string
+	CreatedAt int64
 }
 
 // NodeAuthenticator 校验节点 Bearer token。并发安全。
@@ -51,6 +85,7 @@ type NodeAuthenticator struct {
 
 	mu      sync.RWMutex
 	modTime time.Time
+	entries []nodeCredential  // 凭据文件全量条目（管理写回时保留 comment/created_at）
 	digests map[string][]byte // nodeID → token sha256 摘要（32 字节）
 }
 
@@ -93,6 +128,7 @@ func (a *NodeAuthenticator) load() error {
 	}
 
 	a.mu.Lock()
+	a.entries = f.Nodes
 	a.digests = digests
 	a.modTime = st.ModTime()
 	a.mu.Unlock()
@@ -128,6 +164,121 @@ func (a *NodeAuthenticator) Authenticate(token string) (nodeID string, ok bool) 
 		}
 	}
 	return "", false
+}
+
+// List 返回全部凭据的管理视图（按 id 排序，不含摘要）。
+func (a *NodeAuthenticator) List() []CredentialInfo {
+	a.maybeReload()
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	out := make([]CredentialInfo, 0, len(a.entries))
+	for _, e := range a.entries {
+		out = append(out, CredentialInfo{ID: e.ID, Comment: e.Comment, CreatedAt: e.CreatedAt})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}
+
+// Add 生成 32 字节随机 token（hex），把摘要追加进凭据文件并立即生效。
+// 明文 token 只经返回值返回一次；id 冲突返回 ErrCredentialConflict，
+// id 非法返回 ErrInvalidCredentialID。
+func (a *NodeAuthenticator) Add(id, comment string) (token string, err error) {
+	if err := ValidateCredentialID(id); err != nil {
+		return "", err
+	}
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", fmt.Errorf("auth: token 生成失败：%w", err)
+	}
+	token = hex.EncodeToString(raw)
+	sum := sha256.Sum256([]byte(token))
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if _, dup := a.digests[id]; dup {
+		return "", ErrCredentialConflict
+	}
+	entries := make([]nodeCredential, len(a.entries), len(a.entries)+1)
+	copy(entries, a.entries)
+	entries = append(entries, nodeCredential{
+		ID: id, TokenSHA256: hex.EncodeToString(sum[:]),
+		Comment: comment, CreatedAt: time.Now().Unix(),
+	})
+	if err := a.saveLocked(entries); err != nil {
+		return "", err
+	}
+	return token, nil
+}
+
+// Delete 吊销一个节点凭据并立即生效；id 不存在返回 found=false。
+func (a *NodeAuthenticator) Delete(id string) (found bool, err error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	idx := -1
+	for i, e := range a.entries {
+		if e.ID == id {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return false, nil
+	}
+	entries := make([]nodeCredential, 0, len(a.entries)-1)
+	entries = append(entries, a.entries[:idx]...)
+	entries = append(entries, a.entries[idx+1:]...)
+	if err := a.saveLocked(entries); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// saveLocked 原子写凭据文件（同目录临时文件 + rename，0600）并更新内存
+// 条目、摘要与 modTime（避免随后 mtime 重载入旧文件）。调用方须持有 a.mu。
+// 写盘失败时内存状态不变（继续用旧凭据）。
+func (a *NodeAuthenticator) saveLocked(entries []nodeCredential) error {
+	data, err := json.MarshalIndent(nodeCredentialsFile{Nodes: entries}, "", "  ")
+	if err != nil {
+		return fmt.Errorf("auth: 凭据序列化失败：%w", err)
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(a.path), ".nodes-*.tmp")
+	if err != nil {
+		return fmt.Errorf("auth: 凭据临时文件创建失败：%w", err)
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("auth: 凭据临时文件写入失败：%w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("auth: 凭据临时文件关闭失败：%w", err)
+	}
+	if err := os.Rename(tmpPath, a.path); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("auth: 凭据文件替换失败：%w", err)
+	}
+	// CreateTemp 即 0600；显式 chmod 兜底umask 之外的场景。
+	if err := os.Chmod(a.path, 0o600); err != nil {
+		return fmt.Errorf("auth: 凭据文件权限设置失败：%w", err)
+	}
+	st, err := os.Stat(a.path)
+	if err != nil {
+		return fmt.Errorf("auth: 凭据文件状态读取失败：%w", err)
+	}
+	digests := make(map[string][]byte, len(entries))
+	for _, e := range entries {
+		digest, err := hex.DecodeString(e.TokenSHA256)
+		if err != nil || len(digest) != sha256.Size {
+			return fmt.Errorf("auth: 节点 %s 的 token_sha256 不是 64 位十六进制", e.ID)
+		}
+		digests[e.ID] = digest
+	}
+	a.entries = entries
+	a.digests = digests
+	a.modTime = st.ModTime()
+	return nil
 }
 
 // Admin 为管理端认证。passwordHash 为空表示管理端禁用（任何登录都失败，

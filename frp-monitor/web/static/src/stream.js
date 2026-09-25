@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-// SSE 封装：首个事件 snapshot 全量、之后 node 增量、心跳为 ": ping" 注释行。
+// SSE 封装：首个事件 snapshot 全量、之后 node 增量、心跳为 ": ping" 注释行；
+// tunnels 事件在隧道状态变化时推送全量隧道列表（公开 / 管理各自裁剪）。
 // 断线后由本模块指数退避重连（带抖动）；重连成功服务端会重新下发 snapshot，
 // 页面据此全量刷新。服务端返回非 SSE 响应（如 401）时浏览器放弃重连，
 // 此时上报 failed，由调用方决定后续动作（如回到登录页）。
@@ -16,6 +17,7 @@ export function createStream(
   {
     onSnapshot,
     onNode,
+    onTunnels,
     onStatus,
     minDelayMs = 1000,
     maxDelayMs = 30000,
@@ -61,6 +63,13 @@ export function createStream(
     source.addEventListener("node", (event) => {
       const data = parse(event.data);
       if (data && typeof onNode === "function") onNode(data);
+    });
+
+    source.addEventListener("tunnels", (event) => {
+      const data = parse(event.data);
+      if (data && typeof onTunnels === "function") {
+        onTunnels(Array.isArray(data.tunnels) ? data.tunnels : []);
+      }
     });
 
     source.onopen = () => {

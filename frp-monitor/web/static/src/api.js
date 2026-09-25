@@ -49,6 +49,7 @@ export const publicApi = {
     request(
       `/api/public/v1/nodes/${encodeURIComponent(id)}/metrics?range=${encodeURIComponent(range)}`,
     ),
+  tunnels: () => request("/api/public/v1/tunnels"),
 };
 
 export const adminApi = {
@@ -58,8 +59,38 @@ export const adminApi = {
   session: () => request("/api/admin/v1/session"),
   nodes: () => request("/api/admin/v1/nodes"),
   node: (id) => request(`/api/admin/v1/nodes/${encodeURIComponent(id)}`),
+  nodeEvents: (id, limit) =>
+    request(
+      `/api/admin/v1/nodes/${encodeURIComponent(id)}/events?limit=${encodeURIComponent(limit)}`,
+    ),
   trafficDaily: (id, days) =>
     request(
       `/api/admin/v1/nodes/${encodeURIComponent(id)}/traffic/daily?days=${encodeURIComponent(days)}`,
     ),
+  credentials: () => request("/api/admin/v1/credentials"),
+  createCredential: (id, comment) =>
+    request("/api/admin/v1/credentials", {
+      method: "POST",
+      body: comment === "" ? { id } : { id, comment },
+    }),
+  deleteCredential: (id) =>
+    request(`/api/admin/v1/credentials/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }),
 };
+
+/** 备份可用性探测：200 可下载；409 no_data_dir 表示服务端未开启持久化。 */
+export async function probeBackup() {
+  try {
+    const res = await fetch("/api/admin/v1/backup", {
+      credentials: "same-origin",
+    });
+    // 只需要状态码，立即取消避免真正下载文件体。
+    res.body?.cancel().catch(() => {});
+    if (res.status === 409) return "no_data_dir";
+    if (res.status === 401) return "unauthorized";
+    return res.ok ? "ok" : "unknown";
+  } catch {
+    return "unknown";
+  }
+}

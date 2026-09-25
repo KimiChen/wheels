@@ -1,0 +1,22 @@
+[Unit]
+Description=frp-monitor-server (frps with frp-monitor)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/frp-monitor-server -c /etc/frp-monitor/frps.toml
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=1048576
+
+# 凭据与历史数据放 /var/lib/frp-monitor（StateDirectory 自动创建并保证可写）。
+StateDirectory=frp-monitor
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/frp-monitor
+
+[Install]
+WantedBy=multi-user.target

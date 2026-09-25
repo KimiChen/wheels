@@ -238,7 +238,7 @@ func TestProbePersistenceRoundtrip(t *testing.T) {
 
 	tasks := []protocol.PingTask{
 		{ID: "t2", Target: "example.com:443", Interval: 30},
-		{ID: "t1", Target: "10.0.0.1:22", Interval: 5},
+		{ID: "t1", Target: "192.0.2.1:22", Interval: 5},
 	}
 	db.enqueueProbeTasksReplace("n1", 3, tasks)
 	db.enqueueProbeResults("n1", []protocol.PingResult{

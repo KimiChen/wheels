@@ -1,6 +1,6 @@
 --- /dev/null
 +++ b/client/frpmonitor_hook.go
-@@ -0,0 +1,99 @@
+@@ -0,0 +1,100 @@
 +// Copyright 2016 fatedier, fatedier@gmail.com
 +//
 +// Licensed under the Apache License, Version 2.0 (the "License");
@@ -64,6 +64,7 @@
 +	svr := s.svr
 +	ext := protocol.FRPExtension{
 +		ClientID:   svr.common.ClientID,
++		User:       svr.common.User,
 +		FRPVersion: frpversion.Base(),
 +	}
 +

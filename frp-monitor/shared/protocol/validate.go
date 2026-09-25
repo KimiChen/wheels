@@ -75,6 +75,9 @@ func (e *FRPExtension) Validate() error {
 	if err := checkLen("frp.client_id", e.ClientID, MaxProxyNameLen); err != nil {
 		return err
 	}
+	if err := checkLen("frp.user", e.User, MaxVersionLen); err != nil {
+		return err
+	}
 	if err := checkLen("frp.frp_version", e.FRPVersion, MaxVersionLen); err != nil {
 		return err
 	}

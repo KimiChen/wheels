@@ -250,3 +250,74 @@ export function fillFrpClients(tbody, template, clients, nowSec) {
     "该节点暂无 FRP 客户端记录。",
   );
 }
+
+/** 隧道运行状态徽章：online 布尔，null 显示未知。 */
+export function tunnelBadge(tunnel) {
+  if (tunnel?.online === true) return { variant: "success", text: "在线", dot: true };
+  if (tunnel?.online === false) return { variant: "danger", text: "离线" };
+  return { variant: null, text: fmtText(null) };
+}
+
+/**
+ * 隧道表（服务端视角）：name / type / 状态 / 连接数 / 今日收 / 发；
+ * 管理端模板多 user / client_id / local_addr 列（公开模板无对应单元格，
+ * setText 自动跳过）。今日收 / 发是服务端隧道口径（十进制字符串），
+ * 与节点网卡流量口径不同、不相加。
+ */
+export function fillTunnels(tbody, template, tunnels) {
+  renderSimpleRows(
+    tbody,
+    template,
+    Array.isArray(tunnels) ? tunnels : [],
+    (row, tunnel) => {
+      setText(row, "name", fmtText(tunnel.name));
+      setText(row, "type", fmtText(tunnel.type));
+      setText(row, "user", fmtText(tunnel.user));
+      setText(row, "client_id", fmtText(tunnel.client_id));
+      setText(row, "local_addr", fmtText(tunnel.local_addr));
+      const statusCell = row.querySelector('[data-f="status"]');
+      if (statusCell) {
+        const badge = document.createElement("span");
+        badge.className = "wsk-badge";
+        statusCell.replaceChildren(badge);
+        setBadge(badge, tunnelBadge(tunnel));
+      }
+      setText(row, "cur_conns", fmtCount(tunnel.cur_conns));
+      setText(row, "today_rx", fmtBytes(tunnel.today_rx_bytes));
+      setText(row, "today_tx", fmtBytes(tunnel.today_tx_bytes));
+    },
+    "该节点暂无隧道记录。",
+  );
+}
+
+const EVENT_KINDS = {
+  tunnel_online: { variant: "success", text: "隧道上线" },
+  tunnel_offline: { variant: "danger", text: "隧道离线" },
+  client_online: { variant: "success", text: "客户端上线" },
+  client_offline: { variant: "danger", text: "客户端离线" },
+};
+
+/** 最近事件表（仅管理端）：时间 / 类型 / 名称 / 详情，服务端已倒序。 */
+export function fillEvents(tbody, template, events, nowSec) {
+  renderSimpleRows(
+    tbody,
+    template,
+    Array.isArray(events) ? events : [],
+    (row, event) => {
+      setTime(row, "ts", event.ts, nowSec);
+      const kindCell = row.querySelector('[data-f="kind"]');
+      if (kindCell) {
+        const badge = document.createElement("span");
+        badge.className = "wsk-badge";
+        kindCell.replaceChildren(badge);
+        setBadge(
+          badge,
+          EVENT_KINDS[event.kind] ?? { variant: null, text: fmtText(event.kind) },
+        );
+      }
+      setText(row, "name", fmtText(event.name));
+      setText(row, "detail", fmtText(event.detail));
+    },
+    "暂无事件记录。",
+  );
+}

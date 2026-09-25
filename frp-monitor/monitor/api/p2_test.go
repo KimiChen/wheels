@@ -32,7 +32,7 @@ func newTestHandlerWithDB(t *testing.T, password string) (*Handler, *store.Store
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewHandler(st, admin, nil), st
+	return NewHandler(st, admin, nil, nil), st
 }
 
 // seedProbeAndTraffic 写入一个含探测统计与流量累计的节点。

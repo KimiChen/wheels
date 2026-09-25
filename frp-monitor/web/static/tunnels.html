@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light dark" />
-    <title>总览 · frp-monitor</title>
+    <title>隧道 · frp-monitor</title>
     <script>
       // 首帧前应用已存主题；无显式选择时不写 data-theme，令牌跟随系统，
       // 禁用 JavaScript 时深色仍然生效。
@@ -19,7 +19,7 @@
     <link rel="stylesheet" href="/assets/wsk/style.css" />
     <link rel="stylesheet" href="/assets/app.css" />
     <script src="/assets/wsk/script.js" defer></script>
-    <script type="module" src="/src/views/index.js"></script>
+    <script type="module" src="/src/views/tunnels.js"></script>
   </head>
   <body>
     <a class="wsk-skip-link" href="#main-content">跳到主要内容</a>
@@ -79,8 +79,8 @@
       </div>
 
       <nav class="fm-topnav" aria-label="页面">
-        <a href="/" aria-current="page">总览</a>
-        <a href="/tunnels.html">隧道</a>
+        <a href="/">总览</a>
+        <a href="/tunnels.html" aria-current="page">隧道</a>
         <a href="/admin.html">管理</a>
       </nav>
 
@@ -117,8 +117,8 @@
       <div class="wsk-page">
         <div class="wsk-page-head">
           <div>
-            <h1 tabindex="-1">监控总览</h1>
-            <p>节点在线状态、资源使用与 FRP 隧道摘要，按秒实时更新。</p>
+            <h1 tabindex="-1">隧道</h1>
+            <p>服务端观察到的全部 FRP 隧道：运行状态、连接数与今日隧道流量。</p>
           </div>
           <span class="wsk-badge wsk-accent">公开只读</span>
         </div>
@@ -129,67 +129,28 @@
           </svg>
           <div>
             <strong>需要启用 JavaScript</strong>
-            <p>监控数据由浏览器脚本通过 API 与 SSE 实时加载，当前只有静态框架。</p>
+            <p>隧道数据由浏览器脚本通过 API 与 SSE 实时加载，当前只有静态框架。</p>
           </div>
         </div>
 
-        <section class="wsk-section" aria-labelledby="ov-title">
-          <div class="wsk-section-head">
-            <h2 id="ov-title">平台总览</h2>
-            <span class="wsk-badge" id="ov-updated">等待数据</span>
-          </div>
-          <div class="wsk-metric-grid" id="overview-grid">
-            <div class="wsk-metric">
-              <span>节点总数</span><strong data-ov="nodes_total">—</strong
-              ><small>已接入节点</small>
-            </div>
-            <div class="wsk-metric">
-              <span>在线节点</span><strong data-ov="nodes_online">—</strong
-              ><small>监控会话在线</small>
-            </div>
-            <div class="wsk-metric">
-              <span>离线节点</span><strong data-ov="nodes_offline">—</strong
-              ><small>监控会话离线</small>
-            </div>
-            <div class="wsk-metric">
-              <span>FRP 在线客户端</span
-              ><strong data-ov="frp_clients_online">—</strong
-              ><small>服务端控制连接</small>
-            </div>
-            <div class="wsk-metric">
-              <span>隧道</span><strong data-ov="tunnels">—</strong
-              ><small>在线 / 总数</small>
-            </div>
-            <div class="wsk-metric">
-              <span>聚合接收</span><strong data-ov="net_rx_bps">—</strong
-              ><small>全节点下行合计</small>
-            </div>
-            <div class="wsk-metric">
-              <span>聚合发送</span><strong data-ov="net_tx_bps">—</strong
-              ><small>全节点上行合计</small>
-            </div>
-          </div>
-          <p class="wsk-help wsk-mt-2" data-ov-note></p>
-        </section>
-
         <section
           class="wsk-section"
-          aria-labelledby="nodes-title"
+          aria-labelledby="tunnels-title"
           data-table-scope
         >
           <div class="wsk-section-head">
-            <h2 id="nodes-title">节点列表</h2>
-            <span class="wsk-badge">实时</span>
+            <h2 id="tunnels-title">隧道列表</h2>
+            <span class="wsk-badge" id="tunnels-updated">等待数据</span>
           </div>
           <div class="wsk-toolbar wsk-mb-3" data-js-only>
             <div class="wsk-filter">
-              <label class="wsk-sr-only" for="node-filter">搜索节点</label
+              <label class="wsk-sr-only" for="tunnel-filter">搜索隧道</label
               ><input
                 class="wsk-control"
-                id="node-filter"
+                id="tunnel-filter"
                 data-table-filter
                 type="search"
-                placeholder="搜索节点 ID 或状态"
+                placeholder="搜索节点、名称或类型"
               />
             </div>
             <span class="wsk-filter-meta" data-table-result aria-live="polite"
@@ -199,13 +160,13 @@
           <div class="wsk-table-wrap">
             <table
               class="wsk-table"
-              id="node-table"
+              id="tunnel-table"
               data-table
               data-page-size="20"
-              data-unit="个节点"
+              data-unit="条隧道"
             >
               <caption class="wsk-sr-only">
-                节点实时监控列表
+                服务端观察到的全部 FRP 隧道
               </caption>
               <thead>
                 <tr>
@@ -213,7 +174,7 @@
                     <button
                       class="wsk-sort-button"
                       type="button"
-                      data-sort="name"
+                      data-sort="node"
                       data-js-only
                     >
                       节点<svg class="wsk-icon" aria-hidden="true">
@@ -222,47 +183,33 @@
                     </button>
                     <span data-no-js>节点</span>
                   </th>
-                  <th scope="col">状态</th>
-                  <th scope="col" class="fm-num" aria-sort="none">
+                  <th scope="col" aria-sort="none">
                     <button
                       class="wsk-sort-button"
                       type="button"
-                      data-sort="cpu"
+                      data-sort="name"
                       data-js-only
                     >
-                      CPU<svg class="wsk-icon" aria-hidden="true">
+                      名称<svg class="wsk-icon" aria-hidden="true">
                         <use href="#sort"></use>
                       </svg>
                     </button>
-                    <span data-no-js>CPU</span>
+                    <span data-no-js>名称</span>
                   </th>
-                  <th scope="col" class="fm-num" aria-sort="none">
-                    <button
-                      class="wsk-sort-button"
-                      type="button"
-                      data-sort="mem"
-                      data-js-only
-                    >
-                      内存<svg class="wsk-icon" aria-hidden="true">
-                        <use href="#sort"></use>
-                      </svg>
-                    </button>
-                    <span data-no-js>内存</span>
+                  <th scope="col">类型</th>
+                  <th scope="col">运行状态</th>
+                  <th scope="col" class="fm-num">连接数</th>
+                  <th scope="col" class="fm-num" title="服务端隧道口径，与节点网卡流量不相加">
+                    今日收（服务端）
                   </th>
-                  <th scope="col" class="fm-num">磁盘</th>
-                  <th scope="col" class="fm-num">网络收 / 发</th>
-                  <th scope="col" class="fm-num" title="各探测任务近 15 分钟窗口 TCP 探测失败率的最差值">
-                    TCP 探测
+                  <th scope="col" class="fm-num" title="服务端隧道口径，与节点网卡流量不相加">
+                    今日发（服务端）
                   </th>
-                  <th scope="col" class="fm-num" title="节点网卡今日收 + 发合计，与 FRP 隧道流量口径不同">
-                    今日流量
-                  </th>
-                  <th scope="col" class="fm-num">更新时间</th>
                 </tr>
               </thead>
-              <tbody id="node-tbody">
+              <tbody id="tunnel-tbody">
                 <tr data-table-empty>
-                  <td class="wsk-table-empty" colspan="9">
+                  <td class="wsk-table-empty" colspan="7">
                     正在连接监控服务…
                   </td>
                 </tr>
@@ -271,7 +218,7 @@
           </div>
           <nav
             class="wsk-pagination wsk-table-pagination"
-            aria-label="节点分页"
+            aria-label="隧道分页"
             data-js-only
           >
             <button type="button" data-table-page-action="previous" aria-label="上一页">
@@ -285,6 +232,12 @@
               </svg>
             </button>
           </nav>
+          <p class="wsk-help wsk-mt-2">
+            今日收 / 发为服务端隧道口径，与节点网卡流量（总览与节点详情中的
+            「节点收 / 发」）口径不同，两者不可相加。节点列显示「未关联节点」
+            表示服务端未能把该隧道匹配到已接入的监控节点（例如未安装采集能力的
+            原版 frpc 直连）。
+          </p>
         </section>
       </div>
     </main>
@@ -297,39 +250,15 @@
       </div>
     </footer>
 
-    <template id="node-row-template">
+    <template id="tunnel-row-template">
       <tr data-row>
-        <th scope="row">
-          <a class="fm-node-link" data-f-link href="/"><span data-f="id"></span></a>
-        </th>
-        <td>
-          <span class="fm-badges">
-            <span class="wsk-badge" data-badge="session"></span>
-            <span class="wsk-badge" data-badge="freshness"></span>
-            <span class="wsk-badge" data-badge="frp"></span>
-          </span>
-        </td>
-        <td class="fm-num" data-f="cpu">—</td>
-        <td class="fm-num">
-          <span data-f="mem">—</span>
-          <small class="fm-cell-sub" data-f="mem_pct"></small>
-        </td>
-        <td class="fm-num">
-          <span data-f="disk">—</span>
-          <small class="fm-cell-sub" data-f="disk_pair"></small>
-        </td>
-        <td class="fm-num">
-          <span class="fm-net">
-            <span data-f="net_rx">—</span>
-            <span data-f="net_tx">—</span>
-          </span>
-        </td>
-        <td class="fm-num">
-          <span data-f="probe">—</span>
-          <small class="fm-cell-sub" data-f="probe_sub"></small>
-        </td>
-        <td class="fm-num" data-f="traffic_today">—</td>
-        <td class="fm-num" data-f="updated">—</td>
+        <td data-f="node"></td>
+        <th scope="row" class="fm-mono" data-f="name"></th>
+        <td data-f="type"></td>
+        <td data-f="status"></td>
+        <td class="fm-num" data-f="cur_conns"></td>
+        <td class="fm-num" data-f="today_rx"></td>
+        <td class="fm-num" data-f="today_tx"></td>
       </tr>
     </template>
 

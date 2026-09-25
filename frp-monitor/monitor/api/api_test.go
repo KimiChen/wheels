@@ -33,7 +33,7 @@ func newTestHandler(t *testing.T, password string) (*Handler, *store.Store) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewHandler(st, admin, nil), st
+	return NewHandler(st, admin, nil, nil), st
 }
 
 // seedFullNode 写入一个含全部字段（含敏感字段）的节点。
@@ -57,7 +57,7 @@ func seedFullNode(t *testing.T, st *store.Store) time.Time {
 		Uptime: 86400, TCP: 100, UDP: 20, Procs: 250,
 	}
 	frp := &protocol.FRPExtension{
-		ClientID: "client-secret-1", FRPVersion: "0.71.0", ControlConnected: true,
+		User: "u1", ClientID: "client-secret-1", FRPVersion: "0.71.0", ControlConnected: true,
 		Proxies: []protocol.ProxyInfo{
 			{Name: "ssh", Type: "tcp", LocalAddr: "127.0.0.1:22", Enabled: true, Status: "running"},
 		},
@@ -68,7 +68,7 @@ func seedFullNode(t *testing.T, st *store.Store) time.Time {
 	st.UpdateFRPClients([]store.FRPClient{
 		{User: "u1", ClientID: "client-secret-1", RunID: "run-1", Version: "0.71.0",
 			Online: true, FirstConnectedAt: 1790380000, LastConnectedAt: 1790380700},
-	})
+	}, now)
 	return now
 }
 

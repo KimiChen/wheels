@@ -49,7 +49,7 @@ func TestCSPInlineScriptHashes(t *testing.T) {
 
 // 安全响应头实际出现在页面响应上。
 func TestSecurityHeadersServed(t *testing.T) {
-	h := NewHandler(nil, nil, web.Static())
+	h := NewHandler(nil, nil, nil, web.Static())
 	req := httptest.NewRequest("GET", "/", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -63,7 +63,7 @@ func TestSecurityHeadersServed(t *testing.T) {
 
 // /admin/ 路由形态重定向到 admin.html。
 func TestAdminRedirect(t *testing.T) {
-	h := NewHandler(nil, nil, web.Static())
+	h := NewHandler(nil, nil, nil, web.Static())
 	for _, path := range []string{"/admin", "/admin/"} {
 		req := httptest.NewRequest("GET", path, nil)
 		rec := httptest.NewRecorder()

@@ -84,7 +84,10 @@ type Extensions struct {
 type FRPExtension struct {
 	// ClientID 为稳定 FRP Client ID；未设置稳定 clientID 的普通 frpc
 	// 只能作为临时连接记录，不参与对账。
-	ClientID   string `json:"client_id"`
+	ClientID string `json:"client_id"`
+	// User 为 frpc 配置的 user（FRP 关联键为 user + clientID；
+	// 不同 user 可有同名 clientID，不能只按 clientID 建表）。
+	User       string `json:"user,omitempty"`
 	FRPVersion string `json:"frp_version"`
 	// ControlConnected 为 FRP 控制连接状态；断连时隧道与监控状态须分别展示。
 	ControlConnected bool `json:"control_connected"`

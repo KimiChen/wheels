@@ -1,0 +1,28 @@
+# frp-monitor-agent 示例配置（frpc 兼容，含 [monitor] 监控扩展段）。
+# 复制到 /etc/frp-monitor/frpc.toml 后修改；文件含秘密时应 0600。
+
+serverAddr = "frps.example.com"
+serverPort = 7000
+auth.token = "change-me"
+
+# 稳定 clientID 才参与隧道对账；不同 user 可有同名 clientID。
+clientID = "node-example-01"
+# user = ""
+
+# 登录失败持续重试：监控在 FRP 登录失败期间仍可上报主机状态。
+loginFailExit = false
+
+[monitor]
+enable = true
+# 监控服务端地址；远程节点必须 wss://（经反向代理），ws:// 仅允许回环。
+serverURL = "wss://frps.example.com/agent/v1/ws"
+# 节点独立监控凭据（服务端只存 sha256 摘要）。建议环境变量引用：
+token = "{{ .Envs.FRP_MONITOR_TOKEN }}"
+reportIntervalSeconds = 1
+
+# [[proxies]]
+# name = "ssh"
+# type = "tcp"
+# localIP = "127.0.0.1"
+# localPort = 22
+# remotePort = 6000

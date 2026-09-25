@@ -130,13 +130,21 @@ frpmonitor_build_tags() {
   printf '%s\n' "noweb frpmonitor"
 }
 
-# 缓存树标记：commit + series 摘要。series 变化后缓存树必须重建。
+# 缓存树标记：commit + series 与全部补丁内容的摘要。补丁内容变化后缓存树必须重建。
 expected_tree_marker() {
-  local series="$FRP_MONITOR_ROOT/patches/series" series_hash="empty"
-  if [[ -s "$series" ]]; then
-    series_hash="$(shasum -a 256 "$series" | awk '{print $1}')"
-  fi
-  printf '%s %s\n' "$(lock_value commit)" "$series_hash"
+  local series="$FRP_MONITOR_ROOT/patches/series"
+  local hash
+  hash="$(
+    {
+      cat "$series"
+      local line
+      while IFS= read -r line; do
+        [[ -z "$line" || "$line" == \#* ]] && continue
+        cat "$FRP_MONITOR_ROOT/patches/$line" 2>/dev/null || true
+      done < "$series"
+    } | shasum -a 256 | awk '{print $1}'
+  )"
+  printf '%s %s\n' "$(lock_value commit)" "$hash"
 }
 
 # 相对路径一律相对子项目根解析，与调用者 cwd 无关。

@@ -120,14 +120,14 @@ func TestReconcileReadOnly(t *testing.T) {
 	now := time.Unix(1790380800, 0)
 	s.StartSession("n1", "s1", 1, now)
 	s.StartSession("n2", "s2", 1, now)
-	frp1 := &protocol.FRPExtension{ClientID: "client-a", ControlConnected: true}
+	frp1 := &protocol.FRPExtension{User: "u1", ClientID: "client-a", ControlConnected: true}
 	if err := s.Report("n1", "s1", 1, nil, nil, frp1, now); err != nil {
 		t.Fatal(err)
 	}
 	s.UpdateFRPClients([]FRPClient{
 		{User: "u1", ClientID: "client-a", RunID: "r1", Online: true},
 		{User: "u2", ClientID: "client-b", RunID: "r2", Online: false},
-	})
+	}, now)
 
 	snap := s.Snapshot()
 	clients := s.FRPClients()
@@ -144,7 +144,7 @@ func TestReconcileReadOnly(t *testing.T) {
 		t.Fatalf("n2 不应绑定：bound=%v matched=%+v", bound, matched)
 	}
 	// 未上报 client_id 与注册表不匹配 → 有声明无匹配
-	n2ext := &protocol.FRPExtension{ClientID: "client-c"}
+	n2ext := &protocol.FRPExtension{User: "u1", ClientID: "client-c"}
 	if err := s.Report("n2", "s2", 1, nil, nil, n2ext, now); err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +186,7 @@ func TestSubscribeBroadcast(t *testing.T) {
 		t.Fatal("StartSession 应广播事件")
 	}
 
-	s.UpdateFRPClients(nil)
+	s.UpdateFRPClients(nil, now)
 	select {
 	case ev := <-ch:
 		if ev.NodeID != "" {

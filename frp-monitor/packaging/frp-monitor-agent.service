@@ -1,0 +1,20 @@
+[Unit]
+Description=frp-monitor-agent (frpc with frp-monitor)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/frp-monitor-agent -c /etc/frp-monitor/frpc.toml
+Restart=always
+RestartSec=5
+LimitNOFILE=1048576
+
+# 采集器需要读 /proc 与 /sys：不要启用 ProcSubset=pid 或 ProtectKernelTunables。
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -35,12 +35,14 @@ for dir in agent monitor shared web; do
   mapped+=("$dir")
 done
 
-# tests/fixtures 供采集器与协议测试在树内引用。
-if [[ -d "$FRP_MONITOR_ROOT/tests/fixtures" ]]; then
-  mkdir -p "$target/tests"
-  cp -R "$FRP_MONITOR_ROOT/tests/fixtures" "$target/tests/fixtures"
-  mapped+=("tests/fixtures")
-fi
+# tests/fixtures 供采集器与协议测试在树内引用；tests/loadgen 为容量测试工具。
+for sub in fixtures loadgen; do
+  if [[ -d "$FRP_MONITOR_ROOT/tests/$sub" ]]; then
+    mkdir -p "$target/tests"
+    cp -R "$FRP_MONITOR_ROOT/tests/$sub" "$target/tests/$sub"
+    mapped+=("tests/$sub")
+  fi
+done
 
 ((${#mapped[@]} > 0)) || die "没有可映射的扩展目录（agent/monitor/shared/web 均不存在）"
 

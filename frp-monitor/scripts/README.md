@@ -8,7 +8,9 @@ go、python3；应用补丁时另需 patch。
 | `prepare-source.sh <输出目录> [镜像]` | 按 `upstream.lock` 浅抓 tag、双重校验 tag 对象与 commit、`git archive` 展开、零 fuzz 应用 `patches/series` |
 | `assemble.sh <源码树>` | 把本仓 `agent/`、`monitor/`、`shared/`、`web/`（及 `tests/fixtures/`）映射到源码树 `extension/frpmonitor/`，拒绝软链接 |
 | `build.sh` | 准备（带 `.cache` 缓存）→ 映射 → 构建基线 frpc/frps 与扩展接线的 frp-monitor-agent/frp-monitor-server 到 `dist/` → 全量编译验证 |
-| `verify.sh` | 交付物检查、`bash -n`、gofmt、JSON 合法性、原生基线构建与受影响包单测、扩展契约/组件测试、frpmonitor 接线构建与端到端冒烟、linux amd64/arm64 交叉编译 |
+| `verify.sh` | 交付物检查、`bash -n`、gofmt、JSON 合法性、原生基线构建与受影响包单测、扩展契约/组件测试、frpmonitor 接线构建与端到端冒烟、linux amd64/arm64 交叉编译、100 节点容量档（`FRP_MONITOR_LOADTEST=0` 跳过） |
+| `loadtest.sh [N]` | 容量测试档位（README §9）：N 个模拟节点（loadgen）验证 monitor 接收与聚合开销，非性能承诺 |
+| `package.sh` | 先跑 verify，再产出 linux amd64/arm64 发布包与 sha256sums 到 `dist/` |
 
 端到端冒烟使用固定回环端口（17000/17400/17500）与专用虚构凭据，真起
 frp-monitor-server/agent 验证上报、公开 DTO 裁剪、管理认证与 FRP 隧道转发。

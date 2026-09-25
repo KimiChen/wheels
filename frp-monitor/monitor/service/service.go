@@ -54,9 +54,20 @@ type FRPClientInfo struct {
 	FirstConnectedAt, LastConnectedAt int64 // Unix 秒
 }
 
-// FRPRegistrySource 为 frps Registry 的只读适配器（由上层胶水实现）。
+// FRPProxyStat 为 frps 内存统计中单个 Proxy 的只读快照。
+type FRPProxyStat struct {
+	Name, Type, User, ClientID string
+	// Online 以 LastStartAt > LastCloseAt 判定。
+	Online   bool
+	CurConns int64
+	// 服务端视角：In=frps 从隧道收到字节，Out=frps 向隧道发出字节（今日）。
+	TodayTrafficIn, TodayTrafficOut int64
+}
+
+// FRPRegistrySource 为 frps Registry / 内存统计的只读适配器（由上层胶水实现）。
 type FRPRegistrySource interface {
 	ListClients() []FRPClientInfo
+	ListProxyStats() []FRPProxyStat
 }
 
 // Start 启动监控服务：绑定监听并即刻返回；服务在 goroutine 中运行，
@@ -94,7 +105,7 @@ func Start(ctx context.Context, cfg Config, src FRPRegistrySource) error {
 	}
 	ingestHandler := ingest.NewHandler(nodeAuth, st, serverVersion())
 	st.SetProbeHook(ingestHandler.NotifyProbeTasksChanged)
-	apiHandler := api.NewHandler(st, adminAuth, web.Static())
+	apiHandler := api.NewHandler(st, adminAuth, nodeAuth, web.Static())
 
 	mux := http.NewServeMux()
 	mux.Handle("/agent/v1/ws", ingestHandler)
@@ -150,8 +161,8 @@ func normalizeRetention(days int) int {
 	return days
 }
 
-// pollRegistry 周期拉取 FRP 注册表快照喂入 store。src  panic 等运行期
-// 错误只记日志，保证 frps 转发不受影响。
+// pollRegistry 周期拉取 FRP 注册表与 proxy 统计快照喂入 store。src panic
+// 等运行期错误只记日志，保证 frps 转发不受影响。
 func pollRegistry(ctx context.Context, src FRPRegistrySource, st *store.Store) {
 	ticker := time.NewTicker(registryPollInterval)
 	defer ticker.Stop()
@@ -166,6 +177,7 @@ func pollRegistry(ctx context.Context, src FRPRegistrySource, st *store.Store) {
 						log.Printf("frpmonitor monitor: FRP 注册表快照 panic（已降级）：%v", r)
 					}
 				}()
+				now := time.Now()
 				infos := src.ListClients()
 				clients := make([]store.FRPClient, 0, len(infos))
 				for _, in := range infos {
@@ -179,7 +191,18 @@ func pollRegistry(ctx context.Context, src FRPRegistrySource, st *store.Store) {
 						LastConnectedAt:  in.LastConnectedAt,
 					})
 				}
-				st.UpdateFRPClients(clients)
+				st.UpdateFRPClients(clients, now)
+
+				stats := src.ListProxyStats()
+				proxies := make([]store.FRPProxy, 0, len(stats))
+				for _, ps := range stats {
+					proxies = append(proxies, store.FRPProxy{
+						Name: ps.Name, Type: ps.Type, User: ps.User, ClientID: ps.ClientID,
+						Online: ps.Online, CurConns: ps.CurConns,
+						TodayTrafficIn: ps.TodayTrafficIn, TodayTrafficOut: ps.TodayTrafficOut,
+					})
+				}
+				st.UpdateFRPProxies(proxies, now)
 			}()
 		}
 	}

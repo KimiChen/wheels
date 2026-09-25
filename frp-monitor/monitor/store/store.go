@@ -28,6 +28,8 @@ var (
 	ErrStaleSession = errors.New("store: 会话已失效（非当前会话）")
 	// ErrOutOfOrder 表示同会话内序号未严格递增。
 	ErrOutOfOrder = errors.New("store: 序号乱序（未严格递增）")
+	// ErrNoPersistence 表示未启用持久化（DataDir 为空或 DB 初始化失败降级）。
+	ErrNoPersistence = errors.New("store: 未启用持久化")
 )
 
 // minStaleAfter 为指标新鲜度阈值下限；有效阈值为
@@ -36,9 +38,12 @@ const minStaleAfter = 10 * time.Second
 
 // Event 为一次状态变更通知。NodeID 为空表示 FRP 注册表快照变化
 // （可能影响任意节点的对账结果，消费方应刷新全部节点）。
+// Tunnels 为 true 表示隧道快照（proxy stats）变化，SSE 消费方应额外
+// 发送 tunnels 事件。
 // 合并窗口（1 秒）由消费方实现，hub 只负责尽快投递。
 type Event struct {
-	NodeID string
+	NodeID  string
+	Tunnels bool
 }
 
 // FRPClient 为服务端 FRP 注册表条目的只读快照（由 service 层的
@@ -100,6 +105,12 @@ type Store struct {
 	mu         sync.RWMutex
 	nodes      map[string]*NodeState
 	frpClients []FRPClient
+	frpProxies []FRPProxy
+
+	// P3：事件检测状态（翻转基线）与内存环形缓冲；访问须持有 mu。
+	prevClientOnline map[string]bool
+	prevProxyOnline  map[string]bool
+	events           eventRing
 
 	subs map[chan Event]struct{}
 
@@ -267,11 +278,39 @@ func (s *Store) Snapshot() []NodeState {
 
 // UpdateFRPClients 替换 FRP 注册表快照（service 层周期喂入）。
 // 对账在读取时进行，因此这里只保存并广播一次「注册表变化」事件。
-func (s *Store) UpdateFRPClients(clients []FRPClient) {
+// 同时对每条注册条目做 Online 翻转检测，翻转写入 FRP 状态事件
+// （client_online/client_offline）。
+func (s *Store) UpdateFRPClients(clients []FRPClient, now time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.frpClients = clients
+	s.detectClientFlips(clients, now)
 	s.broadcast(Event{})
+}
+
+// UpdateFRPProxies 替换 FRP proxy 统计快照（service 层周期喂入）。
+// 快照与上一份比较，仅在变化时广播「隧道变化」事件（Tunnels=true），
+// 避免轮询空转冲刷 SSE；同时对每个 proxy 做 Online 翻转检测，
+// 翻转写入 FRP 状态事件（tunnel_online/tunnel_offline）。
+func (s *Store) UpdateFRPProxies(proxies []FRPProxy, now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	canon := canonicalProxies(proxies)
+	s.detectProxyFlips(canon, now)
+	changed := !proxiesEqual(s.frpProxies, canon)
+	s.frpProxies = canon
+	if changed {
+		s.broadcast(Event{Tunnels: true})
+	}
+}
+
+// FRPProxies 返回当前 FRP proxy 统计快照（排序后的稳定顺序）。
+func (s *Store) FRPProxies() []FRPProxy {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]FRPProxy, len(s.frpProxies))
+	copy(out, s.frpProxies)
+	return out
 }
 
 // FRPClients 返回当前 FRP 注册表快照。
@@ -283,17 +322,18 @@ func (s *Store) FRPClients() []FRPClient {
 	return out
 }
 
-// Reconcile 按 RawClientID 对账：返回服务端注册表中 ClientID 与节点上报的
-// extensions.frp.client_id 相同的条目。对账不认证：仅当全库只有该节点
-// 声明此 client_id 且至少有一条匹配时 bound 为 true；多节点冲突或
-// 无匹配时不绑定（bound=false），冲突只通过返回值呈现、不自动改绑。
+// Reconcile 按 user+clientID 组合键对账（根 README §4：不同 user 可有
+// 同名 clientID，不能只按 clientID 建表）：返回服务端注册表中 User 与
+// ClientID 都和节点上报的 extensions.frp 一致的条目。对账不认证：仅当
+// 全库只有该节点声明此组合键且至少有一条匹配时 bound 为 true；多节点
+// 冲突或无匹配时不绑定（bound=false），冲突只通过返回值呈现、不自动改绑。
 // 本函数为纯函数，不修改任何状态。
 func Reconcile(n NodeState, all []NodeState, clients []FRPClient) (matched []FRPClient, bound bool) {
 	if n.FRP == nil || n.FRP.ClientID == "" {
 		return nil, false
 	}
 	for _, c := range clients {
-		if c.ClientID == n.FRP.ClientID {
+		if c.ClientID == n.FRP.ClientID && c.User == n.FRP.User {
 			matched = append(matched, c)
 		}
 	}
@@ -301,7 +341,8 @@ func Reconcile(n NodeState, all []NodeState, clients []FRPClient) (matched []FRP
 		return nil, false
 	}
 	for _, o := range all {
-		if o.NodeID != n.NodeID && o.FRP != nil && o.FRP.ClientID == n.FRP.ClientID {
+		if o.NodeID != n.NodeID && o.FRP != nil &&
+			o.FRP.ClientID == n.FRP.ClientID && o.FRP.User == n.FRP.User {
 			return matched, false
 		}
 	}
@@ -394,9 +435,18 @@ func (s *Store) HistoryEnabled() bool { return s.db != nil }
 // MetricsRange 读取 [from, to) 分钟区间的聚合行；无 DB 返回错误。
 func (s *Store) MetricsRange(nodeID string, from, to int64) ([]MetricRow, error) {
 	if s.db == nil {
-		return nil, errors.New("store: 未启用持久化")
+		return nil, ErrNoPersistence
 	}
 	return s.db.MetricsRange(nodeID, from, to)
+}
+
+// BackupDB 用 VACUUM INTO 把 SQLite 库的一致快照导出到 destPath
+// （目标文件须不存在）；无 DB 返回 ErrNoPersistence。
+func (s *Store) BackupDB(destPath string) error {
+	if s.db == nil {
+		return ErrNoPersistence
+	}
+	return s.db.Backup(destPath)
 }
 
 // Traffic 返回节点累计流量视图；ok=false 表示从未有有效计数器读数。

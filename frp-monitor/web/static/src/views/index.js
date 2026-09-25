@@ -6,7 +6,11 @@ import { publicApi } from "../api.js";
 import { fmtClock } from "../format.js";
 import { createStream, STREAM_STATE } from "../stream.js";
 import { createNodeTable } from "./nodes.js";
-import { renderOverview, updateOverviewFromNodes } from "./overview.js";
+import {
+  renderOverview,
+  renderTunnelsCount,
+  updateOverviewFromNodes,
+} from "./overview.js";
 import { createServerClock, setConnPill } from "./status.js";
 
 const clock = createServerClock();
@@ -36,6 +40,11 @@ function onNode(node) {
   updateOverviewFromNodes(overviewGrid, nodeTable.nodes, state.overview);
 }
 
+// tunnels 事件携带全量隧道列表，用于刷新「隧道 在线 / 总数」卡片。
+function onTunnels(tunnels) {
+  renderTunnelsCount(overviewGrid, tunnels);
+}
+
 function onStatus(status) {
   setConnPill(pill, status);
   if (status.state === STREAM_STATE.FAILED) {
@@ -58,7 +67,7 @@ async function loadOnce() {
 }
 
 if ("EventSource" in window) {
-  createStream("/events/public", { onSnapshot, onNode, onStatus });
+  createStream("/events/public", { onSnapshot, onNode, onTunnels, onStatus });
 } else {
   setConnPill(pill, { state: STREAM_STATE.FAILED });
   void loadOnce();
