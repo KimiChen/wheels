@@ -22,6 +22,7 @@ import (
 	frpversion "github.com/fatedier/frp/pkg/util/version"
 
 	"github.com/fatedier/frp/extension/frpmonitor/agent/collect"
+	"github.com/fatedier/frp/extension/frpmonitor/agent/probe"
 	"github.com/fatedier/frp/extension/frpmonitor/agent/transport"
 	"github.com/fatedier/frp/extension/frpmonitor/shared/protocol"
 	"github.com/fatedier/frp/extension/frpmonitor/shared/version"
@@ -122,9 +123,11 @@ func (s *Service) runSession(ctx context.Context) error {
 	}
 	defer conn.Close()
 
+	prober := probe.NewManager()
 	sess := &session{
 		conn:    conn,
 		id:      newSessionID(),
+		prober:  prober,
 		pending: make(map[uint64]chan *protocol.Response),
 		readErr: make(chan error, 1),
 	}
@@ -134,7 +137,7 @@ func (s *Service) runSession(ctx context.Context) error {
 		SchemaVersion:  protocol.SchemaVersion,
 		AgentVersion:   version.Version,
 		FRPVersion:     frpversion.Base(),
-		Capabilities:   []string{"metrics"},
+		Capabilities:   []string{"metrics", "ping"},
 		SessionID:      sess.id,
 		ReportInterval: s.cfg.ReportIntervalSeconds,
 		SentAt:         time.Now().Unix(),
@@ -143,6 +146,24 @@ func (s *Service) runSession(ctx context.Context) error {
 		return err
 	}
 	log.Printf("[frp-monitor] 已连接 %s（会话 %s）", s.cfg.ServerURL, sess.id)
+
+	// TCP 探测随会话生命周期：每会话一个 Manager，会话结束取消本轮
+	// 全部探测；结果经 ping.result 逐条上报（复用会话 sequence 与 call
+	// 通道，call 已并发安全）。
+	probeCtx, probeCancel := context.WithCancel(ctx)
+	defer probeCancel()
+	go prober.Run(probeCtx, func(r protocol.PingResult) {
+		params := &protocol.PingResultParams{
+			SessionID: sess.id,
+			Sequence:  atomic.AddUint64(&sess.sequence, 1),
+			SentAt:    time.Now().Unix(),
+			Results:   []protocol.PingResult{r},
+		}
+		// 上报失败不致命：连接级错误会经 readErr 或主循环 call 结束会话。
+		if err := sess.call(probeCtx, protocol.MethodPingResult, params); err != nil && probeCtx.Err() == nil {
+			log.Printf("[frp-monitor] ping.result 上报失败：%v", err)
+		}
+	})
 
 	var lastFactsHash, lastFRPHash string
 	var lastFRPSent time.Time
@@ -192,11 +213,12 @@ func (s *Service) runSession(ctx context.Context) error {
 
 // session 维护一条连接上的请求/响应配对与读 pump。
 type session struct {
-	conn *transport.Conn
-	id   string
+	conn   *transport.Conn
+	id     string
+	prober *probe.Manager // 本会话的探测调度器；创建后不再变更
 
-	sequence uint64 // 会话内递增的上报序号（仅上报 goroutine 递增）
-	callID   uint64 // JSON-RPC 请求 id
+	sequence uint64 // 会话内递增的上报序号（report 与 ping.result 共用，atomic 递增）
+	callID   uint64 // JSON-RPC 请求 id（atomic 递增；多 goroutine call 并发安全）
 
 	pendingMu sync.Mutex
 	pending   map[uint64]chan *protocol.Response
@@ -238,7 +260,7 @@ func (s *session) call(ctx context.Context, method string, params any) error {
 	}
 }
 
-// readPump 为唯一读循环：分发响应与下行请求（P1 无下行方法，回 MethodNotFound）。
+// readPump 为唯一读循环：分发响应与下行请求（ping.tasks 等）。
 func (s *session) readPump() {
 	for {
 		_ = s.conn.SetReadDeadline(time.Now().Add(readIdleTimeout))
@@ -258,14 +280,7 @@ func (s *session) readPump() {
 			continue // 畸形帧不致命
 		}
 		if frame.Method != "" {
-			// 下行请求（如 P2 的 ping.tasks）：P1 一律 MethodNotFound。
-			if frame.ID != nil {
-				_ = s.conn.Send(&protocol.Response{
-					JSONRPC: protocol.JSONRPCVersion,
-					ID:      *frame.ID,
-					Error:   &protocol.Error{Code: protocol.CodeMethodNotFound, Message: "agent 未实现：" + frame.Method},
-				})
-			}
+			s.handleDownlink(frame.ID, frame.Method, frame.Params)
 			continue
 		}
 		if frame.ID == nil {
@@ -278,6 +293,48 @@ func (s *session) readPump() {
 			ch <- &protocol.Response{Result: frame.Result, Error: frame.Error}
 		}
 	}
+}
+
+// handleDownlink 分发 monitor 下行请求：ping.tasks 应用到探测管理器，
+// 其余回 MethodNotFound。无 ID 的下行帧按通知处理，不回复。
+func (s *session) handleDownlink(id *uint64, method string, params json.RawMessage) {
+	var resp *protocol.Response
+	if method == protocol.MethodPingTasks {
+		resp = applyPingTasks(s.prober, id, params)
+	} else if id != nil {
+		resp = &protocol.Response{
+			JSONRPC: protocol.JSONRPCVersion,
+			ID:      *id,
+			Error:   &protocol.Error{Code: protocol.CodeMethodNotFound, Message: "agent 未实现：" + method},
+		}
+	}
+	// 写失败由 readErr / 主循环 call 发现，此处忽略。
+	if resp != nil {
+		_ = s.conn.Send(resp)
+	}
+}
+
+// applyPingTasks 校验并整体替换探测任务列表，产出对 ping.tasks 的响应：
+// 成功回 result null；参数或版本非法回 CodeInvalidParams。id 为 nil 时
+// 仍应用变更但不产出响应。
+func applyPingTasks(prober *probe.Manager, id *uint64, params json.RawMessage) *protocol.Response {
+	var p protocol.PingTasksParams
+	var rpcErr *protocol.Error
+	if err := json.Unmarshal(params, &p); err != nil {
+		rpcErr = &protocol.Error{Code: protocol.CodeInvalidParams, Message: "ping.tasks params 非法"}
+	} else if err := prober.Apply(p); err != nil {
+		rpcErr = &protocol.Error{Code: protocol.CodeInvalidParams, Message: err.Error()}
+	}
+	if id == nil {
+		return nil
+	}
+	resp := &protocol.Response{JSONRPC: protocol.JSONRPCVersion, ID: *id}
+	if rpcErr != nil {
+		resp.Error = rpcErr
+	} else {
+		resp.Result = json.RawMessage("null")
+	}
+	return resp
 }
 
 func (s *session) notifyErr(err error) {

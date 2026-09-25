@@ -7,7 +7,8 @@
     "agent_version": "0.1.0-dev",
     "frp_version": "0.71.0",
     "capabilities": [
-      "metrics"
+      "metrics",
+      "ping"
     ],
     "session_id": "sess-20260926-0001",
     "report_interval": 1,

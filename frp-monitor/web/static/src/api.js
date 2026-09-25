@@ -45,6 +45,10 @@ export const publicApi = {
   overview: () => request("/api/public/v1/overview"),
   nodes: () => request("/api/public/v1/nodes"),
   node: (id) => request(`/api/public/v1/nodes/${encodeURIComponent(id)}`),
+  nodeMetrics: (id, range) =>
+    request(
+      `/api/public/v1/nodes/${encodeURIComponent(id)}/metrics?range=${encodeURIComponent(range)}`,
+    ),
 };
 
 export const adminApi = {
@@ -54,4 +58,8 @@ export const adminApi = {
   session: () => request("/api/admin/v1/session"),
   nodes: () => request("/api/admin/v1/nodes"),
   node: (id) => request(`/api/admin/v1/nodes/${encodeURIComponent(id)}`),
+  trafficDaily: (id, days) =>
+    request(
+      `/api/admin/v1/nodes/${encodeURIComponent(id)}/traffic/daily?days=${encodeURIComponent(days)}`,
+    ),
 };

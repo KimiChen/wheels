@@ -144,6 +144,10 @@ func (p *PingResultParams) Validate() error {
 	if p.Sequence < 1 {
 		return fmt.Errorf("protocol: sequence 必须从 1 递增：%d", p.Sequence)
 	}
+	if len(p.Results) > MaxPingResultsPerMessage {
+		return fmt.Errorf("protocol: results 数量 %d 超过上限 %d",
+			len(p.Results), MaxPingResultsPerMessage)
+	}
 	for i, r := range p.Results {
 		if r.TaskID == "" {
 			return fmt.Errorf("protocol: results[%d].task_id 为空", i)

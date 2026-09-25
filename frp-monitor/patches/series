@@ -3,3 +3,4 @@
 0002-monitor-config-types.patch
 0003-client-monitor-hook.patch
 0004-server-monitor-hook.patch
+0005-deps-modernc-sqlite.patch

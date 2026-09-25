@@ -40,7 +40,10 @@ func setup(t *testing.T) (*httptest.Server, *store.Store, string) {
 		t.Fatal(err)
 	}
 	st := store.New()
-	srv := httptest.NewServer(NewHandler(nodeAuth, st, "frp-monitor/test"))
+	h := NewHandler(nodeAuth, st, "frp-monitor/test")
+	// 与服务端生产接线一致：任务变更触发下发。
+	st.SetProbeHook(h.NotifyProbeTasksChanged)
+	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
 	return srv, st, token
 }

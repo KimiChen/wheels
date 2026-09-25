@@ -1,6 +1,6 @@
 --- /dev/null
 +++ b/pkg/config/v1/frpmonitor.go
-@@ -0,0 +1,46 @@
+@@ -0,0 +1,52 @@
 +// Copyright 2016 fatedier, fatedier@gmail.com
 +//
 +// Licensed under the Apache License, Version 2.0 (the "License");
@@ -46,6 +46,12 @@
 +	// AdminPasswordHash 为管理密码的 sha256 十六进制小写摘要；
 +	// 为空时管理端（/admin/、/api/admin/、/events/admin）禁用。
 +	AdminPasswordHash string `json:"adminPasswordHash,omitempty"`
++
++	// DataDir 为历史数据目录（SQLite）。为空时仅内存最新状态，不持久化
++	// 历史、流量与节点记录（P1 行为）。
++	DataDir string `json:"dataDir,omitempty"`
++	// HistoryRetentionDays 为历史保留天数，范围 [1,365]，默认 7。
++	HistoryRetentionDays int `json:"historyRetentionDays,omitempty"`
 +}
 --- a/pkg/config/v1/client.go
 +++ b/pkg/config/v1/client.go
@@ -75,7 +81,7 @@
  	Transport ServerTransportConfig `json:"transport,omitempty"`
 --- /dev/null
 +++ b/pkg/config/v1/validation/frpmonitor.go
-@@ -0,0 +1,84 @@
+@@ -0,0 +1,87 @@
 +// Copyright 2016 fatedier, fatedier@gmail.com
 +//
 +// Licensed under the Apache License, Version 2.0 (the "License");
@@ -157,6 +163,9 @@
 +				return fmt.Errorf("monitor.adminPasswordHash 只允许小写十六进制")
 +			}
 +		}
++	}
++	if c.HistoryRetentionDays < 0 || c.HistoryRetentionDays > 365 {
++		return fmt.Errorf("monitor.historyRetentionDays 越界 [0,365]（0 为默认 7）：%d", c.HistoryRetentionDays)
 +	}
 +	return nil
 +}

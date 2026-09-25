@@ -3,20 +3,24 @@
 // （Facts、本地目标、计数器范围、frp_clients 对账）。实时走 /events/admin；
 // 401 时回到登录表单。登录表单走真实 POST，不使用 data-demo-submit 伪保存。
 
-import { ApiError, adminApi } from "../api.js";
+import { ApiError, adminApi, publicApi } from "../api.js";
 import { fmtClock } from "../format.js";
 import { createStream, STREAM_STATE } from "../stream.js";
 import {
   fillCounters,
   fillFacts,
   fillFrpClients,
+  fillProbes,
   fillProxies,
   fillResources,
   fillStatus,
+  fillTraffic,
+  fillTrafficDaily,
 } from "./detail.js";
 import { createNodeTable } from "./nodes.js";
 import { renderOverview, updateOverviewFromNodes } from "./overview.js";
 import { createServerClock, sessionBadge, setBadge, setConnPill } from "./status.js";
+import { createTrends } from "./trends.js";
 
 const clock = createServerClock();
 const loginView = document.getElementById("login-view");
@@ -35,6 +39,16 @@ const proxyBody = document.getElementById("proxy-tbody");
 const proxyTemplate = document.getElementById("proxy-row-template");
 const frpBody = document.getElementById("frp-tbody");
 const frpTemplate = document.getElementById("frp-row-template");
+const probeBody = document.getElementById("probe-tbody");
+const probeTemplate = document.getElementById("probe-row-template");
+const trafficBody = document.getElementById("traffic-tbody");
+const trafficTemplate = document.getElementById("traffic-row-template");
+
+// 趋势历史走公开 metrics 路由（契约仅此一个）；日流量表为管理端专属接口。
+const trends = createTrends({
+  root: document.getElementById("trend-section"),
+  fetchMetrics: (id, range) => publicApi.nodeMetrics(id, range),
+});
 
 const nodeTable = createNodeTable({
   table: document.getElementById("node-table"),
@@ -49,6 +63,7 @@ function showLogin() {
   detail.hidden = true;
   loginView.hidden = false;
   state.selectedId = null;
+  trends.hide();
   if (stream) {
     stream.close();
     stream = null;
@@ -116,6 +131,31 @@ function fillDetail(node) {
   fillCounters(detail, node, clock.now());
   fillProxies(proxyBody, proxyTemplate, node.proxies);
   fillFrpClients(frpBody, frpTemplate, node.frp_clients, clock.now());
+  fillProbes(probeBody, probeTemplate, node.probes);
+  fillTraffic(detail, node.traffic);
+  trends.show(node.id);
+}
+
+/** 近 7 日流量：仅在选择节点时拉取一次，SSE 增量不重复请求。 */
+async function loadTrafficDaily(id) {
+  try {
+    const data = await adminApi.trafficDaily(id, 7);
+    if (state.selectedId !== id) return;
+    fillTrafficDaily(trafficBody, trafficTemplate, data?.days);
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) {
+      showLogin();
+      return;
+    }
+    if (state.selectedId !== id) return;
+    const row = document.createElement("tr");
+    const cell = document.createElement("td");
+    cell.className = "wsk-table-empty";
+    cell.colSpan = 3;
+    cell.textContent = "日流量加载失败，请重新选择节点。";
+    row.append(cell);
+    trafficBody.replaceChildren(row);
+  }
 }
 
 async function selectNode(id, { moveFocus = false } = {}) {
@@ -127,6 +167,7 @@ async function selectNode(id, { moveFocus = false } = {}) {
   });
   const cached = nodeTable.nodes.get(id);
   if (cached) fillDetail(cached);
+  void loadTrafficDaily(id);
   try {
     const data = await adminApi.node(id);
     clock.update(data?.now);

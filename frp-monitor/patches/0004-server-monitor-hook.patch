@@ -1,6 +1,6 @@
 --- /dev/null
 +++ b/server/frpmonitor_hook.go
-@@ -0,0 +1,75 @@
+@@ -0,0 +1,77 @@
 +// Copyright 2016 fatedier, fatedier@gmail.com
 +//
 +// Licensed under the Apache License, Version 2.0 (the "License");
@@ -49,6 +49,8 @@
 +		Addr:              cfg.Addr,
 +		CredentialsFile:   cfg.CredentialsFile,
 +		AdminPasswordHash: cfg.AdminPasswordHash,
++		DataDir:           cfg.DataDir,
++		RetentionDays:     cfg.HistoryRetentionDays,
 +	}, frpRegistrySource{svr: svr}); err != nil {
 +		// 监控启动失败只降级，不影响隧道。
 +		log.Warnf("frp-monitor 监控服务启动失败，已降级（隧道不受影响）：%v", err)

@@ -246,13 +246,18 @@
                   </th>
                   <th scope="col" class="fm-num">磁盘</th>
                   <th scope="col" class="fm-num">网络收 / 发</th>
-                  <th scope="col" class="fm-num">TCP 探测</th>
+                  <th scope="col" class="fm-num" title="各探测任务近 15 分钟窗口 TCP 探测失败率的最差值">
+                    TCP 探测
+                  </th>
+                  <th scope="col" class="fm-num" title="节点网卡今日收 + 发合计，与 FRP 隧道流量口径不同">
+                    今日流量
+                  </th>
                   <th scope="col" class="fm-num">更新时间</th>
                 </tr>
               </thead>
               <tbody id="node-tbody">
                 <tr data-table-empty>
-                  <td class="wsk-table-empty" colspan="8">
+                  <td class="wsk-table-empty" colspan="9">
                     正在连接监控服务…
                   </td>
                 </tr>
@@ -314,7 +319,11 @@
             <span data-f="net_tx">—</span>
           </span>
         </td>
-        <td class="fm-num" title="TCP 探测将于 P2 阶段提供">—</td>
+        <td class="fm-num">
+          <span data-f="probe">—</span>
+          <small class="fm-cell-sub" data-f="probe_sub"></small>
+        </td>
+        <td class="fm-num" data-f="traffic_today">—</td>
         <td class="fm-num" data-f="updated">—</td>
       </tr>
     </template>

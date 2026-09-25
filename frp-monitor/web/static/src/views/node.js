@@ -5,8 +5,15 @@
 
 import { ApiError, publicApi } from "../api.js";
 import { createStream, STREAM_STATE } from "../stream.js";
-import { fillProxies, fillResources, fillStatus } from "./detail.js";
+import {
+  fillProbes,
+  fillProxies,
+  fillResources,
+  fillStatus,
+  fillTraffic,
+} from "./detail.js";
 import { createServerClock, sessionBadge, setBadge, setConnPill } from "./status.js";
+import { createTrends } from "./trends.js";
 
 const clock = createServerClock();
 const pill = document.getElementById("conn-status");
@@ -16,12 +23,21 @@ const headState = document.getElementById("node-head-state");
 const subtitle = document.getElementById("node-sub");
 const proxyBody = document.getElementById("proxy-tbody");
 const proxyTemplate = document.getElementById("proxy-row-template");
+const probeBody = document.getElementById("probe-tbody");
+const probeTemplate = document.getElementById("probe-row-template");
 
 const nodeId = new URLSearchParams(location.search).get("id");
+
+// 趋势走 metrics 历史接口（公开路由，管理端同用）；当前值仍由 SSE 实时更新。
+const trends = createTrends({
+  root: document.getElementById("trend-section"),
+  fetchMetrics: (id, range) => publicApi.nodeMetrics(id, range),
+});
 
 function showNotFound(text) {
   content.hidden = true;
   notFound.hidden = false;
+  trends.hide();
   const message = notFound.querySelector("[data-notfound-text]");
   if (message && text) message.textContent = text;
 }
@@ -33,6 +49,9 @@ function fill(node, nowSec) {
   fillStatus(content, node, nowSec);
   fillResources(content, node);
   fillProxies(proxyBody, proxyTemplate, node.proxies);
+  fillProbes(probeBody, probeTemplate, node.probes);
+  fillTraffic(content, node.traffic);
+  trends.show(node.id);
 }
 
 function onNode(node, nowSec) {

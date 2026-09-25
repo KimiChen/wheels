@@ -43,6 +43,8 @@ type Config struct {
 	Addr              string // 默认 "127.0.0.1:7400"
 	CredentialsFile   string // 节点凭据文件（JSON），必填
 	AdminPasswordHash string // 管理密码 sha256 十六进制小写；空 = 管理端禁用
+	DataDir           string // 空 = 仅内存（不持久化）
+	RetentionDays     int    // 默认 7，范围 [1,365]
 }
 
 // FRPClientInfo 为 frps 注册表条目的只读快照。
@@ -81,7 +83,17 @@ func Start(ctx context.Context, cfg Config, src FRPRegistrySource) error {
 	}
 
 	st := store.New()
+	// DataDir 非空时启用 SQLite 持久化；初始化失败只降级为仅内存模式，
+	// 绝不拖停 frps（根 README §6）。
+	if cfg.DataDir != "" {
+		if db, err := store.OpenDB(cfg.DataDir, normalizeRetention(cfg.RetentionDays)); err != nil {
+			log.Printf("frpmonitor monitor: SQLite 初始化失败，降级为仅内存模式：%v", err)
+		} else {
+			st.AttachDB(db)
+		}
+	}
 	ingestHandler := ingest.NewHandler(nodeAuth, st, serverVersion())
+	st.SetProbeHook(ingestHandler.NotifyProbeTasksChanged)
 	apiHandler := api.NewHandler(st, adminAuth, web.Static())
 
 	mux := http.NewServeMux()
@@ -109,6 +121,8 @@ func Start(ctx context.Context, cfg Config, src FRPRegistrySource) error {
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			log.Printf("frpmonitor monitor: 优雅关闭失败：%v", err)
 		}
+		// 冲刷聚合、清空写队列并关闭 DB。
+		st.Close()
 	}()
 	if src != nil {
 		go pollRegistry(ctx, src, st)
@@ -120,6 +134,20 @@ func Start(ctx context.Context, cfg Config, src FRPRegistrySource) error {
 // （shared/version 的 init 已把后缀注入 frpversion.Full()）。
 func serverVersion() string {
 	return frpversion.Full()
+}
+
+// normalizeRetention 规范化保留天数：0 取默认 7，越界收敛到 [1,365]。
+func normalizeRetention(days int) int {
+	if days == 0 {
+		return 7
+	}
+	if days < 1 {
+		return 1
+	}
+	if days > 365 {
+		return 365
+	}
+	return days
 }
 
 // pollRegistry 周期拉取 FRP 注册表快照喂入 store。src  panic 等运行期

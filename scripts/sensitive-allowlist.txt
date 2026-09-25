@@ -42,6 +42,8 @@
 74.125.0.0/16     # Google 公开分配，同上
 142.250.0.0/15    # Google 公开分配，同上
 172.217.0.0/16    # Google 公开分配，同上
+10.0.0.8/32       # frp-monitor 采集器地址选择测试的私有地址输入
+169.254.1.1/32    # 同上：链路本地地址分类用例，语义必需无法用文档网段替代
 
 [domain-exclude]
 sing-box-routing/rules/   # 路由规则的载荷就是域名清单，逐条登记毫无意义
@@ -91,6 +93,7 @@ nginx.org                                  # 构建与页面引用
 www.sqlite.org                             # 构建与页面引用
 dev.mysql.com                              # 构建与页面引用
 www.slimframework.com                      # 构建与页面引用
+modernc.org                                # frp-monitor 的 SQLite 驱动依赖声明
 
 # —— 腾讯云验证码与云服务（sub2api-plus 的验证码接入）
 turing.captcha.qcloud.com                  # sub2api-plus 的验证码接入

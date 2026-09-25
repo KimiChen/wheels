@@ -27,6 +27,9 @@ const (
 	MinPingInterval = 5
 	MaxPingInterval = 3600
 
+	// MaxPingResultsPerMessage 为单帧 ping.result 的结果数上限。
+	MaxPingResultsPerMessage = 256
+
 	// LatencyFailed 表示 TCP 握手失败（含普通 DNS 解析错误）。
 	// DNS 超时不上报结果（缺样），不得以失败填充。
 	LatencyFailed = -1
@@ -62,7 +65,8 @@ type HelloResult struct {
 // Metrics 与 Extensions 按各自调度携带，三者至少有一个非空。
 type ReportParams struct {
 	SessionID string `json:"session_id"`
-	// Sequence 在会话内从 1 递增；服务端拒绝乱序与旧会话覆盖。
+	// Sequence 在会话内从 1 递增，与 ping.result 共享同一序号空间；
+	// 服务端拒绝乱序与旧会话覆盖。
 	Sequence uint64 `json:"sequence"`
 	SentAt   int64  `json:"sent_at"`
 
@@ -118,10 +122,12 @@ type PingTask struct {
 
 // PingResultParams 为探测结果上报；DNS 超时的任务不出现在 Results 中。
 type PingResultParams struct {
-	SessionID string       `json:"session_id"`
-	Sequence  uint64       `json:"sequence"`
-	SentAt    int64        `json:"sent_at"`
-	Results   []PingResult `json:"results"`
+	SessionID string `json:"session_id"`
+	// Sequence 与 report 共享同一会话内递增序号空间。
+	Sequence uint64 `json:"sequence"`
+	SentAt   int64  `json:"sent_at"`
+	// Results 单帧上限 MaxPingResultsPerMessage。
+	Results []PingResult `json:"results"`
 }
 
 // PingResult 为单个任务的一次探测结果。

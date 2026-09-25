@@ -241,6 +241,126 @@
             </div>
           </section>
 
+          <section
+            class="wsk-section"
+            aria-labelledby="trend-title"
+            id="trend-section"
+          >
+            <div class="wsk-section-head">
+              <h2 id="trend-title">资源趋势</h2>
+              <span class="wsk-badge">历史</span>
+            </div>
+            <div class="wsk-toolbar wsk-mb-3">
+              <div class="wsk-view-switch" role="group" aria-label="趋势时间范围">
+                <button type="button" data-trend-range="1h" aria-pressed="true">
+                  1 小时
+                </button>
+                <button type="button" data-trend-range="6h" aria-pressed="false">
+                  6 小时
+                </button>
+                <button type="button" data-trend-range="24h" aria-pressed="false">
+                  24 小时
+                </button>
+                <button type="button" data-trend-range="7d" aria-pressed="false">
+                  7 天
+                </button>
+              </div>
+              <span class="wsk-filter-meta" data-trend-meta aria-live="polite"></span>
+            </div>
+            <div class="wsk-alert wsk-info" data-trend-empty hidden>
+              <svg class="wsk-icon" aria-hidden="true">
+                <use href="#info"></use>
+              </svg>
+              <div>
+                <strong>历史未开启</strong>
+                <p>
+                  服务端未配置数据目录，不保留历史序列；上方实时当前值不受影响。
+                </p>
+              </div>
+            </div>
+            <div class="wsk-alert wsk-warning" data-trend-error hidden>
+              <svg class="wsk-icon" aria-hidden="true">
+                <use href="#warning"></use>
+              </svg>
+              <div>
+                <strong>历史数据加载失败</strong>
+                <p>可能是网络波动或服务端繁忙。</p>
+                <button
+                  class="wsk-button wsk-secondary wsk-mt-2"
+                  type="button"
+                  data-trend-retry
+                >
+                  重试
+                </button>
+              </div>
+            </div>
+            <div class="fm-chart-grid" data-trend-grid></div>
+          </section>
+
+          <section class="wsk-section" aria-labelledby="probe-title">
+            <div class="wsk-section-head">
+              <h2 id="probe-title">TCP 探测</h2>
+              <span class="wsk-badge">实时</span>
+            </div>
+            <div class="wsk-table-wrap">
+              <table class="wsk-table">
+                <caption class="wsk-sr-only">
+                  该节点的 TCP 探测任务结果
+                </caption>
+                <thead>
+                  <tr>
+                    <th scope="col">任务</th>
+                    <th scope="col" class="fm-num">最近延迟</th>
+                    <th scope="col" class="fm-num">
+                      TCP 探测失败率（15 分钟）
+                    </th>
+                    <th scope="col" class="fm-num">样本数</th>
+                  </tr>
+                </thead>
+                <tbody id="probe-tbody">
+                  <tr>
+                    <td class="wsk-table-empty" colspan="4">等待数据…</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <p class="wsk-help wsk-mt-2">
+              「TCP 探测失败率」为近 15 分钟窗口内 TCP 握手失败占比，反映探测目标
+              可达性；它不代表节点真实 IP 丢包率。无样本时延迟与失败率显示「未知」。
+            </p>
+          </section>
+
+          <section class="wsk-section" aria-labelledby="traffic-title">
+            <div class="wsk-section-head">
+              <h2 id="traffic-title">流量统计</h2>
+              <span class="wsk-badge">节点网卡流量</span>
+            </div>
+            <div class="wsk-panel">
+              <div class="wsk-status-list">
+                <div>
+                  <span>今日收<small>节点网卡接收</small></span
+                  ><strong data-f="today_rx">—</strong>
+                </div>
+                <div>
+                  <span>今日发<small>节点网卡发送</small></span
+                  ><strong data-f="today_tx">—</strong>
+                </div>
+                <div>
+                  <span>累计收<small>节点网卡接收</small></span
+                  ><strong data-f="total_rx">—</strong>
+                </div>
+                <div>
+                  <span>累计发<small>节点网卡发送</small></span
+                  ><strong data-f="total_tx">—</strong>
+                </div>
+              </div>
+            </div>
+            <p class="wsk-help wsk-mt-2">
+              主机网卡流量包含其他业务与协议开销，与 FRP 隧道流量口径不同，
+              两者不可相加。
+            </p>
+          </section>
+
           <section class="wsk-section" aria-labelledby="proxy-title">
             <div class="wsk-section-head">
               <h2 id="proxy-title">Proxy 列表</h2>
@@ -267,22 +387,6 @@
               </table>
             </div>
           </section>
-
-          <section class="wsk-section" aria-labelledby="probe-title">
-            <div class="wsk-section-head">
-              <h2 id="probe-title">TCP 探测</h2>
-              <span class="wsk-badge">P2</span>
-            </div>
-            <div class="wsk-alert wsk-info">
-              <svg class="wsk-icon" aria-hidden="true">
-                <use href="#info"></use>
-              </svg>
-              <div>
-                <strong>TCP 探测将于 P2 阶段提供</strong>
-                <p>届时此处展示各探测任务的握手延迟与失败率。</p>
-              </div>
-            </div>
-          </section>
         </div>
       </div>
     </main>
@@ -301,6 +405,15 @@
         <td data-f="type"></td>
         <td data-f="status"></td>
         <td data-f="enabled"></td>
+      </tr>
+    </template>
+
+    <template id="probe-row-template">
+      <tr>
+        <th scope="row" class="fm-mono" data-f="probe_id"></th>
+        <td class="fm-num" data-f="latency"></td>
+        <td class="fm-num" data-f="fail_rate"></td>
+        <td class="fm-num" data-f="samples"></td>
       </tr>
     </template>
 

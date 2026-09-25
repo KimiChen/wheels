@@ -21,5 +21,6 @@
 | 0002-monitor-config-types | `pkg/config/v1` 增加 `[monitor]` 配置类型与校验（frpc/frps） |
 | 0003-client-monitor-hook | frpc 生命周期钩子：`Service.Run` 首次登录前启动监控 |
 | 0004-server-monitor-hook | frps 生命周期钩子 + monitor 开启时强制启用内存统计 collector |
+| 0005-deps-modernc-sqlite | go.mod/go.sum 增加纯 Go SQLite 驱动 modernc.org/sqlite（增量添加，不升级既有依赖） |
 
 当前尚未进入实现阶段，因此 `series` 中没有补丁。

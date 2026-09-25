@@ -18,6 +18,7 @@ for required in \
   patches/series patches/0001-version-suffix.patch \
   patches/0002-monitor-config-types.patch \
   patches/0003-client-monitor-hook.patch patches/0004-server-monitor-hook.patch \
+  patches/0005-deps-modernc-sqlite.patch \
   tests/fixtures/README.md
 do
   [[ -f "$required" ]] || die "缺少交付物：$required"
@@ -98,7 +99,7 @@ remotePort = 6000
 EOF
 "$temp_dir/frpc" verify -c "$temp_dir/frpc.toml" > /dev/null
 
-# 4. 上游受影响包单测：覆盖未来补丁已触及/将触及的 client/server/config/metrics。
+# 4. 上游受影响包单测：覆盖补丁已触及/将触及的 client/server/config/metrics。
 CGO_ENABLED=0 go test -tags "$tags" -count=1 \
   ./pkg/config/... ./pkg/metrics/... ./client/... ./server/...
 
@@ -116,10 +117,9 @@ CGO_ENABLED=0 go build -trimpath -buildvcs=false \
 "$temp_dir/frp-monitor-server" --version | grep -q "frp-monitor" || \
   die "扩展版本输出缺少 frp-monitor 后缀"
 
-# 端到端：真实 frps+frpc 回环对接，监控凭据/上报/公开裁剪/管理认证/隧道转发全链路。
-# 端口固定为本机回环高端口；冒烟值均为专用虚构值。
-smoke_token="p1-smoke-token-fixture"
-smoke_admin="p1-admin-fixture"
+# 端到端：真实 frps+frpc 回环对接。端口固定为本机回环高端口；冒烟值均为专用虚构值。
+smoke_token="p2-smoke-token-fixture"
+smoke_admin="p2-admin-fixture"
 smoke_token_hash="$(printf '%s' "$smoke_token" | shasum -a 256 | awk '{print $1}')"
 smoke_admin_hash="$(printf '%s' "$smoke_admin" | shasum -a 256 | awk '{print $1}')"
 
@@ -135,6 +135,8 @@ enable = true
 addr = "127.0.0.1:17400"
 credentialsFile = "$temp_dir/credentials.json"
 adminPasswordHash = "$smoke_admin_hash"
+dataDir = "$temp_dir/data"
+historyRetentionDays = 7
 EOF
 
 cat > "$temp_dir/frpc-smoke.toml" <<EOF
@@ -161,7 +163,12 @@ server_pid=$!
 "$temp_dir/frp-monitor-agent" -c "$temp_dir/frpc-smoke.toml" > "$temp_dir/frpc.log" 2>&1 &
 agent_pid=$!
 
-python3 - "$temp_dir" <<'PYEOF'
+dump_logs() {
+  echo "---- frps.log ----" >&2; tail -c 2000 "$temp_dir/frps.log" >&2 || true
+  echo "---- frpc.log ----" >&2; tail -c 2000 "$temp_dir/frpc.log" >&2 || true
+}
+
+python3 - "$temp_dir" <<'PYEOF' || { dump_logs; exit 1; }
 import json, sys, time, platform, urllib.request, urllib.error, http.cookiejar
 
 temp_dir = sys.argv[1]
@@ -173,7 +180,7 @@ def get(url, opener=None):
     op = opener or urllib.request.build_opener()
     return op.open(url, timeout=5)
 
-# 1. 等待节点上线；Linux 上进一步要求真实 CPU 样本（首个样本 cpu 为 null）
+# 1. 等待节点上线 + FRP 控制连接；Linux 上进一步要求真实 CPU 样本
 deadline = time.time() + 30
 node = None
 while time.time() < deadline:
@@ -193,20 +200,16 @@ while time.time() < deadline:
     time.sleep(1)
 if not node:
     print("E2E 失败：节点未上线或指标长期无效", file=sys.stderr)
-    print(open(temp_dir + "/frps.log").read()[-2000:], file=sys.stderr)
-    print(open(temp_dir + "/frpc.log").read()[-2000:], file=sys.stderr)
     sys.exit(1)
 
-assert node["frp_control_connected"] is True, "FRP 控制连接应在线"
 assert node["metrics_stale"] is False, "指标应新鲜"
 if IS_LINUX:
     assert node["mem_total"] is not None and node["net_rx"] is not None, "Linux 上内存/网速应有效"
 else:
-    # 非 Linux：指标组降级为未知（null），链路与会话语义仍需正确
     assert node["cpu"] is None, "非 Linux 平台 CPU 应为 unknown（null）"
 assert any(p["name"] == "monitor-api-via-frp" for p in node["proxies"]), "应列出隧道"
 # 公开 DTO 裁剪：不得出现私有字段
-for banned in ("hostname", "boot_id", "ipv4", "ipv6", "local_addr", "iface", "kernel"):
+for banned in ("hostname", "boot_id", "ipv4", "ipv6", "local_addr", "iface", "kernel", "target"):
     assert f'"{banned}"' not in body, f"公开 DTO 泄露字段：{banned}"
 
 # 2. 公开总览
@@ -228,10 +231,10 @@ except urllib.error.HTTPError as e:
 cj = http.cookiejar.CookieJar()
 opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
 req = urllib.request.Request(BASE + "/api/admin/v1/login",
-                             data=json.dumps({"password": "p1-admin-fixture"}).encode(),
+                             data=json.dumps({"password": "p2-admin-fixture"}).encode(),
                              headers={"Content-Type": "application/json"})
 assert json.loads(opener.open(req, timeout=5).read().decode())["ok"] is True
-# FRP 注册表对账按 2s 周期快照，轮询等待其刷新
+
 deadline2 = time.time() + 15
 admin_body = ""
 while time.time() < deadline2:
@@ -243,10 +246,97 @@ while time.time() < deadline2:
 assert '"hostname"' in admin_body and '"boot_id"' in admin_body, "管理 DTO 应含完整字段"
 assert admin["nodes"][0]["frp_clients"], "管理 DTO 应含 FRP 注册表对账结果"
 
-print("E2E 冒烟通过：节点上报、公开裁剪、管理认证、FRP 隧道转发均正常")
+# 5. TCP 探测闭环（P2）：下发版本化任务列表 → agent 探测 → 公开/管理视图可见
+tasks = {"tasks": [
+    {"id": "t-ok", "target": "127.0.0.1:17000", "interval": 5},
+    {"id": "t-bad", "target": "127.0.0.1:9", "interval": 5},
+]}
+req = urllib.request.Request(BASE + "/api/admin/v1/nodes/smoke-node-01/probe-tasks",
+                             data=json.dumps(tasks).encode(), method="PUT",
+                             headers={"Content-Type": "application/json"})
+resp = json.loads(opener.open(req, timeout=5).read().decode())
+assert resp.get("ok") is True and resp.get("version", 0) >= 1, f"探测任务下发失败：{resp}"
+
+deadline3 = time.time() + 45
+probes = {}
+while time.time() < deadline3:
+    n = json.loads(get(BASE + "/api/public/v1/nodes/smoke-node-01").read().decode())["node"]
+    probes = {p["id"]: p for p in n.get("probes", [])}
+    ok_t = probes.get("t-ok", {})
+    bad_t = probes.get("t-bad", {})
+    if ok_t.get("last_latency_ms") is not None and ok_t.get("samples", 0) >= 1 \
+       and (bad_t.get("fail_rate") or 0) > 0:
+        break
+    time.sleep(2)
+assert "target" not in json.dumps(probes), "公开探测 DTO 不得含 target"
+assert probes.get("t-ok", {}).get("last_latency_ms") is not None, "t-ok 应有成功延迟"
+assert (probes.get("t-bad", {}).get("fail_rate") or 0) > 0, "t-bad 应有失败率"
+
+# 管理视图可见 target
+admin_node = json.loads(opener.open(BASE + "/api/admin/v1/nodes/smoke-node-01", timeout=5).read().decode())["node"]
+admin_probes = {p["id"]: p for p in admin_node.get("probes", [])}
+assert admin_probes.get("t-ok", {}).get("target") == "127.0.0.1:17000", "管理探测 DTO 应含 target"
+
+# 6. 流量字段结构（值断言仅 Linux：macOS 上网卡计数器按契约为 unknown）
+node2 = json.loads(get(BASE + "/api/public/v1/nodes/smoke-node-01").read().decode())["node"]
+assert "traffic" in node2, "节点 DTO 应含 traffic 字段"
+if IS_LINUX:
+    assert node2["traffic"] is not None, "Linux 上流量应有数据"
+    assert int(node2["traffic"]["total_rx_bytes"]) >= 0
+
+print("E2E 第一段通过：上报/裁剪/认证/隧道/探测/流量结构正常")
 PYEOF
 
-# 7. 发布目标架构交叉编译冒烟（frp 为纯 Go，无需 C 工具链）。
+# 7. monitor 重启恢复：同 dataDir 重启后节点记录不丢、agent 重连恢复在线。
+kill "$server_pid" 2>/dev/null; wait "$server_pid" 2>/dev/null || true
+"$temp_dir/frp-monitor-server" -c "$temp_dir/frps-smoke.toml" >> "$temp_dir/frps.log" 2>&1 &
+server_pid=$!
+
+python3 - "$temp_dir" <<'PYEOF' || { dump_logs; exit 1; }
+import json, sys, time, platform, urllib.request
+
+temp_dir = sys.argv[1]
+BASE = "http://127.0.0.1:17400"
+IS_LINUX = platform.system() == "Linux"
+
+def get(url):
+    return urllib.request.urlopen(url, timeout=5)
+
+# 重启后 agent 按退避重连（约数秒）；节点应先以记录形式存在，最终恢复在线
+deadline = time.time() + 60
+node = None
+while time.time() < deadline:
+    try:
+        data = json.loads(get(BASE + "/api/public/v1/nodes").read().decode())
+        for n in data.get("nodes", []):
+            if n.get("id") == "smoke-node-01" and n.get("online"):
+                node = n
+                break
+        if node:
+            break
+    except Exception:
+        pass
+    time.sleep(1)
+assert node, "monitor 重启后节点未恢复在线"
+
+# 历史接口：结构断言（macOS 上数值组全为 null 是契约内行为）
+deadline2 = time.time() + 150
+hist = None
+while time.time() < deadline2:
+    h = json.loads(get(BASE + "/api/public/v1/nodes/smoke-node-01/metrics?range=1h").read().decode())
+    if h.get("enabled") and h.get("series", {}).get("cpu"):
+        hist = h
+        break
+    time.sleep(5)
+assert hist, "历史接口应返回 enabled:true 且含 series"
+assert hist["step"] == 60 and len(hist["series"]["cpu"]) > 0, "1h 窗口应为 60s 步长"
+if IS_LINUX:
+    assert any(v is not None for v in hist["series"]["cpu"]), "Linux 上 1 分钟后应有真实 CPU 样本"
+
+print("E2E 第二段通过：monitor 重启恢复、分钟聚合历史正常")
+PYEOF
+
+# 8. 发布目标架构交叉编译冒烟（frp 为纯 Go，无需 C 工具链）。
 for arch in amd64 arm64; do
   for cmd in frpc frps; do
     CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -trimpath -buildvcs=false \
@@ -256,4 +346,4 @@ for arch in amd64 arm64; do
   done
 done
 
-printf '验证通过：基线/扩展构建与测试、端到端冒烟、linux amd64/arm64 交叉编译全部成功。\n'
+printf '验证通过：基线/扩展构建与测试、端到端冒烟（含探测/历史/恢复）、linux amd64/arm64 交叉编译全部成功。\n'

@@ -66,11 +66,16 @@ func NewHandler(st *store.Store, admin *auth.Admin, static fs.FS) *Handler {
 	mux.HandleFunc("GET /api/public/v1/overview", h.handleOverview)
 	mux.HandleFunc("GET /api/public/v1/nodes", h.handlePublicNodes)
 	mux.HandleFunc("GET /api/public/v1/nodes/{id}", h.handlePublicNode)
+	mux.HandleFunc("GET /api/public/v1/nodes/{id}/metrics", h.handlePublicNodeMetrics)
 	mux.HandleFunc("POST /api/admin/v1/login", h.handleLogin)
 	mux.HandleFunc("POST /api/admin/v1/logout", h.handleLogout)
 	mux.HandleFunc("GET /api/admin/v1/session", h.handleAdminSession)
 	mux.HandleFunc("GET /api/admin/v1/nodes", h.handleAdminNodes)
 	mux.HandleFunc("GET /api/admin/v1/nodes/{id}", h.handleAdminNode)
+	mux.HandleFunc("GET /api/admin/v1/nodes/{id}/metrics", h.handleAdminNodeMetrics)
+	mux.HandleFunc("GET /api/admin/v1/nodes/{id}/probe-tasks", h.handleAdminProbeTasksGet)
+	mux.HandleFunc("PUT /api/admin/v1/nodes/{id}/probe-tasks", h.handleAdminProbeTasksPut)
+	mux.HandleFunc("GET /api/admin/v1/nodes/{id}/traffic/daily", h.handleAdminTrafficDaily)
 	mux.HandleFunc("GET /events/public", h.handlePublicEvents)
 	mux.HandleFunc("GET /events/admin", h.handleAdminEvents)
 	// 路由形态的 README 约定为 /admin/，静态资源实际文件为 admin.html。
@@ -115,6 +120,8 @@ type nodeCommon struct {
 	UDP                 *int64      `json:"udp"`
 	Procs               *int64      `json:"procs"`
 	FRPControlConnected *bool       `json:"frp_control_connected"`
+	// Traffic 为累计流量（P2）；从未有有效计数器读数时为 null。
+	Traffic *trafficDTO `json:"traffic"`
 }
 
 // publicProxy 为公开 Proxy DTO：无本地目标。
@@ -139,6 +146,8 @@ type publicNodeDTO struct {
 	nodeCommon
 	// Proxies 在从未收到 FRP 扩展时为 null，否则为数组（可为空）。
 	Proxies []publicProxy `json:"proxies"`
+	// Probes 为探测任务滑窗统计（P2）；无任务时为空数组。
+	Probes []publicProbeDTO `json:"probes"`
 }
 
 // adminFactsDTO 为管理端资产信息；均输出 string|null（cpu_cores 为十进制
@@ -173,6 +182,8 @@ type frpClientDTO struct {
 type adminNodeDTO struct {
 	nodeCommon
 	Proxies []adminProxy `json:"proxies"`
+	// Probes 为探测任务滑窗统计（P2），额外含 target。
+	Probes []adminProbeDTO `json:"probes"`
 
 	Facts      *adminFactsDTO `json:"facts"`
 	BootID     *string        `json:"boot_id"`
@@ -292,11 +303,12 @@ func (h *Handler) commonFor(n store.NodeState, now time.Time) nodeCommon {
 		cc := n.FRP.ControlConnected
 		c.FRPControlConnected = &cc
 	}
+	c.Traffic = trafficFor(h.store, n.NodeID, now)
 	return c
 }
 
 func (h *Handler) publicNodeFor(n store.NodeState, now time.Time) publicNodeDTO {
-	d := publicNodeDTO{nodeCommon: h.commonFor(n, now)}
+	d := publicNodeDTO{nodeCommon: h.commonFor(n, now), Probes: publicProbesFor(h.store.ProbeStats(n.NodeID, now))}
 	if n.FRP != nil {
 		d.Proxies = make([]publicProxy, 0, len(n.FRP.Proxies))
 		for _, p := range n.FRP.Proxies {
@@ -311,7 +323,8 @@ func (h *Handler) publicNodeFor(n store.NodeState, now time.Time) publicNodeDTO 
 func (h *Handler) adminNodeFor(n store.NodeState, all []store.NodeState,
 	clients []store.FRPClient, now time.Time) adminNodeDTO {
 
-	d := adminNodeDTO{nodeCommon: h.commonFor(n, now), FRPClients: []frpClientDTO{}}
+	d := adminNodeDTO{nodeCommon: h.commonFor(n, now), FRPClients: []frpClientDTO{},
+		Probes: adminProbesFor(h.store.ProbeStats(n.NodeID, now))}
 	if n.FRP != nil {
 		d.Proxies = make([]adminProxy, 0, len(n.FRP.Proxies))
 		for _, p := range n.FRP.Proxies {
@@ -436,6 +449,10 @@ func (h *Handler) handlePublicNode(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (h *Handler) handlePublicNodeMetrics(w http.ResponseWriter, r *http.Request) {
+	h.handleNodeMetrics(w, r, false)
+}
+
 // ---------- 管理 API ----------
 
 // requireAdmin 校验管理会话 Cookie，失败写 401 并返回 false。
@@ -516,6 +533,10 @@ func (h *Handler) handleAdminNode(w http.ResponseWriter, r *http.Request) {
 		"now":  h.now().Unix(),
 		"node": h.adminNodeFor(n, h.store.Snapshot(), h.store.FRPClients(), h.now()),
 	})
+}
+
+func (h *Handler) handleAdminNodeMetrics(w http.ResponseWriter, r *http.Request) {
+	h.handleNodeMetrics(w, r, true)
 }
 
 // ---------- SSE ----------

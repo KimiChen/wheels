@@ -93,7 +93,7 @@ func TestHelloGolden(t *testing.T) {
 		SchemaVersion:  protocol.SchemaVersion,
 		AgentVersion:   "0.1.0-dev",
 		FRPVersion:     "0.71.0",
-		Capabilities:   []string{"metrics"},
+		Capabilities:   []string{"metrics", "ping"},
 		SessionID:      testSession,
 		ReportInterval: 1,
 		SentAt:         1790380800,

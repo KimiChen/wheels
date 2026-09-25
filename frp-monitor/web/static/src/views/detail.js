@@ -10,7 +10,9 @@ import {
   fmtClock,
   fmtCount,
   fmtCpu,
+  fmtFailRate,
   fmtInterval,
+  fmtLatency,
   fmtLoad,
   fmtPair,
   fmtPercent,
@@ -130,6 +132,55 @@ export function fillProxies(tbody, template, proxies) {
       );
     },
     "该节点暂无 Proxy。",
+  );
+}
+
+/**
+ * TCP 探测表格：任务 / 最近延迟 / 失败率（15 分钟窗口）/ 样本数；
+ * 管理端模板多一列 target。措辞统一为「TCP 探测失败率」，
+ * 不暗示测得真实 IP 丢包率。无任务显示空态「未配置探测任务」。
+ */
+export function fillProbes(tbody, template, probes) {
+  renderSimpleRows(
+    tbody,
+    template,
+    Array.isArray(probes) ? probes : [],
+    (row, probe) => {
+      setText(row, "probe_id", fmtText(probe.id));
+      setText(row, "target", fmtText(probe.target));
+      setText(row, "latency", fmtLatency(probe.last_latency_ms));
+      setText(row, "fail_rate", fmtFailRate(probe.fail_rate));
+      setText(row, "samples", fmtCount(probe.samples));
+    },
+    "未配置探测任务。",
+  );
+}
+
+/**
+ * 节点网卡流量：今日收 / 发、累计收 / 发。traffic 为 null（未开启累计
+ * 或暂无基线）时全部显示「未知」，不伪造为 0。主机网卡流量与 FRP 隧道
+ * 流量口径不同，页面分开标注、不相加。
+ */
+export function fillTraffic(scope, traffic) {
+  const source = traffic ?? {};
+  setText(scope, "today_rx", fmtBytes(source.today_rx_bytes));
+  setText(scope, "today_tx", fmtBytes(source.today_tx_bytes));
+  setText(scope, "total_rx", fmtBytes(source.total_rx_bytes));
+  setText(scope, "total_tx", fmtBytes(source.total_tx_bytes));
+}
+
+/** 近 7 日流量表（仅管理端，traffic/daily 接口）。 */
+export function fillTrafficDaily(tbody, template, days) {
+  renderSimpleRows(
+    tbody,
+    template,
+    Array.isArray(days) ? days : [],
+    (row, day) => {
+      setText(row, "day", fmtText(day.day));
+      setText(row, "rx", fmtBytes(day.rx_bytes));
+      setText(row, "tx", fmtBytes(day.tx_bytes));
+    },
+    "暂无日流量记录。",
   );
 }
 

@@ -152,9 +152,142 @@
     max-width: 26rem;
   }
 
+  /* 趋势图：双栏卡片网格，SVG 自适应宽度。颜色只用套件令牌。 */
+  .fm-chart-grid {
+    align-items: start;
+    display: grid;
+    gap: var(--space-24);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .fm-chart-plot {
+    align-items: stretch;
+    display: grid;
+    gap: var(--space-8);
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .fm-chart-y {
+    color: var(--muted-soft);
+    display: flex;
+    flex-direction: column;
+    font-size: var(--type-2xs);
+    font-variant-numeric: tabular-nums;
+    justify-content: space-between;
+    padding: var(--space-8) 0;
+    text-align: right;
+  }
+
+  .fm-chart svg {
+    display: block;
+    height: auto;
+    width: 100%;
+  }
+
+  .fm-chart-gridline {
+    stroke: var(--border);
+    stroke-width: 1;
+  }
+
+  .fm-chart path {
+    fill: none;
+    stroke-width: 1.5;
+    vector-effect: non-scaling-stroke;
+  }
+
+  .fm-chart-dot {
+    stroke: none;
+  }
+
+  .fm-line-1 {
+    stroke: var(--accent);
+  }
+
+  .fm-line-2 {
+    stroke: var(--success);
+  }
+
+  .fm-line-3 {
+    stroke: var(--warning);
+  }
+
+  .fm-line-4 {
+    stroke: var(--info);
+  }
+
+  .fm-chart-dot.fm-line-1 {
+    fill: var(--accent);
+  }
+
+  .fm-chart-dot.fm-line-2 {
+    fill: var(--success);
+  }
+
+  .fm-chart-dot.fm-line-3 {
+    fill: var(--warning);
+  }
+
+  .fm-chart-dot.fm-line-4 {
+    fill: var(--info);
+  }
+
+  .fm-chart-x {
+    color: var(--muted-soft);
+    display: flex;
+    font-size: var(--type-2xs);
+    font-variant-numeric: tabular-nums;
+    justify-content: space-between;
+    margin-top: var(--space-4);
+  }
+
+  .fm-chart-legend {
+    color: var(--muted);
+    display: flex;
+    flex-direction: column;
+    font-size: var(--type-xs);
+    gap: var(--space-4);
+    list-style: none;
+    margin: var(--space-8) 0 0;
+    padding: 0;
+  }
+
+  .fm-legend-dot {
+    border-radius: var(--radius-pill);
+    display: inline-block;
+    height: 0.625em;
+    margin-right: var(--space-6);
+    width: 0.625em;
+  }
+
+  .fm-dot-1 {
+    background: var(--accent);
+  }
+
+  .fm-dot-2 {
+    background: var(--success);
+  }
+
+  .fm-dot-3 {
+    background: var(--warning);
+  }
+
+  .fm-dot-4 {
+    background: var(--info);
+  }
+
+  .fm-chart-nodata {
+    color: var(--muted-soft);
+    font-size: var(--type-xs);
+    grid-column: 1 / -1;
+    margin: 0;
+    padding: var(--space-24) 0;
+    text-align: center;
+  }
+
   @media (max-width: 900px) {
     .fm-detail-grid,
-    .fm-dl {
+    .fm-dl,
+    .fm-chart-grid {
       grid-template-columns: minmax(0, 1fr);
     }
   }

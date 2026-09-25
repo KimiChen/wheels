@@ -98,6 +98,42 @@ export function fmtCpu(value) {
   return `${parsed.toFixed(1)}%`;
 }
 
+/** TCP 探测失败率：0..1 浮点 → 百分比；null（无样本）→ 未知。 */
+export function fmtFailRate(value) {
+  const parsed = toFiniteNumber(value);
+  if (parsed === null || typeof parsed === "object") return UNKNOWN;
+  const clamped = Math.min(1, Math.max(0, parsed));
+  return `${(clamped * 100).toFixed(1)}%`;
+}
+
+/** TCP 握手延迟：毫秒，null（无样本）→ 未知。 */
+export function fmtLatency(value) {
+  const parsed = toFiniteNumber(value);
+  if (parsed === null || typeof parsed === "object" || parsed < 0) {
+    return UNKNOWN;
+  }
+  return `${Math.round(parsed)} ms`;
+}
+
+/**
+ * 两个十进制字符串 / 数字字节量求和：任一为 null → null（调用方显示未知）。
+ * 均在 Number 安全范围时返回 Number，否则用 BigInt 求和后返回十进制字符串。
+ */
+export function sumByteValues(a, b) {
+  if (isNil(a) || isNil(b)) return null;
+  const pa = toFiniteNumber(a);
+  const pb = toFiniteNumber(b);
+  if (pa === null || pb === null) return null;
+  if (typeof pa === "object" || typeof pb === "object") {
+    try {
+      return (BigInt(String(a).trim()) + BigInt(String(b).trim())).toString();
+    } catch {
+      return null;
+    }
+  }
+  return pa + pb;
+}
+
 /** 占比：used / total（十进制字符串），total 为 0 或任一未知 → 未知。 */
 export function fmtPercent(used, total) {
   const u = toFiniteNumber(used);

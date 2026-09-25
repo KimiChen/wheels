@@ -5,18 +5,57 @@
 
 import {
   fmtAgo,
+  fmtBytes,
   fmtClock,
   fmtCpu,
+  fmtFailRate,
   fmtPair,
   fmtPercent,
   fmtRate,
   isNil,
+  sumByteValues,
+  UNKNOWN,
 } from "../format.js";
 import { fillStatusBadges } from "./status.js";
 
 function setText(row, field, text) {
   const el = row.querySelector(`[data-f="${field}"]`);
   if (el) el.textContent = text;
+}
+
+/**
+ * TCP 探测列：取各任务近 15 分钟窗口失败率的最差值；无任务显示「—」，
+ * 有任务但均无样本显示「未知」。title 逐任务列出明细。
+ */
+function fillProbeCell(row, probes) {
+  const cell = row.querySelector('[data-f="probe"]');
+  if (!cell) return;
+  const sub = row.querySelector('[data-f="probe_sub"]');
+  if (!Array.isArray(probes) || probes.length === 0) {
+    cell.textContent = "—";
+    cell.title = "未配置探测任务";
+    if (sub) sub.textContent = "";
+    return;
+  }
+  const rates = probes
+    .map((probe) => probe?.fail_rate)
+    .filter((rate) => typeof rate === "number" && Number.isFinite(rate));
+  cell.textContent = rates.length > 0 ? fmtFailRate(Math.max(...rates)) : UNKNOWN;
+  cell.title = probes
+    .map((probe) => `${probe?.id ?? "?"}: ${fmtFailRate(probe?.fail_rate)}`)
+    .join("\n");
+  if (sub) sub.textContent = `${probes.length} 个任务`;
+}
+
+/** 今日流量列：节点网卡今日收 + 发合计；traffic 为 null 显示「未知」。 */
+function fillTrafficTodayCell(row, traffic) {
+  const cell = row.querySelector('[data-f="traffic_today"]');
+  if (!cell) return;
+  const sum = traffic
+    ? sumByteValues(traffic.today_rx_bytes, traffic.today_tx_bytes)
+    : null;
+  cell.textContent = sum === null ? UNKNOWN : fmtBytes(sum);
+  cell.title = "节点网卡今日收 + 发合计，与 FRP 隧道流量口径不同";
 }
 
 /** 就地填充一行：只改文本与徽章样式，不替换可聚焦元素本身。 */
@@ -39,6 +78,8 @@ export function fillRow(row, node, nowSec, { hrefFor } = {}) {
   setText(row, "disk_pair", fmtPair(node.disk_used, node.disk_total));
   setText(row, "net_rx", `↓ ${fmtRate(node.net_rx)}`);
   setText(row, "net_tx", `↑ ${fmtRate(node.net_tx)}`);
+  fillProbeCell(row, node.probes);
+  fillTrafficTodayCell(row, node.traffic);
 
   const updated = row.querySelector('[data-f="updated"]');
   if (updated) {

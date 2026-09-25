@@ -48,3 +48,17 @@
 `6d41d588b3537b2d2460d73f999d958fd37eb00d` 中的 `web-standard-kit/` 目录快照，
 随 monitor 二进制嵌入发布；页面结构、业务样式与 `src/` 模块为本子项目自有实现。
 升级套件快照时同步更新本节与 `web/README.md` 的来源记录。
+
+## modernc.org/sqlite（P2 历史存储）
+
+monitor 的历史与流量持久化使用纯 Go SQLite 驱动（经 `patches/0005-deps-modernc-sqlite.patch`
+加入上游 go.mod/go.sum，不复制源码进仓）：
+
+- modernc.org/sqlite v1.34.5（BSD-3-Clause，The Sqlite Authors）
+- modernc.org/libc v1.55.3、modernc.org/mathutil v1.6.0、modernc.org/memory v1.8.0
+  （BSD-3-Clause）
+- github.com/dustin/go-humanize v1.0.1、github.com/mattn/go-isatty v0.0.20、
+  github.com/ncruces/go-strftime v0.1.9（MIT）
+- github.com/remyoudompheng/bigfft（BSD-3-Clause，The Go Authors）
+
+发布包须附带上述许可证全文（packaging 随 P3 落地）。
