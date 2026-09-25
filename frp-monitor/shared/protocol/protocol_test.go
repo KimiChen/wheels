@@ -90,12 +90,13 @@ func assertGolden(t *testing.T, name string, v any) {
 
 func TestHelloGolden(t *testing.T) {
 	params := &protocol.HelloParams{
-		SchemaVersion: protocol.SchemaVersion,
-		AgentVersion:  "0.1.0-dev",
-		FRPVersion:    "0.71.0",
-		Capabilities:  []string{"metrics", "ping"},
-		SessionID:     testSession,
-		SentAt:        1790380800,
+		SchemaVersion:  protocol.SchemaVersion,
+		AgentVersion:   "0.1.0-dev",
+		FRPVersion:     "0.71.0",
+		Capabilities:   []string{"metrics"},
+		SessionID:      testSession,
+		ReportInterval: 1,
+		SentAt:         1790380800,
 	}
 	if err := params.Validate(); err != nil {
 		t.Fatalf("样本应通过校验：%v", err)

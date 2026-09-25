@@ -6,9 +6,18 @@ go、python3；应用补丁时另需 patch。
 | 入口 | 用途 |
 |---|---|
 | `prepare-source.sh <输出目录> [镜像]` | 按 `upstream.lock` 浅抓 tag、双重校验 tag 对象与 commit、`git archive` 展开、零 fuzz 应用 `patches/series` |
-| `assemble.sh <源码树>` | 把本仓 `agent/`、`monitor/`、`shared/`、`web/` 映射到源码树 `extension/frpmonitor/`，拒绝软链接 |
-| `build.sh` | 准备（带 `.cache` 缓存）→ 映射 → 构建基线 frpc/frps 到 `dist/` → 全量编译验证扩展包 |
-| `verify.sh` | 交付物检查、`bash -n`、gofmt、JSON 合法性、原生基线构建与受影响包单测、扩展契约测试、linux amd64/arm64 交叉编译 |
+| `assemble.sh <源码树>` | 把本仓 `agent/`、`monitor/`、`shared/`、`web/`（及 `tests/fixtures/`）映射到源码树 `extension/frpmonitor/`，拒绝软链接 |
+| `build.sh` | 准备（带 `.cache` 缓存）→ 映射 → 构建基线 frpc/frps 与扩展接线的 frp-monitor-agent/frp-monitor-server 到 `dist/` → 全量编译验证 |
+| `verify.sh` | 交付物检查、`bash -n`、gofmt、JSON 合法性、原生基线构建与受影响包单测、扩展契约/组件测试、frpmonitor 接线构建与端到端冒烟、linux amd64/arm64 交叉编译 |
+
+端到端冒烟使用固定回环端口（17000/17400/17500）与专用虚构凭据，真起
+frp-monitor-server/agent 验证上报、公开 DTO 裁剪、管理认证与 FRP 隧道转发。
+采集器首版仅支持 Linux：在 macOS 上运行时指标组按契约降级为「未知」，
+冒烟仅验证链路与状态语义。
+
+构建标签：`noweb` 恒启用（上游 Dashboard 前端不随源码分发，见 lib.sh）；
+`frpmonitor` 激活扩展接线（补丁中的生命周期钩子从空实现切换为真实实现）。
+verify.sh 对两种标签组合都验证，保证「关闭扩展时原生 FRP 基线通过」。
 
 本地目录与镜像地址从 `.env` 读取（见 `.env.example`，键白名单见 `lib.sh`）；
 `.env` 不提交，也不允许出现白名单以外的键。

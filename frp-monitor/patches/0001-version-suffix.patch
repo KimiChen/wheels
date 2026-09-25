@@ -1,0 +1,17 @@
+--- a/pkg/util/version/version.go
++++ b/pkg/util/version/version.go
+@@ -16,6 +16,14 @@
+ 
+ var version = "0.71.0"
+ 
++// Suffix 由构建期扩展设置（如 frp-monitor），默认空串，原生构建行为不变。
++var Suffix = ""
++
+ func Full() string {
++	return version + Suffix
++}
++
++// Base 返回不带扩展后缀的基线版本。
++func Base() string {
+ 	return version
+ }

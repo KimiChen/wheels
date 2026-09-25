@@ -60,7 +60,8 @@ fi
 
 [[ ! -e "$output_dir/.git" ]] || die "准备后的源码树不得包含嵌套 .git"
 
-printf '%s\n' "$upstream_commit" > "$output_dir/.frp-monitor-prepared"
+# 标记记录 commit 与 series 摘要：series 变化后缓存树必须重建。
+expected_tree_marker > "$output_dir/.frp-monitor-prepared"
 
 printf '源码已准备：%s\n' "$output_dir"
 printf '上游版本：%s (%s)\n' "$upstream_tag" "$upstream_commit"

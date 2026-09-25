@@ -16,7 +16,7 @@ head -n 5 "$tree/go.mod" | grep -q '^module github.com/fatedier/frp$' || \
   die "源码树不是 fatedier/frp 模块：$tree"
 
 # 软链接会逃逸出子项目目录，把构建产物绑到本机路径上；一律拒绝。
-for dir in agent monitor shared web; do
+for dir in agent monitor shared web tests/fixtures; do
   [[ -d "$FRP_MONITOR_ROOT/$dir" ]] || continue
   if [[ -n "$(find "$FRP_MONITOR_ROOT/$dir" -type l -print -quit)" ]]; then
     die "扩展目录包含软链接，拒绝映射：$dir"
@@ -34,6 +34,13 @@ for dir in agent monitor shared web; do
   cp -R "$src" "$target/$dir"
   mapped+=("$dir")
 done
+
+# tests/fixtures 供采集器与协议测试在树内引用。
+if [[ -d "$FRP_MONITOR_ROOT/tests/fixtures" ]]; then
+  mkdir -p "$target/tests"
+  cp -R "$FRP_MONITOR_ROOT/tests/fixtures" "$target/tests/fixtures"
+  mapped+=("tests/fixtures")
+fi
 
 ((${#mapped[@]} > 0)) || die "没有可映射的扩展目录（agent/monitor/shared/web 均不存在）"
 

@@ -30,6 +30,9 @@ func (p *HelloParams) Validate() error {
 			return err
 		}
 	}
+	if p.ReportInterval < 1 || p.ReportInterval > 3600 {
+		return fmt.Errorf("protocol: report_interval 越界 [1,3600]：%d", p.ReportInterval)
+	}
 	if p.SentAt <= 0 {
 		return fmt.Errorf("protocol: sent_at 必须为正 Unix 秒：%d", p.SentAt)
 	}

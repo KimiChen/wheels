@@ -125,6 +125,20 @@ frp_build_tags() {
   printf '%s\n' "noweb"
 }
 
+# frpmonitor 标签激活扩展接线（patches/ 中的生命周期钩子从空实现切换为真实实现）。
+frpmonitor_build_tags() {
+  printf '%s\n' "noweb frpmonitor"
+}
+
+# 缓存树标记：commit + series 摘要。series 变化后缓存树必须重建。
+expected_tree_marker() {
+  local series="$FRP_MONITOR_ROOT/patches/series" series_hash="empty"
+  if [[ -s "$series" ]]; then
+    series_hash="$(shasum -a 256 "$series" | awk '{print $1}')"
+  fi
+  printf '%s %s\n' "$(lock_value commit)" "$series_hash"
+}
+
 # 相对路径一律相对子项目根解析，与调用者 cwd 无关。
 cache_dir() {
   local dir="${FRP_MONITOR_CACHE_DIR:-.cache/frp-monitor}"

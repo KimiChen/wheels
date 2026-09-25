@@ -19,8 +19,8 @@ marker=".frp-monitor-prepared"
 if [[ -d "$src" ]]; then
   [[ -f "$src/$marker" ]] || die "缓存源码树缺少准备标记，请删除后重试：$src"
   prepared="$(cat "$src/$marker")"
-  [[ "$prepared" == "$upstream_commit" ]] || \
-    die "缓存源码树提交为 $prepared，与锁定 $upstream_commit 不符，请删除后重试：$src"
+  [[ "$prepared" == "$(expected_tree_marker)" ]] || \
+    die "缓存源码树与锁定状态不符（$prepared），请删除后重试：$src"
 else
   mkdir -p "$cache"
   "$FRP_MONITOR_ROOT/scripts/prepare-source.sh" "$src"
@@ -36,6 +36,7 @@ version_ldflags="-X github.com/fatedier/frp/pkg/util/version.version=${upstream_
 
 cd "$src"
 tags="$(frp_build_tags)"
+ext_tags="$(frpmonitor_build_tags)"
 for cmd in frpc frps; do
   CGO_ENABLED=0 go build -trimpath -buildvcs=false \
     -tags "$tags" \
@@ -43,8 +44,18 @@ for cmd in frpc frps; do
     -o "$out/$cmd" "./cmd/$cmd"
 done
 
-# 扩展包当前不被任何 cmd 引用，必须显式全量编译，防止「能映射、不能编译」溜走。
-CGO_ENABLED=0 go build -tags "$tags" ./...
+# 扩展接线产物：frp-monitor-agent/server（frpmonitor 标签）。
+CGO_ENABLED=0 go build -trimpath -buildvcs=false \
+  -tags "$ext_tags" \
+  -ldflags "-s -w -buildid= $version_ldflags" \
+  -o "$out/frp-monitor-agent" ./cmd/frpc
+CGO_ENABLED=0 go build -trimpath -buildvcs=false \
+  -tags "$ext_tags" \
+  -ldflags "-s -w -buildid= $version_ldflags" \
+  -o "$out/frp-monitor-server" ./cmd/frps
 
-printf '已构建基线二进制：%s/frpc %s/frps\n' "$out" "$out"
-"$out/frps" --version
+# 扩展包当前不被任何 cmd 引用，必须显式全量编译，防止「能映射、不能编译」溜走。
+CGO_ENABLED=0 go build -tags "$ext_tags" ./...
+
+printf '已构建：%s/{frpc,frps}（基线） %s/{frp-monitor-agent,frp-monitor-server}（扩展）\n' "$out" "$out"
+"$out/frp-monitor-server" --version

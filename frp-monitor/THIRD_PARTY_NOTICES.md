@@ -11,17 +11,21 @@
 - Source commit: `4a23aa181c1d7e28eecaa8216024ed753b9d27c8`
 - License: Apache-2.0
 
-完整上游源码不保存在本仓库中。准备构建时，工具必须取得上述固定提交并验证身份，
-然后在临时工作树中应用 `patches/`，并映射本项目扩展源码。当前目录迁移与构建方案
-以根目录 `README.md` 为准。
+完整上游源码不保存在本仓库中。准备构建时，工具取得上述固定提交并验证身份，
+然后在临时工作树中应用 `patches/`，并映射本项目扩展源码（`agent/`、`monitor/`、
+`shared/`、`web/` → `extension/frpmonitor/`）。
 
-计划中的实质修改包括：
+当前实质修改（`patches/series`，均为最小补丁或包内薄胶水新文件）：
 
-- 在 frpc 进程级生命周期中增加 Linux Telemetry、TCP 探测和独立 WSS 上报；
-- 采集主机资源、网络、连接总览和本地 Proxy 状态；
-- 在 frps 中增加与原 Dashboard/API 分离的接收、聚合、存储与查询模块；
-- 在独立 Listener 提供基于 web-standard-kit 的网页、公开摘要和认证管理接口；
-- 保持 frp wire protocol、数据转发路径以及原有管理功能不变。
+- `pkg/util/version`：增加 `Suffix`/`Base()`，用于显示自身版本与 FRP 基线版本；
+- `pkg/config/v1`：增加 frpc/frps 的 `[monitor]` 配置类型与校验；
+- frpc 生命周期钩子：`client.Service.Run` 首次登录前启动监控 goroutine
+  （Linux 主机指标采集与独立 WSS 上报，读取本地 Proxy 只读状态）；
+- frps 生命周期钩子：`server.Service.Run` 启动独立 Listener（节点认证接收、
+  内存最新状态、公开/管理 API、SSE 与嵌入页面）；monitor 开启时即使 Dashboard
+  关闭也强制启用内存统计 collector（全进程仅注册一次）；
+- 钩子均以 build tag `frpmonitor` 接线，默认构建（空实现）保持 frp wire
+  protocol、数据转发路径以及原有管理功能完全不变。
 
 实际引入代码后，应在每个补丁或 Overlay package 中保留适用的上游版权、许可证和
 来源说明，并同步更新本文件中的“实质修改”列表。
@@ -40,6 +44,7 @@
 
 ## web-standard-kit
 
-网页计划复用本仓库 `web-standard-kit/`，参考快照为
-`6d41d588b3537b2d2460d73f999d958fd37eb00d` 中的该目录。
-本轮未复制网页资源；实际引入时记录所用文件与版本，并保留适用的来源和许可说明。
+`web/static/assets/wsk/`（style.css、script.js）复制自本仓库
+`6d41d588b3537b2d2460d73f999d958fd37eb00d` 中的 `web-standard-kit/` 目录快照，
+随 monitor 二进制嵌入发布；页面结构、业务样式与 `src/` 模块为本子项目自有实现。
+升级套件快照时同步更新本节与 `web/README.md` 的来源记录。

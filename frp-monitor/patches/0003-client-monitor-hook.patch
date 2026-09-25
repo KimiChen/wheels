@@ -1,0 +1,139 @@
+--- /dev/null
++++ b/client/frpmonitor_hook.go
+@@ -0,0 +1,99 @@
++// Copyright 2016 fatedier, fatedier@gmail.com
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++//
++// frp-monitor：client 生命周期钩子（frpmonitor 构建标签下的真实实现）。
++// 本文件在上游 client 包内做薄适配：读取 Service 只读状态并交给扩展包，
++// 业务逻辑全部在 extension/frpmonitor/agent/。
++
++//go:build frpmonitor
++
++package client
++
++import (
++	"net"
++	"strconv"
++
++	"github.com/fatedier/frp/pkg/util/log"
++	frpversion "github.com/fatedier/frp/pkg/util/version"
++
++	agentservice "github.com/fatedier/frp/extension/frpmonitor/agent/service"
++	"github.com/fatedier/frp/extension/frpmonitor/shared/protocol"
++)
++
++// startFrpMonitor 在 client.Service.Run 首次登录前被调用。
++func (svr *Service) startFrpMonitor() {
++	// 局部 panic 边界：扩展启动失败不得影响 frpc 主流程。
++	defer func() {
++		if r := recover(); r != nil {
++			log.Errorf("frp-monitor agent 启动 panic（已隔离）：%v", r)
++		}
++	}()
++
++	cfg := svr.common.Monitor
++	if !cfg.Enable {
++		return
++	}
++	agentservice.Start(svr.ctx, agentservice.Config{
++		Enable:                true,
++		ServerURL:             cfg.ServerURL,
++		Token:                 cfg.Token,
++		ReportIntervalSeconds: cfg.ReportIntervalSeconds,
++	}, frpStatusSource{svr: svr})
++}
++
++// frpStatusSource 实现 agentservice.FRPStatusSource：从 Service 取只读快照。
++type frpStatusSource struct {
++	svr *Service
++}
++
++func (s frpStatusSource) Snapshot() protocol.FRPExtension {
++	svr := s.svr
++	ext := protocol.FRPExtension{
++		ClientID:   svr.common.ClientID,
++		FRPVersion: frpversion.Base(),
++	}
++
++	svr.ctlMu.RLock()
++	ctl := svr.ctl
++	svr.ctlMu.RUnlock()
++	if ctl != nil {
++		select {
++		case <-ctl.Done():
++		default:
++			ext.ControlConnected = true
++		}
++	}
++
++	svr.cfgMu.RLock()
++	proxyCfgs := svr.proxyCfgs
++	svr.cfgMu.RUnlock()
++	for _, c := range proxyCfgs {
++		base := c.GetBaseConfig()
++		pi := protocol.ProxyInfo{
++			Name:      base.Name,
++			Type:      base.Type,
++			LocalAddr: net.JoinHostPort(base.LocalIP, strconv.Itoa(base.LocalPort)),
++			Enabled:   true, // proxyCfgs 已经过 Start 过滤，列出的即为启用
++			Status:    "unknown",
++		}
++		if st, ok := svr.getProxyStatus(base.Name); ok {
++			pi.Status = st.Phase
++			if st.Err != "" {
++				pi.Status = st.Phase + ": " + st.Err
++			}
++		}
++		ext.Proxies = append(ext.Proxies, pi)
++	}
++	return ext
++}
+--- /dev/null
++++ b/client/frpmonitor_hook_stub.go
+@@ -0,0 +1,21 @@
++// Copyright 2016 fatedier, fatedier@gmail.com
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++//
++// frp-monitor：未带 frpmonitor 构建标签时的空实现，保持原生基线行为。
++
++//go:build !frpmonitor
++
++package client
++
++func (svr *Service) startFrpMonitor() {}
+--- a/client/service.go
++++ b/client/service.go
+@@ -227,6 +227,10 @@
+ 	ctx, cancel := context.WithCancelCause(ctx)
+ 	svr.ctx = xlog.NewContext(ctx, xlog.FromContextSafe(ctx))
+ 	svr.cancel = cancel
++
++	// frp-monitor：监控 goroutine 在首次登录前启动，登录失败期间也可上报
++	// 主机状态；未启用或未带 frpmonitor 构建标签时为空操作。
++	svr.startFrpMonitor()
+ 
+ 	// set custom DNSServer
+ 	if svr.common.DNSServer != "" {

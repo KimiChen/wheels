@@ -1,0 +1,185 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* frp-monitor 业务样式。套件令牌与组件在 @layer wsk（assets/wsk/style.css），
+   本层只使用令牌组合业务布局，并在其后声明以允许覆盖。不新增颜色。 */
+@layer app {
+  /* 顶栏：品牌 + 页面导航 + 连接状态 + 主题按钮 四列。 */
+  .wsk-topbar:has(.fm-topnav) {
+    grid-template-columns: minmax(0, 1fr) auto auto auto;
+  }
+
+  .fm-brand-sub {
+    color: var(--muted-soft);
+    display: block;
+    font-size: var(--type-2xs);
+    letter-spacing: 0.06em;
+  }
+
+  /* 页面导航复用 .wsk-view-switch 的视觉，但语义是链接而非视图切换。 */
+  .fm-topnav {
+    background: var(--surface-soft);
+    border: 1px solid var(--border);
+    border-radius: calc(var(--radius-sm) + 1px);
+    display: inline-flex;
+    padding: 2px;
+  }
+
+  .fm-topnav a {
+    align-items: center;
+    border-radius: var(--radius-xs);
+    color: var(--muted);
+    display: inline-flex;
+    font-size: var(--type-xs);
+    font-weight: 600;
+    min-height: 1.875rem;
+    padding: 0 var(--space-12);
+    text-decoration: none;
+    transition:
+      background-color 140ms ease,
+      color 140ms ease;
+  }
+
+  .fm-topnav a:hover {
+    color: var(--text);
+  }
+
+  .fm-topnav a[aria-current="page"] {
+    background: var(--surface-raised);
+    box-shadow: var(--card-highlight), var(--shadow-sm);
+    color: var(--text);
+  }
+
+  .fm-mono {
+    font-family: var(--font-mono);
+  }
+
+  /* 表格数值列右对齐等宽数字；首列节点 ID 保持左对齐行表头。 */
+  .fm-num {
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+    white-space: nowrap;
+  }
+
+  .fm-cell-sub {
+    color: var(--muted-soft);
+    display: block;
+    font-size: var(--type-2xs);
+  }
+
+  .fm-badges {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-4);
+  }
+
+  .fm-net {
+    display: inline-flex;
+    flex-direction: column;
+  }
+
+  .fm-node-link {
+    font-family: var(--font-mono);
+    text-decoration: none;
+  }
+
+  .fm-node-link:hover {
+    color: var(--link);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+
+  /* 管理端列表里的节点选择按钮：外观对齐链接。 */
+  .fm-node-btn {
+    background: none;
+    border: 0;
+    color: var(--text);
+    cursor: pointer;
+    font-family: var(--font-mono);
+    font-size: inherit;
+    font-weight: inherit;
+    padding: 0;
+    text-decoration: underline;
+    text-decoration-color: var(--border-strong);
+    text-underline-offset: 2px;
+  }
+
+  .fm-node-btn:hover {
+    color: var(--link);
+  }
+
+  /* 管理端当前选中行：与套件行选中态同一表达。 */
+  .fm-row-active :is(td, th[scope="row"]) {
+    background: var(--accent-soft);
+  }
+
+  .fm-row-active th[scope="row"] {
+    box-shadow: inset 2px 0 0 var(--accent);
+  }
+
+  /* 详情页双栏：资源 / 系统动态。 */
+  .fm-detail-grid {
+    align-items: start;
+    display: grid;
+    gap: var(--space-24);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  /* Facts / 计数器定义列表。 */
+  .fm-dl {
+    display: grid;
+    gap: var(--space-12) var(--space-24);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    margin: 0;
+  }
+
+  .fm-dl > div {
+    min-width: 0;
+  }
+
+  .fm-dl dt {
+    color: var(--muted-soft);
+    font-size: var(--type-xs);
+  }
+
+  .fm-dl dd {
+    font-family: var(--font-mono);
+    font-size: var(--type-sm);
+    margin: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .fm-login-card {
+    margin: var(--space-48) auto 0;
+    max-width: 26rem;
+  }
+
+  @media (max-width: 900px) {
+    .fm-detail-grid,
+    .fm-dl {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+
+  @media (max-width: 680px) {
+    /* 窄屏：第一行 品牌 / 连接状态 / 主题，导航占满第二行。 */
+    .wsk-topbar:has(.fm-topnav) {
+      grid-template-columns: minmax(0, 1fr) auto auto;
+    }
+
+    .fm-topnav {
+      grid-column: 1 / -1;
+      grid-row: 2;
+      width: 100%;
+    }
+
+    .fm-topnav a {
+      flex: 1;
+      justify-content: center;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .fm-topnav a {
+      transition: none;
+    }
+  }
+}

@@ -41,6 +41,9 @@ type HelloParams struct {
 	Capabilities  []string `json:"capabilities"`
 	// SessionID 由 agent 为每次监控连接生成；服务端只接受当前会话。
 	SessionID string `json:"session_id"`
+	// ReportInterval 为 agent 配置的指标上报间隔秒数，范围 [1,3600]；
+	// 服务端用它计算指标新鲜度阈值 max(10s, 3×interval)。
+	ReportInterval int `json:"report_interval"`
 	// SentAt 为 agent 本机 Unix 秒，仅用于诊断时钟偏差。
 	SentAt int64 `json:"sent_at"`
 }

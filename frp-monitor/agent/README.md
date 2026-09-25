@@ -4,14 +4,17 @@ frpc + Go 采集模块的扩展源码，构建时由 `scripts/assemble.sh` 映�
 `extension/frpmonitor/agent/`，共享上游 go module。整体架构、字段口径与接入约束见
 根目录 [README.md](../README.md)（§1、§3、§4）。
 
-目标子包（随实施阶段落地，当前仅有契约代码在 `../shared/`）：
+子包现状：
 
-- `service/`：生命周期、调度、FRP 只读适配器；在 `client.Service.Run` 首次登录前启动，
-  退出时取消并限时回收；任何采集或上报失败都不能中断 frpc 隧道。
-- `collect/`：Linux Facts / Metrics，直读 `/proc`、`/sys` 并调用 `statvfs`，
-  字段与口径对齐根 README §3。
-- `probe/`：TCP 探测（握手延迟，失败 `-1`，DNS 超时缺样）。
-- `transport/`：独立 WSS、认证、重连（指数退避加抖动，认证失败不高频重试）。
+- `collect/`：Linux Facts / Metrics 采集，直读 `/proc`、`/sys` 并调用 `statfs`，
+  字段与口径对齐根 README §3；以 `tests/fixtures/` 驱动测试。
+- `transport/`：独立 WSS 客户端（Authorization 握手认证；wss 强制，ws 仅回环）。
+- `service/`：生命周期与调度——hello/report 会话、Facts 变化重报、FRP 扩展区
+  变化上报加 60 秒兜底、指数退避加抖动、认证失败长退避。
+- `probe/`：TCP 探测，P2 落地。
 
-约束：监控挂在进程生命周期，不实现为普通 frpc Proxy 插件；不修改 FRP wire protocol；
-扩展不得反向 import 上游 client/server 根包形成循环。
+接入方式：`patches/0003-client-monitor-hook.patch` 在 `client.Service.Run`
+首次登录前调用钩子（build tag `frpmonitor`；不带标签为空实现），监控 goroutine
+独立于转发路径，任何采集或上报失败都不能中断 frpc 隧道。扩展不反向 import 上游
+client/server 根包；钩子胶水在 client 包内把 `Service` 适配为窄接口
+`FRPStatusSource`。

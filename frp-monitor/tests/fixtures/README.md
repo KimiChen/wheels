@@ -13,6 +13,7 @@
 | `proc/meminfo` | 常规样本：MemTotal 4194304 kB，MemAvailable 存在 |
 | `proc/meminfo.available-zero` | MemAvailable 为 0 是有效数据，不得回退或标未知 |
 | `proc/meminfo.legacy` | 缺失 MemAvailable，回退 MemFree + Buffers + Cached = 2490368 kB |
+| `proc/cpuinfo` | 4 个逻辑处理器条目、model name 为 `Virtual CPU`；对齐 golden 的 cpu_cores=4、cpu_name |
 | `proc/stat` | CPU 累计时间差分（含 iowait、guest），boot 时间、进程数 |
 | `proc/loadavg` | 1/5/15 负载 0.42/0.38/0.35，进程总数 187 |
 | `proc/uptime` | 启动秒数 123456.78（4 核 idle 累计） |
@@ -20,9 +21,12 @@
 | `proc/net/sockstat` + `proc/net/sockstat6` | TCP = IPv4 inuse 31 + tw 17 + IPv6 inuse 11 = 59；UDP = 9 + 5 = 14 |
 | `proc/diskstats` | 整盘/分区/dm/loop 混合，供磁盘去重与汇总参考 |
 | `proc/mounts` | 伪文件系统（proc/sysfs/tmpfs）、overlay、NFS、同设备重复挂载的过滤与去重 |
+| `proc/sys/kernel/random/boot_id` | 内核 boot ID（镜像 `/proc` 相对路径）；与 golden 的 boot_id 一致，标识网卡计数器范围 |
 
 `proc/net/dev` 中 eth0 的累计字节（12345678901 / 9876543210）、sockstat 汇总数、
-loadavg 与 uptime 与 `shared/` 契约 golden 中的样本值刻意一致，便于跨层对账。
+loadavg 与 uptime 与 `shared/` 契约 golden 中的样本值刻意一致，便于跨层对账；
+`proc/cpuinfo` 的核数与型号、`proc/sys/kernel/random/boot_id` 的取值同样对齐
+golden 的 cpu_cores / cpu_name / boot_id。
 
 协议 golden（hello/report/ping.tasks/ping.result）随代码放在
 `shared/protocol/testdata/` 与 `shared/metrics/testdata/`，由 Go 单测逐字节比对。

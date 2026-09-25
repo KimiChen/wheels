@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <title>总览 · frp-monitor</title>
+    <script>
+      // 首帧前应用已存主题；无显式选择时不写 data-theme，令牌跟随系统，
+      // 禁用 JavaScript 时深色仍然生效。
+      document.documentElement.dataset.js = "true";
+      try {
+        const savedTheme = localStorage.getItem("web-standard-kit-theme");
+        if (savedTheme === "light" || savedTheme === "dark") {
+          document.documentElement.dataset.theme = savedTheme;
+        }
+      } catch {}
+    </script>
+    <link rel="stylesheet" href="/assets/wsk/style.css" />
+    <link rel="stylesheet" href="/assets/app.css" />
+    <script src="/assets/wsk/script.js" defer></script>
+    <script type="module" src="/src/views/index.js"></script>
+  </head>
+  <body>
+    <a class="wsk-skip-link" href="#main-content">跳到主要内容</a>
+    <svg class="wsk-icon-sprite" aria-hidden="true">
+      <defs>
+        <symbol id="sun" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="4" />
+          <path
+            d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.66 6.34l1.41-1.41"
+          />
+        </symbol>
+        <symbol id="system" viewBox="0 0 24 24">
+          <rect x="2" y="3" width="20" height="14" rx="2" />
+          <path d="M8 21h8M12 17v4" />
+        </symbol>
+        <symbol id="moon" viewBox="0 0 24 24">
+          <path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8Z" />
+        </symbol>
+        <symbol id="check" viewBox="0 0 24 24">
+          <path d="m5 12 4 4L19 6" />
+        </symbol>
+        <symbol id="info" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="10" />
+          <path d="M12 16v-4M12 8h.01" />
+        </symbol>
+        <symbol id="warning" viewBox="0 0 24 24">
+          <path
+            d="m21.73 18-8-14a2 2 0 0 0-3.46 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"
+          />
+          <path d="M12 9v4M12 17h.01" />
+        </symbol>
+        <symbol id="sort" viewBox="0 0 24 24">
+          <path d="m8 9 4-4 4 4M16 15l-4 4-4-4" />
+        </symbol>
+        <symbol id="sort-asc" viewBox="0 0 24 24">
+          <path d="m6 14 6-6 6 6" />
+        </symbol>
+        <symbol id="sort-desc" viewBox="0 0 24 24">
+          <path d="m6 10 6 6 6-6" />
+        </symbol>
+        <symbol id="chevron-left" viewBox="0 0 24 24">
+          <path d="m15 18-6-6 6-6" />
+        </symbol>
+        <symbol id="chevron-right" viewBox="0 0 24 24">
+          <path d="m9 18 6-6 6-6" />
+        </symbol>
+      </defs>
+    </svg>
+
+    <header class="wsk-topbar">
+      <div class="wsk-brand">
+        <span class="wsk-brand-mark" aria-hidden="true">FM</span>
+        <span class="wsk-brand-copy">
+          <strong>frp-monitor</strong>
+          <span class="fm-brand-sub">FRP 主机与隧道监控</span>
+        </span>
+      </div>
+
+      <nav class="fm-topnav" aria-label="页面">
+        <a href="/" aria-current="page">总览</a>
+        <a href="/admin.html">管理</a>
+      </nav>
+
+      <span
+        class="wsk-badge"
+        id="conn-status"
+        role="status"
+        aria-live="polite"
+        data-js-only
+        >连接中…</span
+      >
+
+      <button
+        class="wsk-icon-button"
+        type="button"
+        data-theme-toggle
+        data-js-only
+        aria-label="主题：跟随系统，切换到浅色"
+        title="主题：跟随系统，切换到浅色"
+      >
+        <svg class="wsk-icon wsk-theme-system" aria-hidden="true">
+          <use href="#system"></use>
+        </svg>
+        <svg class="wsk-icon wsk-theme-sun" aria-hidden="true">
+          <use href="#sun"></use>
+        </svg>
+        <svg class="wsk-icon wsk-theme-moon" aria-hidden="true">
+          <use href="#moon"></use>
+        </svg>
+      </button>
+    </header>
+
+    <main id="main-content" tabindex="-1">
+      <div class="wsk-page">
+        <div class="wsk-page-head">
+          <div>
+            <h1 tabindex="-1">监控总览</h1>
+            <p>节点在线状态、资源使用与 FRP 隧道摘要，按秒实时更新。</p>
+          </div>
+          <span class="wsk-badge wsk-accent">公开只读</span>
+        </div>
+
+        <div class="wsk-alert wsk-info wsk-mt-5" data-no-js>
+          <svg class="wsk-icon" aria-hidden="true">
+            <use href="#info"></use>
+          </svg>
+          <div>
+            <strong>需要启用 JavaScript</strong>
+            <p>监控数据由浏览器脚本通过 API 与 SSE 实时加载，当前只有静态框架。</p>
+          </div>
+        </div>
+
+        <section class="wsk-section" aria-labelledby="ov-title">
+          <div class="wsk-section-head">
+            <h2 id="ov-title">平台总览</h2>
+            <span class="wsk-badge" id="ov-updated">等待数据</span>
+          </div>
+          <div class="wsk-metric-grid" id="overview-grid">
+            <div class="wsk-metric">
+              <span>节点总数</span><strong data-ov="nodes_total">—</strong
+              ><small>已接入节点</small>
+            </div>
+            <div class="wsk-metric">
+              <span>在线节点</span><strong data-ov="nodes_online">—</strong
+              ><small>监控会话在线</small>
+            </div>
+            <div class="wsk-metric">
+              <span>离线节点</span><strong data-ov="nodes_offline">—</strong
+              ><small>监控会话离线</small>
+            </div>
+            <div class="wsk-metric">
+              <span>FRP 在线客户端</span
+              ><strong data-ov="frp_clients_online">—</strong
+              ><small>服务端控制连接</small>
+            </div>
+            <div class="wsk-metric">
+              <span>聚合接收</span><strong data-ov="net_rx_bps">—</strong
+              ><small>全节点下行合计</small>
+            </div>
+            <div class="wsk-metric">
+              <span>聚合发送</span><strong data-ov="net_tx_bps">—</strong
+              ><small>全节点上行合计</small>
+            </div>
+          </div>
+          <p class="wsk-help wsk-mt-2" data-ov-note></p>
+        </section>
+
+        <section
+          class="wsk-section"
+          aria-labelledby="nodes-title"
+          data-table-scope
+        >
+          <div class="wsk-section-head">
+            <h2 id="nodes-title">节点列表</h2>
+            <span class="wsk-badge">实时</span>
+          </div>
+          <div class="wsk-toolbar wsk-mb-3" data-js-only>
+            <div class="wsk-filter">
+              <label class="wsk-sr-only" for="node-filter">搜索节点</label
+              ><input
+                class="wsk-control"
+                id="node-filter"
+                data-table-filter
+                type="search"
+                placeholder="搜索节点 ID 或状态"
+              />
+            </div>
+            <span class="wsk-filter-meta" data-table-result aria-live="polite"
+              >等待数据</span
+            >
+          </div>
+          <div class="wsk-table-wrap">
+            <table
+              class="wsk-table"
+              id="node-table"
+              data-table
+              data-page-size="20"
+              data-unit="个节点"
+            >
+              <caption class="wsk-sr-only">
+                节点实时监控列表
+              </caption>
+              <thead>
+                <tr>
+                  <th scope="col" aria-sort="none">
+                    <button
+                      class="wsk-sort-button"
+                      type="button"
+                      data-sort="name"
+                      data-js-only
+                    >
+                      节点<svg class="wsk-icon" aria-hidden="true">
+                        <use href="#sort"></use>
+                      </svg>
+                    </button>
+                    <span data-no-js>节点</span>
+                  </th>
+                  <th scope="col">状态</th>
+                  <th scope="col" class="fm-num" aria-sort="none">
+                    <button
+                      class="wsk-sort-button"
+                      type="button"
+                      data-sort="cpu"
+                      data-js-only
+                    >
+                      CPU<svg class="wsk-icon" aria-hidden="true">
+                        <use href="#sort"></use>
+                      </svg>
+                    </button>
+                    <span data-no-js>CPU</span>
+                  </th>
+                  <th scope="col" class="fm-num" aria-sort="none">
+                    <button
+                      class="wsk-sort-button"
+                      type="button"
+                      data-sort="mem"
+                      data-js-only
+                    >
+                      内存<svg class="wsk-icon" aria-hidden="true">
+                        <use href="#sort"></use>
+                      </svg>
+                    </button>
+                    <span data-no-js>内存</span>
+                  </th>
+                  <th scope="col" class="fm-num">磁盘</th>
+                  <th scope="col" class="fm-num">网络收 / 发</th>
+                  <th scope="col" class="fm-num">TCP 探测</th>
+                  <th scope="col" class="fm-num">更新时间</th>
+                </tr>
+              </thead>
+              <tbody id="node-tbody">
+                <tr data-table-empty>
+                  <td class="wsk-table-empty" colspan="8">
+                    正在连接监控服务…
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <nav
+            class="wsk-pagination wsk-table-pagination"
+            aria-label="节点分页"
+            data-js-only
+          >
+            <button type="button" data-table-page-action="previous" aria-label="上一页">
+              <svg class="wsk-icon" aria-hidden="true">
+                <use href="#chevron-left"></use>
+              </svg></button
+            ><span data-table-page-numbers></span
+            ><button type="button" data-table-page-action="next" aria-label="下一页">
+              <svg class="wsk-icon" aria-hidden="true">
+                <use href="#chevron-right"></use>
+              </svg>
+            </button>
+          </nav>
+        </section>
+      </div>
+    </main>
+
+    <footer class="wsk-footer">
+      <div class="wsk-footer-inner">
+        <div class="wsk-footer-legal">
+          <span>frp-monitor · FRP 主机与隧道监控</span>
+        </div>
+      </div>
+    </footer>
+
+    <template id="node-row-template">
+      <tr data-row>
+        <th scope="row">
+          <a class="fm-node-link" data-f-link href="/"><span data-f="id"></span></a>
+        </th>
+        <td>
+          <span class="fm-badges">
+            <span class="wsk-badge" data-badge="session"></span>
+            <span class="wsk-badge" data-badge="freshness"></span>
+            <span class="wsk-badge" data-badge="frp"></span>
+          </span>
+        </td>
+        <td class="fm-num" data-f="cpu">—</td>
+        <td class="fm-num">
+          <span data-f="mem">—</span>
+          <small class="fm-cell-sub" data-f="mem_pct"></small>
+        </td>
+        <td class="fm-num">
+          <span data-f="disk">—</span>
+          <small class="fm-cell-sub" data-f="disk_pair"></small>
+        </td>
+        <td class="fm-num">
+          <span class="fm-net">
+            <span data-f="net_rx">—</span>
+            <span data-f="net_tx">—</span>
+          </span>
+        </td>
+        <td class="fm-num" title="TCP 探测将于 P2 阶段提供">—</td>
+        <td class="fm-num" data-f="updated">—</td>
+      </tr>
+    </template>
+
+    <div class="wsk-toast-region" id="toast-region" aria-live="polite"></div>
+  </body>
+</html>

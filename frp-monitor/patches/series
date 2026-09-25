@@ -1,1 +1,5 @@
-# 实现阶段按应用顺序填写补丁文件名，一行一个。
+# 按应用顺序排列，prepare-source.sh 零 fuzz 应用。
+0001-version-suffix.patch
+0002-monitor-config-types.patch
+0003-client-monitor-hook.patch
+0004-server-monitor-hook.patch

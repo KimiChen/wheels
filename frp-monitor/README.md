@@ -3,10 +3,10 @@
 基于 FRP 的主机与隧道监控项目：`agent` 复用 frpc，`monitor` 复用 frps，
 `web` 基于本仓库的 `web-standard-kit`。三个模块均位于本子项目目录。
 
-> 状态：P0 契约与构建已落地，2026-09-26 更新。已有目录结构、协议契约
-> （`shared/`）、构建管线（`scripts/`）与参考 fixture（`tests/fixtures/`）；
-> 采集器、监控服务、网页和 frpc/frps 生命周期接线尚未实现（P1 起）。
-> 下文是整体方案。
+> 状态：P1 实时闭环已落地，2026-09-26 更新。Linux 采集器（`agent/collect`）、
+> WSS 通道与节点凭据、FRP 连接适配器、最新状态与公开/管理页面已可用，
+> `scripts/verify.sh` 含回环端到端冒烟（非 Linux 平台仅验证链路，指标组按契约
+> 降级为未知）。TCP 探测、SQLite 历史与累计流量、隧道对账与发布完善在 P2/P3。
 
 本轮需求将原来的“60 秒上报、最新内存快照、公开 HTML”调整为对齐
 `monitor-probe/agent` 的监控方案。本 README 为当前规划入口；

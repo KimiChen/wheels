@@ -1,0 +1,185 @@
+--- /dev/null
++++ b/pkg/config/v1/frpmonitor.go
+@@ -0,0 +1,46 @@
++// Copyright 2016 fatedier, fatedier@gmail.com
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++//
++// frp-monitor：监控扩展的配置类型。新增文件，仅在 frpmonitor 构建标签下
++// 被生命周期钩子消费；原生构建解析后忽略 [monitor] 段。
++
++package v1
++
++// AgentMonitorConfig 为 frpc 的 [monitor] 段：节点监控上报配置。
++type AgentMonitorConfig struct {
++	// Enable 开启监控上报。默认 false。
++	Enable bool `json:"enable,omitempty"`
++	// ServerURL 为监控服务端 WSS 地址（如 wss://monitor.example.com/agent/v1/ws）。
++	// ws:// 仅允许回环地址（本地开发）。
++	ServerURL string `json:"serverURL,omitempty"`
++	// Token 为节点独立监控凭据，与 FRP 认证凭据分开。
++	// 建议使用环境变量引用，避免明文写入配置文件。
++	Token string `json:"token,omitempty"`
++	// ReportIntervalSeconds 为指标上报间隔秒数，范围 [1,3600]，默认 1。
++	ReportIntervalSeconds int `json:"reportIntervalSeconds,omitempty"`
++}
++
++// ServerMonitorConfig 为 frps 的 [monitor] 段：监控服务配置。
++type ServerMonitorConfig struct {
++	// Enable 开启监控服务。默认 false。
++	Enable bool `json:"enable,omitempty"`
++	// Addr 为独立监控 Listener 地址，默认 127.0.0.1:7400。
++	// 公开访问由 HTTPS 反向代理提供；与原 Dashboard/API 互不共用。
++	Addr string `json:"addr,omitempty"`
++	// CredentialsFile 为节点凭据文件（JSON，内容为 sha256 摘要）。
++	CredentialsFile string `json:"credentialsFile,omitempty"`
++	// AdminPasswordHash 为管理密码的 sha256 十六进制小写摘要；
++	// 为空时管理端（/admin/、/api/admin/、/events/admin）禁用。
++	AdminPasswordHash string `json:"adminPasswordHash,omitempty"`
++}
+--- a/pkg/config/v1/client.go
++++ b/pkg/config/v1/client.go
+@@ -65,6 +65,10 @@
+ 	Transport  ClientTransportConfig `json:"transport,omitempty"`
+ 	VirtualNet VirtualNetConfig      `json:"virtualNet,omitempty"`
+ 
++	// Monitor 为 frp-monitor 监控扩展配置（[monitor] 段，仅在 frpmonitor
++	// 构建标签下生效）。
++	Monitor AgentMonitorConfig `json:"monitor,omitempty"`
++
+ 	// FeatureGates specifies a set of feature gates to enable or disable.
+ 	// This can be used to enable alpha/beta features or disable default features.
+ 	FeatureGates map[string]bool `json:"featureGates,omitempty"`
+--- a/pkg/config/v1/server.go
++++ b/pkg/config/v1/server.go
+@@ -74,6 +74,10 @@
+ 	// in /metrics api.
+ 	EnablePrometheus bool `json:"enablePrometheus,omitempty"`
+ 
++	// Monitor 为 frp-monitor 监控扩展配置（[monitor] 段，仅在 frpmonitor
++	// 构建标签下生效）。
++	Monitor ServerMonitorConfig `json:"monitor,omitempty"`
++
+ 	Log LogConfig `json:"log,omitempty"`
+ 
+ 	Transport ServerTransportConfig `json:"transport,omitempty"`
+--- /dev/null
++++ b/pkg/config/v1/validation/frpmonitor.go
+@@ -0,0 +1,84 @@
++// Copyright 2016 fatedier, fatedier@gmail.com
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++//
++// frp-monitor：监控扩展配置的校验。新增文件。
++
++package validation
++
++import (
++	"fmt"
++	"net"
++	"net/url"
++	"strings"
++
++	v1 "github.com/fatedier/frp/pkg/config/v1"
++)
++
++func validateAgentMonitorConfig(c *v1.AgentMonitorConfig) error {
++	if !c.Enable {
++		return nil
++	}
++	if c.ServerURL == "" {
++		return fmt.Errorf("monitor.serverURL 不能为空")
++	}
++	u, err := url.Parse(c.ServerURL)
++	if err != nil {
++		return fmt.Errorf("monitor.serverURL 非法：%v", err)
++	}
++	switch u.Scheme {
++	case "wss":
++	case "ws":
++		host := u.Hostname()
++		if ip := net.ParseIP(host); !(ip != nil && ip.IsLoopback()) &&
++			!strings.EqualFold(host, "localhost") {
++			return fmt.Errorf("monitor.serverURL 的 ws:// 仅允许回环地址，远程节点必须使用 wss://")
++		}
++	default:
++		return fmt.Errorf("monitor.serverURL 的 scheme 必须为 wss 或 ws")
++	}
++	if c.Token == "" {
++		return fmt.Errorf("monitor.token 不能为空")
++	}
++	if c.ReportIntervalSeconds < 0 || c.ReportIntervalSeconds > 3600 {
++		return fmt.Errorf("monitor.reportIntervalSeconds 越界 [0,3600]（0 为默认 1）：%d", c.ReportIntervalSeconds)
++	}
++	return nil
++}
++
++func validateServerMonitorConfig(c *v1.ServerMonitorConfig) error {
++	if !c.Enable {
++		return nil
++	}
++	addr := c.Addr
++	if addr == "" {
++		addr = "127.0.0.1:7400"
++	}
++	if _, _, err := net.SplitHostPort(addr); err != nil {
++		return fmt.Errorf("monitor.addr 非法：%v", err)
++	}
++	if c.CredentialsFile == "" {
++		return fmt.Errorf("monitor.credentialsFile 不能为空")
++	}
++	if c.AdminPasswordHash != "" {
++		if len(c.AdminPasswordHash) != 64 {
++			return fmt.Errorf("monitor.adminPasswordHash 应为 sha256 十六进制（64 字符）")
++		}
++		for _, r := range c.AdminPasswordHash {
++			if !('0' <= r && r <= '9' || 'a' <= r && r <= 'f') {
++				return fmt.Errorf("monitor.adminPasswordHash 只允许小写十六进制")
++			}
++		}
++	}
++	return nil
++}
+--- a/pkg/config/v1/validation/client.go
++++ b/pkg/config/v1/validation/client.go
+@@ -38,6 +38,7 @@
+ 		func() (Warning, error) { return v.validateAuthConfig(&c.Auth) },
+ 		func() (Warning, error) { return nil, validateLogConfig(&c.Log) },
+ 		func() (Warning, error) { return nil, validateWebServerConfig(&c.WebServer) },
++		func() (Warning, error) { return nil, validateAgentMonitorConfig(&c.Monitor) },
+ 		func() (Warning, error) { return validateTransportConfig(&c.Transport) },
+ 		func() (Warning, error) { return validateIncludeFiles(c.IncludeConfigFiles) },
+ 	}
+--- a/pkg/config/v1/validation/server.go
++++ b/pkg/config/v1/validation/server.go
+@@ -45,6 +45,10 @@
+ 		errs = AppendError(errs, err)
+ 	}
+ 
++	if err := validateServerMonitorConfig(&c.Monitor); err != nil {
++		errs = AppendError(errs, err)
++	}
++
+ 	errs = AppendError(errs, ValidatePort(c.BindPort, "bindPort"))
+ 	errs = AppendError(errs, ValidatePort(c.KCPBindPort, "kcpBindPort"))
+ 	errs = AppendError(errs, ValidatePort(c.QUICBindPort, "quicBindPort"))
