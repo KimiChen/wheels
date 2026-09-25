@@ -1,0 +1,15 @@
+{
+  "hostname": "node-example-01",
+  "os": "linux",
+  "kernel": "6.8.0-31-generic",
+  "arch": "amd64",
+  "virt": "kvm",
+  "cpu_name": "Virtual CPU",
+  "cpu_cores": 4,
+  "agent_version": "0.1.0-dev",
+  "ipv4": "192.0.2.10",
+  "ipv6": "2001:db8::10",
+  "mem_total": 4294967296,
+  "swap_total": 1073741824,
+  "disk_total": 107374182400
+}

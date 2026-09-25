@@ -3,8 +3,10 @@
 基于 FRP 的主机与隧道监控项目：`agent` 复用 frpc，`monitor` 复用 frps，
 `web` 基于本仓库的 `web-standard-kit`。三个模块均位于本子项目目录。
 
-> 状态：实现规划，2026-09-26 更新。当前只有文档和 Overlay 骨架，没有可运行的
-> 采集器、监控服务、网页或构建脚本。下文是建议方案，本轮不开发功能或部署。
+> 状态：P0 契约与构建已落地，2026-09-26 更新。已有目录结构、协议契约
+> （`shared/`）、构建管线（`scripts/`）与参考 fixture（`tests/fixtures/`）；
+> 采集器、监控服务、网页和 frpc/frps 生命周期接线尚未实现（P1 起）。
+> 下文是整体方案。
 
 本轮需求将原来的“60 秒上报、最新内存快照、公开 HTML”调整为对齐
 `monitor-probe/agent` 的监控方案。本 README 为当前规划入口；
@@ -259,7 +261,7 @@ HTML + CSS + 原生 ES Modules，保持 `wsk-` 组件、128 个令牌、`@layer 
 
 ## 8. 目标目录与构建
 
-以下是实施时的目标，本轮不创建空模块冒充实现：
+目标结构如下（`agent/`、`monitor/`、`web/` 内子包随实施阶段落地）：
 
 ```text
 frp-monitor/
@@ -288,14 +290,13 @@ frp-monitor/
 ├── scripts/                   # 准备、校验、构建、套件同步、打包
 ├── tests/                     # 脱敏 fixture、协议和集成验收
 ├── packaging/                 # 服务、安装与发布模板
-├── overlay/                   # 历史预留，实施时迁移
 ├── .cache/                    # 上游临时树，ignored
-├── data/                      # 开发状态，实施前补充 ignore
+├── data/                      # 开发状态，ignored
 └── dist/                      # 发布包，ignored
 ```
 
-实施时将原 `overlay/client/telemetry`、`overlay/server/publicclientinfo`、
-`overlay/web` 迁到 agent/monitor/web，不维护两份业务代码。构建仍采用 Overlay：
+原 `overlay/` 占位目录已迁入 agent/monitor/web，不维护两份业务代码。
+构建采用 Overlay：
 显式映射到临时上游树的 `extension/frpmonitor/{agent,monitor,shared,web}`，
 共享上游 Go module；嵌入代码放到资源父目录，避免 `go:embed` 跨目录使用 `..`。
 生命周期入口通过窄接口依赖扩展，扩展不能反向 import 上游 client/server 根包而形成循环。

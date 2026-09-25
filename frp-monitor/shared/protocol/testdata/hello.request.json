@@ -1,0 +1,16 @@
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "hello",
+  "params": {
+    "schema_version": 1,
+    "agent_version": "0.1.0-dev",
+    "frp_version": "0.71.0",
+    "capabilities": [
+      "metrics",
+      "ping"
+    ],
+    "session_id": "sess-20260926-0001",
+    "sent_at": 1790380800
+  }
+}

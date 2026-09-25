@@ -1,0 +1,8 @@
+proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0
+sysfs /sys sysfs rw,nosuid,nodev,noexec,relatime 0 0
+/dev/sda1 / ext4 rw,relatime,errors=remount-ro 0 0
+tmpfs /run tmpfs rw,nosuid,nodev,size=819200k,mode=755 0 0
+/dev/sda1 /var/lib/docker ext4 rw,relatime,errors=remount-ro 0 0
+overlay /var/lib/docker/overlay2/9f8e7d6c5b4a/merged overlay rw,relatime,lowerdir=/var/lib/docker/overlay2/l/A,upperdir=/var/lib/docker/overlay2/9f8e7d6c5b4a/diff,workdir=/var/lib/docker/overlay2/9f8e7d6c5b4a/work 0 0
+server.example.com:/share /mnt/nfs nfs rw,relatime,vers=3 0 0
+tmpfs /dev/shm tmpfs rw,nosuid,nodev 0 0

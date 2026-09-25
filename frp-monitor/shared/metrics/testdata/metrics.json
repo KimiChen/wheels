@@ -1,0 +1,28 @@
+{
+  "collected_at": 1790380800,
+  "cpu": 12.5,
+  "load": [
+    0.42,
+    0.38,
+    0.35
+  ],
+  "mem_used": 1610612736,
+  "swap_used": 0,
+  "disk_used": 26843545600,
+  "mem_total": 4294967296,
+  "swap_total": 1073741824,
+  "disk_total": 107374182400,
+  "net_rx": 1024.5,
+  "net_tx": 2048.25,
+  "net_rx_total": 12345678901,
+  "net_tx_total": 9876543210,
+  "boot_id": "9b2f3c1e-7a4d-4e5f-9c2b-1a2b3c4d5e6f",
+  "iface": "eth0",
+  "uptime": 123456,
+  "tcp": 59,
+  "udp": 14,
+  "procs": 187,
+  "quality": {
+    "net_rate": "unknown"
+  }
+}

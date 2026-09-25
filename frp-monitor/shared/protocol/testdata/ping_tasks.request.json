@@ -1,0 +1,20 @@
+{
+  "jsonrpc": "2.0",
+  "id": 10,
+  "method": "ping.tasks",
+  "params": {
+    "version": 7,
+    "tasks": [
+      {
+        "id": "t-home",
+        "target": "192.0.2.1:443",
+        "interval": 30
+      },
+      {
+        "id": "t-dns",
+        "target": "dns.example.com:53",
+        "interval": 60
+      }
+    ]
+  }
+}
