@@ -1250,6 +1250,8 @@ sing-box-plus-manager/
 订阅规则模板在 `web/subscription-rules.yaml`，由主控编译进二进制。模板首条内建规则
 `AND,((NETWORK,UDP),(DST-PORT,443)),REJECT-DROP` 静默丢弃 UDP/443（QUIC），
 避免产生拒绝响应；客户端切换到 TCP 的时间取决于客户端超时策略。
+`web/subscription-head.yaml` 的两个 DNS 上游还分别禁用 SVCB（TYPE64）和 HTTPS（TYPE65）
+记录的返回。`IN-TYPE,HTTPS` 匹配入站类型，不能用于阻断 DNS HTTPS 记录。
 
 ## 7. 工作分解与里程碑
 

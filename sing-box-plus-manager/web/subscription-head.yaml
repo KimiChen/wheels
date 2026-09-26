@@ -72,7 +72,8 @@ dns:
     - "www.msftncsi.com"
     - "www.msftconnecttest.com"
   nameserver:
-      - 223.5.5.5
-      - 119.29.29.29
+      # SVCB (64) / HTTPS (65) 可能携带 HTTP/3 提示；不向客户端返回这两类记录。
+      - "223.5.5.5#disable-qtype-64=true&disable-qtype-65=true"
+      - "119.29.29.29#disable-qtype-64=true&disable-qtype-65=true"
 
 # 固定代理
