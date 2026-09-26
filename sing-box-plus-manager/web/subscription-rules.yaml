@@ -1,6 +1,10 @@
 # 规则
 rules:
 
+  # VLESS Vision 不承载 UDP/443；静默丢弃 QUIC，避免返回拒绝响应。
+  # 客户端何时改走 TCP 由其自身的超时与回退策略决定。
+  - AND,((NETWORK,UDP),(DST-PORT,443)),REJECT-DROP
+
   # ========== 海外 AI（内嵌自 ai.list） ==========
   - DOMAIN-SUFFIX,ppq.ai,海外AI
   - DOMAIN-SUFFIX,bitrefill.com,海外AI

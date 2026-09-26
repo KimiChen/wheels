@@ -1247,6 +1247,10 @@ sing-box-plus-manager/
 
 **订阅端点独立**：`GET /sub/{token}`，不在 `/api/v1` 下，不认会话，只认 token，单独限流（§4.7）。
 
+订阅规则模板在 `web/subscription-rules.yaml`，由主控编译进二进制。模板首条内建规则
+`AND,((NETWORK,UDP),(DST-PORT,443)),REJECT-DROP` 静默丢弃 UDP/443（QUIC），
+避免产生拒绝响应；客户端切换到 TCP 的时间取决于客户端超时策略。
+
 ## 7. 工作分解与里程碑
 
 | 里程碑 | 交付物 | 完成标准（可重放） |
