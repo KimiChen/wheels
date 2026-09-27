@@ -22,10 +22,14 @@ const nodes = [
   {id: "b", name: "节点 10", session: "offline", freshness: "stale", metrics: {cpu: ok(10), net_rx: ok("9999"), net_tx: ok("9999")}, frp: {control_state: "disconnected", proxy_total: 9, proxy_running: 9}},
   {id: "c", name: "等待", session: "waiting", freshness: "waiting", metrics: null},
 ];
-test("sorting puts missing CPU last and keeps search/filter input data unchanged", () => {
-  assert.deepEqual(select(nodes, " 节点 ", "all", "cpu").map(n => n.id), ["b","a"]);
-  assert.deepEqual(select(nodes, "", "online").map(n => n.id), ["a"]);
-  assert.deepEqual(select(nodes, "", "all", "cpu").map(n => n.id), ["b","a","c"]);
+test("name search preserves server order and does not change the input", () => {
+  const ordered = [nodes[1], nodes[0], nodes[2]];
+  assert.deepEqual(select(ordered, " 节点 ").map(n => n.id), ["b","a"]);
+  assert.deepEqual(select(ordered).map(n => n.id), ["b","a","c"]);
+  assert.deepEqual(select(nodes, "不存在"), []);
+  const named = [{...nodes[0], name: "Test Node"}];
+  assert.deepEqual(select(named, " tEsT "), named);
+  assert.deepEqual(ordered.map(n => n.id), ["b","a","c"]);
   assert.deepEqual(nodes.map(n => n.id), ["a","b","c"]);
 });
 test("overview excludes stale and disconnected samples, but valid zero remains zero", () => {
@@ -37,6 +41,23 @@ test("overview excludes stale and disconnected samples, but valid zero remains z
   assert.equal(stats.stale, 1);
   assert.equal(overview([]).rx.value, null);
   assert.equal(overview([]).proxyTotal, null);
+});
+test("CPU average includes valid zero and excludes stale, offline and unknown samples", () => {
+  const node = (cpu, session = "online", freshness = "fresh") => ({session, freshness, metrics: {cpu}});
+  const valid = [node(ok(0)), node(ok(60))];
+  const ignored = [
+    node(ok(100), "online", "stale"),
+    node(ok(100), "offline"),
+    node(ok(100), "waiting", "waiting"),
+    node({value: 50, quality: "unavailable"}),
+    node({value: null, quality: "warming_up"}),
+    node(undefined), node(ok(null)), node(ok("10")), node(ok(-1)), node(ok(101)), node(ok(Infinity)),
+    {session: "online", freshness: "fresh", metrics: null},
+  ];
+  assert.deepEqual(overview([...valid, ...ignored]).cpu, {value: 30, count: 2});
+  assert.deepEqual(overview([valid[0]]).cpu, {value: 0, count: 1});
+  assert.deepEqual(overview(ignored).cpu, {value: null, count: 0});
+  assert.deepEqual(overview([]).cpu, {value: null, count: 0});
 });
 test("malformed or duplicate identities cannot corrupt the DOM map", () => {
   assert.throws(() => snapshot({nodes: [nodes[0], nodes[0]], generated_at: "2026-01-01T00:00:00Z"}));

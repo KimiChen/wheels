@@ -11,15 +11,9 @@ export function snapshot(data) {
   }
   return data;
 }
-export function select(nodes, query = "", filter = "all", sort = "name") {
+export function select(nodes, query = "") {
   const text = query.trim().toLocaleLowerCase("zh-CN");
-  const rank = {online: 0, offline: 1, waiting: 2};
-  const name = (a,b) => a.name.localeCompare(b.name, "zh-CN", {numeric: true}) || a.id.localeCompare(b.id);
-  return nodes.filter(n => (filter === "all" || n.session === filter) && n.name.toLocaleLowerCase("zh-CN").includes(text)).sort((a,b) => {
-    if (sort === "status") return rank[a.session] - rank[b.session] || name(a,b);
-    if (sort === "cpu") return (percent(b.metrics?.cpu) ?? -1) - (percent(a.metrics?.cpu) ?? -1) || name(a,b);
-    return name(a,b);
-  });
+  return nodes.filter(n => n.name.toLocaleLowerCase("zh-CN").includes(text));
 }
 export function overview(nodes) {
   const live = nodes.filter(n => n.session === "online" && n.freshness === "fresh");
@@ -28,10 +22,11 @@ export function overview(nodes) {
     return {value: values.length ? values.reduce((a,b) => a+b, 0n) : null, count: values.length};
   };
   const proxies = live.filter(n => n.frp?.control_state && n.frp.control_state !== "unknown" && Number.isSafeInteger(n.frp.proxy_total) && Number.isSafeInteger(n.frp.proxy_running) && n.frp.proxy_total >= 0 && n.frp.proxy_running >= 0 && n.frp.proxy_running <= n.frp.proxy_total);
+  const cpu = live.map(n => percent(n.metrics?.cpu)).filter(value => value !== null);
   return {total: nodes.length, online: nodes.filter(n => n.session === "online").length,
     offline: nodes.filter(n => n.session === "offline").length, waiting: nodes.filter(n => n.session === "waiting").length,
     fresh: nodes.filter(n => n.freshness === "fresh").length, stale: nodes.filter(n => n.freshness === "stale").length,
-    rx: sum("net_rx"), tx: sum("net_tx"), proxyNodes: proxies.length,
+    rx: sum("net_rx"), tx: sum("net_tx"), cpu: {value: cpu.length ? cpu.reduce((a,b) => a+b, 0) / cpu.length : null, count: cpu.length}, proxyNodes: proxies.length,
     proxyRunning: proxies.length ? proxies.reduce((a,n) => a+n.frp.proxy_running, 0) : null,
     proxyTotal: proxies.length ? proxies.reduce((a,n) => a+n.frp.proxy_total, 0) : null};
 }
