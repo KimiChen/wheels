@@ -8,6 +8,8 @@
 > 在线备份恢复和 systemd 配置生成。Linux amd64 测试机已部署，实机采样、
 > FRP 回归与 systemd 恢复已通过；短时容量结果见测试部署记录。
 
+节点数据结构见第 6 节；简化存储与可选 TSDB 的开发计划见第 9 节。
+
 当前需求将原来的“60 秒上报、最新内存快照、公开 HTML”调整为对齐
 `monitor-probe/agent` 的监控方案。本 README 为当前规划入口；
 `docs/frpc.md`、`docs/frps.md` 保留为历史设计，冲突时以本文为准。
@@ -33,7 +35,7 @@ python3 scripts/local.py run
 启用对本机 FRP 端口的 TCP 建连探测；已有目录不会覆盖，可用
 `--directory data/p3-demo` 创建新安装，并在 `run` 时指定同一目录。
 公开监控页使用顶部导航、卡片/表格切换、名称搜索和底部实时汇总，不包含地球、
-可用性视图或分组/标签/状态/排序筛选。点击卡片进入 `/node/{public_id}`，查看
+可用性视图或分组/标签/状态/排序筛选。点击卡片进入 `/node/{id}`，查看
 硬件概况、实时资源、历史与网络延迟；卡片为 CPU/内存/硬盘/流量四格内容。
 历史首次分钟写入前显示缺样，通常等待不超过一分钟。
 管理页面为 `/admin/`，使用私有 `data/local/admin.token` 中的独立登录token。
@@ -86,7 +88,7 @@ Linux amd64/arm64 已交叉构建并打包；amd64 已部署测试机，arm64 �
 
 历史按分钟批量写盘，正常 TERM/INT 退出刷新尾批；强制终止可能丢失尚未提交的一分钟。
 存储失败时公开接口显示 degraded，实时上报和原生 FRP 继续工作。主机流量仅统计
-同一计数范围内已接收的增量，按 UTC 接收日归属；不能当作运营商账单或隧道流量。
+同一计数范围内已接收的增量，不能当作运营商账单或隧道流量。
 
 ## 1. 推荐架构
 
@@ -115,11 +117,14 @@ flowchart LR
         FPS[frps Service]
         I[监控 WSS 接收器]
         S[最新状态 / 聚合 / 流量基线]
-        DB[(SQLite)]
+        DB[(SQLite 配置 / 当前流量统计)]
+        TS[(可选 TSDB 指标历史)]
         API[页面 API / SSE / 静态资源]
         I --> S
         FPS -. 只读状态 .-> S
         S --> DB
+        S --> TS
+        TS --> API
         S --> API
         DB --> API
     end
@@ -230,7 +235,7 @@ Dashboard 关闭也要显式启用该 collector；统一入口保证只注册一
 
 | 身份 | 规则 |
 |---|---|
-| `agent_id` | 安装时持久化；每节点独立监控凭据，由服务端从凭据确定归属，不信任正文自填 ID |
+| `node_id` | 主控分配的自增数字 ID；每节点独立监控凭据，由服务端从凭据确定归属，不信任正文自填 ID |
 | FRP 关联键 | `server_id + user + raw_client_id`；不同 user 可有同名 clientID，不能只按 clientID 建表 |
 | `session_id + sequence` | 每次监控连接新会话、会话内递增；只接受当前会话，迟到报告和旧连接退出不得覆盖新连接 |
 | `boot_id` | 仅标识网络计数器范围，不用它判断 agent 进程重启或去重会话 |
@@ -270,38 +275,168 @@ Proxy/Visitor 生命周期、原 Dashboard/API/Prometheus 的原有行为。
 限制帧大小、数组/字符串长度、速率和连接数，拒绝非有限数、负容量和越界值。
 Go 端用整数处理累计字节，浏览器 DTO 使用十进制字符串防止 JS 大整数精度丢失。
 
-## 6. 存储、历史和流量
+## 6. 存储与节点数据结构
 
-建议 SQLite WAL + 内存最新快照。秒级数据主要在内存处理，窗口聚合批量写盘；
-数据库任务经过独立有界队列，不持有 FRP 转发锁。监控初始化、磁盘或查询故障应使
-监控降级，不能拖停隧道。
+采用 SQLite 保存配置和业务数据、内存保存实时状态、可选 TSDB 保存指标历史。
+本节是 P4 的目标设计，功能交付与验收安排见第 9 节。开发期按新结构建库，
+不要求兼容或导入现有配置、数据库和历史数据。
 
-上述隔离针对可处理的采集、网络和数据库错误。扩展 goroutine 设置局部 panic
-处理边界并限制资源；同进程仍共享 Go runtime、内存和退出命运，OOM、未恢复 panic
-或进程崩溃仍可能中断隧道。若要求进程级故障隔离，需要另选独立进程部署方案。
+### 6.1 存储职责
 
-| 逻辑表 | 内容 |
+| 层 | 内容 |
 |---|---|
-| `nodes / credentials` | 节点、FRP 关联、独立凭据、公开字段策略 |
-| `node_facts / last_seen` | 最新资产与最后接收时间 |
-| `metrics_1m` | CPU、负载、资源、网速和连接数的分钟摘要 |
-| `traffic_state / traffic_daily` | 流量基线、累计量、日统计 |
-| `probe_tasks / probe_results` | 探测配置、窗口延迟、有效样本数和失败数 |
-| `frp_snapshots` | 需要保留的隧道状态变化 |
+| SQLite | 节点配置、费用与套餐、当前套餐用量、今日流量、计数器恢复基线，以及凭据和探测等业务配置 |
+| 内存 | 当前连接/会话、Facts、最新 Metrics、在线与新鲜度、FRP 实时状态、管理登录会话 |
+| 可选 TSDB | CPU、内存、磁盘、负载、网络速率及 TCP 探测历史，供节点详情曲线查询 |
 
-历史建议默认 7 天、可配置。记录样本数和覆盖时间；曲线按窗口聚合、断线留缺口，
-不把一分钟最后一帧当成平均值。持久化 last_seen 不能让 monitor 重启后节点自动在线。
+TSDB 默认关闭，关闭或后端不可用不应影响 SQLite 记账和实时监控。持久化计数器
+只用于恢复累计，不能让节点在中控重启后自动显示在线。私钥等启动凭据继续使用
+受保护的外部配置，不保存到节点公开字段。
 
-流量分成两类独立显示，不能相加：主机网卡流量包含其他业务与协议开销，
-FRP 隧道流量有自己的统计口径；分别标注“节点收/发”和“服务端隧道收/发”。
+### 6.2 合并后的 nodes 表
 
-累计参考
-[monitor/db.rs](https://github.com/monitor-probe/monitor/blob/fb4c4a4ce0b3a665ab7a4bd491d2dd447a78e6bc/src/db.rs)：
-同一计数器范围用累计值差分；首次只建基线，boot ID/网卡集合变化或计数器回退时重建，
-不把 lifetime 总量记成今日新增。基线与累计量同事务更新，缺失读数不能以 0 覆盖基线。
-短暂断线后同范围增量可恢复，但跨日/月分配无法精确补齐；范围变化则无法补齐旧增量。
-按服务端接收时间归属，明确覆盖限制；如开放重置日、统计时区，应持久化配置。
-不能声称与运营商账单完全一致。
+节点核心数据只保存当前值。费用、到期、续费说明、套餐配置、当前周期、今日流量
+和基线全部并入 `nodes`，不另建账单、续费记录、套餐版本、每日或周期账本表。
+管理员直接修改费用、到期和续费说明，不自动扣款或延长到期时间。
+
+```sql
+CREATE TABLE nodes (
+    -- 基本信息与公开策略
+    id                          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name                        TEXT NOT NULL,
+    public_note                 TEXT NOT NULL DEFAULT '',
+    private_note                TEXT NOT NULL DEFAULT '',
+    is_public                   INTEGER NOT NULL DEFAULT 1,
+    publish_billing             INTEGER NOT NULL DEFAULT 0,
+    publish_traffic_plan        INTEGER NOT NULL DEFAULT 1,
+
+    -- 管理员维护的费用、到期和续费说明
+    price_minor                 INTEGER,
+    currency                    TEXT,
+    billing_cycle               TEXT,
+    expires_at_ms               INTEGER,
+    renewal_note                TEXT NOT NULL DEFAULT '',
+
+    -- 当前套餐配置
+    traffic_quota_bytes         TEXT,
+    traffic_mode                TEXT NOT NULL DEFAULT 'max',
+    traffic_reset_mode          TEXT NOT NULL DEFAULT 'monthly',
+    traffic_reset_day           INTEGER NOT NULL DEFAULT 1,
+    traffic_reset_timezone      TEXT NOT NULL DEFAULT 'UTC',
+
+    -- 当前套餐周期
+    traffic_period_start_at_ms  INTEGER,
+    traffic_period_end_at_ms    INTEGER,
+    traffic_period_rx_bytes     TEXT NOT NULL DEFAULT '0',
+    traffic_period_tx_bytes     TEXT NOT NULL DEFAULT '0',
+    traffic_adjustment_bytes    TEXT NOT NULL DEFAULT '0',
+    traffic_period_partial      INTEGER NOT NULL DEFAULT 1,
+
+    -- 主控机器系统时区下的今日统计
+    traffic_day                 TEXT,
+    traffic_today_rx_bytes      TEXT NOT NULL DEFAULT '0',
+    traffic_today_tx_bytes      TEXT NOT NULL DEFAULT '0',
+    traffic_today_partial       INTEGER NOT NULL DEFAULT 1,
+
+    -- 上次有效系统计数器，首次接入时为空
+    counter_boot_id             TEXT,
+    counter_interface           TEXT,
+    counter_scope               TEXT,
+    counter_rx_bytes            TEXT,
+    counter_tx_bytes            TEXT,
+    counter_received_at_ms      INTEGER,
+
+    -- 管理配置版本与时间
+    config_revision             INTEGER NOT NULL DEFAULT 1,
+    created_at_ms               INTEGER NOT NULL,
+    updated_at_ms               INTEGER NOT NULL,
+
+    CHECK (price_minor IS NULL OR price_minor >= 0),
+    CHECK (traffic_mode IN ('max', 'total', 'rx', 'tx')),
+    CHECK (traffic_reset_mode IN ('monthly', 'manual')),
+    CHECK (traffic_reset_day BETWEEN 1 AND 31)
+);
+```
+
+字段约定：
+
+- 关联字段 `node_id` 使用 INTEGER，节点详情地址使用 `/node/{id}`。自增 ID 不回收复用。
+- `price_minor` 保存币种最小单位，例如人民币“分”；NULL 表示未设置，0 表示免费。
+  `currency` 使用 CNY、USD 等币种码；`billing_cycle` 可填月付、季付、年付、一次性等。
+  付费周期与套餐流量周期独立，`expires_at_ms` 为空表示未设置到期时间。
+- 流量以字节计，保存为规范十进制 TEXT，应用使用整数运算，API 同样返回十进制字符串。
+  系统计数器不得经浮点数转换；只有 `traffic_adjustment_bytes` 允许为负数。
+- `traffic_quota_bytes` 为 NULL 表示未设置上限，不计算剩余量和百分比；0 是实际零额度。
+  零额度时百分比为空，非零额度允许显示超过 100% 的使用率。
+- 时间戳统一为 UTC 毫秒。`traffic_day` 为主控本地日期 `YYYY-MM-DD`，页面标注“今日流量”。
+  `traffic_reset_timezone` 独立决定套餐重置时区，默认 UTC。
+- `partial=1` 表示统计覆盖不完整，例如周期中途接入、计数器重置或采集缺口；
+  原始累计初始化为 0 不代表接入前的用量已知。首次有效采样只建立基线。
+- `config_revision` 与 `updated_at_ms` 随管理员修改更新；采样使用
+  `counter_received_at_ms`，不因频繁采样增加配置版本。
+- `is_public` 控制整个节点；费用和到期默认不公开，套餐默认公开。公开 API 使用
+  字段白名单，不直接序列化整行节点数据，私有备注、凭据和计数器内部标识不公开。
+
+### 6.3 套餐用量与手工校准
+
+当前套餐用量使用同一周期内累计 RX/TX 计算：
+
+| 类型 | 原始计费用量 F(RX, TX) |
+|---|---|
+| Max / `max` | `max(周期累计 RX, 周期累计 TX)` |
+| `total` | `周期累计 RX + 周期累计 TX` |
+| `rx` | `周期累计 RX` |
+| `tx` | `周期累计 TX` |
+
+```text
+本周期已用 = F(周期累计 RX, 周期累计 TX) + traffic_adjustment_bytes
+管理员填写已用 U 时：traffic_adjustment_bytes = U - F(当前周期累计 RX, TX)
+```
+
+管理员可以随时填写非负已用量；只修改校准差额，不改采集到的 RX/TX，不影响今日、
+系统累计或 FRP 流量。例如 Max 模式 RX=100、TX=80，改已用为 150，差额为 50；
+随后 RX=110、TX=120，显示 170。Max 必须对整个周期累计收发取较大值，不能逐样本
+取 max 后相加。单个服务商已用数字无法还原其历史 RX/TX，手工值用于校准显示用量。
+
+套餐设置修改立即应用当前周期。**待定：修改计费类型时，保留修改前的已用量还是
+按新类型重算，需在实现前确定；两种方式均使用同一校准差额字段。**
+
+重置仅支持两种方式：
+
+- 每月固定日期：按套餐时区本地零点重置；该日期不存在时取当月最后一天。
+  每次从配置日期计算边界，不因某个月取月末而改变后续月份的重置日。
+- 管理员手动重置：将当前周期起点设为重置时间；手动模式的结束时间可以为空。
+
+重置时周期 RX/TX 和校准差额归零，保留系统计数器基线及今日统计。每月模式下手动
+重置后仍按下一个配置日期自动重置。修改重置日只调整下一次重置时间，不清空当前用量。
+跨日覆盖昨日统计，跨周期覆盖上一周期统计，不保留往日、往期或人工修改历史。
+
+### 6.4 四种流量口径
+
+| 名称 | 来源与保存方式 | 边界 |
+|---|---|---|
+| 系统累计 | 最新有效 Metrics 的网卡累计 RX/TX，实时值在内存；`counter_*` 保存差分基线 | 可能随主机重启、接口或采集范围变化归零 |
+| 今日流量 | 有效系统计数器差分，保存到 `nodes.traffic_today_*` | 主控机器系统时区当天零点至次日零点 |
+| 套餐周期 | 同一批系统差分保存到 `nodes.traffic_period_*`，按套餐类型加校准差额计算已用 | 套餐重置时间决定，与今日日期独立 |
+| FRP 隧道流量 | 原生 FRP 服务端视角的隧道计数，当前保存在内存 | 保留 FRP 本地日与进程重启口径，部分协议在连接关闭时计入 |
+
+四者独立展示，FRP 隧道流量不能再加到系统或套餐流量中。FRP 只展示可信绑定匹配
+的节点观测，不能因同名代理归属变化把旧计数转给新节点。网络速率历史不能替代
+持久计数器差分，也不能从 TSDB 自动恢复管理员校准后的套餐账本。
+
+### 6.5 累计与持久化
+
+按节点串行处理有效报告，继续校验连接所有权、会话和序号，拒绝重复/迟到样本。
+首次采样只建基线；启动标识、接口、scope 变化或计数器回退时重建基线并标记覆盖不足，
+不把 lifetime 总量记成今日或套餐新增。无效/缺失计数器不能用零覆盖基线。
+
+同一 SQLite 事务更新基线、今日增量和当前周期增量；失败整体回滚，避免重试重复累计。
+使用有界写队列和批量持久化，不在 FRP 转发线程执行数据库操作。主控日边界按系统
+时区日历计算，不将一天固定写成 86400 秒。界面保留统计不完整的标记，不承诺与
+服务商计费账单完全一致。
+
+TSDB 写入不参与 SQLite 事务。关闭或后端故障时保留实时页面和当前流量累计；
+历史接口区分未启用、无样本与降级。节点离线期间曲线保留缺口，不补零或恢复为在线。
 
 ## 7. Web 设计
 
@@ -313,7 +448,7 @@ HTML + CSS + 原生 ES Modules，保持 `wsk-` 组件、128 个令牌、`@layer 
 |---|---|
 | 总览 | 节点在线数、正常隧道数、资源摘要、主机收发速率和异常 |
 | 节点列表 | 名称搜索、表格/卡片；系统摘要、CPU、内存、硬盘、系统累计流量与网速 |
-| 节点详情 `/node/{public_id}` | 硬件摘要、实时资源、UTC今日流量、资源趋势、TCP探测和FRP核对 |
+| 节点详情 `/node/{id}` | 硬件摘要、实时资源、主控时区今日流量、套餐用量、资源趋势、TCP探测和FRP核对 |
 | 隧道 | 节点、名称、类型、运行状态、连接数、流量；管理视图可看本地目标 |
 | 接入与设置 | 节点凭据、采样间隔、接口筛选、探测任务、历史与公开策略 |
 
@@ -327,7 +462,7 @@ HTML + CSS + 原生 ES Modules，保持 `wsk-` 组件、128 个令牌、`@layer 
 
 建议路由与权限：
 
-- `/`、`/node/{public_id}`、`/api/public/v1/*`、`/events/public`：公开只读、服务端裁剪的摘要 DTO。
+- `/`、`/node/{id}`、`/api/public/v1/*`、`/events/public`：公开只读、服务端裁剪的摘要 DTO。
 - `/admin/`、`/api/admin/v1/*`、`/events/admin`：会话认证后的完整详情与管理。
 - `/agent/v1/ws`：节点独立凭据认证的采集通道。
 
@@ -360,7 +495,7 @@ frp-monitor/
 ├── monitor/
 │   ├── service/               # 生命周期、FRP Registry / Stats 适配器
 │   ├── ingest/                # 认证、接收、会话
-│   ├── store/                 # SQLite、迁移、聚合、流量
+│   ├── store/                 # SQLite 配置与当前流量、可选 TSDB 历史
 │   ├── api/                   # 公开/管理 DTO、查询、SSE
 │   └── auth/                  # 管理会话与凭据
 ├── web/
@@ -402,6 +537,30 @@ frpc/frps 本身不会自动读取它。建议使用 `FRP_MONITOR_*`、`FRP_AGEN
 | P1：实时闭环（已实现，amd64 实机通过） | Go 采集、WSS、节点凭据、最小 FRP 连接适配器、最新状态与节点页面 | fixture、协议、本机闭环与 Linux amd64 采样对照通过 |
 | P2：完整采集体验（已实现，amd64 实机通过） | TCP 探测、SQLite 历史、主机当日流量、趋势与恢复 | 探测语义、会话/重启/网卡变化、事务与聚合测试；短时 synthetic 容量见部署记录 |
 | P3：FRP 与发布完善（已部署 amd64 测试机） | 隧道对账、公开/管理视图、接入配置、备份与 systemd 发布 | amd64 部署、权限/裁剪、恢复、UI 与 FRP 回归通过；arm64 和长时负载待补 |
+| P4：简化存储与可选 TSDB（下一步，尚未实施） | 合并节点配置与当前流量统计；可选指标历史后端及节点详情曲线 | 自增节点 ID、主控时区换日、套餐校准/重置；历史开关、查询、重启恢复、保留期清理及后端故障隔离 |
+
+**P4 开发范围：**
+
+- SQLite 的 `nodes.id` 使用 `INTEGER PRIMARY KEY AUTOINCREMENT`。费用、到期、
+  续费说明、套餐配置、当前套餐周期、今日流量和计数器基线合并到 `nodes`，不再
+  单独建立账单、续费记录、套餐版本、每日账本或周期账本表；不保留往日/往期账本。
+- 价格、到期、续费及本周期已用由管理员手动维护；已用量通过人工校准差额调整，
+  原始周期 RX/TX 保留。套餐支持 Max/total/rx/tx，每月固定日期或手动重置，
+  套餐设置修改立即应用当前周期。今日流量按主控机器系统时区划日，时间戳仍存 UTC。
+- 项目处于开发期，新结构直接建库，不要求兼容或导入旧配置、旧数据库及历史数据。
+- 下一步接入一个**可选 TSDB 后端，默认关闭**，提供启用开关、存储位置和保留天数。
+  具体后端在该阶段选定；先完成单一后端，不建设多后端扩展框架。
+- TSDB 保存 CPU、内存、磁盘、负载、网络速率及 TCP 探测历史，按数字 `node_id`
+  关联。提供时间范围和采样步长查询，接入现有节点详情曲线；指标时间戳使用 UTC，
+  页面时间按主控时区显示。断线和缺样保留缺口，不补成零。
+- SQLite 保存配置及当前流量统计，内存保存实时状态；TSDB 不参与流量记账事务，
+  不作为费用、套餐或人工校准值的权威来源。关闭或后端故障时，节点鉴权、实时监控、
+  今日及套餐流量统计仍应工作；页面区分历史未启用、无样本与后端降级。
+
+P4 验收包括：启用后历史可写可查、进程重启后可查询、超过保留期自动清理；
+关闭 TSDB 不创建历史后端、不影响核心监控；后端超时/不可用时写入队列和查询有界，
+不阻塞实时接收、SQLite 记账与 FRP 转发。另验证主控本地午夜、套餐月末/手动重置、
+Max 整周期累计取较大值，以及人工校准后继续累计。以上均为待开发验收项。
 
 P1/P2/P3 已完成本地受控闭环及 Linux amd64 测试部署；公开生产上线仍需验证
 目标环境、arm64（若使用）与真实业务的持续负载。节点凭据支持管理接口即时新增/轮换/撤销，私有配置文件
@@ -409,7 +568,7 @@ P1/P2/P3 已完成本地受控闭环及 Linux amd64 测试部署；公开生产�
 管理员凭据热更新清空旧会话。Telemetry 配置更改需重启 agent；原生 Proxy 配置 reload
 和 ProxyStore 的后续变更会进入只读快照。`--config_dir` 模式每进程至多启用一个
 采集实例，应只在一个 frpc 配置中启用 telemetry。
-告警、价格/到期管理、主题市场、远程 Proxy/Visitor CRUD、Shell、自动升级
+价格/到期管理已列入 P4。告警、主题市场、远程 Proxy/Visitor CRUD、Shell、自动升级
 不纳入采集同等目标，可后续单独规划。
 
 关键验证：
