@@ -19,8 +19,8 @@ import (
 const oauthCookie = "frp_monitor_oauth"
 const oauthTTL = 10 * time.Minute
 
-// Bounds on unfinished OAuth attempts: a global table and a per-source-IP
-// share, so anonymous initiations cannot crowd out a real administrator.
+// Bound unfinished OAuth attempts globally and per connection peer. A full
+// share evicts its oldest attempt, including when users share a reverse proxy.
 const maxOAuthPending = 64
 const maxOAuthPendingPerIP = 8
 
@@ -79,8 +79,8 @@ func (s *Service) adminSameOrigin(r *http.Request) bool {
 	return err == nil && origins[0] == u.Scheme+"://"+u.Host && r.Host == u.Host
 }
 
-// clientIP identifies an OAuth initiation source for the pending-attempt
-// quota only; it is never part of an authorization decision.
+// clientIP uses the connection peer for the pending-attempt quota only. Proxy
+// headers are not trusted, and this is never part of an authorization decision.
 func clientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
@@ -117,8 +117,20 @@ func (s *Service) githubStart(w http.ResponseWriter, r *http.Request) {
 		a.tokens = 5
 	}
 	a.at = now
+	if a.tokens < 1 {
+		a.mu.Unlock()
+		w.Header().Set("Retry-After", "3")
+		http.Error(w, "try later", 429)
+		return
+	}
+	a.tokens--
+	// Replacing this browser's attempt already frees a slot. Remove it before
+	// counting pending attempts, so no other browser is evicted unnecessarily.
+	if old, e := r.Cookie(oauthCookie); e == nil {
+		delete(a.github.pending, tokenHash(old.Value))
+	}
 	sameIP := 0
-	oldest := ""
+	oldest, oldestIP := "", ""
 	for key, attempt := range a.github.pending {
 		if !now.Before(attempt.expires) {
 			delete(a.github.pending, key)
@@ -126,24 +138,19 @@ func (s *Service) githubStart(w http.ResponseWriter, r *http.Request) {
 		}
 		if attempt.ip == ip {
 			sameIP++
+			if oldestIP == "" || attempt.expires.Before(a.github.pending[oldestIP].expires) {
+				oldestIP = key
+			}
 		}
 		if oldest == "" || attempt.expires.Before(a.github.pending[oldest].expires) {
 			oldest = key
 		}
 	}
-	if a.tokens < 1 || sameIP >= maxOAuthPendingPerIP {
-		a.mu.Unlock()
-		w.Header().Set("Retry-After", "3")
-		http.Error(w, "try later", 429)
-		return
-	}
-	a.tokens--
-	if old, e := r.Cookie(oauthCookie); e == nil {
-		delete(a.github.pending, tokenHash(old.Value))
-	}
-	// A full table evicts the oldest unfinished attempt instead of rejecting
-	// the new login, so anonymous placeholders cannot deny administrators.
-	if len(a.github.pending) >= maxOAuthPending {
+	// Evict only one attempt: freeing a peer slot also frees a global slot.
+	// Pending attempts behind a shared proxy must not block new logins.
+	if sameIP >= maxOAuthPendingPerIP {
+		delete(a.github.pending, oldestIP)
+	} else if len(a.github.pending) >= maxOAuthPending {
 		delete(a.github.pending, oldest)
 	}
 	a.github.pending[tokenHash(state)] = oauthAttempt{verifier: verifier, expires: now.Add(oauthTTL), ip: ip}

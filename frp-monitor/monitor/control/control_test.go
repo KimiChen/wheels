@@ -68,8 +68,13 @@ func metrics(rx, tx uint64) shared.Metrics {
 
 func (f *fixture) sample(id string, at time.Time, rx, tx uint64) *Node {
 	f.t.Helper()
+	return f.report(id, at, metrics(rx, tx))
+}
+
+func (f *fixture) report(id string, at time.Time, m shared.Metrics) *Node {
+	f.t.Helper()
 	f.clock.Store(at.UnixMilli())
-	if !f.s.Accept(id, at, metrics(rx, tx)) {
+	if !f.s.Accept(id, at, m) {
 		f.t.Fatal("sample rejected")
 	}
 	if err := f.s.Flush(context.Background()); err != nil {
@@ -548,49 +553,180 @@ func TestCanceledQueuedCallsDoNotReadWorkerResults(t *testing.T) {
 	}
 }
 
-func TestPartialClearsAfterContinuousInPeriodSample(t *testing.T) {
-	at := utc("2026-09-28T23:59:58Z")
-	f := setup(t, at, time.UTC)
-	n := f.create(DefaultNodeConfig("node"))
-	n = f.sample(n.ID, at, 100, 100)
-	if !n.TrafficTodayPartial || !n.TrafficPeriodPartial {
-		t.Fatal("a first sample only builds the baseline and must stay partial", n)
+func TestTrafficPartialTracksCurrentRanges(t *testing.T) {
+	check := func(t *testing.T, n *Node, todayRX, todayTX, periodRX, periodTX string, todayPartial, periodPartial bool) {
+		t.Helper()
+		if n.TrafficTodayRXBytes != todayRX || n.TrafficTodayTXBytes != todayTX ||
+			n.TrafficPeriodRXBytes != periodRX || n.TrafficPeriodTXBytes != periodTX ||
+			n.TrafficTodayPartial != todayPartial || n.TrafficPeriodPartial != periodPartial {
+			t.Fatalf("today=(%s,%s,partial=%t), period=(%s,%s,partial=%t); want today=(%s,%s,partial=%t), period=(%s,%s,partial=%t)",
+				n.TrafficTodayRXBytes, n.TrafficTodayTXBytes, n.TrafficTodayPartial,
+				n.TrafficPeriodRXBytes, n.TrafficPeriodTXBytes, n.TrafficPeriodPartial,
+				todayRX, todayTX, todayPartial, periodRX, periodTX, periodPartial)
+		}
 	}
-	// 周期内首个与基线连续、完整落在边界之后的样本清除 partial。
-	n = f.sample(n.ID, at.Add(time.Second), 200, 300)
-	if n.TrafficTodayPartial || n.TrafficPeriodPartial {
-		t.Fatal("continuous in-period sample must clear partial", n)
+
+	t.Run("first connection and restart", func(t *testing.T) {
+		at := utc("2026-09-28T12:00:00Z")
+		f := setup(t, at, time.UTC)
+		n := f.create(DefaultNodeConfig("node"))
+		n = f.sample(n.ID, at, 1000000, 2000000)
+		check(t, n, "0", "0", "0", "0", true, true)
+		n = f.sample(n.ID, at.Add(time.Second), 1000100, 2000050)
+		check(t, n, "100", "50", "100", "50", true, true)
+		var err error
+		n, err = f.s.UpdateNode(context.Background(), n.ID, n.NodeConfig, ptr("150"), false, n.ConfigRevision)
+		if err != nil || n.UsedBytes() != "150" {
+			t.Fatal(n, err)
+		}
+		check(t, n, "100", "50", "100", "50", true, true)
+		if err := f.s.Close(); err != nil {
+			t.Fatal(err)
+		}
+		f.s, err = Open(f.cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		n = f.sample(n.ID, at.Add(2*time.Second), 1000200, 2000100)
+		check(t, n, "200", "100", "200", "100", true, true)
+		if n.UsedBytes() != "250" {
+			t.Fatal("calibrated usage did not survive restart", n)
+		}
+	})
+
+	for _, discontinuity := range []string{"boot change", "counter rollback", "reporting gap"} {
+		t.Run(discontinuity, func(t *testing.T) {
+			at := utc("2026-10-01T00:00:00Z")
+			f := setup(t, at, time.UTC)
+			n := f.create(DefaultNodeConfig("node"))
+			n = f.sample(n.ID, at, 1000, 2000)
+			check(t, n, "0", "0", "0", "0", false, false)
+			n = f.sample(n.ID, at.Add(time.Second), 1100, 2050)
+			check(t, n, "100", "50", "100", "50", false, false)
+
+			offset := 2 * time.Second
+			m := metrics(10, 20)
+			wantRX, wantTX, finalRX, finalTX := "100", "50", "150", "75"
+			if discontinuity == "boot change" {
+				m.BootID.Value = ptr("boot-b")
+			} else if discontinuity == "reporting gap" {
+				offset = 30 * time.Second
+				m = metrics(1200, 2100)
+				wantRX, wantTX, finalRX, finalTX = "200", "100", "250", "125"
+			}
+			n = f.report(n.ID, at.Add(offset), m)
+			check(t, n, wantRX, wantTX, wantRX, wantTX, true, true)
+			m.NetRXTotal.Value = ptr(*m.NetRXTotal.Value + 50)
+			m.NetTXTotal.Value = ptr(*m.NetTXTotal.Value + 25)
+			n = f.report(n.ID, at.Add(offset+time.Second), m)
+			check(t, n, finalRX, finalTX, finalRX, finalTX, true, true)
+		})
 	}
-	// 跨日分摊属于估算，先标记 partial；新一日内的连续样本再次清除。
-	n = f.sample(n.ID, utc("2026-09-29T00:00:01Z"), 400, 400)
-	if !n.TrafficTodayPartial {
-		t.Fatal("estimated day crossing must mark partial", n)
+
+	t.Run("estimated day crossing keeps exact manual period", func(t *testing.T) {
+		at := utc("2026-09-28T23:59:59Z")
+		f := setup(t, at, time.UTC)
+		cfg := DefaultNodeConfig("node")
+		cfg.TrafficResetMode = "manual"
+		n := f.create(cfg)
+		n = f.sample(n.ID, at, 1000, 2000)
+		check(t, n, "0", "0", "0", "0", true, false)
+		n = f.sample(n.ID, at.Add(2*time.Second), 1200, 2100)
+		check(t, n, "100", "50", "200", "100", true, false)
+		n = f.sample(n.ID, at.Add(3*time.Second), 1300, 2150)
+		check(t, n, "200", "100", "300", "150", true, false)
+	})
+
+	t.Run("estimated month crossing stays partial", func(t *testing.T) {
+		at := utc("2026-09-30T23:59:59Z")
+		f := setup(t, at, time.UTC)
+		n := f.create(DefaultNodeConfig("node"))
+		f.sample(n.ID, at, 1000, 2000)
+		n = f.sample(n.ID, at.Add(2*time.Second), 1200, 2100)
+		check(t, n, "100", "50", "100", "50", true, true)
+		n = f.sample(n.ID, at.Add(3*time.Second), 1300, 2150)
+		check(t, n, "200", "100", "200", "100", true, true)
+	})
+
+	t.Run("estimated manual reset keeps exact day", func(t *testing.T) {
+		at := utc("2026-10-01T00:00:00Z")
+		f := setup(t, at, time.UTC)
+		cfg := DefaultNodeConfig("node")
+		cfg.TrafficResetMode = "manual"
+		n := f.create(cfg)
+		n = f.sample(n.ID, at, 1000, 2000)
+		f.clock.Store(at.Add(5 * time.Second).UnixMilli())
+		var err error
+		n, err = f.s.UpdateNode(context.Background(), n.ID, cfg, nil, true, n.ConfigRevision)
+		if err != nil {
+			t.Fatal(err)
+		}
+		check(t, n, "0", "0", "0", "0", false, true)
+		n = f.sample(n.ID, at.Add(10*time.Second), 1100, 2200)
+		check(t, n, "100", "200", "50", "100", false, true)
+		n = f.sample(n.ID, at.Add(11*time.Second), 1200, 2250)
+		check(t, n, "200", "250", "150", "150", false, true)
+	})
+
+	for _, boundary := range []string{"day", "month", "month with boot change"} {
+		t.Run("exact "+boundary+" boundary", func(t *testing.T) {
+			at := utc("2026-09-28T23:59:59Z")
+			cfg := DefaultNodeConfig("node")
+			if boundary != "day" {
+				// The plan resets at Shanghai midnight, inside the UTC day.
+				at = utc("2026-09-30T15:59:59Z")
+				cfg.TrafficResetTimezone = "Asia/Shanghai"
+			}
+			f := setup(t, at, time.UTC)
+			n := f.create(cfg)
+			n = f.sample(n.ID, at, 1000, 2000)
+			check(t, n, "0", "0", "0", "0", true, true)
+			m := metrics(1100, 2050)
+			if boundary == "month with boot change" {
+				m = metrics(10, 20)
+				m.BootID.Value = ptr("boot-b")
+			}
+			n = f.report(n.ID, at.Add(time.Second), m)
+			switch boundary {
+			case "day":
+				check(t, n, "0", "0", "100", "50", false, true)
+			case "month":
+				check(t, n, "100", "50", "0", "0", true, false)
+			default:
+				check(t, n, "0", "0", "0", "0", true, false)
+			}
+			m.NetRXTotal.Value = ptr(*m.NetRXTotal.Value + 100)
+			m.NetTXTotal.Value = ptr(*m.NetTXTotal.Value + 50)
+			n = f.report(n.ID, at.Add(2*time.Second), m)
+			switch boundary {
+			case "day":
+				check(t, n, "100", "50", "200", "100", false, true)
+			case "month":
+				check(t, n, "200", "100", "100", "50", true, false)
+			default:
+				check(t, n, "100", "50", "100", "50", true, false)
+			}
+		})
 	}
-	if n.TrafficPeriodPartial {
-		t.Fatal("an in-period day crossing must keep the period complete", n)
-	}
-	n = f.sample(n.ID, utc("2026-09-29T00:00:02Z"), 500, 500)
-	if n.TrafficTodayPartial || n.TrafficPeriodPartial {
-		t.Fatal("continuous sample inside the new day must clear partial", n)
-	}
-	// 缺口重新标记，恢复连续后再次清除。
-	n = f.sample(n.ID, utc("2026-09-29T00:00:30Z"), 600, 600)
-	if !n.TrafficTodayPartial || !n.TrafficPeriodPartial {
-		t.Fatal("a reporting gap must mark partial", n)
-	}
-	n = f.sample(n.ID, utc("2026-09-29T00:00:31Z"), 700, 700)
-	if n.TrafficTodayPartial || n.TrafficPeriodPartial {
-		t.Fatal("continuous sample after the gap must clear partial", n)
-	}
-	// 账期切换同理。
-	n = f.sample(n.ID, utc("2026-10-01T00:00:01Z"), 800, 800)
-	if !n.TrafficPeriodPartial {
-		t.Fatal("period rollover must mark partial", n)
-	}
-	n = f.sample(n.ID, utc("2026-10-01T00:00:02Z"), 900, 900)
-	if n.TrafficPeriodPartial || n.TrafficTodayPartial {
-		t.Fatal("continuous sample inside the new period must clear partial", n)
-	}
+
+	t.Run("exact manual reset clears only period", func(t *testing.T) {
+		at := utc("2026-09-28T12:00:00Z")
+		f := setup(t, at, time.UTC)
+		cfg := DefaultNodeConfig("node")
+		cfg.TrafficResetMode = "manual"
+		n := f.create(cfg)
+		n = f.sample(n.ID, at.Add(time.Second), 1000, 2000)
+		n = f.sample(n.ID, at.Add(2*time.Second), 1100, 2050)
+		check(t, n, "100", "50", "100", "50", true, true)
+		var err error
+		n, err = f.s.UpdateNode(context.Background(), n.ID, cfg, nil, true, n.ConfigRevision)
+		if err != nil {
+			t.Fatal(err)
+		}
+		check(t, n, "100", "50", "0", "0", true, false)
+		n = f.sample(n.ID, at.Add(3*time.Second), 1200, 2100)
+		check(t, n, "200", "100", "100", "50", true, false)
+	})
 }
 
 func TestStaleIngestErrorFlushKeepsRecoveredHealth(t *testing.T) {

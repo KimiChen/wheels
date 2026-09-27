@@ -309,8 +309,8 @@ func (s *Store) UpdateNode(ctx context.Context, id string, cfg NodeConfig, usedB
 			n.TrafficPeriodStartAtMS = ptr(now.UnixMilli())
 			n.TrafficPeriodRXBytes, n.TrafficPeriodTXBytes, n.TrafficAdjustmentBytes = "0", "0", "0"
 			// A baseline exactly at the reset keeps the new period exact;
-			// otherwise observe clears the flag after the first complete
-			// sample that continues the baseline inside the period.
+			// otherwise the first crossing delta is estimated and the
+			// period stays partial even after continuous samples resume.
 			n.TrafficPeriodPartial = n.CounterReceivedAtMS == nil || *n.CounterReceivedAtMS != now.UnixMilli()
 		}
 		if usedBytes != nil {

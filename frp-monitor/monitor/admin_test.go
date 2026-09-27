@@ -459,64 +459,169 @@ func TestNodeIDRequiresInt64RoundTrip(t *testing.T) {
 	}
 }
 
-func TestGitHubPendingPerIPLimitAndOldestEviction(t *testing.T) {
+func TestGitHubPendingSharedProxyEvictsOldestPeer(t *testing.T) {
 	s, _, _ := testAdmin(t)
 	a := s.admin
-	start := func(ip string) int {
-		// Refill the per-3s token bucket; this test exercises pending limits,
-		// not the initiation rate limit.
-		a.mu.Lock()
-		a.tokens = 5
-		a.at = time.Now()
-		a.mu.Unlock()
-		record := httptest.NewRecorder()
-		req := httptest.NewRequest("GET", "http://"+s.Address()+"/api/admin/v1/auth/github", nil)
-		req.RemoteAddr = ip + ":1234"
-		s.githubStart(record, req)
-		return record.Code
-	}
-	if code := start("198.51.100.1"); code != 302 {
-		t.Fatalf("first start: %d", code)
-	}
-	// Mark the first attempt as the oldest so eviction targets it.
+	// Other peers' older attempts must survive even when both the global
+	// table and the shared proxy's share are full.
 	a.mu.Lock()
+	for i := 0; i < maxOAuthPending-maxOAuthPendingPerIP; i++ {
+		a.github.pending[fmt.Sprintf("other-peer-%d", i)] = oauthAttempt{ip: fmt.Sprintf("198.51.100.%d", i+1), expires: time.Now().Add(time.Minute)}
+	}
+	a.mu.Unlock()
 	var oldest string
-	for key := range a.github.pending {
-		oldest = key
-	}
-	entry := a.github.pending[oldest]
-	entry.expires = time.Now().Add(time.Minute)
-	a.github.pending[oldest] = entry
-	a.mu.Unlock()
-	for i := 1; i < maxOAuthPendingPerIP; i++ {
-		if code := start("198.51.100.1"); code != 302 {
-			t.Fatalf("same-IP start %d: %d", i, code)
-		}
-	}
-	if code := start("198.51.100.1"); code != 429 {
-		t.Fatalf("per-IP pending unbounded: %d", code)
-	}
-	for i := 2; ; i++ {
+	var oldestCookie, latestCookie *http.Cookie
+	for i := 0; i <= maxOAuthPendingPerIP; i++ {
 		a.mu.Lock()
-		full := len(a.github.pending) >= maxOAuthPending
+		// Isolate pending capacity from the short-term initiation rate limit.
+		a.tokens, a.at = 5, time.Now()
 		a.mu.Unlock()
-		if full {
-			break
+		req := httptest.NewRequest("GET", "http://"+s.Address()+"/api/admin/v1/auth/github", nil)
+		req.RemoteAddr = "127.0.0.1:1234"
+		req.Header.Set("X-Forwarded-For", fmt.Sprintf("203.0.113.%d", i+1))
+		record := httptest.NewRecorder()
+		s.githubStart(record, req)
+		if record.Code != 302 {
+			t.Fatalf("proxy login %d: %d", i+1, record.Code)
 		}
-		if code := start(fmt.Sprintf("198.51.100.%d", i)); code != 302 {
-			t.Fatalf("fill %d: %d", i, code)
+		latestCookie = record.Result().Cookies()[0]
+		if i == 0 {
+			oldestCookie = latestCookie
+			oldest = tokenHash(oldestCookie.Value)
+			a.mu.Lock()
+			attempt := a.github.pending[oldest]
+			attempt.expires = time.Now().Add(2 * time.Minute)
+			a.github.pending[oldest] = attempt
+			a.mu.Unlock()
 		}
-	}
-	// A full table evicts the oldest attempt instead of refusing the login.
-	if code := start("203.0.113.9"); code != 302 {
-		t.Fatalf("full table rejected new login: %d", code)
 	}
 	a.mu.Lock()
-	_, kept := a.github.pending[oldest]
-	count := len(a.github.pending)
+	_, keptOldest := a.github.pending[oldest]
+	total := len(a.github.pending)
+	peers := 0
+	for _, attempt := range a.github.pending {
+		if attempt.ip == "127.0.0.1" {
+			peers++
+		}
+	}
+	otherPeers := 0
+	for i := 0; i < maxOAuthPending-maxOAuthPendingPerIP; i++ {
+		if _, kept := a.github.pending[fmt.Sprintf("other-peer-%d", i)]; kept {
+			otherPeers++
+		}
+	}
 	a.mu.Unlock()
-	if kept || count != maxOAuthPending {
-		t.Fatalf("oldest attempt not evicted: kept=%v pending=%d", kept, count)
+	if keptOldest || peers != maxOAuthPendingPerIP || total != maxOAuthPending || otherPeers != maxOAuthPending-maxOAuthPendingPerIP {
+		t.Fatalf("wrong proxy eviction: oldest=%v peer=%d total=%d other=%d", keptOldest, peers, total, otherPeers)
+	}
+	if res := oauthCallback(t, s, oldestCookie, oldestCookie.Value); res.Header.Get("Location") != "/admin/?auth_error=failed" {
+		t.Fatal("evicted OAuth attempt still accepted")
+	}
+	if res := oauthCallback(t, s, latestCookie, latestCookie.Value); res.Header.Get("Location") != "/admin/" {
+		t.Fatal("new OAuth attempt behind shared proxy could not log in")
+	}
+}
+
+func TestGitHubPendingCookieReplacementAtCapacity(t *testing.T) {
+	for _, size := range []int{maxOAuthPendingPerIP, maxOAuthPending} {
+		t.Run(fmt.Sprintf("pending_%d", size), func(t *testing.T) {
+			s, _, _ := testAdmin(t)
+			a := s.admin
+			oldCookie := &http.Cookie{Name: oauthCookie, Value: strings.Repeat("a", 43)}
+			oldKey := tokenHash(oldCookie.Value)
+			a.mu.Lock()
+			for i := 0; i < size; i++ {
+				key, ip := fmt.Sprintf("attempt-%d", i), "127.0.0.1"
+				if i == maxOAuthPendingPerIP-1 {
+					key = oldKey
+				} else if i >= maxOAuthPendingPerIP {
+					ip = fmt.Sprintf("198.51.100.%d", i)
+				}
+				a.github.pending[key] = oauthAttempt{ip: ip, expires: time.Now().Add(time.Duration(i+1) * time.Minute)}
+			}
+			a.mu.Unlock()
+			req := httptest.NewRequest("GET", "http://"+s.Address()+"/api/admin/v1/auth/github", nil)
+			req.RemoteAddr = "127.0.0.1:1234"
+			req.AddCookie(oldCookie)
+			record := httptest.NewRecorder()
+			s.githubStart(record, req)
+			if record.Code != 302 {
+				t.Fatalf("cookie replacement rejected: %d", record.Code)
+			}
+			a.mu.Lock()
+			defer a.mu.Unlock()
+			if _, kept := a.github.pending[oldKey]; kept {
+				t.Fatal("old cookie attempt not removed")
+			}
+			if len(a.github.pending) != size {
+				t.Fatalf("replacement removed extra attempts: pending=%d want=%d", len(a.github.pending), size)
+			}
+			for i := 0; i < size; i++ {
+				if i == maxOAuthPendingPerIP-1 {
+					continue
+				}
+				if _, kept := a.github.pending[fmt.Sprintf("attempt-%d", i)]; !kept {
+					t.Fatalf("replacement removed unrelated attempt %d", i)
+				}
+			}
+		})
+	}
+}
+
+func TestGitHubPendingGlobalEvictionAndExpiredCleanup(t *testing.T) {
+	for _, expired := range []int{0, 2} {
+		t.Run(fmt.Sprintf("expired_%d", expired), func(t *testing.T) {
+			s, _, _ := testAdmin(t)
+			a := s.admin
+			a.mu.Lock()
+			for i := 0; i < maxOAuthPending; i++ {
+				ttl := time.Duration(i+1) * time.Minute
+				if i < expired {
+					ttl = -time.Minute
+				}
+				a.github.pending[fmt.Sprintf("attempt-%d", i)] = oauthAttempt{ip: fmt.Sprintf("198.51.100.%d", i+1), expires: time.Now().Add(ttl)}
+			}
+			a.mu.Unlock()
+			record := httptest.NewRecorder()
+			req := httptest.NewRequest("GET", "http://"+s.Address()+"/api/admin/v1/auth/github", nil)
+			req.RemoteAddr = "127.0.0.1:1234"
+			s.githubStart(record, req)
+			if record.Code != 302 {
+				t.Fatalf("full table rejected login: %d", record.Code)
+			}
+			a.mu.Lock()
+			defer a.mu.Unlock()
+			removed := max(expired, 1)
+			if len(a.github.pending) != maxOAuthPending-removed+1 {
+				t.Fatalf("unexpected pending count: %d", len(a.github.pending))
+			}
+			for i := 0; i < maxOAuthPending; i++ {
+				_, kept := a.github.pending[fmt.Sprintf("attempt-%d", i)]
+				if kept != (i >= removed) {
+					t.Fatalf("wrong eviction for attempt %d: kept=%v", i, kept)
+				}
+			}
+		})
+	}
+}
+
+func TestGitHubPendingThrottlePreservesExistingAttempt(t *testing.T) {
+	s, _, _ := testAdmin(t)
+	cookie, _ := oauthStart(t, s)
+	s.admin.mu.Lock()
+	s.admin.tokens, s.admin.at = 0, time.Now()
+	s.admin.mu.Unlock()
+	req := httptest.NewRequest("GET", "http://"+s.Address()+"/api/admin/v1/auth/github", nil)
+	req.AddCookie(cookie)
+	record := httptest.NewRecorder()
+	s.githubStart(record, req)
+	if record.Code != 429 || record.Header().Get("Retry-After") != "3" {
+		t.Fatalf("throttle response: status=%d retry=%q", record.Code, record.Header().Get("Retry-After"))
+	}
+	s.admin.mu.Lock()
+	defer s.admin.mu.Unlock()
+	if _, kept := s.admin.github.pending[tokenHash(cookie.Value)]; !kept || len(s.admin.github.pending) != 1 {
+		t.Fatal("throttled login changed pending attempts")
 	}
 }
 

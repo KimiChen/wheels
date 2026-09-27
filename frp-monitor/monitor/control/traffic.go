@@ -75,9 +75,9 @@ func loadResetLocation(name string) *time.Location {
 }
 
 // refresh advances the day and plan period boundaries and reports whether it
-// changed the node. A boundary switch marks the totals partial: the crossing
-// delta is prorated by receive time, i.e. an estimate. observe clears the flag
-// once a sample continues the baseline completely inside the new boundary.
+// changed the node. A boundary switch without an exact starting baseline marks
+// the totals partial: the crossing delta is prorated by receive time, i.e. an
+// estimate. Later complete samples cannot make earlier estimates exact.
 func (s *Store) refresh(n *Node, at time.Time) bool {
 	changed := false
 	local := at.In(s.cfg.Location)
@@ -86,8 +86,7 @@ func (s *Store) refresh(n *Node, at time.Time) bool {
 		n.TrafficDay = ptr(day)
 		n.TrafficTodayRXBytes, n.TrafficTodayTXBytes = "0", "0"
 		boundary := midnight(local.Year(), local.Month(), local.Day(), s.cfg.Location).UnixMilli()
-		// A baseline exactly on the boundary keeps the new day exact; that is
-		// rare, and every other crossing is cleared later by observe instead.
+		// A baseline exactly on the boundary keeps the new day exact.
 		n.TrafficTodayPartial = n.CounterReceivedAtMS == nil || *n.CounterReceivedAtMS != boundary
 		changed = true
 	}
@@ -134,6 +133,9 @@ func (s *Store) observe(n *Node, next sample) bool {
 		refreshAt = now
 	}
 	s.refresh(n, refreshAt)
+	dayStart, _ := time.Parse("2006-01-02", *n.TrafficDay)
+	dayBoundary := midnight(dayStart.Year(), dayStart.Month(), dayStart.Day(), s.cfg.Location).UnixMilli()
+	periodBoundary := *n.TrafficPeriodStartAtMS
 	valid := n.CounterReceivedAtMS != nil && n.CounterBootID != nil && n.CounterInterface != nil && n.CounterScope != nil && n.CounterRXBytes != nil && n.CounterTXBytes != nil
 	var oldRX, oldTX uint64
 	if valid {
@@ -144,23 +146,27 @@ func (s *Store) observe(n *Node, next sample) bool {
 	}
 	if valid {
 		from := *n.CounterReceivedAtMS
-		dayStart, _ := time.Parse("2006-01-02", *n.TrafficDay)
-		dayBoundary := midnight(dayStart.Year(), dayStart.Month(), dayStart.Day(), s.cfg.Location).UnixMilli()
-		periodBoundary := *n.TrafficPeriodStartAtMS
 		rx, tx := next.rx-oldRX, next.tx-oldTX
 		n.TrafficTodayRXBytes = addFraction(n.TrafficTodayRXBytes, rx, from, next.at, dayBoundary)
 		n.TrafficTodayTXBytes = addFraction(n.TrafficTodayTXBytes, tx, from, next.at, dayBoundary)
 		n.TrafficPeriodRXBytes = addFraction(n.TrafficPeriodRXBytes, rx, from, next.at, periodBoundary)
 		n.TrafficPeriodTXBytes = addFraction(n.TrafficPeriodTXBytes, tx, from, next.at, periodBoundary)
 		gap := next.at-from > max(10*time.Second, 3*s.cfg.ReportInterval).Milliseconds()
-		// A gap or a boundary-crossing estimate marks the totals partial. The
-		// flag clears once a sample continues the baseline completely inside
-		// the boundary (from >= boundary, no gap): from then on every counted
-		// byte of the new day/period is attributed exactly, not estimated.
-		n.TrafficTodayPartial = gap || from < dayBoundary
-		n.TrafficPeriodPartial = gap || from < periodBoundary
+		// Completeness describes the entire current range, not only this
+		// delta. Continuous samples cannot repair missing or estimated traffic.
+		n.TrafficTodayPartial = n.TrafficTodayPartial || gap || from < dayBoundary
+		n.TrafficPeriodPartial = n.TrafficPeriodPartial || gap || from < periodBoundary
 	} else {
 		n.TrafficTodayPartial, n.TrafficPeriodPartial = true, true
+	}
+	// A sample exactly at a range's start establishes its complete zero-byte
+	// baseline, even if the previous range or boot was incomplete. This changes
+	// only the matching range; a later sample must never clear its partial flag.
+	if next.at == dayBoundary {
+		n.TrafficTodayPartial = false
+	}
+	if next.at == periodBoundary {
+		n.TrafficPeriodPartial = false
 	}
 	n.CounterBootID, n.CounterInterface, n.CounterScope = ptr(next.boot), ptr(next.iface), ptr(next.scope)
 	n.CounterRXBytes, n.CounterTXBytes = ptr(strconv.FormatUint(next.rx, 10)), ptr(strconv.FormatUint(next.tx, 10))
