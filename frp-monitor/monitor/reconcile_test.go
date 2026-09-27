@@ -170,6 +170,16 @@ func TestReconcileDistinctTupleAndProxyStates(t *testing.T) {
 	}
 }
 
+func TestReconcileNodesSortNumerically(t *testing.T) {
+	s, n := reconcileFixture()
+	n[0].ID = "10"
+	n = append(n, ReconcileNode{ID: "2"}, ReconcileNode{ID: "1"})
+	r := Reconcile(s, n)
+	if len(r.Nodes) != 3 || r.Nodes[0].ID != "1" || r.Nodes[1].ID != "2" || r.Nodes[2].ID != "10" {
+		t.Fatalf("lexical node order: %+v", r.Nodes)
+	}
+}
+
 func TestUntrustedClaimsCannotDenyOrStealTrustedOwner(t *testing.T) {
 	for _, boundAttacker := range []bool{false, true} {
 		s, n := reconcileFixture()

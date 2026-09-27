@@ -15,7 +15,7 @@ import (
 func publicHardwareSnapshot(t *testing.T, facts *shared.Facts, metrics *shared.Metrics) (PublicSnapshot, []byte) {
 	t.Helper()
 	n := &node{credential: credential{AgentID: "1", Name: "Test node"}, facts: facts, metrics: metrics}
-	s := &Service{cfg: shared.MonitorConfig{ReportIntervalSeconds: 1}, nodes: map[string]*node{"1": n}}
+	s := &Service{cfg: shared.MonitorConfig{ReportIntervalSeconds: 1}, location: time.Local, nodes: map[string]*node{"1": n}}
 	configs := nodeConfigs{"1": &control.Node{ID: "1", NodeConfig: control.DefaultNodeConfig("Test node")}}
 	s.configs.Store(&configs)
 	snapshot := s.snapshot(time.Now())

@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -233,7 +235,17 @@ func testControlConfig(t *testing.T, name, token string) shared.MonitorConfig {
 	if err = db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	return shared.MonitorConfig{Enabled: true, BindAddr: "127.0.0.1", ServerID: "example", ReportIntervalSeconds: 1, DatabaseFile: path}
+	// BindPort 0 is rejected by configuration validation; reserve an ephemeral
+	// port for the test listener instead.
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	if err = listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return shared.MonitorConfig{Enabled: true, BindAddr: "127.0.0.1", BindPort: port, ServerID: "example", ReportIntervalSeconds: 1, DatabaseFile: path}
 }
 func TestControlDatabaseRequiredAndPrivate(t *testing.T) {
 	token, _ := randomToken()
@@ -289,12 +301,12 @@ func TestOversizedFrameAndSSELimit(t *testing.T) {
 	if _, _, err := c.ReadMessage(); err == nil {
 		t.Fatal("oversized frame accepted")
 	}
-	for i := 0; i < cap(s.streams); i++ {
-		s.streams <- struct{}{}
+	for i := 0; i < cap(s.streamsPublic); i++ {
+		s.streamsPublic <- struct{}{}
 	}
 	defer func() {
-		for i := 0; i < cap(s.streams); i++ {
-			<-s.streams
+		for i := 0; i < cap(s.streamsPublic); i++ {
+			<-s.streamsPublic
 		}
 	}()
 	res, err := http.Get("http://" + s.Address() + "/events/public")
@@ -304,5 +316,85 @@ func TestOversizedFrameAndSSELimit(t *testing.T) {
 	defer res.Body.Close()
 	if res.StatusCode != 503 {
 		t.Fatalf("unbounded SSE admission: %d", res.StatusCode)
+	}
+}
+
+func TestWSAuthenticatesBeforeRateLimit(t *testing.T) {
+	s, token := testMonitor(t)
+	s.rateMu.Lock()
+	s.rateTokens = -100
+	s.rateAt = time.Now()
+	s.rateMu.Unlock()
+	dial := func(auth string) int {
+		h := http.Header{}
+		if auth != "" {
+			h.Set("Authorization", "Bearer "+auth)
+		}
+		c, r, err := websocket.DefaultDialer.Dial("ws://"+s.Address()+"/agent/v1/ws", h)
+		if c != nil {
+			c.Close()
+		}
+		if err == nil {
+			t.Fatal("rate-limited dial succeeded")
+		}
+		defer r.Body.Close()
+		return r.StatusCode
+	}
+	// An exhausted limiter must not hide authentication outcomes.
+	if got := dial(""); got != 401 {
+		t.Fatalf("unauthenticated under rate limit: %d", got)
+	}
+	if got := dial(token); got != 429 {
+		t.Fatalf("authenticated under rate limit: %d", got)
+	}
+}
+
+func TestWSControlFailureReportsUnavailable(t *testing.T) {
+	s, agent, _ := testAdmin(t)
+	s.control.Close()
+	s.configMu.Lock()
+	s.reloadCredentials()
+	s.configMu.Unlock()
+	h := http.Header{"Authorization": []string{"Bearer " + agent}}
+	c, r, err := websocket.DefaultDialer.Dial("ws://"+s.Address()+"/agent/v1/ws", h)
+	if c != nil {
+		c.Close()
+	}
+	if err == nil || r == nil || r.StatusCode != 503 {
+		status := 0
+		if r != nil {
+			status = r.StatusCode
+		}
+		t.Fatalf("control failure answered %d, want 503: %v", status, err)
+	}
+	r.Body.Close()
+}
+
+func TestPublishedSnapshotSharesEncodedBytes(t *testing.T) {
+	s, _ := testMonitor(t)
+	s.publishSnapshot(time.Now())
+	cached := s.publicJSON.Load()
+	if cached == nil {
+		t.Fatal("publish did not cache encoded bytes")
+	}
+	want, err := json.Marshal(s.public.Load())
+	if err != nil || string(*cached) != string(want) {
+		t.Fatal("cached bytes diverge from published snapshot")
+	}
+	before := *cached
+	r, err := http.Get("http://" + s.Address() + "/api/public/v1/nodes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Body.Close()
+	data, err := io.ReadAll(r.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A once-per-second republish may land between the two reads; the response
+	// must equal one of the cached generations, proving no per-request marshal.
+	after := *s.publicJSON.Load()
+	if string(data) != string(before) && string(data) != string(after) {
+		t.Fatal("public API did not serve the cached encoding")
 	}
 }

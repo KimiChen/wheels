@@ -173,7 +173,9 @@ func Reconcile(server shared.ServerSnapshot, nodes []ReconcileNode) Reconciliati
 			out.Proxies[i].AgentID = out.Clients[indices[0]].AgentID
 		}
 	}
-	sort.Slice(out.Nodes, func(i, j int) bool { return out.Nodes[i].ID < out.Nodes[j].ID })
+	// Node IDs are numeric autoincrement values; order them like the public
+	// snapshot does, not lexically.
+	sort.Slice(out.Nodes, func(i, j int) bool { return nodeIDLess(out.Nodes[i].ID, out.Nodes[j].ID) })
 	sort.Slice(out.Clients, func(i, j int) bool {
 		a, b := out.Clients[i], out.Clients[j]
 		if a.User != b.User {

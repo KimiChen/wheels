@@ -97,7 +97,7 @@ func (s *Service) handleHistory(w http.ResponseWriter, r *http.Request) {
 	}
 	path := strings.TrimPrefix(r.URL.Path, "/api/public/v1/nodes/")
 	parts := strings.Split(path, "/")
-	if len(parts) != 2 || parts[1] != "history" || !idPattern.MatchString(parts[0]) {
+	if len(parts) != 2 || parts[1] != "history" || !validNodeID(parts[0]) {
 		http.NotFound(w, r)
 		return
 	}

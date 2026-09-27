@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -415,5 +416,116 @@ func TestServerCacheExpiryAndFutureTimestampsFailClosed(t *testing.T) {
 	s.serverSnapshot.Store(&server)
 	if s.currentServerSnapshot(now).State != "ready" {
 		t.Fatal("fresh snapshot rejected")
+	}
+}
+
+func TestPublicAndAdminSSEQuotasAreIndependent(t *testing.T) {
+	s, _, admin := testAdmin(t)
+	cookie, _ := login(t, s, admin)
+	for i := 0; i < cap(s.streamsPublic); i++ {
+		s.streamsPublic <- struct{}{}
+	}
+	defer func() {
+		for i := 0; i < cap(s.streamsPublic); i++ {
+			<-s.streamsPublic
+		}
+	}()
+	expectStatus(t, adminRequest(t, s, "GET", "/events/public", "", nil, "", nil), 503)
+	// The admin stream keeps its own quota and still revalidates the session.
+	expectStatus(t, adminRequest(t, s, "GET", "/events/admin", "", cookie, "", nil), 200)
+}
+
+func TestAdminJSONContentTypeCaseInsensitive(t *testing.T) {
+	s, _, admin := testAdmin(t)
+	cookie, session := login(t, s, admin)
+	mixed := http.Header{"Content-Type": []string{"Application/JSON; charset=utf-8"}}
+	expectStatus(t, adminRequest(t, s, "POST", "/api/admin/v1/nodes", `{"name":"Case"}`, cookie, session.CSRF, mixed), 201)
+	wrong := http.Header{"Content-Type": []string{"text/json"}}
+	expectStatus(t, adminRequest(t, s, "POST", "/api/admin/v1/nodes", `{"name":"Other"}`, cookie, session.CSRF, wrong), 415)
+}
+
+func TestNodeIDRequiresInt64RoundTrip(t *testing.T) {
+	s, _, admin := testAdmin(t)
+	cookie, session := login(t, s, admin)
+	if !validNodeID("1") || !validNodeID("9223372036854775807") {
+		t.Fatal("valid ID rejected")
+	}
+	for _, id := range []string{"9223372036854775808", "9999999999999999999", "01", "0", "-1", "1.0"} {
+		if validNodeID(id) {
+			t.Fatalf("invalid ID accepted: %q", id)
+		}
+		expectStatus(t, adminRequest(t, s, "POST", "/api/admin/v1/nodes/"+id+"/rotate", "", cookie, session.CSRF, nil), 404)
+		expectStatus(t, adminRequest(t, s, "GET", "/api/public/v1/nodes/"+id+"/history", "", nil, "", nil), 404)
+	}
+}
+
+func TestGitHubPendingPerIPLimitAndOldestEviction(t *testing.T) {
+	s, _, _ := testAdmin(t)
+	a := s.admin
+	start := func(ip string) int {
+		// Refill the per-3s token bucket; this test exercises pending limits,
+		// not the initiation rate limit.
+		a.mu.Lock()
+		a.tokens = 5
+		a.at = time.Now()
+		a.mu.Unlock()
+		record := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", "http://"+s.Address()+"/api/admin/v1/auth/github", nil)
+		req.RemoteAddr = ip + ":1234"
+		s.githubStart(record, req)
+		return record.Code
+	}
+	if code := start("198.51.100.1"); code != 302 {
+		t.Fatalf("first start: %d", code)
+	}
+	// Mark the first attempt as the oldest so eviction targets it.
+	a.mu.Lock()
+	var oldest string
+	for key := range a.github.pending {
+		oldest = key
+	}
+	entry := a.github.pending[oldest]
+	entry.expires = time.Now().Add(time.Minute)
+	a.github.pending[oldest] = entry
+	a.mu.Unlock()
+	for i := 1; i < maxOAuthPendingPerIP; i++ {
+		if code := start("198.51.100.1"); code != 302 {
+			t.Fatalf("same-IP start %d: %d", i, code)
+		}
+	}
+	if code := start("198.51.100.1"); code != 429 {
+		t.Fatalf("per-IP pending unbounded: %d", code)
+	}
+	for i := 2; ; i++ {
+		a.mu.Lock()
+		full := len(a.github.pending) >= maxOAuthPending
+		a.mu.Unlock()
+		if full {
+			break
+		}
+		if code := start(fmt.Sprintf("198.51.100.%d", i)); code != 302 {
+			t.Fatalf("fill %d: %d", i, code)
+		}
+	}
+	// A full table evicts the oldest attempt instead of refusing the login.
+	if code := start("203.0.113.9"); code != 302 {
+		t.Fatalf("full table rejected new login: %d", code)
+	}
+	a.mu.Lock()
+	_, kept := a.github.pending[oldest]
+	count := len(a.github.pending)
+	a.mu.Unlock()
+	if kept || count != maxOAuthPending {
+		t.Fatalf("oldest attempt not evicted: kept=%v pending=%d", kept, count)
+	}
+}
+
+func TestAdminSameOriginRejectsMissingCallback(t *testing.T) {
+	s, _, _ := testAdmin(t)
+	s.cfg.GitHubCallbackURL = ""
+	record := httptest.NewRecorder()
+	s.githubStart(record, httptest.NewRequest("GET", "http://"+s.Address()+"/api/admin/v1/auth/github", nil))
+	if record.Code != 403 {
+		t.Fatalf("missing callback tolerated: %d", record.Code)
 	}
 }

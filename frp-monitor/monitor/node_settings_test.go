@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -195,6 +197,53 @@ func TestInvalidWriteDoesNotRevokeUnchangedCredentials(t *testing.T) {
 	}
 }
 func jsonNumber(n int64) string { b, _ := json.Marshal(n); return string(b) }
+
+func TestTodayDTOUsesControlLocation(t *testing.T) {
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	loc := time.FixedZone("UTC+14", 14*60*60)
+	db, err := control.Open(control.Config{Path: filepath.Join(dir, "control.sqlite"), ReportInterval: time.Second, Location: loc})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	token, _ := randomToken()
+	if _, err = db.CreateNode(context.Background(), control.DefaultNodeConfig("tz"), tokenHash(token), nil); err != nil {
+		t.Fatal(err)
+	}
+	// The control store refreshes day boundaries with its own clock, so compare
+	// against the real current day in the configured location.
+	now := time.Now()
+	m := *fixture(t, "report-first").Report.Metrics
+	rx, tx := uint64(1000), uint64(500)
+	m.NetRXTotal = shared.Field[uint64]{Value: &rx, Quality: shared.QualityOK}
+	m.NetTXTotal = shared.Field[uint64]{Value: &tx, Quality: shared.QualityOK}
+	if !db.Accept("1", now, m) {
+		t.Fatal("sample rejected")
+	}
+	if err = db.Flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(2 * time.Millisecond)
+	n, err := db.Get(context.Background(), "1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = time.Now()
+	day := now.In(loc).Format("2006-01-02")
+	if n.TrafficDay == nil || *n.TrafficDay != day {
+		t.Fatalf("control day %v, want %s", n.TrafficDay, day)
+	}
+	v := todayDTO(n, now, loc)
+	if v.Day != day || v.RXBytes != n.TrafficTodayRXBytes || v.TXBytes != n.TrafficTodayTXBytes {
+		t.Fatalf("today DTO diverges from control accounting: %+v vs day=%s rx=%s tx=%s", v, *n.TrafficDay, n.TrafficTodayRXBytes, n.TrafficTodayTXBytes)
+	}
+}
 
 func TestCommittedRevocationRefreshFailureClosesOldSession(t *testing.T) {
 	s, agent, _ := testAdmin(t)

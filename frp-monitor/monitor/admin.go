@@ -10,8 +10,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
-	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -67,24 +67,6 @@ func tokenHash(value string) string {
 }
 func equalToken(a, b string) bool { return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1 }
 
-func sameOrigin(r *http.Request) bool {
-	if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" && site != "none" {
-		return false
-	}
-	origins := r.Header.Values("Origin")
-	if len(origins) == 0 {
-		return true
-	}
-	if len(origins) != 1 {
-		return false
-	}
-	expected := "http"
-	if r.TLS != nil {
-		expected = "https"
-	}
-	u, err := url.Parse(origins[0])
-	return err == nil && u.Scheme == expected && u.Host == r.Host && u.User == nil && u.RawQuery == "" && u.Fragment == "" && u.Path == ""
-}
 func (s *Service) session(r *http.Request) (adminSession, string, bool) {
 	if s.admin == nil {
 		return adminSession{}, "", false
@@ -109,7 +91,8 @@ func adminJSON(w http.ResponseWriter, status int, value any) {
 	_ = json.NewEncoder(w).Encode(value)
 }
 func decodeAdmin(w http.ResponseWriter, r *http.Request, target any) bool {
-	if strings.Split(r.Header.Get("Content-Type"), ";")[0] != "application/json" {
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || !strings.EqualFold(mediaType, "application/json") {
 		http.Error(w, "application/json required", http.StatusUnsupportedMediaType)
 		return false
 	}
@@ -299,7 +282,7 @@ func (s *Service) createNode(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Service) mutateNode(w http.ResponseWriter, r *http.Request, path string) {
 	parts := strings.Split(path, "/")
-	if len(parts) > 2 || !idPattern.MatchString(parts[0]) {
+	if len(parts) > 2 || !validNodeID(parts[0]) {
 		http.NotFound(w, r)
 		return
 	}
@@ -340,17 +323,19 @@ func (s *Service) mutateNode(w http.ResponseWriter, r *http.Request, path string
 	defer s.configMu.Unlock()
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
-	current, err := s.control.Get(ctx, id)
-	if err != nil {
-		controlError(w, r, err)
-		return
-	}
 	switch action {
 	case "":
 		err = s.control.DeleteNode(ctx, id)
 	case "rotate":
 		err = s.control.RotateToken(ctx, id, tokenHash(token))
 	case "binding":
+		// Only the binding change needs the current revision for optimistic
+		// concurrency; delete and rotate carry no preconditions.
+		current, gerr := s.control.Get(ctx, id)
+		if gerr != nil {
+			controlError(w, r, gerr)
+			return
+		}
 		err = s.control.SetBinding(ctx, id, binding, current.ConfigRevision)
 	}
 	if err != nil {
@@ -389,13 +374,13 @@ func (s *Service) handleAdminProbes(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "increase version", 409)
 			return
 		}
-		data, marshalErr := json.Marshal(input)
-		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
-		defer cancel()
-		if marshalErr != nil {
+		data, err := json.Marshal(input)
+		if err != nil {
 			http.Error(w, "probe configuration unavailable", 503)
 			return
 		}
+		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+		defer cancel()
 		if err := s.control.WriteProbes(ctx, data); err != nil {
 			s.controlWriteError(w, r, err)
 			return
@@ -426,8 +411,8 @@ func (s *Service) handleAdminEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	select {
-	case s.streams <- struct{}{}:
-		defer func() { <-s.streams }()
+	case s.streamsAdmin <- struct{}{}:
+		defer func() { <-s.streamsAdmin }()
 	default:
 		http.Error(w, "try later", 503)
 		return

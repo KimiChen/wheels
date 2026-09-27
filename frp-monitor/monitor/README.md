@@ -120,7 +120,8 @@ SQLite 只保留当前日和当前套餐周期；跨边界覆盖旧值，不保�
 - Max 使用整周期累计 RX/TX 的较大值；total 为两者之和，rx/tx 为对应方向。
   已用量等于原始计费用量加校准差额。管理员输入非负已用值时只重算差额。
 - 套餐修改立即生效；切换计费类型时重算差额以保持已用值，再按新类型继续累计。
-- 跨边界增量按接收时间比例分摊；缺口、重建或估算保留 `partial` 标记。
+- 跨边界增量按接收时间比例分摊；边界切换、缺口或基线重建会先标记 `partial`，
+  周期内收到首个与基线连续且完整落在边界之后的样本即清除。
 
 队列有界，批量写入不阻塞 FRP 转发线程。`Healthy()` 在队列满或写事务失败时返回 false，
 下一次成功的计数器批次可以从持久基线恢复。重启恢复累计，不恢复在线状态。
@@ -155,8 +156,9 @@ agent 仍会校验解析后的 IP；主控任务配置不能绕过 agent 的目�
 ## 实时与历史 API
 
 `GET /api/public/v1/nodes` 返回 `{nodes, generated_at}`；`GET /events/public` 立即及每秒
-发送同结构 `event: snapshot`。API/SSE 使用 `Cache-Control: no-store`。
-隐藏节点不进入公开列表或公开历史接口。
+发送同结构 `event: snapshot`。两者复用发布点编码好的同一字节串，不逐请求重新编码。
+API/SSE 使用 `Cache-Control: no-store`。公开 SSE 最多 128 并发，管理 SSE 独立最多 64 并发，
+互不挤占；管理 SSE 每秒重验会话。隐藏节点不进入公开列表或公开历史接口。
 
 公开节点包括会话/新鲜度、硬件摘要、实时指标、`public_note`、`traffic_today` 和按公开
 策略裁剪的 `billing` / `traffic_plan`。费用默认不公开，套餐默认公开。`traffic_today`
@@ -178,6 +180,8 @@ agent 仍会校验解析后的 IP；主控任务配置不能绕过 agent 的目�
 未配置 OAuth 时 `GET /api/admin/v1/auth` 返回 `{provider:"github",enabled:false}`，
 管理读写和 SSE 不开放。配置四项 OAuth 参数后，使用 state、短期 cookie 和 PKCE
 完成授权码交换；只有 `githubAdminUsers` 中的个人账号可创建管理会话。
+未完成授权最多保留 64 条、单一来源 IP 最多 8 条；占满时驱逐最旧条目，
+匿名占位无法挤占管理员登录。
 GitHub access token 只用于本次身份查询，不持久化，也不发送给浏览器。
 
 管理会话保存在内存，固定 8 小时过期，最多 64 个；重启需重新登录。

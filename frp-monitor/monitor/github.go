@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -18,9 +19,15 @@ import (
 const oauthCookie = "frp_monitor_oauth"
 const oauthTTL = 10 * time.Minute
 
+// Bounds on unfinished OAuth attempts: a global table and a per-source-IP
+// share, so anonymous initiations cannot crowd out a real administrator.
+const maxOAuthPending = 64
+const maxOAuthPendingPerIP = 8
+
 type oauthAttempt struct {
 	verifier string
 	expires  time.Time
+	ip       string
 }
 type githubAuth struct {
 	clientID, secret, callback string
@@ -52,8 +59,11 @@ func (s *Service) secureAdminCookie(r *http.Request) bool {
 	return r.TLS != nil || strings.HasPrefix(s.cfg.GitHubCallbackURL, "https://")
 }
 func (s *Service) adminSameOrigin(r *http.Request) bool {
+	// newAdmin only exists once the four OAuth settings passed validation, so
+	// the callback URL is never empty here; reject explicitly rather than
+	// falling back to a weaker host comparison.
 	if s.cfg.GitHubCallbackURL == "" {
-		return sameOrigin(r)
+		return false
 	}
 	if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" && site != "none" {
 		return false
@@ -67,6 +77,16 @@ func (s *Service) adminSameOrigin(r *http.Request) bool {
 	}
 	u, err := url.Parse(s.cfg.GitHubCallbackURL)
 	return err == nil && origins[0] == u.Scheme+"://"+u.Host && r.Host == u.Host
+}
+
+// clientIP identifies an OAuth initiation source for the pending-attempt
+// quota only; it is never part of an authorization decision.
+func clientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
 }
 
 func (s *Service) githubStart(w http.ResponseWriter, r *http.Request) {
@@ -90,18 +110,28 @@ func (s *Service) githubStart(w http.ResponseWriter, r *http.Request) {
 	}
 	a := s.admin
 	now := time.Now()
+	ip := clientIP(r)
 	a.mu.Lock()
 	a.tokens += now.Sub(a.at).Seconds() / 3
 	if a.tokens > 5 {
 		a.tokens = 5
 	}
 	a.at = now
+	sameIP := 0
+	oldest := ""
 	for key, attempt := range a.github.pending {
 		if !now.Before(attempt.expires) {
 			delete(a.github.pending, key)
+			continue
+		}
+		if attempt.ip == ip {
+			sameIP++
+		}
+		if oldest == "" || attempt.expires.Before(a.github.pending[oldest].expires) {
+			oldest = key
 		}
 	}
-	if a.tokens < 1 || len(a.github.pending) >= 64 {
+	if a.tokens < 1 || sameIP >= maxOAuthPendingPerIP {
 		a.mu.Unlock()
 		w.Header().Set("Retry-After", "3")
 		http.Error(w, "try later", 429)
@@ -111,7 +141,12 @@ func (s *Service) githubStart(w http.ResponseWriter, r *http.Request) {
 	if old, e := r.Cookie(oauthCookie); e == nil {
 		delete(a.github.pending, tokenHash(old.Value))
 	}
-	a.github.pending[tokenHash(state)] = oauthAttempt{verifier: verifier, expires: now.Add(oauthTTL)}
+	// A full table evicts the oldest unfinished attempt instead of rejecting
+	// the new login, so anonymous placeholders cannot deny administrators.
+	if len(a.github.pending) >= maxOAuthPending {
+		delete(a.github.pending, oldest)
+	}
+	a.github.pending[tokenHash(state)] = oauthAttempt{verifier: verifier, expires: now.Add(oauthTTL), ip: ip}
 	a.mu.Unlock()
 	hash := sha256.Sum256([]byte(verifier))
 	query := url.Values{"client_id": {a.github.clientID}, "redirect_uri": {a.github.callback}, "state": {state}, "code_challenge": {base64.RawURLEncoding.EncodeToString(hash[:])}, "code_challenge_method": {"S256"}, "allow_signup": {"false"}, "scope": {""}}

@@ -14,7 +14,6 @@ import (
 	"math/big"
 	"net"
 	"net/http"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -53,11 +52,16 @@ type node struct {
 }
 
 type Service struct {
-	cfg             shared.MonitorConfig
-	ctx             context.Context
-	cancel          context.CancelFunc
-	server          *http.Server
-	listener        net.Listener
+	// cfg is immutable after Start returns. Reads happen in Start itself or
+	// while holding s.mu; tests adjusting ReportIntervalSeconds also hold s.mu.
+	cfg      shared.MonitorConfig
+	ctx      context.Context
+	cancel   context.CancelFunc
+	server   *http.Server
+	listener net.Listener
+	// location is the accounting calendar timezone shared with the control
+	// store, used by the today-traffic DTO for day boundaries.
+	location        *time.Location
 	mu              sync.Mutex
 	nodes           map[string]*node
 	connections     map[*websocket.Conn]credential
@@ -65,11 +69,13 @@ type Service struct {
 	closeOnce       sync.Once
 	done            chan struct{}
 	handshakes      chan struct{}
-	streams         chan struct{}
+	streamsPublic   chan struct{}
+	streamsAdmin    chan struct{}
 	rateMu          sync.Mutex
 	rateTokens      float64
 	rateAt          time.Time
 	public          atomic.Pointer[PublicSnapshot]
+	publicJSON      atomic.Pointer[[]byte]
 	publishMu       sync.Mutex
 	control         *control.Store
 	configs         atomic.Pointer[nodeConfigs]
@@ -92,7 +98,9 @@ func Start(ctx context.Context, cfg shared.MonitorConfig, providers ...shared.Se
 	if err := cfg.Validate(); err != nil {
 		return nil, errors.New("invalid monitor configuration")
 	}
-	db, err := control.Open(control.Config{Path: cfg.DatabaseFile, ReportInterval: time.Duration(cfg.ReportIntervalSeconds) * time.Second})
+	// Pass the accounting timezone explicitly so the control store and the
+	// today-traffic DTO below can never disagree on day boundaries.
+	db, err := control.Open(control.Config{Path: cfg.DatabaseFile, ReportInterval: time.Duration(cfg.ReportIntervalSeconds) * time.Second, Location: time.Local})
 	if err != nil {
 		return nil, errors.New("control database unavailable")
 	}
@@ -104,7 +112,7 @@ func Start(ctx context.Context, cfg shared.MonitorConfig, providers ...shared.Se
 	}()
 
 	child, cancel := context.WithCancel(ctx)
-	s := &Service{cfg: cfg, ctx: child, cancel: cancel, nodes: map[string]*node{}, control: db, connections: map[*websocket.Conn]credential{}, handshakes: make(chan struct{}, 32), streams: make(chan struct{}, 128), done: make(chan struct{}), rateTokens: 40, rateAt: time.Now()}
+	s := &Service{cfg: cfg, ctx: child, cancel: cancel, location: time.Local, nodes: map[string]*node{}, control: db, connections: map[*websocket.Conn]credential{}, handshakes: make(chan struct{}, 32), streamsPublic: make(chan struct{}, 128), streamsAdmin: make(chan struct{}, 64), done: make(chan struct{}), rateTokens: 40, rateAt: time.Now()}
 	if len(providers) > 0 {
 		s.serverProvider = providers[0]
 	}
@@ -201,7 +209,9 @@ func (s *Service) Close() {
 			_ = s.control.Close()
 		}
 		if s.store != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+			// TSDB 排空与关闭在慢盘上可能超过预算。超时只结束等待，后台
+			// worker 仍继续关闭；旧实例关闭完成前进程内不得重新打开历史。
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			_ = s.store.Close(ctx)
 		}
@@ -212,7 +222,27 @@ func (s *Service) Close() {
 	}
 }
 
-var idPattern = regexp.MustCompile(`^[1-9][0-9]{0,18}$`)
+// validNodeID matches control.validID: a positive decimal integer that
+// round-trips through int64, so 19-digit values beyond int64 are rejected.
+func validNodeID(id string) bool {
+	n, err := strconv.ParseInt(id, 10, 64)
+	return err == nil && n > 0 && strconv.FormatInt(n, 10) == id
+}
+
+// nodeIDLess orders node IDs numerically. IDs come from the control store's
+// autoincrement and always parse; a parse failure falls back to a total order
+// (parseable first, then lexical) instead of silently sorting as zero.
+func nodeIDLess(a, b string) bool {
+	ai, aerr := strconv.ParseInt(a, 10, 64)
+	bi, berr := strconv.ParseInt(b, 10, 64)
+	if aerr == nil && berr == nil {
+		return ai < bi
+	}
+	if (aerr == nil) != (berr == nil) {
+		return aerr == nil
+	}
+	return a < b
+}
 
 func (s *Service) authenticateCredential(r *http.Request) credential {
 	if s.credentialError.Load() {
@@ -259,8 +289,11 @@ func (s *Service) handleWS(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	if !s.admit() {
-		http.Error(w, "try later", http.StatusTooManyRequests)
+	// Authentication is a cheap in-memory digest lookup and runs before the
+	// handshake rate limit. A control store failure answers 503, distinct
+	// from a bad credential's 401.
+	if s.credentialError.Load() {
+		http.Error(w, "control unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	grant := s.authenticateCredential(r)
@@ -268,6 +301,10 @@ func (s *Service) handleWS(w http.ResponseWriter, r *http.Request) {
 	if id == "" {
 		w.Header().Set("WWW-Authenticate", "Bearer")
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if !s.admit() {
+		http.Error(w, "try later", http.StatusTooManyRequests)
 		return
 	}
 	select {
@@ -343,11 +380,12 @@ func (s *Service) handleWS(w http.ResponseWriter, r *http.Request) {
 	if hello.Extensions != nil {
 		n.frp = hello.Extensions.FRP
 	}
+	interval := s.cfg.ReportIntervalSeconds
 	s.mu.Unlock()
 	if old != nil {
 		old.Close()
 	}
-	result := shared.HelloResult{Schema: shared.SchemaVersion, SessionID: hello.SessionID, Capabilities: append([]string(nil), hello.Capabilities...), ReportInterval: uint32(s.cfg.ReportIntervalSeconds)}
+	result := shared.HelloResult{Schema: shared.SchemaVersion, SessionID: hello.SessionID, Capabilities: append([]string(nil), hello.Capabilities...), ReportInterval: uint32(interval)}
 	_ = c.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	if c.WriteJSON(struct {
 		JSONRPC string             `json:"jsonrpc"`
@@ -469,6 +507,10 @@ func (s *Service) handleWS(w http.ResponseWriter, r *http.Request) {
 		if report.Metrics != nil {
 			n.metrics = report.Metrics
 			n.metricsAt = now
+			// Lock order: s.mu is held while calling into both stores, so
+			// control.Accept and store.Accept must remain non-blocking (bounded
+			// queue, drop when full) and must never acquire s.mu; otherwise the
+			// report loop deadlocks or stalls behind database backpressure.
 			if s.control != nil {
 				s.control.Accept(id, now, *report.Metrics)
 			}
@@ -588,7 +630,7 @@ func (s *Service) snapshotFor(now time.Time, private bool) PublicSnapshot {
 			p.AccountingState = "degraded"
 		}
 		p.PublicNote = config.PublicNote
-		p.TrafficToday = todayDTO(config, now)
+		p.TrafficToday = todayDTO(config, now, s.location)
 		if private || config.PublishBilling {
 			p.Billing = billingDTO(config)
 		}
@@ -713,11 +755,7 @@ func (s *Service) snapshotFor(now time.Time, private bool) PublicSnapshot {
 		}
 		out.Nodes = visible
 	}
-	sort.Slice(out.Nodes, func(i, j int) bool {
-		a, _ := strconv.ParseInt(out.Nodes[i].ID, 10, 64)
-		b, _ := strconv.ParseInt(out.Nodes[j].ID, 10, 64)
-		return a < b
-	})
+	sort.Slice(out.Nodes, func(i, j int) bool { return nodeIDLess(out.Nodes[i].ID, out.Nodes[j].ID) })
 	return out
 }
 func publicHeaders(w http.ResponseWriter) {
@@ -732,6 +770,11 @@ func (s *Service) handleNodes(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(5 * time.Second))
+	// Reuse the encoding produced at publish time instead of marshaling per request.
+	if data := s.publicJSON.Load(); data != nil {
+		_, _ = w.Write(*data)
+		return
+	}
 	_ = json.NewEncoder(w).Encode(s.public.Load())
 }
 func (s *Service) handleEvents(w http.ResponseWriter, r *http.Request) {
@@ -741,8 +784,8 @@ func (s *Service) handleEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	select {
-	case s.streams <- struct{}{}:
-		defer func() { <-s.streams }()
+	case s.streamsPublic <- struct{}{}:
+		defer func() { <-s.streamsPublic }()
 	default:
 		http.Error(w, "try later", http.StatusServiceUnavailable)
 		return
@@ -751,14 +794,14 @@ func (s *Service) handleEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Accel-Buffering", "no")
 	controller := http.NewResponseController(w)
 	send := func() bool {
-		data, err := json.Marshal(s.public.Load())
-		if err != nil {
+		data := s.publicJSON.Load()
+		if data == nil {
 			return false
 		}
 		if controller.SetWriteDeadline(time.Now().Add(5*time.Second)) != nil {
 			return false
 		}
-		if _, err = fmt.Fprintf(w, "event: snapshot\ndata: %s\n\n", data); err != nil {
+		if _, err := fmt.Fprintf(w, "event: snapshot\ndata: %s\n\n", *data); err != nil {
 			return false
 		}
 		return controller.Flush() == nil
@@ -784,11 +827,19 @@ func (s *Service) handleEvents(w http.ResponseWriter, r *http.Request) {
 
 // Serialize computing and publishing so a pre-revocation snapshot cannot
 // overwrite the immediate post-revocation snapshot in the public cache.
+// The snapshot is encoded once here; the public API and every public SSE
+// client reuse the cached bytes. A marshal failure (none of the DTOs can
+// produce one) keeps the previous consistent snapshot/bytes pair.
 func (s *Service) publishSnapshot(now time.Time) {
 	s.publishMu.Lock()
 	defer s.publishMu.Unlock()
 	next := s.snapshot(now)
+	data, err := json.Marshal(next)
+	if err != nil {
+		return
+	}
 	s.public.Store(&next)
+	s.publicJSON.Store(&data)
 }
 
 func serverTLS(certFile, keyFile string) (*tls.Config, error) {

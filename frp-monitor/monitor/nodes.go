@@ -45,9 +45,13 @@ type nodeSettings struct {
 func billingDTO(n *control.Node) *nodeBilling {
 	return &nodeBilling{n.PriceMinor, n.Currency, n.BillingCycle, n.ExpiresAtMS, n.RenewalNote}
 }
-func todayDTO(n *control.Node, now time.Time) *nodeToday {
-	day := now.In(time.Local).Format("2006-01-02")
-	v := &nodeToday{Day: day, Timezone: now.In(time.Local).Format("MST"), RXBytes: "0", TXBytes: "0", Partial: true}
+
+// todayDTO formats the control store's daily counters; loc must be the same
+// accounting location the control store uses, or the day boundary would drift.
+func todayDTO(n *control.Node, now time.Time, loc *time.Location) *nodeToday {
+	local := now.In(loc)
+	day := local.Format("2006-01-02")
+	v := &nodeToday{Day: day, Timezone: local.Format("MST"), RXBytes: "0", TXBytes: "0", Partial: true}
 	if n.TrafficDay != nil && *n.TrafficDay == day {
 		v.RXBytes = n.TrafficTodayRXBytes
 		v.TXBytes = n.TrafficTodayTXBytes
