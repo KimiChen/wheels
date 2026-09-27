@@ -1,0 +1,84 @@
+{
+  "jsonrpc": "2.0",
+  "id": "hello-1",
+  "method": "hello",
+  "params": {
+    "schema": 1,
+    "session_id": "example-session-1",
+    "sequence": 1,
+    "collected_at": "2026-09-27T00:00:00Z",
+    "capabilities": [
+      "metrics.v1",
+      "frp.v1",
+      "ping.v1"
+    ],
+    "facts": {
+      "scope": "host",
+      "hostname": {
+        "value": "example-node",
+        "quality": "ok"
+      },
+      "os": {
+        "value": "Example Linux",
+        "quality": "ok"
+      },
+      "kernel": {
+        "value": "6.0-example",
+        "quality": "ok"
+      },
+      "arch": {
+        "value": "amd64",
+        "quality": "ok"
+      },
+      "virt": {
+        "value": "none",
+        "quality": "ok"
+      },
+      "cpu_name": {
+        "value": "Example CPU",
+        "quality": "ok"
+      },
+      "cpu_cores": {
+        "value": 4,
+        "quality": "ok"
+      },
+      "agent_version": {
+        "value": "0.1.0-dev",
+        "quality": "ok"
+      },
+      "ipv4": {
+        "value": "192.0.2.10",
+        "quality": "ok"
+      },
+      "mem_total": {
+        "value": 8589934592,
+        "quality": "ok"
+      },
+      "swap_total": {
+        "value": 0,
+        "quality": "ok"
+      },
+      "disk_total": {
+        "value": 107374182400,
+        "quality": "ok"
+      },
+      "ipv6": {
+        "value": null,
+        "quality": "unavailable",
+        "reason": "read_error"
+      }
+    },
+    "extensions": {
+      "frp": {
+        "association": {
+          "server_id": "example-server",
+          "user": "",
+          "raw_client_id": "example-client"
+        },
+        "version": "0.71.0",
+        "control_state": "disconnected",
+        "proxies": []
+      }
+    }
+  }
+}

@@ -2,7 +2,7 @@
 
 ## frp
 
-本项目计划通过补丁和 Overlay 修改以下上游项目：
+本项目通过固定源码构建和 Overlay 扩展以下上游项目：
 
 - Project: frp
 - Source: https://github.com/fatedier/frp
@@ -15,7 +15,12 @@
 然后在临时工作树中应用 `patches/`，并映射本项目扩展源码。当前目录迁移与构建方案
 以根目录 `README.md` 为准。
 
-计划中的实质修改包括：
+P0 实际变更：新增本项目的 JSON-RPC 协议包并映射到上游 module 的
+`extension/frpmonitor/shared`，通过独立测试验证；`patches/series` 尚无补丁，
+命令与 Service 生命周期保持原生行为。构建包内的两个可执行文件由固定 FRP
+源码生成，尚不含运行时监控能力。完整上游文件只存在于 ignored 临时树。
+
+后续计划中的实质修改包括：
 
 - 在 frpc 进程级生命周期中增加 Linux Telemetry、TCP 探测和独立 WSS 上报；
 - 采集主机资源、网络、连接总览和本地 Proxy 状态；
@@ -28,7 +33,7 @@
 
 ## monitor-probe 设计参考
 
-本轮仅调研以下 MIT 项目，未复制其实现代码：
+以下 MIT 项目用作设计和算法参考，P0 未复制其实现代码或测试：
 
 - https://github.com/monitor-probe/agent
   - Commit: `cebc5383abb5963abeb722877a2d82c1a7aea5c6`
@@ -37,6 +42,8 @@
 
 上述源码的版权声明为 `Copyright (c) 2026 stqfdyr`。后续如移植源码、测试或其他
 受版权保护材料，须随材料保留原版权声明与 MIT 许可证全文，并更新本文件。
+`tests/fixtures/collect/cases.json` 的样本输入为本项目自行构造；参考函数、
+预期值单位与有意的质量语义差异见同目录 README。
 
 ## web-standard-kit
 

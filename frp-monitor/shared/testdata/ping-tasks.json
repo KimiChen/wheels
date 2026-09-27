@@ -1,0 +1,18 @@
+{
+  "jsonrpc": "2.0",
+  "method": "ping.tasks",
+  "params": {
+    "schema": 1,
+    "session_id": "example-session-1",
+    "sequence": 1,
+    "collected_at": "2026-09-27T00:00:00Z",
+    "version": 1,
+    "tasks": [
+      {
+        "id": "example-probe",
+        "target": "example.invalid:443",
+        "interval": 5
+      }
+    ]
+  }
+}

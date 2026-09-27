@@ -1,1 +1,2 @@
-# 实现阶段按应用顺序填写补丁文件名，一行一个。
+# P0: no lifecycle patches. Binaries retain native FRP behavior.
+# Add one relative patch filename per line, in application order.

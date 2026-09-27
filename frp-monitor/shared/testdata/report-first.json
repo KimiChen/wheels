@@ -1,0 +1,92 @@
+{
+  "jsonrpc": "2.0",
+  "method": "report",
+  "params": {
+    "schema": 1,
+    "session_id": "example-session-1",
+    "sequence": 2,
+    "collected_at": "2026-09-27T00:00:00Z",
+    "metrics": {
+      "scope": "host",
+      "load": {
+        "value": [
+          0.1,
+          0.2,
+          0.3
+        ],
+        "quality": "ok"
+      },
+      "mem_total": {
+        "value": 8589934592,
+        "quality": "ok"
+      },
+      "mem_used": {
+        "value": 8589934592,
+        "quality": "ok"
+      },
+      "swap_total": {
+        "value": 0,
+        "quality": "ok"
+      },
+      "swap_used": {
+        "value": 0,
+        "quality": "ok"
+      },
+      "disk_total": {
+        "value": 107374182400,
+        "quality": "ok"
+      },
+      "disk_used": {
+        "value": 0,
+        "quality": "ok"
+      },
+      "net_rx_total": {
+        "value": 18446744073709551615,
+        "quality": "ok"
+      },
+      "net_tx_total": {
+        "value": 9007199254740993,
+        "quality": "ok"
+      },
+      "boot_id": {
+        "value": "example-boot-id:example-interface-hash",
+        "quality": "ok"
+      },
+      "iface": {
+        "value": "",
+        "quality": "ok"
+      },
+      "uptime": {
+        "value": 100,
+        "quality": "ok"
+      },
+      "tcp": {
+        "value": 5,
+        "quality": "ok"
+      },
+      "udp": {
+        "value": 2,
+        "quality": "ok"
+      },
+      "procs": {
+        "value": 30,
+        "quality": "ok"
+      },
+      "cpu": {
+        "value": null,
+        "quality": "warming_up",
+        "reason": "no_baseline"
+      },
+      "net_rx": {
+        "value": null,
+        "quality": "warming_up",
+        "reason": "no_baseline"
+      },
+      "net_tx": {
+        "value": null,
+        "quality": "warming_up",
+        "reason": "no_baseline"
+      }
+    }
+  }
+}

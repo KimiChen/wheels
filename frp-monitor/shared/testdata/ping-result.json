@@ -1,0 +1,13 @@
+{
+  "jsonrpc": "2.0",
+  "method": "ping.result",
+  "params": {
+    "schema": 1,
+    "session_id": "example-session-1",
+    "sequence": 3,
+    "collected_at": "2026-09-27T00:00:00Z",
+    "task_version": 1,
+    "task_id": "example-probe",
+    "latency_ms": -1
+  }
+}

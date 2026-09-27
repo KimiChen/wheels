@@ -3,12 +3,39 @@
 基于 FRP 的主机与隧道监控项目：`agent` 复用 frpc，`monitor` 复用 frps，
 `web` 基于本仓库的 `web-standard-kit`。三个模块均位于本子项目目录。
 
-> 状态：实现规划，2026-09-26 更新。当前只有文档和 Overlay 骨架，没有可运行的
-> 采集器、监控服务、网页或构建脚本。下文是建议方案，本轮不开发功能或部署。
+> 状态：P0 契约与构建，2026-09-27 更新。已提供固定源码准备、Overlay 映射、
+> 协议校验与测试、基础二进制构建和打包入口。尚无采集器、监控 Listener、数据库或
+> 网页；目前二进制运行原生 FRP，不能当作已完成的监控产品部署。
 
-本轮需求将原来的“60 秒上报、最新内存快照、公开 HTML”调整为对齐
+当前需求将原来的“60 秒上报、最新内存快照、公开 HTML”调整为对齐
 `monitor-probe/agent` 的监控方案。本 README 为当前规划入口；
 `docs/frpc.md`、`docs/frps.md` 保留为历史设计，冲突时以本文为准。
+
+P0 本地入口（在本子项目根目录执行，要求 Python 3.11+、Git、Go 及 Node.js/npm）：
+
+```bash
+python3 scripts/frp.py prepare
+python3 -m unittest discover -s tests -p '*test*.py'
+python3 scripts/frp.py test
+python3 scripts/frp.py build --native
+# macOS arm64 本机的回归示例；其他宿主使用实际 GOOS-GOARCH 路径。
+python3 tests/smoke.py --agent dist/darwin-arm64/frp-monitor-agent --server dist/darwin-arm64/frp-monitor-server
+python3 scripts/frp.py package
+```
+
+`.env` 为可选本地配置，缺省值见 `.env.example`。初次准备和构建需要网络下载
+固定源码、Go 依赖和上游 Dashboard 的 npm 依赖；网页在构建时编译，运行二进制不需
+Node 服务。完整参数与工具链规则见 [scripts/README.md](scripts/README.md)，
+协议 v1、字段和质量约束见 [shared/README.md](shared/README.md)，
+测试覆盖与尚未实现的验收见 [tests/README.md](tests/README.md)。
+Linux 采集参考向量位于 `tests/fixtures/collect/`，P1 将接入真实采集代码对照。
+
+2026-09-27 的 P0 验证使用 macOS arm64、Go 1.26.5、Node 26.5.0 和 npm 11.17.0：
+构建脚本/协议测试、shared race/vet 和短时模糊测试通过；本机原生 FRP 的 wire v1/v2
+配置校验、无 Proxy 登录、TCP 转发、服务端重启后重连及 Dashboard 认证/资源访问通过。
+Linux amd64/arm64 已交叉构建并打包，尚未在两种 Linux 实机部署验收。
+同一环境重复构建 Linux amd64，两份二进制的 SHA256 均一致；发布包白名单及
+包内/包外校验和已验证。生成物和依赖只保留在 ignored 的 `.cache/`、`dist/`。
 
 ## 1. 推荐架构
 
@@ -99,7 +126,8 @@ FRP 登录失败时仍可查看主机及故障状态；监控失联时隧道继�
 推荐 systemd 宿主机部署；容器读数标注 namespace 范围，不能声称一定代表宿主机。
 算法验收包括：
 
-- CPU 使用累计时间差，iowait 计入 idle、guest 不重复相加；网速除以实际单调时间差。
+- CPU 使用累计时间差，iowait 计入 idle、guest 不重复相加；网速除以实际单调时间差，
+  有效 B/s 按参考实现向下取整。
 - 内存 used = MemTotal − MemAvailable；仅当字段缺失时回退到 MemFree + Buffers + Cached。
   MemAvailable 为 0 是有效数据。Swap used = SwapTotal − SwapFree。
 - 磁盘块大小 `bs = f_frsize > 0 ? f_frsize : f_bsize`，used =
@@ -259,7 +287,8 @@ HTML + CSS + 原生 ES Modules，保持 `wsk-` 组件、128 个令牌、`@layer 
 
 ## 8. 目标目录与构建
 
-以下是实施时的目标，本轮不创建空模块冒充实现：
+以下为目标目录。P0 已迁移 agent/monitor/web 的目录说明，实际 Go 实现在 shared；
+agent/monitor 子目录、页面、服务与安装配置将在对应阶段有实现时创建：
 
 ```text
 frp-monitor/
@@ -288,14 +317,13 @@ frp-monitor/
 ├── scripts/                   # 准备、校验、构建、套件同步、打包
 ├── tests/                     # 脱敏 fixture、协议和集成验收
 ├── packaging/                 # 服务、安装与发布模板
-├── overlay/                   # 历史预留，实施时迁移
 ├── .cache/                    # 上游临时树，ignored
-├── data/                      # 开发状态，实施前补充 ignore
+├── data/                      # 开发状态，ignored
 └── dist/                      # 发布包，ignored
 ```
 
-实施时将原 `overlay/client/telemetry`、`overlay/server/publicclientinfo`、
-`overlay/web` 迁到 agent/monitor/web，不维护两份业务代码。构建仍采用 Overlay：
+原 `overlay/client/telemetry`、`overlay/server/publicclientinfo`、
+`overlay/web` 已迁到 agent/monitor/web，不维护两份目录。构建仍采用 Overlay：
 显式映射到临时上游树的 `extension/frpmonitor/{agent,monitor,shared,web}`，
 共享上游 Go module；嵌入代码放到资源父目录，避免 `go:embed` 跨目录使用 `..`。
 生命周期入口通过窄接口依赖扩展，扩展不能反向 import 上游 client/server 根包而形成循环。
@@ -340,5 +368,7 @@ P1 是本地受控演示闭环，P2 才覆盖参考 agent 的全部采集类别�
 
 本子项目与 FRP 使用 Apache-2.0；参考的 monitor-probe/agent 和 monitor 为 MIT。
 移植代码、测试或其他受版权保护材料时，保留版权及 MIT 许可并更新
-`THIRD_PARTY_NOTICES.md`。本轮仅作设计调研，未复制上游实现代码。
+`THIRD_PARTY_NOTICES.md`。P0 的协议、构建脚本与合成向量为本项目实现，
+未复制 monitor-probe 实现或测试；FRP 源码仅获取到 ignored 临时目录用于构建，
+原生二进制随包保留其适用许可证与第三方声明。
 FRP 完整固定来源记录在 `upstream.lock` 与 `THIRD_PARTY_NOTICES.md`。

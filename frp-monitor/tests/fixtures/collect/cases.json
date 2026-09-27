@@ -1,0 +1,116 @@
+{
+  "schema_version": 1,
+  "reference_commit": "cebc5383abb5963abeb722877a2d82c1a7aea5c6",
+  "cases": [
+    {
+      "id": "cpu-iowait-idle-guest-not-counted-twice",
+      "operation": "cpu",
+      "input": {
+        "previous": "cpu  100 20 50 700 30 10 10 0 80 10\n",
+        "current": "cpu  140 20 60 730 40 10 20 0 110 10\n"
+      },
+      "expected": {"cpu": 60.0}
+    },
+    {
+      "id": "cpu-first-sample-is-unknown",
+      "operation": "cpu",
+      "input": {"previous": null, "current": "cpu  100 20 50 700 30 10 10 0 80 10\n"},
+      "expected": {"cpu": null, "reason": "no_baseline"},
+      "reference_expected": {"cpu": 0.0}
+    },
+    {
+      "id": "cpu-read-error-is-unknown",
+      "operation": "cpu",
+      "input": {"previous": "cpu  100 20 50 700 30 10 10 0 80 10\n", "current": null},
+      "expected": {"cpu": null, "reason": "read_error"},
+      "reference_expected": {"cpu": 0.0}
+    },
+    {
+      "id": "memory-available-zero-valid-swapcached-not-subtracted",
+      "operation": "memory",
+      "input": {"meminfo": "MemTotal: 8192 kB\nMemAvailable: 0 kB\nMemFree: 1024 kB\nBuffers: 128 kB\nCached: 2048 kB\nSwapTotal: 2048 kB\nSwapFree: 512 kB\nSwapCached: 256 kB\n"},
+      "expected": {"mem_total": 8388608, "mem_used": 8388608, "swap_total": 2097152, "swap_used": 1572864}
+    },
+    {
+      "id": "memory-fallback-only-when-available-absent",
+      "operation": "memory",
+      "input": {"meminfo": "MemTotal: 8192 kB\nMemFree: 1024 kB\nBuffers: 128 kB\nCached: 2048 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n"},
+      "expected": {"mem_total": 8388608, "mem_used": 5111808, "swap_total": 0, "swap_used": 0}
+    },
+    {
+      "id": "memory-available-above-total-saturates",
+      "operation": "memory",
+      "input": {"meminfo": "MemTotal: 2048 kB\nMemAvailable: 3072 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n"},
+      "expected": {"mem_total": 2097152, "mem_used": 0, "swap_total": 0, "swap_used": 0}
+    },
+    {
+      "id": "disk-frsize-and-free-reserve",
+      "operation": "disk",
+      "input": {"statvfs": [{"f_blocks": 2048, "f_bfree": 1024, "f_bavail": 960, "f_frsize": 4096, "f_bsize": 8192}]},
+      "expected": {"disk_total": 8388608, "disk_used": 4194304}
+    },
+    {
+      "id": "disk-fallback-blocksize-and-underflow",
+      "operation": "disk",
+      "input": {"statvfs": [{"f_blocks": 10, "f_bfree": 12, "f_bavail": 8, "f_frsize": 0, "f_bsize": 4096}]},
+      "expected": {"disk_total": 40960, "disk_used": 0}
+    },
+    {
+      "id": "disk-overflow-saturates-u64",
+      "operation": "disk",
+      "input": {"statvfs": [{"f_blocks": 18446744073709551615, "f_bfree": 0, "f_bavail": 0, "f_frsize": 4096, "f_bsize": 4096}]},
+      "expected": {"disk_total": 18446744073709551615, "disk_used": 18446744073709551615}
+    },
+    {
+      "id": "mount-filter-deduplicate-shadow-and-unescape",
+      "operation": "mounts",
+      "input": {"mounts": "/dev/test0 / ext4 rw 0 0\n/dev/test0 /bind ext4 rw 0 0\n/dev/test1 /home ext4 rw 0 0\ntmpfs /home tmpfs rw 0 0\noverlay /container overlay rw 0 0\n//storage.invalid/share /remote cifs rw 0 0\n/dev/test2 /test\\040volume ext4 rw 0 0\npool/a /pool-a zfs rw 0 0\npool/b /pool-b zfs rw 0 0\n"},
+      "expected": {"mount_points": ["/", "/test volume", "/pool-a"]}
+    },
+    {
+      "id": "socket-ipv4-timewait-added-once",
+      "operation": "sockets",
+      "input": {"sockstat": "sockets: used 90\nTCP: inuse 12 orphan 1 tw 9 alloc 80 mem 2\nUDP: inuse 3 mem 4\n", "sockstat6": "TCP6: inuse 5\nUDP6: inuse 2\n"},
+      "expected": {"tcp": 26, "udp": 5}
+    },
+    {
+      "id": "interface-explicit-exclusion-wins",
+      "operation": "interfaces",
+      "input": {"iface": "eth0,vmbr0,-eth0", "interfaces": [{"name": "eth0", "hardware": true}, {"name": "vmbr0", "uevent": "DEVTYPE=bridge\n"}, {"name": "lo", "type": "772"}]},
+      "expected": {"counted": ["vmbr0"]}
+    },
+    {
+      "id": "interface-kernel-topology-and-modem",
+      "operation": "interfaces",
+      "input": {"iface": "", "interfaces": [{"name": "eth0", "hardware": true}, {"name": "testport", "hardware": true, "lower": ["eth0"]}, {"name": "mesh0", "type": "65534"}, {"name": "modem0", "hardware": true, "type": "65534"}, {"name": "guest0", "brport": true}, {"name": "eth1", "type": "1"}]},
+      "expected": {"counted": ["eth0", "eth1", "modem0"]}
+    },
+    {
+      "id": "network-actual-time-and-integer-truncation",
+      "operation": "network",
+      "input": {"elapsed_seconds": 2.5, "previous": {"eth0": [1000, 4000]}, "current": {"eth0": [1511, 5024]}},
+      "expected": {"net_rx_total": 1511, "net_tx_total": 5024, "net_rx": 204, "net_tx": 409}
+    },
+    {
+      "id": "network-first-sample-keeps-lifetime-totals",
+      "operation": "network",
+      "input": {"elapsed_seconds": null, "previous": null, "current": {"eth0": [1000, 4000]}},
+      "expected": {"net_rx_total": 1000, "net_tx_total": 4000, "net_rx": null, "net_tx": null, "reason": "no_baseline"},
+      "reference_expected": {"net_rx": 0, "net_tx": 0}
+    },
+    {
+      "id": "network-counter-rollback-rebases",
+      "operation": "network",
+      "input": {"elapsed_seconds": 1.0, "previous": {"eth0": [1000, 4000]}, "current": {"eth0": [10, 20]}},
+      "expected": {"net_rx_total": 10, "net_tx_total": 20, "net_rx": null, "net_tx": null, "reason": "counter_reset"},
+      "reference_expected": {"net_rx": 0, "net_tx": 0}
+    },
+    {
+      "id": "network-new-interface-does-not-book-lifetime",
+      "operation": "network",
+      "input": {"elapsed_seconds": 1.0, "previous": {"eth0": [1000, 4000]}, "current": {"eth0": [1100, 4100], "eth1": [900000, 800000]}},
+      "expected": {"net_rx_total": 901100, "net_tx_total": 804100, "net_rx": null, "net_tx": null, "reason": "scope_changed"},
+      "reference_expected": {"net_rx": 100, "net_tx": 100}
+    }
+  ]
+}

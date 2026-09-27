@@ -1,6 +1,102 @@
-# Scripts
+# 构建入口
 
-实现阶段在此放置上游源码准备、Commit 校验、补丁应用、Overlay 组装、测试和打包脚本。
+`scripts/frp.py` 是 Python 3.11+ 标准库 CLI；运行平台为 macOS/Linux，需要 Git、
+本机 Go、Node.js 与 npm。当前输出仍是 **FRP baseline**：原生 frpc/frps 功能和
+Dashboard 保留，尚未接入 Telemetry 生命周期，也没有本项目监控网页或服务。
 
-当前没有可执行脚本；待第一批实现落地后再提供真实的 `prepare`、`build`、`test` 和
-`package` 入口。
+从 `frp-monitor/` 运行：
+
+```sh
+python3 scripts/frp.py prepare
+python3 scripts/frp.py test
+python3 scripts/frp.py build --native
+python3 tests/smoke.py --agentdist/darwin-arm64/frp-monitor-agent --serverdist/darwin-arm64/frp-monitor-server
+python3 scripts/frp.py build
+python3 scripts/frp.py package
+```
+
+上例 smoke 路径适用于 Apple Silicon；其他主机使用 `build --native` 返回的目录。
+命令成功后 stdout 输出 JSON，进度和编译日志写入 stderr。可从任意工作目录调用脚本。
+同时只允许一个 CLI 使用同一缓存，避免准备/构建互相覆盖。
+
+| 命令 | 行为 |
+| --- | --- |
+| `prepare` | 严格校验锁文件，获取并核验上游 annotated tag 和 Commit，在临时目录应用补丁和映射扩展，成功后发布源码树 |
+| `test` | 重新 prepare，运行 `pkg/config/...`、`pkg/msg/...`、`pkg/util/...` 和 `extension/frpmonitor/shared/...` 的本机 Go 测试；不运行 Docker/e2e |
+| `build` | 重新 prepare，构建原生 frpc/frps Dashboard，再构建 Linux amd64 和 arm64 两套二进制 |
+| `build --native` | 使用本机 OS/架构，供本地 smoke；支持 macOS/Linux amd64/arm64 |
+| `build --target linux/amd64` | 只构建指定目标；可重复 `--target`，不能与 `--native` 同用 |
+| `package` | 重新完成两个 Linux 目标的构建，生成两个 tar.gz 及外部 `SHA256SUMS` |
+
+## 配置与路径
+
+默认安全读取子项目根 `.env`，仅接受以下三个键；同名进程环境变量优先：
+
+| 键 | 默认值 | 约束 |
+| --- | --- | --- |
+| `FRP_MONITOR_CACHE_DIR` | `.cache` | 位于本子项目 `.cache/` 内，可为绝对路径或相对路径 |
+| `FRP_MONITOR_OUTPUT_DIR` | `dist` | 位于本子项目 `dist/` 内，可为绝对路径或相对路径 |
+| `FRP_MONITOR_UPSTREAM_MIRROR` | `upstream.lock` 的官方仓库 | 可省略或留空；也可指定本地 Git 镜像路径或不含凭据的 HTTPS URL |
+
+`.env` 只按 UTF-8 读取字面量赋值，不运行 shell、不执行文件、不展开变量。
+接受简单单/双引号和未引用值后的 ` # 注释`；白名单键中的 `$`、反引号及控制字符拒绝。
+其他键忽略，因此 Git 凭据或业务配置不会加入构建参数。生成路径不允许 `..`、
+项目外路径或符号链接，确保产物留在已忽略的目录内。
+
+默认目录：
+
+```text
+.cache/upstream/repository.git   固定上游对象缓存
+.cache/upstream/worktree/        本次准备的源码，无 .git
+.cache/go-build/                 Go 编译缓存
+.cache/go-mod/                   Go module 缓存
+.cache/npm/                      npm 缓存
+.cache/web-assets/               原生 Dashboard 编译结果缓存
+dist/linux-amd64/               frp-monitor-agent、frp-monitor-server、BUILD.json
+dist/linux-arm64/               同上
+dist/<本机OS>-<本机架构>/         --native 产物
+```
+
+## 固定来源与构建边界
+
+- `upstream.lock` 必须完整且只有当前 schema 字段。仓库固定为官方 FRP，校验
+  `tag_object` 的对象类型、完整 SHA 和 annotated tag 解引用后的 Commit。
+  Git replace refs 被禁用；镜像只能提供锁文件指定的身份，不能改变版本。
+- 缓存源码使用 `git archive`；路径穿越、外部链接和特殊文件拒绝。上游内部文档
+  符号链接物化成普通文件。每次 prepare 都重新组装，并先移除上一份带工具元数据
+  的源码树；组装/补丁失败不会发布半成品。初始化时锁文件或配置解析失败可能保留
+  旧的已验证树，但命令仍失败。未带工具元数据的目录不会被删除。
+- `patches/series` 按列出的顺序应用补丁，先 `git apply --check` 再应用。
+  文件名必须为 `0001-name.patch` 形式，不允许重复项、路径穿越或补丁 symlink。
+- 仅将 `agent/`、`monitor/`、`shared/`、`web/` 映射到
+  `extension/frpmonitor/`；使用上游 `github.com/fatedier/frp` module。
+  扩展中的 symlink、`.env*`、依赖目录和嵌套 Go module 会被拒绝。
+- 原生 Dashboard 来自同一固定上游源码的 `web/frpc` 与 `web/frps`，使用该树
+  的 `web/package-lock.json` 执行 `npm ci` 及两个 workspace 的 `npm run build`。
+  不使用 `noweb`。缓存按全部网页源文件摘要、Node/npm 版本分组；使用前重新
+  计算两个完整 dist 树的摘要，缺文件、额外文件或内容变化会触发重建。
+- Go 使用本机工具链，显式 `GOTOOLCHAIN=local`、`GOENV=off`、`GOWORK=off`、
+  `CGO_ENABLED=0`、`-mod=readonly`、`-trimpath`、`-buildvcs=false` 和空 build ID。
+  清除影响架构、实验功能及默认调试行为的 Go 环境选项，不自动下载 Go 工具链。
+  工具链必须满足上游 `go.mod`；`BUILD.json` 记录本次 Go/Node/npm 版本、上游身份、
+  构建脚本/补丁/扩展摘要、原生网页资源摘要以及二进制摘要。
+- 重现构建要求相同源码、依赖、操作系统、Go/Node/npm 工具链及构建条件；不承诺
+  不同工具链版本逐字节相同。tar.gz 文件排序、权限、所有者和时间戳固定。
+- 每个架构的两个二进制均成功后才替换其目录。构建失败时旧架构产物可能保留，
+  多架构构建也可能只完成前一个目标；应以命令退出码和最终 JSON 为成功依据，
+  不将失败后残留目录当作本轮成功产物。
+
+发布包只包含两个二进制、`BUILD.json`、`LICENSE`、`THIRD_PARTY_NOTICES.md`、
+`upstream.lock`、说明及包内 `SHA256SUMS`。不会打包 `.env`、本地运行数据、
+上游临时树、npm 依赖目录或源码。`package` 失败时同样不能沿用残留发布包。
+
+## 离线脚本测试
+
+```sh
+python3 -m unittest discover -s tests -p pipeline_test.py -v
+```
+
+测试用临时本地 Git 仓库构造 annotated tag，不联网或运行 Go/npm；覆盖锁文件与
+Tag/Commit 不匹配、安全配置、路径与 symlink、重复 prepare、成功和失败补丁、
+归档路径、Git replace refs 隔离、原生网页缓存完整性、固定发布包内容及校验和。
+FRP 实际转发与重连验收另见 `tests/README.md`。

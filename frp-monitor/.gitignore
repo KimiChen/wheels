@@ -1,0 +1,12 @@
+# Local configuration, runtime state and reproducible build workspaces.
+/.env
+/.env.*
+!/.env.example
+/.cache/
+/data/
+/dist/
+/build/
+__pycache__/
+*.py[cod]
+*.test
+*.out
