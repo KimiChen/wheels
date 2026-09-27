@@ -1,4 +1,4 @@
-import {UNKNOWN} from "./format.mjs";
+import {UNKNOWN, bytes, decimal, percent, percentage, ratio, capacity, loadText} from "./format.mjs";
 import {windows, finite, count, dateText, coverage, failureRate, chart, resourceCharts} from "./history-data.mjs";
 import {connectHistory} from "./history-transport.mjs";
 
@@ -21,11 +21,19 @@ function metric(label, className = "") {
 }
 function createChart(spec) {
   const element = el("figure", "fm-history-chart"), heading = el("figcaption", "fm-chart-heading");
-  const range = el("span", "fm-chart-range"); heading.append(el("span", "", spec.title), range);
-  const plot = svg("svg", {viewBox: "0 0 440 120", role: "img", preserveAspectRatio: "none"});
-  const title = svg("title"), desc = svg("desc"), drawing = svg("g", {transform: "translate(0 5)"});
+  if (spec.key) element.dataset.metric = spec.key;
+  const current = el("strong", "fm-chart-current", UNKNOWN), liveNote = el("p", "fm-chart-live-note", "等待实时采样");
+  current.hidden = !spec.key; liveNote.hidden = !spec.key;
+  const range = el("span", "fm-chart-range"); heading.append(el("span", "", spec.title), current);
+  const plotWrap = el("div", "fm-chart-plot"), axis = el("div", "fm-chart-axis");
+  axis.setAttribute("aria-hidden", "true");
+  const plot = svg("svg", {viewBox: "0 0 450 130", role: "img", preserveAspectRatio: "none"});
+  const title = svg("title"), desc = svg("desc"), drawing = svg("g", {transform: "translate(5 10)"});
   title.textContent = spec.title;
+  plotWrap.hidden = true;
   plot.append(title, desc);
+  const ticks = Array.from({length: 3}, () => el("span"));
+  axis.append(...ticks); plotWrap.append(axis, plot);
   for (const y of [0, 55, 110]) drawing.append(svg("line", {x1: 0, x2: 440, y1: y, y2: y, class: "fm-chart-grid"}));
   const paths = spec.series.map((_, index) => {
     const group = svg("g", {class: `fm-chart-series fm-chart-series-${index}`});
@@ -35,12 +43,18 @@ function createChart(spec) {
   const empty = el("p", "fm-chart-empty", "暂无有效采样"), labels = el("div", "fm-chart-times");
   const from = el("time"), to = el("time"); labels.append(from, to);
   const summaries = el("ul", "fm-chart-summary"), summaryRows = spec.series.map((_, index) => el("li", `fm-series-label-${index}`));
-  summaries.append(...summaryRows); element.append(heading, plot, empty, labels, summaries);
-  return {element, update(rows, data) {
+  summaries.append(...summaryRows);
+  const legend = el("ul", "fm-chart-legend"); legend.hidden = spec.series.length < 2;
+  spec.series.forEach((series, index) => legend.append(el("li", `fm-series-label-${index}`, series.name)));
+  const details = el("details", "fm-chart-details"); details.append(el("summary", "", "采样详情"), range, summaries);
+  element.append(heading, liveNote, plotWrap, empty, labels, legend, details);
+  return {element, live(value, note) { write(current, value); write(liveNote, note); }, update(rows, data) {
     const result = chart(rows, spec.series, {window: data.window, generatedAt: data.generated_at, step: data.step_seconds, ceiling: spec.ceiling});
-    if (result.empty) plot.setAttribute("hidden", ""); else plot.removeAttribute("hidden");
+    plotWrap.hidden = result.empty;
     empty.hidden = !result.empty;
     const ceiling = result.empty ? UNKNOWN : spec.series[0].format(result.maximum);
+    const maximum = result.maximum, middle = typeof maximum === "bigint" ? maximum / 2n : maximum / 2, zero = typeof maximum === "bigint" ? 0n : 0;
+    [maximum, middle, zero].forEach((value, index) => { ticks[index].textContent = result.empty ? UNKNOWN : spec.series[0].format(value); });
     write(range, result.empty ? UNKNOWN : `0 – ${ceiling}`);
     title.textContent = `${spec.title}，纵轴 0 至 ${ceiling}`;
     desc.textContent = `${windows[data.window]}。${result.summaries.join("；")}。缺失时间段留白，不补零。`;
@@ -79,13 +93,13 @@ export function createHistoryPanel(body, nodeID) {
   rangeSwitch.setAttribute("role", "group"); rangeSwitch.setAttribute("aria-label", "历史时间范围");
   let section = "resources", selected = "1h", last = null, stopped = false;
   const sectionButtons = new Map(), rangeButtons = new Map();
-  for (const [key, name] of [["resources", "资源"], ["network", "网络延迟"]]) {
+  for (const [key, name] of [["resources", "详情"], ["network", "网络"]]) {
     const button = el("button", "fm-history-tab", name); button.type = "button";
     button.setAttribute("aria-pressed", String(section === key)); sectionSwitch.append(button); sectionButtons.set(key, button);
     button.addEventListener("click", () => { section = key; applySection(); });
   }
   for (const [key, name] of Object.entries(windows)) {
-    const button = el("button", "fm-history-range", key); button.type = "button";
+    const button = el("button", "fm-history-range", {"1h": "1 小时", "6h": "6 小时", "24h": "1 天", "7d": "7 天"}[key]); button.type = "button";
     button.setAttribute("aria-label", name); button.setAttribute("aria-pressed", String(selected === key)); rangeSwitch.append(button); rangeButtons.set(key, button);
     button.addEventListener("click", () => {
       selected = key; for (const [value, item] of rangeButtons) item.setAttribute("aria-pressed", String(value === selected));
@@ -95,7 +109,7 @@ export function createHistoryPanel(body, nodeID) {
   const controls = el("div", "fm-history-controls"); controls.append(rangeSwitch, refresh);
   toolbar.append(sectionSwitch, controls);
   const status = el("p", "fm-history-status", "正在准备历史记录…"); status.setAttribute("role", "status");
-  const storage = el("p", "fm-history-storage"), content = el("div", "fm-history-content"); content.hidden = true;
+  const storage = el("p", "fm-history-storage"), content = el("div", "fm-history-content"); storage.hidden = true;
   const chartNote = el("p", "fm-history-note");
   const charts = el("div", "fm-history-charts"), graphs = resourceCharts.map(createChart); charts.append(...graphs.map(g => g.element));
   const probeTitle = el("h4", "", "TCP 探测"), probeNote = el("p", "fm-history-note", "失败率是所选范围内 TCP 建连失败次数占比，不表示 IP 丢包率。耗时曲线仅汇总成功建连；全部失败的时间段留白。"), probeState = el("p", "fm-history-storage"), probeEmpty = el("p", "fm-history-empty", "暂无 TCP 探测记录。"), probeList = el("div", "fm-probe-list");
@@ -103,9 +117,9 @@ export function createHistoryPanel(body, nodeID) {
   resources.id = `${identifier}-resources`; probeGroup.id = `${identifier}-network`;
   sectionButtons.get("resources")?.setAttribute("aria-controls", resources.id); sectionButtons.get("network")?.setAttribute("aria-controls", probeGroup.id);
   resources.append(chartNote, charts); probeGroup.append(probeTitle, probeState, probeNote, probeEmpty, probeList);
-  content.append(resources, probeGroup); body.append(toolbar, status, storage, content);
+  content.append(resources, probeGroup); body.append(toolbar, storage, content, status);
   function applySection() {
-    resources.hidden = last?.storage.state === "disabled" || section !== "resources";
+    resources.hidden = section !== "resources";
     probeGroup.hidden = section !== "network";
     for (const [key, button] of sectionButtons) button.setAttribute("aria-pressed", String(section === key));
   }
@@ -120,6 +134,7 @@ export function createHistoryPanel(body, nodeID) {
     last = data;
     const state = data.storage.state, dropped = count(data.storage.dropped) ? data.storage.dropped : null;
     storage.dataset.state = state;
+    storage.hidden = state === "ready";
     write(storage, state === "disabled" ? "指标历史未启用，暂无历史曲线；今日与套餐流量正常累计。" : state === "degraded" ? `指标历史暂不可用，曲线记录可能不完整${dropped ? `；已丢弃 ${dropped} 条记录` : ""}。缺失数据不会补成 0。` : "历史按分钟归档，最新记录可能延迟约 1 分钟；图表缺口表示没有有效采样。");
     content.hidden = false; applySection();
     write(chartNote, `${windows[data.window]} · 每个时间段 ${coverage(data.step_seconds)}。数值仅汇总有效采样；缺失时段留白。`);
@@ -139,6 +154,16 @@ export function createHistoryPanel(body, nodeID) {
   const connection = connectHistory({nodeID, onData, onState});
   refresh.addEventListener("click", () => connection.refresh());
   return {
+    updateMetrics(metrics) {
+      const current = {
+        cpu: [percentage(percent(metrics.cpu)), "当前使用率"],
+        memory: [percentage(ratio(metrics.mem_used, metrics.mem_total)), capacity(metrics.mem_used, metrics.mem_total)],
+        disk: [percentage(ratio(metrics.disk_used, metrics.disk_total)), capacity(metrics.disk_used, metrics.disk_total)],
+        network: [`↓ ${bytes(decimal(metrics.net_rx), true)} · ↑ ${bytes(decimal(metrics.net_tx), true)}`, "接收 / 发送 · 当前速率"],
+        load: [loadText(metrics.load), "1 / 5 / 15 分钟"],
+      };
+      graphs.forEach((graph, index) => graph.live(...current[resourceCharts[index].key]));
+    },
     setVisible(next) { if (!stopped) connection.activate(next); },
     stop() { stopped = true; connection.stop(); },
   };

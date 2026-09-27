@@ -1,4 +1,4 @@
-import {UNKNOWN, bytes, cumulative, capacity, decimal, percent, percentage, uptime, timeText, sessionLabels, freshnessLabels, frpLabel, reconciliationText} from "./format.mjs";
+import {UNKNOWN, bytes, cumulative, decimal, percent, percentage, loadText, uptime, timeText, sessionLabels, freshnessLabels, frpLabel, reconciliationText} from "./format.mjs";
 import {nodeID, hardwareValue, cpuModel} from "./node-data.mjs";
 import {billingText, todayText, planText, dateTime} from "./node-settings.mjs";
 import {connect} from "./transport.mjs";
@@ -29,8 +29,8 @@ function patchNode(node) {
   put("name", node.name); put("session", sessionLabels[node.session]); labels.get("session").dataset.state = node.session;
   put("freshness", `数据${freshnessLabels[node.freshness]}`); labels.get("freshness").dataset.state = node.freshness;
   put("uptime", uptime(metrics.uptime)); put("agent", hardwareValue(hardware?.agent_version));
-  put("os", hardwareValue(hardware?.os)); put("cpu-model", cpuModel(hardware)); put("cpu", percentage(percent(metrics.cpu)));
-  put("memory", capacity(metrics.mem_used, metrics.mem_total)); put("disk", capacity(metrics.disk_used, metrics.disk_total));
+  put("os", hardwareValue(hardware?.os)); put("cpu-model", cpuModel(hardware)); put("load", loadText(metrics.load));
+  put("memory-total", bytes(decimal(metrics.mem_total))); put("disk-total", bytes(decimal(metrics.disk_total)));
   const environment = [hardwareValue(hardware?.arch), hardwareValue(hardware?.virt)].filter(value => value !== UNKNOWN);
   put("environment", environment.length ? environment.join(" · ") : UNKNOWN);
   for (const [key, field] of [["processes", "procs"], ["tcp", "tcp"], ["udp", "udp"]]) put(key, decimal(metrics[field]));
@@ -51,6 +51,7 @@ function patchNode(node) {
   put("interval", Number.isFinite(node.interval_seconds) && node.interval_seconds > 0 ? `${node.interval_seconds} 秒 / 次` : UNKNOWN);
   write(byID("footer-sample"), `CPU ${percentage(percent(metrics.cpu))} · ↑ ${bytes(decimal(metrics.net_tx), true)} · ↓ ${bytes(decimal(metrics.net_rx), true)}`);
   if (!panel) panel = createHistoryPanel(historyHost, id);
+  panel.updateMetrics(metrics);
   panel.setVisible(document.visibilityState !== "hidden");
 }
 function onSnapshot(data) {

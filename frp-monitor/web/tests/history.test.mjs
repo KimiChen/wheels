@@ -29,7 +29,7 @@ test("SVG paths leave explicit and implicit sample gaps without turning zero int
 });
 test("network chart scales BigInts only after taking a bounded ratio", () => {
   const rows = [point("59", null, {net_rx: "9007199254740993", net_tx: "18014398509481986"})];
-  const graph = chart(rows, resourceCharts[2].series, {window: "1h", generatedAt: generated_at, step: 60});
+  const graph = chart(rows, resourceCharts.find(spec => spec.key === "network").series, {window: "1h", generatedAt: generated_at, step: 60});
   assert.equal(graph.maximum, 18014398509481986n);
   assert.equal(graph.paths[0].dots[0].y, "55.00");
   assert.equal(graph.paths[1].dots[0].y, "0.00");

@@ -1,5 +1,5 @@
 import {adminClient, adminSnapshot, probeDocument, nextProbeDocument, errorText, fieldText, byteText, reconciliationLabels, proxyLabels, clientProxyLabels} from "./admin-data.mjs";
-import {settingsRequest, priceInput, gibInput, localDateInput, todayText, planText} from "./node-settings.mjs";
+import {settingsRequest, priceInput, gibInput, localDateInput, todayText, planText, dateTime} from "./node-settings.mjs";
 import {sessionLabels, freshnessLabels, frpLabel, bytes, decimal, percent, percentage, capacity, timeText} from "./format.mjs";
 
 const $ = id => document.getElementById(id);
@@ -8,19 +8,28 @@ let loggedIn = false, busy = false, snapshot = null, selectedID = null, poll = n
 const cards = new Map();
 const el = (tag, text, className) => { const node = document.createElement(tag); if (text !== undefined) node.textContent = text; if (className) node.className = className; return node; };
 const safe = raw => typeof raw === "string" || (typeof raw === "number" && Number.isFinite(raw)) ? String(raw) : "—";
-function notice(text, state = "ready") { $("notice").textContent = text; $("notice").dataset.state = state; }
-function clearSecret() { $("secret-id").value = ""; $("secret-token").value = ""; $("credential-result").hidden = true; }
+function notice(text, state = "ready") {
+  for (const box of [$("notice"), ...document.querySelectorAll("[data-dialog-notice]")]) { box.hidden = true; box.textContent = ""; }
+  const dialog = [...document.querySelectorAll("dialog[open]")].at(-1);
+  const box = dialog?.querySelector("[data-dialog-notice]") ?? $("notice");
+  box.textContent = text; box.dataset.state = state; box.hidden = !text;
+}
+function openDialog(id) { const dialog = $(id); dialog.hidden = false; if (!dialog.open) dialog.showModal(); }
+function clearSecret() { $("secret-id").value = ""; $("secret-token").value = ""; $("credential-result").close(); $("credential-result").hidden = true; }
 function showSecret(data) {
   if (!data || typeof data.id !== "string" || typeof data.token !== "string" || data.token.length < 32 || data.token.length > 512) throw new Error("invalid_credential");
-  $("secret-id").value = data.id; $("secret-token").value = data.token; $("credential-result").hidden = false;
+  $("node-panel").close();
+  $("secret-id").value = data.id; $("secret-token").value = data.token; openDialog("credential-result");
   $("secret-token").focus(); $("secret-token").select();
 }
 function locked(message = "请使用 GitHub 登录。", disabled = false) {
+  for (const dialog of document.querySelectorAll("dialog[open]")) dialog.close();
   client.clear(); loggedIn = false; refreshing = false; clearTimeout(poll); probeEpoch++;
   snapshotEpoch++; snapshot = null; selectedID = null; probes = null; pendingAction = null;
   clearSecret(); cards.clear(); $("node-list").replaceChildren(); $("node-details").replaceChildren(); $("server-registry").replaceChildren(); $("probe-rows").replaceChildren();
   $("binding-form").reset(); $("settings-form").reset(); settingsRevision = null; settingsDirty = false; $("create-form").reset(); $("node-search").value = "";
   $("node-title").textContent = ""; $("node-id").textContent = ""; $("node-session").textContent = "";
+  for (const id of ["settings-current", "settings-status", "snapshot-at", "node-count", "confirm-copy"]) $(id).textContent = "";
   $("node-panel").hidden = true; $("confirm-action").hidden = true; $("workspace").hidden = true; $("logout").hidden = true; $("login-panel").hidden = false; $("github-login").hidden = disabled;
   notice(message, disabled ? "error" : "ready");
 }
@@ -38,7 +47,8 @@ async function refreshNodes(force = false) {
     if (!loggedIn || generation !== snapshotEpoch) return;
     snapshot = next; renderNodes(); renderRegistry();
     $("probe-health").hidden = next.probes_state !== "degraded";
-    notice(next.credentials_state === "degraded" ? "节点配置暂不可用，请检查服务端后再操作。" : "私有快照已更新。每 10 秒自动刷新，编辑中的表单不会被覆盖。", next.credentials_state === "degraded" ? "error" : "ready");
+    if (next.credentials_state === "degraded") notice("节点配置暂不可用，请检查服务端后再操作。", "error");
+    else if (!document.querySelector("dialog[open]")) notice("");
   } catch (error) { if (loggedIn && generation === snapshotEpoch) notice(`${errorText(error)}${snapshot ? " 当前显示上次成功快照。" : " 尚无可用快照。"}`, "error"); }
   finally { if (generation === snapshotEpoch) { refreshing = false; if (loggedIn) poll = setTimeout(refreshNodes, 10000); } }
 }
@@ -59,20 +69,31 @@ function renderNodes() {
   const nodes = snapshot.nodes, known = new Set(nodes.map(node => node.id));
   for (const [id, card] of cards) if (!known.has(id)) { card.remove(); cards.delete(id); }
   for (const node of nodes) {
-    let button = cards.get(node.id);
-    if (!button) {
-      button = el("button"); button.type = "button";
-      const identity = el("span"); identity.append(el("strong"), el("small")); button.append(identity, el("span", undefined, "fm-badge"));
-      button.addEventListener("click", () => selectNode(node.id)); cards.set(node.id, button); $("node-list").append(button);
+    let row = cards.get(node.id);
+    if (!row) {
+      row = $("admin-node-row").content.firstElementChild.cloneNode(true);
+      for (const button of row.querySelectorAll("[data-node-action]")) button.addEventListener("click", () => selectNode(node.id, button.dataset.nodeAction));
+      cards.set(node.id, row); $("node-list").append(row);
     }
-    button.querySelector("strong").textContent = node.name;
-    button.querySelector("small").textContent = freshnessLabels[node.freshness] ?? "等待报告";
-    const badge = button.querySelector(".fm-badge"); badge.textContent = sessionLabels[node.session]; badge.dataset.state = node.session;
-    button.disabled = busy;
+    const put = (key, value) => { row.querySelector(`[data-cell="${key}"]`).textContent = value; };
+    const settings = node.settings ?? {}, plan = planText(node.traffic_plan), price = priceInput(settings.price_minor, settings.currency);
+    put("name", node.name); put("id", `#${node.id}`);
+    for (const family of ["ipv4", "ipv6"]) {
+      const value = node.facts?.[family]; put(family, value?.quality === "ok" && typeof value.value === "string" ? value.value : "—");
+    }
+    put("session", sessionLabels[node.session]); row.querySelector('[data-cell="session"]').dataset.state = node.session;
+    put("visibility", `${settings.is_public === true ? "公开" : settings.is_public === false ? "不公开" : "—"} · ${freshnessLabels[node.freshness]}`);
+    put("used", plan.used); put("quota", `/ ${plan.quota}`);
+    put("price", price === "" ? "未设置" : `${price} ${settings.currency}`); put("cycle", settings.billing_cycle || "—");
+    put("expires", settings.expires_at_ms == null ? "未设置" : dateTime(settings.expires_at_ms));
+    for (const button of row.querySelectorAll("button")) {
+      button.disabled = busy;
+      if (button.title) button.setAttribute("aria-label", `${node.name} · ${button.title}`);
+    }
   }
   $("node-count").textContent = nodes.length;
-  $("snapshot-at").textContent = `快照 ${timeText(snapshot.generated_at)}`;
-  if (!known.has(selectedID)) selectNode(nodes[0]?.id ?? null); else renderDetail();
+  $("snapshot-at").textContent = `更新于 ${timeText(snapshot.generated_at)} · 每 10 秒同步`;
+  if (selectedID && !known.has(selectedID)) selectNode(null); else renderDetail();
   filterNodes();
 }
 function filterNodes() {
@@ -81,14 +102,29 @@ function filterNodes() {
   $("nodes-empty").hidden = count > 0;
   $("nodes-empty").textContent = snapshot?.nodes.length ? "没有匹配的节点。" : "尚无节点，创建凭据后即可接入。";
 }
-function selectNode(id) {
+function selectNode(id, pane = "settings") {
+  const changed = selectedID !== id;
   selectedID = id; pendingAction = null; $("confirm-action").hidden = true;
-  for (const [key, card] of cards) card.setAttribute("aria-pressed", String(key === id));
   const node = snapshot?.nodes.find(item => item.id === id);
   $("node-panel").hidden = !node;
-  $("binding-form").reset();
-  if (node) for (const key of ["server_id", "user", "raw_client_id"]) $("binding-form").elements[key].value = node.frp_binding?.[key] ?? "";
-  loadSettings(node); renderDetail();
+  if (!node) { $("node-panel").close(); $("node-details").replaceChildren(); loadSettings(null); $("binding-form").reset(); return; }
+  if (changed || !settingsDirty) loadSettings(node);
+  if (changed) {
+    $("binding-form").reset();
+    for (const key of ["server_id", "user", "raw_client_id"]) $("binding-form").elements[key].value = node.frp_binding?.[key] ?? "";
+  }
+  renderDetail(); showEditorPane(pane); openDialog("node-panel");
+}
+function showEditorPane(pane) {
+  for (const panel of document.querySelectorAll("[data-editor-panel]")) panel.hidden = panel.dataset.editorPanel !== pane;
+  for (const button of document.querySelectorAll("[data-editor-pane]")) button.setAttribute("aria-pressed", String(button.dataset.editorPane === pane));
+}
+function showView() {
+  const key = ["nodes", "probes", "frp"].includes(location.hash.slice(1)) ? location.hash.slice(1) : "nodes";
+  for (const panel of document.querySelectorAll("[data-admin-panel]")) panel.hidden = panel.dataset.adminPanel !== key;
+  for (const link of document.querySelectorAll("[data-admin-view]")) {
+    if (link.dataset.adminView === key) link.setAttribute("aria-current", "page"); else link.removeAttribute("aria-current");
+  }
 }
 function renderDetail() {
   const node = snapshot?.nodes.find(item => item.id === selectedID); if (!node) return;
@@ -101,7 +137,7 @@ function renderDetail() {
   box.append(rowList([["今日接收 / 发送", `${today.rx} / ${today.tx}`], ["今日统计范围", today.note], ["套餐已用 / 额度", `${plan.used} / ${plan.quota}`], ["套餐计费", plan.note]]));
   box.append(rowList([["资源新鲜度", freshnessLabels[node.freshness]], ["最近资源报告", timeText(node.metrics_at)], ["监控最近活动", timeText(node.last_seen)], ["FRP 控制连接 · 节点报告", frpLabel(node.frp?.control_state)]]));
   box.append(el("h3", "主机资源"));
-  if (node.metrics) box.append(rowList([["CPU 使用率", percentage(percent(node.metrics.cpu))], ["内存用量", capacity(node.metrics.mem_used, node.metrics.mem_total)], ["主机接收速率", bytes(decimal(node.metrics.net_rx), true)], ["主机发送速率", bytes(decimal(node.metrics.net_tx), true)]]));
+  if (node.metrics) box.append(rowList([["CPU 使用率", percentage(percent(node.metrics.cpu))], ["内存用量", capacity(node.metrics.mem_used, node.metrics.mem_total)], ["硬盘用量", capacity(node.metrics.disk_used, node.metrics.disk_total)], ["主机接收速率", bytes(decimal(node.metrics.net_rx), true)], ["主机发送速率", bytes(decimal(node.metrics.net_tx), true)]]));
   else box.append(el("p", "尚未收到主机资源报告。", "fa-muted"));
   if (node.facts) box.append(rowList([["采集范围", node.facts.scope], ["主机名", fieldText(node.facts.hostname)], ["系统 / 架构", `${fieldText(node.facts.os)} / ${fieldText(node.facts.arch)}`], ["内核", fieldText(node.facts.kernel)], ["CPU", fieldText(node.facts.cpu_name)], ["核心数", fieldText(node.facts.cpu_cores)], ["IPv4", fieldText(node.facts.ipv4)], ["IPv6", fieldText(node.facts.ipv6)], ["虚拟化", fieldText(node.facts.virt)], ["Agent 版本", fieldText(node.facts.agent_version)]]));
   else box.append(el("p", "主机详情将在节点首次报告后显示。", "fa-muted"));
@@ -206,7 +242,7 @@ $("logout").addEventListener("click", async () => {
 });
 $("create-form").addEventListener("submit", event => {
   event.preventDefault(); const name = $("node-name").value.trim(); if (!name) return;
-  mutation(async () => { clearSecret(); const result = await client.request("/api/admin/v1/nodes", {method: "POST", body: {name}}); showSecret(result); $("create-form").reset(); await refreshNodes(true); if (snapshot?.nodes.some(node => node.id === result.id)) selectNode(result.id); }, "节点已创建。请保存上方一次性令牌。");
+  mutation(async () => { clearSecret(); const result = await client.request("/api/admin/v1/nodes", {method: "POST", body: {name}}); $("create-dialog").close(); showSecret(result); $("create-form").reset(); await refreshNodes(true); }, "节点已创建。请保存一次性令牌。");
 });
 $("binding-form").addEventListener("submit", event => {
   event.preventDefault(); const id = selectedID, form = $("binding-form"); if (!id) return;
@@ -226,12 +262,18 @@ $("confirm-yes").addEventListener("click", () => {
     await refreshNodes(true);
   }, action.kind === "rotate" ? "令牌已轮换。请保存上方新令牌并更新节点。" : "节点接入权限已撤销。");
 });
-$("secret-clear").addEventListener("click", () => { clearSecret(); $("node-name").focus(); });
+$("secret-clear").addEventListener("click", () => { clearSecret(); if ($("node-panel").open) $("rotate").focus(); else $("add-node").focus(); });
 $("secret-copy").addEventListener("click", async () => {
   try { await navigator.clipboard.writeText($("secret-token").value); notice("令牌已复制。保存到私有文件后请清除显示。"); }
   catch { $("secret-token").focus(); $("secret-token").select(); notice("浏览器不允许自动复制，请复制已选中的令牌。", "error"); }
 });
 $("refresh").addEventListener("click", () => refreshNodes());
+$("add-node").addEventListener("click", () => { openDialog("create-dialog"); $("node-name").focus(); });
+for (const button of document.querySelectorAll("[data-close-dialog]")) button.addEventListener("click", () => { if (!busy) button.closest("dialog").close(); });
+for (const dialog of document.querySelectorAll("dialog")) dialog.addEventListener("cancel", event => { if (busy) event.preventDefault(); });
+$("credential-result").addEventListener("close", () => { $("secret-id").value = ""; $("secret-token").value = ""; });
+for (const button of document.querySelectorAll("[data-editor-pane]")) button.addEventListener("click", () => showEditorPane(button.dataset.editorPane));
+window.addEventListener("hashchange", showView); showView();
 $("node-search").addEventListener("input", filterNodes);
 $("probes-reload").addEventListener("click", () => mutation(loadProbes));
 $("probe-add").addEventListener("click", () => { const row = addProbe(); row.querySelector("input").focus(); });

@@ -25,28 +25,43 @@
   </defs></svg>
   <header class="fm-topbar"><div class="fm-topbar-inner">
     <a class="fm-brand" href="/" aria-label="FRP Monitor 首页"><span class="fm-brand-mark"><svg aria-hidden="true"><use href="#pulse"/></svg></span><span>FRP <b>Monitor</b></span></a>
-    <div class="fm-top-actions"><a href="/" class="fm-back"><svg aria-hidden="true"><use href="#arrow-left"/></svg><span>返回节点列表</span></a><button class="wsk-button fm-theme" data-theme-toggle data-js-only type="button" aria-label="切换主题"><svg aria-hidden="true"><use href="#theme"/></svg></button><a class="fm-admin" href="/admin/" aria-label="管理工作台" title="管理工作台"><svg aria-hidden="true"><use href="#settings"/></svg><span>管理</span></a></div>
+    <div class="fm-top-actions"><a href="/" class="fm-back" aria-label="返回节点列表"><svg aria-hidden="true"><use href="#arrow-left"/></svg><span>返回节点列表</span></a><button class="wsk-button fm-theme" data-theme-toggle data-js-only type="button" aria-label="切换主题"><svg aria-hidden="true"><use href="#theme"/></svg></button><a class="fm-admin" href="/admin/" aria-label="管理工作台" title="管理工作台"><svg aria-hidden="true"><use href="#settings"/></svg><span>管理</span></a></div>
   </div></header>
   <main id="main" tabindex="-1">
     <div id="connection-notice" class="fm-notice" role="status">正在获取节点快照…</div>
     <noscript><div class="fm-notice">此页面需要 JavaScript 获取节点状态和历史趋势。</div></noscript>
     <section id="node-empty" class="fm-empty" aria-labelledby="empty-title"><span class="fm-empty-icon"><svg aria-hidden="true"><use href="#server"/></svg></span><h1 id="empty-title">正在读取节点</h1><p id="empty-copy">同步当前节点的资源、系统信息与历史记录。</p><button id="retry-empty" class="wsk-button fm-refresh" type="button" data-js-only>重新同步</button></section>
     <article id="node-detail" hidden>
-      <header class="fm-node-heading"><div class="fm-node-title"><span class="fm-node-heading-icon"><svg aria-hidden="true"><use href="#server"/></svg></span><div><div class="fm-node-title-line"><h1 data-value="name">—</h1><span class="fm-badge" data-value="session"></span></div><p class="fm-node-meta"><span>运行 <b data-value="uptime">—</b></span><span>Agent <b data-value="agent">—</b></span><span class="fm-data-state" data-value="freshness"></span></p></div></div><button id="retry" class="wsk-button fm-refresh" type="button" data-js-only><svg aria-hidden="true"><use href="#refresh"/></svg>刷新</button></header>
-      <dl class="fm-node-overview">
-        <div class="fm-node-info"><dt>操作系统</dt><dd data-value="os">—</dd><dd class="fm-node-info-note" data-value="scope">等待资源报告</dd></div>
-        <div class="fm-node-info"><dt>处理器</dt><dd data-value="cpu-model">—</dd><dd class="fm-node-info-note">当前 CPU <b data-value="cpu">—</b></dd></div>
-        <div class="fm-node-info"><dt>内存 / 硬盘</dt><dd class="fm-capacities"><span><small>内存</small><b data-value="memory">—</b></span><span><small>硬盘</small><b data-value="disk">—</b></span></dd><dd class="fm-node-info-note">已用 / 总容量</dd></div>
-        <div class="fm-node-info"><dt>系统环境</dt><dd data-value="environment">—</dd><dd class="fm-node-info-note">进程 <b data-value="processes">—</b> · TCP <b data-value="tcp">—</b> · UDP <b data-value="udp">—</b></dd></div>
+      <header class="fm-node-heading"><div class="fm-node-title"><a class="fm-node-back" href="/" aria-label="返回节点列表"><svg aria-hidden="true"><use href="#arrow-left"/></svg></a><h1 data-value="name">—</h1></div><button id="retry" class="wsk-button fm-refresh" type="button" data-js-only><svg aria-hidden="true"><use href="#refresh"/></svg>刷新</button></header>
+      <dl class="fm-node-facts">
+        <div><dt>状态</dt><dd><span class="fm-badge" data-value="session"></span></dd></div>
+        <div><dt>运行时间</dt><dd data-value="uptime">—</dd></div>
+        <div><dt>系统环境</dt><dd data-value="environment">—</dd></div>
+        <div><dt>内存</dt><dd data-value="memory-total">—</dd></div>
+        <div><dt>硬盘</dt><dd data-value="disk-total">—</dd></div>
+        <div><dt>FRP 连接</dt><dd data-value="frp">—</dd></div>
+      </dl>
+      <dl class="fm-node-facts">
+        <div><dt>操作系统</dt><dd data-value="os">—</dd></div>
+        <div><dt>CPU</dt><dd data-value="cpu-model">—</dd></div>
+        <div><dt>Agent</dt><dd data-value="agent">—</dd></div>
+      </dl>
+      <dl class="fm-node-facts">
+        <div><dt>Load · 1 / 5 / 15 分钟</dt><dd data-value="load">—</dd></div>
+        <div><dt>系统累计接收</dt><dd data-value="system-rx">—</dd></div>
+        <div><dt>系统累计发送</dt><dd data-value="system-tx">—</dd></div>
+        <div><dt>进程</dt><dd data-value="processes">—</dd></div>
+        <div><dt>TCP / UDP</dt><dd><span data-value="tcp">—</span> / <span data-value="udp">—</span></dd></div>
+      </dl>
+      <p class="fm-node-sampling"><span data-value="sample-time">尚未收到资源报告</span><span class="fm-data-state" data-value="freshness"></span><span data-value="scope">等待资源报告</span><span data-value="interval">—</span></p>
+      <p id="node-public-note" class="fm-node-public-note" hidden></p>
+      <section class="fm-node-history" aria-label="节点资源与网络趋势"><div id="node-history"></div></section>
+      <details class="fm-node-accounting"><summary>流量、套餐与 FRP 明细</summary><dl class="fm-node-overview">
         <div class="fm-node-info"><dt>今日流量</dt><dd class="fm-capacities"><span><small>↓ 接收</small><b data-value="traffic-rx">—</b></span><span><small>↑ 发送</small><b data-value="traffic-tx">—</b></span></dd><dd class="fm-node-info-note" id="traffic-note">等待今日统计</dd></div>
-        <div class="fm-node-info"><dt>系统累计流量</dt><dd class="fm-capacities"><span><small>↓ 接收</small><b data-value="system-rx">—</b></span><span><small>↑ 发送</small><b data-value="system-tx">—</b></span></dd><dd class="fm-node-info-note">系统网卡累计计数，可能随重启归零</dd></div>
         <div class="fm-node-info" id="node-plan"><dt>套餐已用 / 额度</dt><dd data-value="plan-usage">—</dd><dd class="fm-node-info-note" data-value="plan-remaining">—</dd><dd class="fm-node-info-note" data-value="plan-note">—</dd><dd class="fm-node-info-note" data-value="plan-period">—</dd></div>
         <div class="fm-node-info" id="node-billing"><dt>费用与到期</dt><dd data-value="billing">—</dd><dd class="fm-node-info-note" data-value="renewal-note">—</dd></div>
         <div class="fm-node-info"><dt>FRP 隧道</dt><dd><b data-value="proxies">—</b><small> 运行 / 已配置</small></dd><dd class="fm-node-info-note" data-value="frp-reconciliation">等待核对</dd><dd class="fm-node-info-note" data-value="frp-traffic">—</dd><dd class="fm-node-info-note">FRP 服务端本地日 · 独立于主机流量</dd></div>
-      </dl>
-      <p id="node-public-note" class="fm-node-public-note" hidden></p>
-      <p class="fm-node-sampling"><span data-value="sample-time">尚未收到资源报告</span><span data-value="interval">—</span><span>FRP 控制连接 <b data-value="frp">—</b></span></p>
-      <section class="fm-node-history" aria-label="节点历史趋势"><div id="node-history"></div></section>
+      </dl></details>
     </article>
   </main>
   <footer class="fm-footer"><div class="fm-footer-inner"><div class="fm-footer-live"><span class="fm-stream" data-state="loading" id="stream-status" role="status"><i></i><span id="stream-label">正在连接</span></span><span class="fm-snapshot">快照 <time id="snapshot-at">—</time></span><span class="fm-node-footer-sample" id="footer-sample">等待节点数据</span></div><span class="fm-footer-brand">FRP Monitor <span class="fm-footer-separator">/</span> 公开 · 只读</span></div></footer>
