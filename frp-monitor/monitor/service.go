@@ -521,7 +521,19 @@ func closeProtocol(c *websocket.Conn) {
 	_ = c.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "invalid monitor frame"), time.Now().Add(time.Second))
 }
 
-// PublicMetrics deliberately omits facts, boot ID, network interface and FRP associations.
+// PublicHardware exposes only the hardware and software summary used by public
+// cards and node details. Do not embed Facts or BrowserFacts: they also contain
+// private host identifiers, addresses and the exact kernel version.
+type PublicHardware struct {
+	OS           shared.Field[string] `json:"os"`
+	Arch         shared.Field[string] `json:"arch"`
+	Virt         shared.Field[string] `json:"virt"`
+	CPUName      shared.Field[string] `json:"cpu_name"`
+	CPUCores     shared.Field[uint32] `json:"cpu_cores"`
+	AgentVersion shared.Field[string] `json:"agent_version"`
+}
+
+// PublicMetrics deliberately omits boot ID, network interface and FRP associations.
 type PublicMetrics struct {
 	Scope      shared.Scope            `json:"scope"`
 	CPU        shared.Field[float64]   `json:"cpu"`
@@ -550,15 +562,16 @@ type PublicFRP struct {
 	ProxyRunning   int    `json:"proxy_running"`
 }
 type PublicNode struct {
-	ID              string         `json:"id"`
-	Name            string         `json:"name"`
-	Session         string         `json:"session"`
-	Freshness       string         `json:"freshness"`
-	LastSeen        *time.Time     `json:"last_seen"`
-	MetricsAt       *time.Time     `json:"metrics_at"`
-	IntervalSeconds int            `json:"interval_seconds"`
-	FRP             PublicFRP      `json:"frp"`
-	Metrics         *PublicMetrics `json:"metrics"`
+	ID              string          `json:"id"`
+	Name            string          `json:"name"`
+	Session         string          `json:"session"`
+	Freshness       string          `json:"freshness"`
+	LastSeen        *time.Time      `json:"last_seen"`
+	MetricsAt       *time.Time      `json:"metrics_at"`
+	IntervalSeconds int             `json:"interval_seconds"`
+	FRP             PublicFRP       `json:"frp"`
+	Hardware        *PublicHardware `json:"hardware"`
+	Metrics         *PublicMetrics  `json:"metrics"`
 }
 type PublicSnapshot struct {
 	Nodes       []PublicNode `json:"nodes"`
@@ -571,6 +584,13 @@ func (s *Service) snapshot(now time.Time) PublicSnapshot {
 	out := PublicSnapshot{Nodes: make([]PublicNode, 0, len(s.nodes)), GeneratedAt: now.UTC()}
 	for _, n := range s.nodes {
 		p := PublicNode{ID: n.credential.AgentID, Name: n.credential.Name, Session: "waiting", Freshness: "waiting", IntervalSeconds: s.cfg.ReportIntervalSeconds, FRP: PublicFRP{ControlState: "unknown"}}
+		if n.facts != nil {
+			p.Hardware = &PublicHardware{
+				OS: n.facts.OS, Arch: n.facts.Arch, Virt: n.facts.Virt,
+				CPUName: n.facts.CPUName, CPUCores: n.facts.CPUCores,
+				AgentVersion: n.facts.AgentVersion,
+			}
+		}
 		if n.seen {
 			p.Session = "offline"
 			if n.conn != nil {

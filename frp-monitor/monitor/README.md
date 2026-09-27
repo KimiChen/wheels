@@ -97,10 +97,12 @@ agent 的本地目标策略始终再次校验解析后的 IP，操作员文件�
 `GET /api/public/v1/nodes` 返回 `{nodes: [...], generated_at: ...}`。
 `GET /events/public` 立即发送 `event: snapshot`，之后每秒发送同结构完整快照。
 API/SSE 均 `Cache-Control: no-store`，页面静态资源由 `web.Handler()` 提供安全头。
-没有公开原始 report / Facts 的路由。
+没有公开原始 report / Facts 的路由。`hardware` 是独立白名单摘要，仅投影
+`os, arch, virt, cpu_name, cpu_cores, agent_version`，保留质量字段；未收到 Facts
+时为 null。主机名、IP、精确内核和其他身份信息仍不公开。
 
 每个节点只有 `id`、`name`、`session`、`freshness`、`last_seen`、`metrics_at`、
-`interval_seconds`、`frp`、`metrics`。时间为服务端 UTC RFC3339，缺样时为 null。
+`interval_seconds`、`frp`、`hardware`、`metrics`。时间为服务端 UTC RFC3339，缺样时为 null。
 `frp` 仅含 `control_state`、`proxy_total`、`proxy_running`、`reconciliation`、
 `server_online`（无可信匹配为 null）、`registered`（可信服务端在线代理数）；
 没有名称、关联、目标、服务端注册表明细或隧道流量。

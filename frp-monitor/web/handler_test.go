@@ -54,3 +54,38 @@ func TestAdminStaticShellContainsNoPrivateValues(t *testing.T) {
 		}
 	}
 }
+
+func TestNodePageRoutes(t *testing.T) {
+	h := Handler()
+	for _, path := range []string{"/node/test-node-1", "/node/test-node-1/"} {
+		for _, method := range []string{http.MethodGet, http.MethodHead} {
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, httptest.NewRequest(method, path, nil))
+			if w.Code != http.StatusOK || !strings.Contains(w.Header().Get("Content-Type"), "text/html") || !strings.Contains(w.Header().Get("Content-Security-Policy"), "script-src 'self'") {
+				t.Fatalf("%s %s: %d", method, path, w.Code)
+			}
+			if method == http.MethodGet && !strings.Contains(w.Body.String(), "/src/node.mjs") {
+				t.Fatal("node page was not served")
+			}
+		}
+	}
+	for _, path := range []string{"/node/short", "/node/", "/node/test-node-1/extra", "/node/test%2Fnode1", "/node/../admin.html", "/node.html", "/node/" + strings.Repeat("a", 129)} {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("unexpected route %s: %d", path, w.Code)
+		}
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/node/test-node-1", nil))
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatal("node page accepted a write")
+	}
+	for _, path := range []string{"/src/node.mjs", "/src/node-data.mjs", "/assets/node.css"} {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
+		if w.Code != http.StatusOK {
+			t.Fatalf("missing node asset: %s", path)
+		}
+	}
+}

@@ -18,6 +18,12 @@ export function memoryPercent(point) {
   const used = integer(point.mem_used), total = integer(point.mem_total);
   return used === null || total === null || total === 0n || used > total ? null : Number(used * 10000n / total) / 100;
 }
+export function diskPercent(point) {
+  const usedField = point.fields?.disk_used, totalField = point.fields?.disk_total;
+  const used = count(usedField?.samples) && usedField.samples > 0 ? integer(usedField.value) : null;
+  const total = count(totalField?.samples) && totalField.samples > 0 ? integer(totalField.value) : null;
+  return used === null || total === null || total === 0n || used > total ? null : Number(used * 10000n / total) / 100;
+}
 export function history(data, nodeID, window) {
   if (!data || data.node_id !== nodeID || data.window !== window || !Object.hasOwn(windows, window) || !validDate(data.generated_at) ||
       !Number.isSafeInteger(data.step_seconds) || data.step_seconds < 1 || !["ready", "disabled", "degraded"].includes(data.storage?.state) ||
@@ -82,5 +88,6 @@ export const resourceCharts = [
   {key: "cpu", title: "CPU 使用率", ceiling: 100, series: [{name: "CPU", read: p => finite(p.cpu) !== null && p.cpu <= 100 ? p.cpu : null, format: n => `${n.toFixed(1)}%`}]},
   {key: "memory", title: "内存使用率", ceiling: 100, series: [{name: "内存", read: memoryPercent, format: n => `${n.toFixed(1)}%`}]},
   {key: "network", title: "主机收发速率", series: [{name: "接收", read: p => integer(p.net_rx), format: n => bytes(n, true)}, {name: "发送", read: p => integer(p.net_tx), format: n => bytes(n, true)}]},
+  {key: "disk", title: "硬盘使用率", ceiling: 100, series: [{name: "硬盘", read: diskPercent, format: n => `${n.toFixed(1)}%`}]},
   {key: "load", title: "系统负载", series: [0,1,2].map((index) => ({name: `${[1,5,15][index]} 分钟`, read: p => Array.isArray(p.load) ? finite(p.load[index]) : null, format: n => n.toFixed(2)}))},
 ];

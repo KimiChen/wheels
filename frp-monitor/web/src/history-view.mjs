@@ -71,42 +71,70 @@ function createProbe(probe) {
   }};
 }
 
-export function createHistoryPanel(card, nodeID) {
-  const details = card.querySelector(".fm-history"), body = card.querySelector(".fm-history-body"), summary = details.querySelector("summary");
-  const identifier = `history-${++sequence}`;
-  body.id = identifier; summary.setAttribute("aria-controls", identifier);
+export function createHistoryPanel(card, nodeID, options = {}) {
+  const detail = options.mode === "detail";
+  const details = detail ? null : card.querySelector(".fm-history"), body = detail ? card : card.querySelector(".fm-history-body");
+  const summary = details?.querySelector("summary"), identifier = detail && body.id ? body.id : `history-${++sequence}`;
+  body.id = identifier; summary?.setAttribute("aria-controls", identifier);
   const toolbar = el("div", "fm-history-toolbar"), windowLabel = el("label", "fm-select"), selector = el("select");
   selector.setAttribute("aria-label", "历史时间范围");
   for (const [value, label] of Object.entries(windows)) { const option = el("option", "", label); option.value = value; selector.append(option); }
   windowLabel.append(el("span", "", "时间范围"), selector);
   const refresh = el("button", "wsk-button fm-refresh", "刷新历史"); refresh.type = "button";
-  toolbar.append(windowLabel, refresh);
-  const status = el("p", "fm-history-status", "展开后获取历史记录"); status.setAttribute("role", "status");
+  const sectionSwitch = el("div", "fm-history-sections"), rangeSwitch = el("div", "fm-history-ranges");
+  sectionSwitch.setAttribute("role", "group"); sectionSwitch.setAttribute("aria-label", "历史图表内容");
+  rangeSwitch.setAttribute("role", "group"); rangeSwitch.setAttribute("aria-label", "历史时间范围");
+  let section = "resources", selected = "1h", visible = !detail, last = null, stopped = false;
+  const sectionButtons = new Map(), rangeButtons = new Map();
+  if (detail) {
+    for (const [key, name] of [["resources", "资源"], ["network", "网络延迟"]]) {
+      const button = el("button", "fm-history-tab", name); button.type = "button";
+      button.setAttribute("aria-pressed", String(section === key)); sectionSwitch.append(button); sectionButtons.set(key, button);
+      button.addEventListener("click", () => { section = key; applySection(); });
+    }
+    for (const [key, name] of Object.entries(windows)) {
+      const button = el("button", "fm-history-range", key); button.type = "button";
+      button.setAttribute("aria-label", name); button.setAttribute("aria-pressed", String(selected === key)); rangeSwitch.append(button); rangeButtons.set(key, button);
+      button.addEventListener("click", () => {
+        selected = key; for (const [value, item] of rangeButtons) item.setAttribute("aria-pressed", String(value === selected));
+        connection.select(key);
+      });
+    }
+    const controls = el("div", "fm-history-controls"); controls.append(rangeSwitch, refresh);
+    toolbar.append(sectionSwitch, controls);
+  } else toolbar.append(windowLabel, refresh);
+  const status = el("p", "fm-history-status", detail ? "正在准备历史记录…" : "展开后获取历史记录"); status.setAttribute("role", "status");
   const storage = el("p", "fm-history-storage"), content = el("div", "fm-history-content"); content.hidden = true;
   const trafficHeader = el("div", "fm-history-heading"), trafficTitle = el("h4", "", "今日主机流量"), day = el("span", "fm-history-note"); trafficHeader.append(trafficTitle, day);
   const traffic = el("dl", "fm-traffic"), rx = metric("累计接收"), tx = metric("累计发送"); traffic.append(rx.node, tx.node);
   const trafficNote = el("p", "fm-history-note"), chartsTitle = el("h4", "", "资源趋势"), chartNote = el("p", "fm-history-note");
   const charts = el("div", "fm-history-charts"), graphs = resourceCharts.map(createChart); charts.append(...graphs.map(g => g.element));
   const probeTitle = el("h4", "", "TCP 探测"), probeNote = el("p", "fm-history-note", "失败率是所选范围内 TCP 建连失败次数占比，不表示 IP 丢包率。耗时曲线仅汇总成功建连；全部失败的时间段留白。"), probeState = el("p", "fm-history-storage"), probeEmpty = el("p", "fm-history-empty", "暂无 TCP 探测记录。"), probeList = el("div", "fm-probe-list");
-  const probes = new Map();
-  const resources = el("div");
-  resources.append(trafficHeader, traffic, trafficNote, chartsTitle, chartNote, charts);
-  content.append(resources, probeTitle, probeState, probeNote, probeEmpty, probeList);
-  body.append(toolbar, status, storage, content);
-  let visible = true, last = null;
+  const probes = new Map(), resources = el("div", "fm-resource-history"), probeGroup = el("div", "fm-network-history");
+  resources.id = `${identifier}-resources`; probeGroup.id = `${identifier}-network`;
+  sectionButtons.get("resources")?.setAttribute("aria-controls", resources.id); sectionButtons.get("network")?.setAttribute("aria-controls", probeGroup.id);
+  if (!detail) resources.append(trafficHeader, traffic, trafficNote, chartsTitle);
+  resources.append(chartNote, charts); probeGroup.append(probeTitle, probeState, probeNote, probeEmpty, probeList);
+  content.append(resources, probeGroup); body.append(toolbar, status, storage, content);
+  function applySection() {
+    resources.hidden = last?.storage.state === "disabled" || (detail && section !== "resources");
+    probeGroup.hidden = detail && section !== "network";
+    for (const [key, button] of sectionButtons) button.setAttribute("aria-pressed", String(section === key));
+  }
+  applySection();
   function onState(state) {
     const stamp = last ? `${windows[last.window]} · 更新于 ${dateText(last.generated_at)}` : "";
     status.dataset.state = state;
     body.setAttribute("aria-busy", state === "loading" ? "true" : "false");
-    write(status, state === "loading" ? (last ? `正在读取；当前保留上次成功结果（${stamp}）。` : "正在读取历史记录…") : state === "error" ? (last ? `历史更新失败，30 秒后重试。以下为上次成功结果（${stamp}），可能已过期。` : "暂时无法读取历史记录，30 秒后重试。") : `${stamp} · 展开期间每 30 秒更新`);
+    write(status, state === "loading" ? (last ? `正在读取；当前保留上次成功结果（${stamp}）。` : "正在读取历史记录…") : state === "error" ? (last ? `历史更新失败，30 秒后重试。以下为上次成功结果（${stamp}），可能已过期。` : "暂时无法读取历史记录，30 秒后重试。") : `${stamp} · ${detail ? "页面可见" : "展开"}期间每 30 秒更新`);
+    options.onState?.(state, last);
   }
   function onData(data) {
     last = data;
     const state = data.storage.state, dropped = count(data.storage.dropped) ? data.storage.dropped : null;
     storage.dataset.state = state;
     write(storage, state === "disabled" ? "历史存储未启用，趋势与今日累计流量暂不可用。" : state === "degraded" ? `历史存储降级，记录可能不完整${dropped ? `；已丢弃 ${dropped} 条记录` : ""}。缺失数据不会补成 0。` : "历史按分钟归档，最新记录可能延迟约 1 分钟；图表缺口表示没有有效采样。");
-    content.hidden = false;
-    resources.hidden = state === "disabled";
+    content.hidden = false; applySection();
     const flow = data.traffic ?? {};
     write(day, /^\d{4}-\d{2}-\d{2}$/.test(flow.day) ? `${flow.day} · UTC` : "UTC 日期未知");
     const receive = cumulative(flow.rx_bytes), send = cumulative(flow.tx_bytes);
@@ -118,8 +146,7 @@ export function createHistoryPanel(card, nodeID) {
     for (const graph of graphs) graph.update(data.points, data);
     probeState.dataset.state = data.probes_state;
     write(probeState, ({disabled: "未配置 TCP 探测任务。", waiting: "等待节点接入并启用 TCP 探测；已有结果可能不是当前状态。", ready: "节点已启用 TCP 探测，按配置间隔执行。", degraded: "TCP 任务配置不可用；如有记录，以下保留最近有效配置与结果。"})[data.probes_state] ?? "TCP 任务状态未知。");
-    if (state === "disabled") write(probeEmpty, "历史存储未启用，当前没有持久化探测结果。");
-    else write(probeEmpty, "暂无 TCP 探测记录。");
+    write(probeEmpty, state === "disabled" ? "历史存储未启用，当前没有持久化探测结果。" : "暂无 TCP 探测记录。");
     const existing = new Set(data.probes.map(p => p.id));
     for (const [id, panel] of probes) if (!existing.has(id)) { panel.element.remove(); probes.delete(id); }
     data.probes.forEach((probe, index) => {
@@ -128,14 +155,15 @@ export function createHistoryPanel(card, nodeID) {
       if (probeList.children[index] !== panel.element) probeList.insertBefore(panel.element, probeList.children[index] ?? null);
     });
     probeEmpty.hidden = data.probes.length !== 0;
+    options.onData?.(data);
   }
   const connection = connectHistory({nodeID, onData, onState});
-  details.addEventListener("toggle", () => connection.activate(visible && details.open));
+  details?.addEventListener("toggle", () => { if (!stopped) connection.activate(visible && details.open); });
   selector.addEventListener("change", () => connection.select(selector.value));
   refresh.addEventListener("click", () => connection.refresh());
   return {
-    setVisible(next) { visible = next; connection.activate(visible && details.open); },
-    setName(name) { summary.setAttribute("aria-label", `${name} · 趋势与探测`); },
-    stop() { connection.stop(); },
+    setVisible(next) { if (stopped) return; visible = next; connection.activate(visible && (detail || details.open)); },
+    setName(name) { summary?.setAttribute("aria-label", `${name} · 趋势与探测`); },
+    stop() { stopped = true; connection.stop(); },
   };
 }

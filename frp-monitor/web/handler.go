@@ -5,10 +5,11 @@ import (
 	"bytes"
 	"embed"
 	"net/http"
+	"regexp"
 	"time"
 )
 
-//go:embed index.html admin.html assets src
+//go:embed index.html node.html admin.html assets src
 var content embed.FS
 
 // This list is intentionally explicit: adding documentation, tests, or Go source
@@ -23,9 +24,12 @@ var publicFiles = map[string]string{
 	"/assets/style.css":          "assets/style.css",
 	"/assets/script.js":          "assets/script.js",
 	"/assets/app.css":            "assets/app.css",
+	"/assets/node.css":           "assets/node.css",
 	"/assets/theme.js":           "assets/theme.js",
 	"/assets/favicon.svg":        "assets/favicon.svg",
 	"/src/app.mjs":               "src/app.mjs",
+	"/src/node.mjs":              "src/node.mjs",
+	"/src/node-data.mjs":         "src/node-data.mjs",
 	"/src/format.mjs":            "src/format.mjs",
 	"/src/store.mjs":             "src/store.mjs",
 	"/src/transport.mjs":         "src/transport.mjs",
@@ -33,6 +37,10 @@ var publicFiles = map[string]string{
 	"/src/history-transport.mjs": "src/history-transport.mjs",
 	"/src/history-view.mjs":      "src/history-view.mjs",
 }
+
+// A node page is a public shell; the live snapshot determines whether it exists.
+// Do not turn arbitrary paths into a catch-all application route.
+var nodePagePath = regexp.MustCompile(`^/node/[A-Za-z0-9_-]{8,128}/?$`)
 
 // Handler provides the static application only. The monitor owns API/SSE routes.
 func Handler() http.Handler {
@@ -46,6 +54,9 @@ func Handler() http.Handler {
 			w.Header().Set("Cache-Control", "no-store")
 		}
 		name, ok := publicFiles[r.URL.Path]
+		if !ok && nodePagePath.MatchString(r.URL.Path) {
+			name, ok = "node.html", true
+		}
 		if !ok {
 			http.NotFound(w, r)
 			return

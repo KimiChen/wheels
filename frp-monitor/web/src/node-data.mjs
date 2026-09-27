@@ -1,0 +1,26 @@
+import {UNKNOWN, value} from "./format.mjs";
+
+const nodePattern = /^[A-Za-z0-9_-]{8,128}$/;
+export function nodeURL(id) { return typeof id === "string" && nodePattern.test(id) ? `/node/${encodeURIComponent(id)}` : null; }
+export function nodeID(pathname) {
+  const match = /^\/node\/([^/]+)\/?$/.exec(pathname);
+  if (!match) return null;
+  try { const id = decodeURIComponent(match[1]); return nodePattern.test(id) ? id : null; } catch { return null; }
+}
+export function hardwareValue(field) {
+  const raw = value(field);
+  return typeof raw === "string" && raw.trim() ? raw.trim() : UNKNOWN;
+}
+export function cpuCores(hardware) {
+  const n = value(hardware?.cpu_cores);
+  return Number.isInteger(n) && n > 0 && n <= 4294967295 ? n : null;
+}
+export function hardwareText(hardware) {
+  const parts = ["os", "virt", "arch"].map(key => hardwareValue(hardware?.[key])).filter(item => item !== UNKNOWN);
+  return parts.length ? parts.join(" · ") : "系统信息待上报";
+}
+export function cpuLabel(hardware) { const n = cpuCores(hardware); return n === null ? "CPU" : `CPU ${n} 核`; }
+export function cpuModel(hardware) {
+  const name = hardwareValue(hardware?.cpu_name), cores = cpuCores(hardware);
+  return name === UNKNOWN ? (cores === null ? UNKNOWN : `${cores} 个逻辑核心`) : `${name}${cores === null ? "" : ` × ${cores}`}`;
+}
