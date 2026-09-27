@@ -10,7 +10,10 @@ function harness() {
   return {client, requests, timers, expired: () => expired};
 }
 test("GitHub session writes use memory CSRF, same-origin cookies and no token-login method", async () => {
-  const h = harness(); const login = h.client.session();
+  const h = harness();
+  await assert.rejects(h.client.request("/api/admin/v1/nodes", {method: "POST", anonymous: true}), error => error.status === 401);
+  assert.equal(h.requests.length, 0);
+  const login = h.client.session();
   assert.equal(h.requests[0].url, "/api/admin/v1/session");
   assert.equal(h.requests[0].options.body, undefined);
   assert.equal(h.client.login, undefined);

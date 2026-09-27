@@ -1,6 +1,6 @@
 import {history, windows} from "./history-data.mjs";
 
-// One request per visible expanded node; superseded responses cannot change its graph.
+// One request per visible node detail page; superseded responses cannot change its graph.
 export function connectHistory({nodeID, onData, onState, fetcher = globalThis.fetch, timer = globalThis.setTimeout, cancel = globalThis.clearTimeout}) {
   let selected = "1h", active = false, generation = 0, pending = null, timeout = null, controller = null;
   function clean() { cancel(pending); cancel(timeout); pending = timeout = null; controller?.abort(); controller = null; }

@@ -28,13 +28,6 @@ type HistoryResult struct {
 	StepSeconds int64   `json:"step_seconds"`
 	Points      []Point `json:"points"`
 }
-type TrafficResult struct {
-	Day             string  `json:"day"`
-	RXBytes         *string `json:"rx_bytes"`
-	TXBytes         *string `json:"tx_bytes"`
-	CoverageSeconds float64 `json:"coverage_seconds"`
-	Resets          int     `json:"resets"`
-}
 type ProbePoint struct {
 	At        time.Time `json:"at"`
 	LatencyMS *float64  `json:"latency_ms"`

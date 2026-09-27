@@ -197,22 +197,23 @@ node --test frp-monitor/web/tests/*.test.mjs
 GO111MODULE=off go test ./frp-monitor/web
 ```
 
-当前 36 项 JavaScript 测试覆盖数字节点 ID、uint64/大整数精度、未知与零、金额与
+JavaScript 测试覆盖数字节点 ID、uint64/大整数精度、未知与零、金额与
 GiB 换算、校准留空及显式零、额度超用、快照状态、同源 CSRF、会话失效清理、
 迟到响应、探测版本、重连、历史范围和缺样图表。静态 Go 测试覆盖资源 allowlist、
 MIME、CSP、数字详情路由、只读方法及不含私有值的 GitHub 登录壳。
 
 本地临时 fixture 已用真实 Chrome 验证卡片与详情、设置保存、切换计费类型不额外
-提交校准值、150 GiB 手工校准、带版本的套餐重置、GitHub 拒绝访问提示，以及
-390px 详情无整体横向溢出。检查未发现 JavaScript 页面异常；fixture 与截图不嵌入发布资源。
+提交校准值、150 GiB 手工校准、带版本的套餐重置、GitHub 拒绝访问提示；历史面板
+覆盖关闭、正常、降级和无样本、资源/探测切换、时间范围与刷新。390px 详情无整体
+横向溢出，检查未发现 JavaScript 页面异常；fixture 与截图不嵌入发布资源。
 
-项目 Go 全套测试及 race 检查通过；Darwin native 双进程 P4 smoke 在历史关闭和
+项目 Go 全套测试及 race 检查通过；Darwin native 双进程监控验收在历史关闭和
 启用两种配置下通过，覆盖新控制库、数字节点、实时 JSON/SSE 隐私裁剪、agent 接入、
 持久用量与重启恢复，启用时也验证内嵌 TSDB 样本。执行方式：
 
 ```sh
-python3 frp-monitor/tests/p4_smoke.py --agent <native-agent> --server <native-server>
-python3 frp-monitor/tests/p4_smoke.py --agent <native-agent> --server <native-server> --history
+python3 frp-monitor/tests/monitor_smoke.py --agent <native-agent> --server <native-server>
+python3 frp-monitor/tests/monitor_smoke.py --agent <native-agent> --server <native-server> --history
 ```
 
 GitHub OAuth 流程和管理员权限已由服务端模拟测试覆盖，尚未配置真实 GitHub 账号验收。

@@ -21,7 +21,8 @@ import time
 import tomllib
 from urllib.parse import urlsplit
 
-from local import private, settings, control_database, github_config, _history_directory
+from local import (private, read_private, settings, control_database, github_config,
+                   _history_directory, toml_value, render_auth, render_monitor, render_telemetry)
 
 FILES = frozenset(('server.toml', 'agent.toml', 'github.secret', 'frp.token', 'agent.token',
                    'local.crt', 'local.key', 'tls.crt', 'tls.key', 'ca.crt', 'local.json',
@@ -47,22 +48,10 @@ def private_directory(value):
     return path
 
 
-def read_private(path, limit=1024 * 1024):
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    with os.fdopen(fd, 'rb') as stream:
-        info = os.fstat(stream.fileno())
-        if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size > limit:
-            raise ValueError('private inputs must be regular 0600 files within the size limit')
-        value = stream.read(limit + 1)
-        if len(value) > limit:
-            raise ValueError('input exceeds size limit')
-        return value
-
-
 def literal(value, name, maximum=128, empty=False):
     if (not empty and not value.strip()) or len(value.encode()) > maximum or any(ord(c) < 32 for c in value):
         raise ValueError('invalid ' + name)
-    return json.dumps(value, ensure_ascii=False)
+    return toml_value(value)
 
 
 def new_directory(value, write):
@@ -83,7 +72,7 @@ def new_directory(value, write):
 
 def server_init(args):
     config = settings()
-    server_id = literal(args.server_id, 'server ID')
+    literal(args.server_id, 'server ID')
     address = str(ipaddress.ip_address(args.bind))
     cert = read_private(path_without_links(args.tls_cert))
     key = read_private(path_without_links(args.tls_key))
@@ -97,13 +86,9 @@ def server_init(args):
         # replaced the original paths after read_private returned.
         import ssl
         ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER).load_cert_chain(stage / 'tls.crt', stage / 'tls.key')
-        q = lambda name: json.dumps(str(final / name))
-        private(stage / 'server.toml', f'bindAddr = {json.dumps(address)}\nbindPort = {config["FRP_SERVER_PORT"]}\n'
-                f'auth.method = "token"\nauth.tokenSource.type = "file"\nauth.tokenSource.file.path = {q("frp.token")}\n'
-                f'\n[monitor]\nenabled = true\nbindAddr = {json.dumps(address)}\nbindPort = {config["FRP_MONITOR_PORT"]}\nserverID = {server_id}\n'
-                f'certFile = {q("tls.crt")}\nkeyFile = {q("tls.key")}\ndatabaseFile = {q("control.sqlite")}\n'
-                f'historyDataPath = {json.dumps(_history_directory(config["FRP_MONITOR_HISTORY_DATA_PATH"], final))}\n'
-                f'retentionDays = {config["FRP_MONITOR_RETENTION_DAYS"]}\nreportIntervalSeconds = {config["FRP_MONITOR_INTERVAL_SECONDS"]}\n' + oauth)
+        private(stage / 'server.toml', f'bindAddr = {toml_value(address)}\nbindPort = {config["FRP_SERVER_PORT"]}\n'
+                + render_auth(final) + render_monitor(config, final, bind=address, server_id=args.server_id,
+                    cert_file="tls.crt", key_file="tls.key", oauth=oauth))
         private(stage / 'installation.json', '{"format":2,"roles":["server"]}\n')
     return new_directory(args.directory, write)
 
@@ -129,14 +114,11 @@ def agent_init(args):
     def write(stage, final):
         private(stage / 'agent.token', token + '\n')
         private(stage / 'frp.token', frp + '\n')
-        q = lambda name: json.dumps(str(final / name))
-        private(stage / 'agent.toml', f'serverAddr = {json.dumps(args.server_addr)}\nserverPort = {config["FRP_SERVER_PORT"]}\n'
-                f'clientID = {json.dumps(args.client_id)}\nuser = {json.dumps(args.user)}\nloginFailExit = false\n'
-                f'auth.method = "token"\nauth.tokenSource.type = "file"\nauth.tokenSource.file.path = {q("frp.token")}\n'
-                f'\n[telemetry]\nenabled = true\nendpoint = {json.dumps(args.monitor_url)}\nserverID = {json.dumps(args.server_id)}\n'
-                f'tokenFile = {q("agent.token")}\nintervalSeconds = {config["FRP_MONITOR_INTERVAL_SECONDS"]}\niface = {json.dumps(config["FRP_AGENT_IFACE"])}\n'
-                f'probeEnabled = {str(args.probes).lower()}\nprobeAllowPrivate = {str(args.allow_private_probes).lower()}\n'
-                + (f'caFile = {q("ca.crt")}\n' if ca else ''))
+        private(stage / 'agent.toml', f'serverAddr = {toml_value(args.server_addr)}\nserverPort = {config["FRP_SERVER_PORT"]}\n'
+                f'clientID = {toml_value(args.client_id)}\nuser = {toml_value(args.user)}\nloginFailExit = false\n'
+                + render_auth(final) + render_telemetry(config, final, endpoint=args.monitor_url,
+                    server_id=args.server_id, ca_file="ca.crt" if ca else "", probes=args.probes,
+                    allow_private_probes=args.allow_private_probes))
         if ca:
             private(stage / 'ca.crt', ca.decode('utf-8'))
         private(stage / 'installation.json', '{"format":2,"roles":["agent"]}\n')
@@ -243,7 +225,7 @@ def remap_paths(text, old, final):
         if match:
             value = tomllib.loads('value = ' + match[2])['value']
             if value in replacements:
-                line = match[1] + json.dumps(replacements[value]) + match[3] + ending
+                line = match[1] + toml_value(replacements[value]) + match[3] + ending
         lines.append(line)
     result = ''.join(lines)
     def remap(value):

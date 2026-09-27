@@ -81,20 +81,24 @@ class LocalTests(unittest.TestCase):
     def test_github_login_copies_secret_and_uses_allowlist_without_token_fallback(self):
         with tempfile.TemporaryDirectory() as root:
             root = Path(root).resolve()
-            secret = root / "oauth-secret"
+            secret = root / "oauth🛰secret"
             local.private(secret, "example-client-secret\n")
             env = {"FRP_GITHUB_CLIENT_ID": "example-client-id", "FRP_GITHUB_CLIENT_SECRET_FILE": str(secret),
-                   "FRP_GITHUB_CALLBACK_URL": "https://monitor.example.invalid/api/admin/v1/auth/github/callback", "FRP_GITHUB_ADMIN_USERS": "ExampleAdmin,second-admin,ExampleAdmin", "FRP_MONITOR_HISTORY_DATA_PATH": "history", "FRP_MONITOR_RETENTION_DAYS": "365"}
+                   "FRP_GITHUB_CALLBACK_URL": "https://monitor.example.invalid/api/admin/v1/auth/github/callback", "FRP_GITHUB_ADMIN_USERS": "ExampleAdmin,second-admin,ExampleAdmin", "FRP_MONITOR_HISTORY_DATA_PATH": "history🛰", "FRP_MONITOR_RETENTION_DAYS": "365", "FRP_AGENT_IFACE": "eth🛰"}
             config = local.settings(root, env)
-            local.initialize(root / "demo", plain_http=True, config=config)
-            content = (root / "demo/server.toml").read_text()
+            folder = root / "demo🛰"
+            local.initialize(folder, plain_http=True, config=config)
+            content = (folder / "server.toml").read_text()
             monitor = tomllib.loads(content)["monitor"]
             self.assertEqual(monitor["githubAdminUsers"], ["exampleadmin", "second-admin"])
-            self.assertEqual(monitor["githubClientSecretFile"], str(root / "demo/github.secret"))
-            self.assertEqual((root / "demo/github.secret").stat().st_mode & 0o777, 0o600)
+            self.assertEqual(monitor["githubClientSecretFile"], str(folder / "github.secret"))
+            self.assertEqual((folder / "github.secret").stat().st_mode & 0o777, 0o600)
             self.assertNotIn("example-client-secret", content)
-            self.assertEqual(monitor["historyDataPath"], str(root / "demo/history"))
-            self.assertFalse((root / "demo/history").exists())
+            self.assertEqual(monitor["historyDataPath"], str(folder / "history🛰"))
+            self.assertFalse((folder / "history🛰").exists())
+            agent = tomllib.loads((folder / "agent.toml").read_text())
+            self.assertEqual(agent["telemetry"]["iface"], "eth🛰")
+            self.assertEqual(agent["auth"]["tokenSource"]["file"]["path"], str(folder / "frp.token"))
             for changed in ({"FRP_GITHUB_CLIENT_ID": ""}, {"FRP_GITHUB_ADMIN_USERS": "bad login"}, {"FRP_GITHUB_CALLBACK_URL": "http://example.invalid/callback"}, {"FRP_MONITOR_HISTORY_DATA_PATH": "../outside"}):
                 with self.subTest(changed=changed), self.assertRaises(ValueError):
                     local.settings(root, {**env, **changed})
@@ -116,6 +120,46 @@ class LocalTests(unittest.TestCase):
             for name in ("linked/cache", "public", "file"):
                 with self.subTest(name=name), self.assertRaises(ValueError):
                     local._history_directory(name, destination)
+
+    def test_github_secret_matches_server_byte_limits_and_whitespace_rules(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            source = root / "oauth-secret"
+            config = {**local.settings(root, {}), "FRP_GITHUB_CLIENT_SECRET_FILE": str(source)}
+            cases = [("a" * 8, True), ("a" * 256, True), ("密钥AB", True), ("  abcdefgh\n", True),
+                     ("a" * 7, False), ("a" * 257, False), ("密" * 86, False),
+                     ("abcd efgh", False), ("abcd\tefgh", False), ("abcd\nefgh", False), ("abcd\0efgh", False)]
+            for index, (value, valid) in enumerate(cases):
+                with self.subTest(value_length=len(value.encode()), valid=valid):
+                    source.write_text(value, encoding="utf-8")
+                    source.chmod(0o600)
+                    staging = root / str(index)
+                    staging.mkdir(mode=0o700)
+                    if valid:
+                        local.github_config(config, staging, staging)
+                        self.assertEqual((staging / "github.secret").read_text(), value.strip() + "\n")
+                    else:
+                        with self.assertRaises(ValueError):
+                            local.github_config(config, staging, staging)
+                        self.assertFalse((staging / "github.secret").exists())
+
+    def test_private_reader_rejects_oversize_public_and_linked_inputs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            source = root / "input"
+            local.private(source, "12345678")
+            self.assertEqual(local.read_private(source, 8), b"12345678")
+            with self.assertRaises(ValueError):
+                local.read_private(source, 7)
+            source.chmod(0o644)
+            with self.assertRaises(ValueError):
+                local.read_private(source)
+            source.chmod(0o600)
+            (root / "linked").symlink_to(source)
+            (root / "parent").symlink_to(root, target_is_directory=True)
+            for path in (root / "linked", root / "parent/input", root):
+                with self.subTest(path=path), self.assertRaises(ValueError):
+                    local.read_private(path)
 
     def test_paths_stay_in_private_data_and_symlinks_rejected(self):
         with tempfile.TemporaryDirectory() as root, mock.patch.object(local, "ROOT", Path(root)):

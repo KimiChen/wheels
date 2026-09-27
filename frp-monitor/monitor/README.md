@@ -1,7 +1,7 @@
 # Monitor
 
 主控提供独立 Listener、节点认证、内存实时状态、公开/管理 JSON 与 SSE、当前流量统计、
-可选指标历史和 FRP 服务端对账。P4 已通过本地 Go/race/vet 与二进制验收，尚未部署本轮代码。
+可选指标历史和 FRP 服务端对账。测试与实机验收方法见 [测试说明](../tests/README.md)。
 构建时映射到固定 FRP 源码的 `extension/frpmonitor/monitor`，不依赖上游 `server` 根包。
 入口为 `Start(ctx, shared.MonitorConfig, ...shared.ServerProvider)`、`Service.Address()`、
 `Service.Close()`。监控与原生 FRP 转发的监听、认证和生命周期相互隔离。
@@ -88,7 +88,7 @@ monitor:
 | `nodes` | 自增数字 ID、节点名称/公开策略、费用到期、套餐、当前周期和今日流量、计数器基线、当前令牌摘要及可信 FRP 绑定 |
 | `settings` | `id=1` 的单行，`probe_json` 保存带版本的探测文档 |
 
-精确结构见 [control/schema.sql](control/schema.sql) 和[项目数据结构](../README.md#6-存储与节点数据结构)。
+精确结构见 [control/schema.sql](control/schema.sql) 和[项目数据结构](../README.md#存储与节点数据结构)。
 只创建新结构，不导入旧库。`nodes.id` 使用 `INTEGER PRIMARY KEY AUTOINCREMENT`，
 删除后不复用；API 使用其十进制字符串，例如 `"1"`。最多 1,024 个节点。
 

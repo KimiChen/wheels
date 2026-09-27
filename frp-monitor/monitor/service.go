@@ -4,9 +4,8 @@ package monitor
 
 import (
 	"context"
-	"crypto/sha256"
 	"crypto/subtle"
-	"encoding/hex"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -61,7 +60,6 @@ type Service struct {
 	listener        net.Listener
 	mu              sync.Mutex
 	nodes           map[string]*node
-	credentials     []credential
 	connections     map[*websocket.Conn]credential
 	wg              sync.WaitGroup
 	closeOnce       sync.Once
@@ -215,9 +213,7 @@ func (s *Service) Close() {
 }
 
 var idPattern = regexp.MustCompile(`^[1-9][0-9]{0,18}$`)
-var digestPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
-func (s *Service) authenticate(r *http.Request) string { return s.authenticateCredential(r).AgentID }
 func (s *Service) authenticateCredential(r *http.Request) credential {
 	if s.credentialError.Load() {
 		return credential{}
@@ -230,13 +226,13 @@ func (s *Service) authenticateCredential(r *http.Request) credential {
 	if len(token) < 43 || strings.ContainsAny(token, " \r\n\t") {
 		return credential{}
 	}
-	hash := sha256.Sum256([]byte(token))
-	want := hex.EncodeToString(hash[:])
+	want := tokenHash(token)
 	match := credential{}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// Constant-time digest comparisons; neither credential values nor client identifiers are logged.
-	for _, c := range s.credentials {
+	for _, n := range s.nodes {
+		c := n.credential
 		if subtle.ConstantTimeCompare([]byte(c.TokenSHA256), []byte(want)) == 1 {
 			match = c
 		}
@@ -793,4 +789,12 @@ func (s *Service) publishSnapshot(now time.Time) {
 	defer s.publishMu.Unlock()
 	next := s.snapshot(now)
 	s.public.Store(&next)
+}
+
+func serverTLS(certFile, keyFile string) (*tls.Config, error) {
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return nil, err
+	}
+	return &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{cert}}, nil
 }

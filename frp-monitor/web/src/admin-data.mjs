@@ -1,11 +1,11 @@
-import {value, bytes, decimal, quality} from "./format.mjs";
+import {value, bytes, uint64, quality} from "./format.mjs";
 import {validNodeID} from "./node-data.mjs";
 
 export const reconciliationLabels = {matched: "已核对", unbound: "未设可信绑定", conflict: "归属冲突", mismatch: "报告与绑定不一致", missing: "服务端未登记", stale: "节点报告已过期", transient: "未配置稳定 ID", unavailable: "服务端快照不可用", ready: "可用", disabled: "未启用"};
 export const clientProxyLabels = {unknown: "未知", disabled: "未启用", starting: "启动中", running: "运行中", error: "错误", closed: "已关闭"};
 export const proxyLabels = {unavailable: "暂不可核对", registered: "已登记", offline: "已离线", missing: "未登记", conflict: "归属冲突", disabled: "未启用"};
 export function fieldText(field) { const v = value(field); return typeof v === "string" || typeof v === "number" ? String(v) : quality(field); }
-export function byteText(raw) { return bytes(decimal({quality: "ok", value: raw})); }
+export function byteText(raw) { return bytes(uint64(raw)); }
 export function adminSnapshot(raw) {
   if (!raw || !Array.isArray(raw.nodes) || raw.nodes.length > 1024 || !Number.isFinite(Date.parse(raw.generated_at)) || !["ready", "degraded"].includes(raw.credentials_state)) throw new Error("invalid_snapshot");
   const ids = new Set();
@@ -61,20 +61,20 @@ export function adminClient({fetcher = globalThis.fetch, onExpired = () => {}, t
   let csrf = null, epoch = 0;
   const active = new Set();
   function clear() { epoch++; csrf = null; for (const controller of active) controller.abort(); active.clear(); }
-  async function request(path, {method = "GET", body, anonymous = false} = {}) {
+  async function request(path, {method = "GET", body} = {}) {
     if (!path.startsWith("/api/admin/v1/")) throw new Error("invalid_admin_path");
     const write = method !== "GET", generation = epoch, controller = new AbortController();
-    if (write && !anonymous && !csrf) throw Object.assign(new Error("unauthorized"), {status: 401});
+    if (write && !csrf) throw Object.assign(new Error("unauthorized"), {status: 401});
     active.add(controller);
     const timeout = timer(() => controller.abort(), 10000);
     try {
       const headers = {Accept: "application/json"};
       if (body !== undefined) headers["Content-Type"] = "application/json";
-      if (write && !anonymous) headers["X-CSRF-Token"] = csrf;
+      if (write) headers["X-CSRF-Token"] = csrf;
       const response = await fetcher(path, {method, headers, body: body === undefined ? undefined : JSON.stringify(body), credentials: "same-origin", cache: "no-store", signal: controller.signal, redirect: "error"});
       if (generation !== epoch || controller.signal.aborted) throw Object.assign(new Error("cancelled"), {name: "AbortError"});
       if (!response.ok) {
-        if ((response.status === 401 || response.status === 403) && !anonymous) { clear(); onExpired(); }
+        if (response.status === 401 || response.status === 403) { clear(); onExpired(); }
         throw Object.assign(new Error("request_failed"), {status: response.status});
       }
       const data = response.status === 204 ? null : await response.json();

@@ -2,12 +2,17 @@ export const UNKNOWN = "—";
 export function value(field) {
   return field?.quality === "ok" && field.value !== null ? field.value : null;
 }
-export function decimal(field) {
-  const raw = value(field);
+export function uint64(raw) {
   if (typeof raw !== "string" || !/^(0|[1-9][0-9]*)$/.test(raw) || raw.length > 20) return null;
   const n = BigInt(raw);
   return n <= 18446744073709551615n ? n : null;
 }
+// Current daily/period sums can exceed a single system counter's uint64 range.
+export function cumulative(raw) {
+  return typeof raw === "string" && raw.length <= 80 && /^(0|[1-9][0-9]*)$/.test(raw) ? BigInt(raw) : null;
+}
+export function decimal(field) { return uint64(value(field)); }
+
 export function percent(field) {
   const n = value(field);
   return typeof n === "number" && Number.isFinite(n) && n >= 0 && n <= 100 ? n : null;

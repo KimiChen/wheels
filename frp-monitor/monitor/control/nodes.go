@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/fatedier/frp/extension/frpmonitor/shared"
 )
 
 const columns = `id,name,public_note,private_note,is_public,publish_billing,publish_traffic_plan,
@@ -164,14 +166,14 @@ func validateHash(hash string) error {
 	return nil
 }
 
-func validateBinding(b *FRPBinding) error {
-	if b != nil && (b.ServerID == "" || !validText(b.ServerID, 128) || !validText(b.User, 128) || !validText(b.RawClientID, 128)) {
+func validateBinding(b *shared.FRPBinding) error {
+	if b != nil && b.Validate() != nil {
 		return fmt.Errorf("%w: invalid FRP binding", ErrInvalid)
 	}
 	return nil
 }
 
-func (s *Store) CreateNode(ctx context.Context, cfg NodeConfig, hash string, binding *FRPBinding) (*Node, error) {
+func (s *Store) CreateNode(ctx context.Context, cfg NodeConfig, hash string, binding *shared.FRPBinding) (*Node, error) {
 	if err := validateConfig(cfg); err != nil {
 		return nil, err
 	}
@@ -188,7 +190,7 @@ func (s *Store) CreateNode(ctx context.Context, cfg NodeConfig, hash string, bin
 			return err
 		}
 		if count >= 1024 {
-			return fmt.Errorf("%w: node limit exceeded", ErrInvalid)
+			return fmt.Errorf("%w: node limit exceeded", ErrConflict)
 		}
 		now := s.cfg.Now()
 		n := &Node{NodeConfig: cfg, TokenSHA256: hash, Binding: binding, TrafficPeriodRXBytes: "0", TrafficPeriodTXBytes: "0", TrafficAdjustmentBytes: "0", TrafficTodayRXBytes: "0", TrafficTodayTXBytes: "0", ConfigRevision: 1, CreatedAtMS: now.UnixMilli(), UpdatedAtMS: now.UnixMilli()}
@@ -345,7 +347,7 @@ func (s *Store) RotateToken(ctx context.Context, id, hash string) error {
 	})
 }
 
-func (s *Store) SetBinding(ctx context.Context, id string, binding *FRPBinding, expectedRevision int64) error {
+func (s *Store) SetBinding(ctx context.Context, id string, binding *shared.FRPBinding, expectedRevision int64) error {
 	if err := validateBinding(binding); err != nil {
 		return err
 	}

@@ -58,7 +58,7 @@ VM 自带的刷新与退出处理负责持久化；非正常掉电可能丢失�
 
 ## 构建与验证
 
-依赖补丁为 `patches/0005-embedded-tsdb-dependency.patch`，需要 Go 1.26.6 或更高。
+依赖补丁为 `patches/0002-storage-dependencies.patch`，需要 Go 1.26.6 或更高。
 构建仍支持 `CGO_ENABLED=0` 的 Linux amd64/arm64。发布包随附 `licenses/` 中的依赖
 许可证及来源。测试使用真实内嵌 VictoriaMetrics，覆盖字段质量、缺口、均值、
 失败探测、重启恢复、缩短保留期清理旧分区、队列背压、并发关闭、目录保护及查询取消。

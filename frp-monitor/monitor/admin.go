@@ -216,12 +216,11 @@ type adminNode struct {
 	TrafficPlan     *nodePlan            `json:"traffic_plan"`
 }
 type adminSnapshot struct {
-	GeneratedAt           time.Time      `json:"generated_at"`
-	Nodes                 []adminNode    `json:"nodes"`
-	CredentialsState      string         `json:"credentials_state"`
-	ProbesState           string         `json:"probes_state"`
-	AdminCredentialsState string         `json:"admin_credentials_state"`
-	FRP                   Reconciliation `json:"frp"`
+	GeneratedAt      time.Time      `json:"generated_at"`
+	Nodes            []adminNode    `json:"nodes"`
+	CredentialsState string         `json:"credentials_state"`
+	ProbesState      string         `json:"probes_state"`
+	FRP              Reconciliation `json:"frp"`
 }
 
 func (s *Service) adminSnapshot() adminSnapshot {
@@ -231,7 +230,7 @@ func (s *Service) adminSnapshot() adminSnapshot {
 	defer s.configMu.Unlock()
 	now := time.Now()
 	public := s.snapshotFor(now, true)
-	out := adminSnapshot{GeneratedAt: now.UTC(), Nodes: []adminNode{}, CredentialsState: "ready", AdminCredentialsState: "ready", ProbesState: "ready"}
+	out := adminSnapshot{GeneratedAt: now.UTC(), Nodes: []adminNode{}, CredentialsState: "ready", ProbesState: "ready"}
 	if s.taskError.Load() {
 		out.ProbesState = "degraded"
 	}
@@ -289,16 +288,7 @@ func (s *Service) createNode(w http.ResponseWriter, r *http.Request) {
 	defer s.configMu.Unlock()
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
-	nodes, err := s.control.Nodes(ctx)
-	if err != nil {
-		controlError(w, r, err)
-		return
-	}
-	if len(nodes) >= maxNodes {
-		http.Error(w, "node limit", 409)
-		return
-	}
-	created, err := s.control.CreateNode(ctx, control.DefaultNodeConfig(input.Name), tokenHash(token), bindingToControl(input.FRPBinding))
+	created, err := s.control.CreateNode(ctx, control.DefaultNodeConfig(input.Name), tokenHash(token), input.FRPBinding)
 	if err != nil {
 		s.controlWriteError(w, r, err)
 		return
@@ -361,7 +351,7 @@ func (s *Service) mutateNode(w http.ResponseWriter, r *http.Request, path string
 	case "rotate":
 		err = s.control.RotateToken(ctx, id, tokenHash(token))
 	case "binding":
-		err = s.control.SetBinding(ctx, id, bindingToControl(binding), current.ConfigRevision)
+		err = s.control.SetBinding(ctx, id, binding, current.ConfigRevision)
 	}
 	if err != nil {
 		s.controlWriteError(w, r, err)

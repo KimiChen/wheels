@@ -1,6 +1,5 @@
 # Apply to the exact commit in upstream.lock.
 0001-monitor-lifecycle.patch
-0002-sqlite-dependency.patch
+0002-storage-dependencies.patch
 0003-persistence-shutdown.patch
 0004-frp-reconciliation.patch
-0005-embedded-tsdb-dependency.patch

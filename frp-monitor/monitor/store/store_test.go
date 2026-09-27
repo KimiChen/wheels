@@ -94,6 +94,14 @@ func TestActualTSDBQualityMeansAndMissingBuckets(t *testing.T) {
 	if h.Points[1].Fields["cpu"].Value != nil || h.Points[1].Samples != 0 {
 		t.Fatal("missing bucket filled")
 	}
+	if err = s.scan(context.Background(), "1", "", at, at.Add(time.Minute), func(name string, _ int64, _ float64) error {
+		if name == "net_rx_total" || name == "net_tx_total" {
+			t.Errorf("unused lifetime counter stored in TSDB: %s", name)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 	// Only the real VictoriaMetrics directory layout is created, no history SQLite.
 	if _, err = os.Stat(filepath.Join(s.cfg.Path, "data")); err != nil {
 		t.Fatal("missing TSDB data directory", err)

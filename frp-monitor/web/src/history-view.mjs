@@ -1,9 +1,8 @@
-import {UNKNOWN, bytes} from "./format.mjs";
+import {UNKNOWN} from "./format.mjs";
 import {windows, finite, count, dateText, coverage, failureRate, chart, resourceCharts} from "./history-data.mjs";
 import {connectHistory} from "./history-transport.mjs";
 
 const svgNS = "http://www.w3.org/2000/svg";
-let sequence = 0;
 function el(tag, className, text) {
   const node = document.createElement(tag);
   if (className) node.className = className;
@@ -71,52 +70,43 @@ function createProbe(probe) {
   }};
 }
 
-export function createHistoryPanel(card, nodeID, options = {}) {
-  const detail = options.mode === "detail";
-  const details = detail ? null : card.querySelector(".fm-history"), body = detail ? card : card.querySelector(".fm-history-body");
-  const summary = details?.querySelector("summary"), identifier = detail && body.id ? body.id : `history-${++sequence}`;
-  body.id = identifier; summary?.setAttribute("aria-controls", identifier);
-  const toolbar = el("div", "fm-history-toolbar"), windowLabel = el("label", "fm-select"), selector = el("select");
-  selector.setAttribute("aria-label", "历史时间范围");
-  for (const [value, label] of Object.entries(windows)) { const option = el("option", "", label); option.value = value; selector.append(option); }
-  windowLabel.append(el("span", "", "时间范围"), selector);
+export function createHistoryPanel(body, nodeID) {
+  const identifier = body.id;
+  const toolbar = el("div", "fm-history-toolbar");
   const refresh = el("button", "wsk-button fm-refresh", "刷新历史"); refresh.type = "button";
   const sectionSwitch = el("div", "fm-history-sections"), rangeSwitch = el("div", "fm-history-ranges");
   sectionSwitch.setAttribute("role", "group"); sectionSwitch.setAttribute("aria-label", "历史图表内容");
   rangeSwitch.setAttribute("role", "group"); rangeSwitch.setAttribute("aria-label", "历史时间范围");
-  let section = "resources", selected = "1h", visible = !detail, last = null, stopped = false;
+  let section = "resources", selected = "1h", last = null, stopped = false;
   const sectionButtons = new Map(), rangeButtons = new Map();
-  if (detail) {
-    for (const [key, name] of [["resources", "资源"], ["network", "网络延迟"]]) {
-      const button = el("button", "fm-history-tab", name); button.type = "button";
-      button.setAttribute("aria-pressed", String(section === key)); sectionSwitch.append(button); sectionButtons.set(key, button);
-      button.addEventListener("click", () => { section = key; applySection(); });
-    }
-    for (const [key, name] of Object.entries(windows)) {
-      const button = el("button", "fm-history-range", key); button.type = "button";
-      button.setAttribute("aria-label", name); button.setAttribute("aria-pressed", String(selected === key)); rangeSwitch.append(button); rangeButtons.set(key, button);
-      button.addEventListener("click", () => {
-        selected = key; for (const [value, item] of rangeButtons) item.setAttribute("aria-pressed", String(value === selected));
-        connection.select(key);
-      });
-    }
-    const controls = el("div", "fm-history-controls"); controls.append(rangeSwitch, refresh);
-    toolbar.append(sectionSwitch, controls);
-  } else toolbar.append(windowLabel, refresh);
-  const status = el("p", "fm-history-status", detail ? "正在准备历史记录…" : "展开后获取历史记录"); status.setAttribute("role", "status");
+  for (const [key, name] of [["resources", "资源"], ["network", "网络延迟"]]) {
+    const button = el("button", "fm-history-tab", name); button.type = "button";
+    button.setAttribute("aria-pressed", String(section === key)); sectionSwitch.append(button); sectionButtons.set(key, button);
+    button.addEventListener("click", () => { section = key; applySection(); });
+  }
+  for (const [key, name] of Object.entries(windows)) {
+    const button = el("button", "fm-history-range", key); button.type = "button";
+    button.setAttribute("aria-label", name); button.setAttribute("aria-pressed", String(selected === key)); rangeSwitch.append(button); rangeButtons.set(key, button);
+    button.addEventListener("click", () => {
+      selected = key; for (const [value, item] of rangeButtons) item.setAttribute("aria-pressed", String(value === selected));
+      connection.select(key);
+    });
+  }
+  const controls = el("div", "fm-history-controls"); controls.append(rangeSwitch, refresh);
+  toolbar.append(sectionSwitch, controls);
+  const status = el("p", "fm-history-status", "正在准备历史记录…"); status.setAttribute("role", "status");
   const storage = el("p", "fm-history-storage"), content = el("div", "fm-history-content"); content.hidden = true;
-  const chartsTitle = el("h4", "", "资源趋势"), chartNote = el("p", "fm-history-note");
+  const chartNote = el("p", "fm-history-note");
   const charts = el("div", "fm-history-charts"), graphs = resourceCharts.map(createChart); charts.append(...graphs.map(g => g.element));
   const probeTitle = el("h4", "", "TCP 探测"), probeNote = el("p", "fm-history-note", "失败率是所选范围内 TCP 建连失败次数占比，不表示 IP 丢包率。耗时曲线仅汇总成功建连；全部失败的时间段留白。"), probeState = el("p", "fm-history-storage"), probeEmpty = el("p", "fm-history-empty", "暂无 TCP 探测记录。"), probeList = el("div", "fm-probe-list");
   const probes = new Map(), resources = el("div", "fm-resource-history"), probeGroup = el("div", "fm-network-history");
   resources.id = `${identifier}-resources`; probeGroup.id = `${identifier}-network`;
   sectionButtons.get("resources")?.setAttribute("aria-controls", resources.id); sectionButtons.get("network")?.setAttribute("aria-controls", probeGroup.id);
-  if (!detail) resources.append(chartsTitle);
   resources.append(chartNote, charts); probeGroup.append(probeTitle, probeState, probeNote, probeEmpty, probeList);
   content.append(resources, probeGroup); body.append(toolbar, status, storage, content);
   function applySection() {
-    resources.hidden = last?.storage.state === "disabled" || (detail && section !== "resources");
-    probeGroup.hidden = detail && section !== "network";
+    resources.hidden = last?.storage.state === "disabled" || section !== "resources";
+    probeGroup.hidden = section !== "network";
     for (const [key, button] of sectionButtons) button.setAttribute("aria-pressed", String(section === key));
   }
   applySection();
@@ -124,8 +114,7 @@ export function createHistoryPanel(card, nodeID, options = {}) {
     const stamp = last ? `${windows[last.window]} · 更新于 ${dateText(last.generated_at)}` : "";
     status.dataset.state = state;
     body.setAttribute("aria-busy", state === "loading" ? "true" : "false");
-    write(status, state === "loading" ? (last ? `正在读取；当前保留上次成功结果（${stamp}）。` : "正在读取历史记录…") : state === "error" ? (last ? `历史更新失败，30 秒后重试。以下为上次成功结果（${stamp}），可能已过期。` : "暂时无法读取历史记录，30 秒后重试。") : `${stamp} · ${detail ? "页面可见" : "展开"}期间每 30 秒更新`);
-    options.onState?.(state, last);
+    write(status, state === "loading" ? (last ? `正在读取；当前保留上次成功结果（${stamp}）。` : "正在读取历史记录…") : state === "error" ? (last ? `历史更新失败，30 秒后重试。以下为上次成功结果（${stamp}），可能已过期。` : "暂时无法读取历史记录，30 秒后重试。") : `${stamp} · 页面可见期间每 30 秒更新`);
   }
   function onData(data) {
     last = data;
@@ -146,15 +135,11 @@ export function createHistoryPanel(card, nodeID, options = {}) {
       if (probeList.children[index] !== panel.element) probeList.insertBefore(panel.element, probeList.children[index] ?? null);
     });
     probeEmpty.hidden = data.probes.length !== 0;
-    options.onData?.(data);
   }
   const connection = connectHistory({nodeID, onData, onState});
-  details?.addEventListener("toggle", () => { if (!stopped) connection.activate(visible && details.open); });
-  selector.addEventListener("change", () => connection.select(selector.value));
   refresh.addEventListener("click", () => connection.refresh());
   return {
-    setVisible(next) { if (stopped) return; visible = next; connection.activate(visible && (detail || details.open)); },
-    setName(name) { summary?.setAttribute("aria-label", `${name} · 趋势与探测`); },
+    setVisible(next) { if (!stopped) connection.activate(next); },
     stop() { stopped = true; connection.stop(); },
   };
 }

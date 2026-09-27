@@ -1,29 +1,18 @@
-# Patches
+# 上游补丁
 
-本目录用于保存对固定 frp 上游提交中“既有文件”的最小修改。
+`series` 按顺序将补丁应用到 `upstream.lock` 固定的 FRP 提交。每次准备都从原始
+源码重新组装，不能在已打补丁的源码树上重复应用；升级上游时重新生成并验证全部补丁。
 
-约定：
+| 补丁 | 职责 |
+|---|---|
+| `0001-monitor-lifecycle.patch` | 配置与版本入口、client/server 监控生命周期、客户端只读 Proxy 快照、内存 metrics 注册保护及回归测试 |
+| `0002-storage-dependencies.patch` | SQLite、内嵌 VictoriaMetrics 及完整 FRP 模块图所需的最终 `go.mod` / `go.sum`，要求 Go 1.26.6+ |
+| `0003-persistence-shutdown.patch` | 监控启用时处理 TERM/INT，经原生退出路径取消并关闭监控存储；关闭监控时保留原生信号行为 |
+| `0004-frp-reconciliation.patch` | 从 Registry、Proxy Manager 和 Stats 提供有界只读快照，锁忙时返回 unavailable；保留身份与流量口径，不带认证秘密 |
 
-- 文件按 `0001-...patch`、`0002-...patch` 顺序命名；
-- `series` 每行记录一个补丁文件名，并决定应用顺序；
-- 补丁必须能在 `upstream.lock` 指定的源码 Commit 上干净应用；
-- 不把完整上游文件当作补丁提交；
-- 不在补丁中混入格式化、重命名或与 Telemetry 无关的修改；
-- 每次升级上游后重新生成并验证全部补丁。
+补丁只包含上游既有文件的必要改动与相关测试，不提交完整上游树，不混入无关格式化。
+独立扩展通过 Overlay 映射到 `extension/frpmonitor/`。FRP wire protocol、原生命令、
+认证与 Dashboard 保持；可信归属由管理员绑定、节点报告和服务端观察共同核对。
 
-`0001-monitor-lifecycle.patch` 接入配置、版本命令、client/server 异步监控生命周期，
-增加只读 Proxy 快照与内存 metrics collector 的线程安全单次注册。
-监控开关默认关闭；FRP wire protocol、转发逻辑、原生 `-v` 输出与 Dashboard 保留。
-客户端源快照保持上游“先各源排除 disabled，再合并启用项”的优先级，并补充仅有
-disabled 配置的名称供展示；新增方法不改变原生 Load。补丁附带回归测试。
-每次准备源码都从已验证的固定版本重新组装，不能在上一次已打补丁的目录上重复应用。
-
-P2 追加 `0002-sqlite-dependency.patch`，锁定纯 Go SQLite 及所需最小依赖版本；
-`0003-persistence-shutdown.patch` 仅在 monitor 启用时接收 TERM/INT、取消服务 context，
-让原生关闭路径与监控尾批刷新完成。附有 context 取消测试，并由 P2 smoke 验证真实
-二进制 TERM 后的数据库恢复。关闭 monitor 时保留原生信号处理行为。
-
-P3 追加 `0004-frp-reconciliation.patch`：服务端 Registry、Proxy Manager、内存Stats
-提供有界只读快照，监控后台每秒取样；锁繁忙时返回unavailable，不阻塞原生转发。
-保留user和raw clientID身份，client与proxy快照不含认证信息；字节计数以字符串提供。
-对账还需管理员可信预绑定，服务端原始详情只在管理接口可见。
+`scripts/frp.py prepare` 逐项执行 `git apply --check` 后应用；依赖版本和校验值只维护
+一份最终补丁。行为测试及真实二进制验证见 [tests/README.md](../tests/README.md)。

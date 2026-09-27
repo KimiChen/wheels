@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/fatedier/frp/extension/frpmonitor/monitor/control"
-	"github.com/fatedier/frp/extension/frpmonitor/shared"
 )
 
 type nodeConfigs map[string]*control.Node
@@ -59,19 +58,6 @@ func todayDTO(n *control.Node, now time.Time) *nodeToday {
 func planDTO(n *control.Node) *nodePlan {
 	return &nodePlan{n.TrafficQuotaBytes, n.TrafficMode, n.TrafficResetMode, n.TrafficResetDay, n.TrafficResetTimezone, n.TrafficPeriodStartAtMS, n.TrafficPeriodEndAtMS, n.TrafficPeriodRXBytes, n.TrafficPeriodTXBytes, n.UsedBytes(), n.TrafficPeriodPartial}
 }
-func bindingToControl(b *shared.FRPBinding) *control.FRPBinding {
-	if b == nil {
-		return nil
-	}
-	return &control.FRPBinding{ServerID: b.ServerID, User: b.User, RawClientID: b.RawClientID}
-}
-func bindingFromControl(b *control.FRPBinding) *shared.FRPBinding {
-	if b == nil {
-		return nil
-	}
-	return &shared.FRPBinding{ServerID: b.ServerID, User: b.User, RawClientID: b.RawClientID}
-}
-
 func (s *Service) refreshNodes(ctx context.Context) error {
 	nodes, err := s.control.Nodes(ctx)
 	if err != nil {
@@ -81,7 +67,7 @@ func (s *Service) refreshNodes(ctx context.Context) error {
 	creds := make([]credential, 0, len(nodes))
 	for _, n := range nodes {
 		configs[n.ID] = n
-		creds = append(creds, credential{AgentID: n.ID, Name: n.Name, TokenSHA256: n.TokenSHA256, FRPBinding: bindingFromControl(n.Binding)})
+		creds = append(creds, credential{AgentID: n.ID, Name: n.Name, TokenSHA256: n.TokenSHA256, FRPBinding: n.Binding})
 	}
 	s.configs.Store(&configs)
 	s.applyCredentials(creds)

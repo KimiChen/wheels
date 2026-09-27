@@ -104,6 +104,26 @@ def private(path: Path, text: str):
         stream.write(text)
 
 
+def read_private(path, limit=1024 * 1024):
+    """Read one bounded, regular 0600 file without following links or blocking on FIFOs."""
+    if any(part.is_symlink() for part in (path, *path.parents)):
+        raise ValueError("private input paths must not contain symlinks")
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size > limit:
+            raise ValueError("private inputs must be regular 0600 files within the size limit")
+        with os.fdopen(fd, "rb") as stream:
+            fd = None
+            value = stream.read(limit + 1)
+        if len(value) > limit:
+            raise ValueError("input exceeds size limit")
+        return value
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
 def _history_directory(value, destination, *, check_files=True):
     """Resolve optional history inside the private runtime, without creating it."""
     if not value:
@@ -152,6 +172,11 @@ def control_database(path: Path, *, node_name=None, token=None, server_id="local
     return node_id
 
 
+def toml_value(value):
+    """Encode TOML strings and string arrays without JSON-only surrogate escapes."""
+    return json.dumps(value, ensure_ascii=False)
+
+
 def github_config(config, staging, destination):
     """Copy a configured OAuth secret without writing it into TOML or stdout."""
     secret_path = config["FRP_GITHUB_CLIENT_SECRET_FILE"]
@@ -160,22 +185,40 @@ def github_config(config, staging, destination):
         source = Path(secret_path).expanduser()
         if not source.is_absolute():
             source = ROOT / source
-        if any(part.is_symlink() for part in (source, *source.parents)):
-            raise ValueError("GitHub secret path must not contain symlinks")
-        fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-        with os.fdopen(fd, "rb") as stream:
-            info = os.fstat(stream.fileno())
-            if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size > 4096:
-                raise ValueError("GitHub secret must be a regular 0600 file")
-            secret = stream.read(4097).decode("utf-8").strip()
-        if not secret or len(secret) > 4096 or any(ord(c) < 33 for c in secret):
+        secret = read_private(source, 4096).decode("utf-8").strip()
+        if not 8 <= len(secret.encode("utf-8")) <= 256 or any(char in secret for char in "\0\r\n\t "):
             raise ValueError("GitHub secret file contains an invalid value")
         private(staging / "github.secret", secret + "\n")
         target = str(destination / "github.secret")
-    return (f'githubClientID = {json.dumps(config["FRP_GITHUB_CLIENT_ID"])}\n'
-            f'githubClientSecretFile = {json.dumps(target)}\n'
-            f'githubCallbackURL = {json.dumps(config["FRP_GITHUB_CALLBACK_URL"])}\n'
-            f'githubAdminUsers = {json.dumps(config["FRP_GITHUB_ADMIN_USERS"])}\n')
+    return (f'githubClientID = {toml_value(config["FRP_GITHUB_CLIENT_ID"])}\n'
+            f'githubClientSecretFile = {toml_value(target)}\n'
+            f'githubCallbackURL = {toml_value(config["FRP_GITHUB_CALLBACK_URL"])}\n'
+            f'githubAdminUsers = {toml_value(config["FRP_GITHUB_ADMIN_USERS"])}\n')
+
+
+def render_auth(directory):
+    return ('auth.method = "token"\nauth.tokenSource.type = "file"\n'
+            f'auth.tokenSource.file.path = {toml_value(str(directory / "frp.token"))}\n')
+
+
+def render_monitor(config, directory, *, bind, server_id, cert_file="", key_file="", oauth=""):
+    q = lambda name: toml_value(str(directory / name))
+    return ('\n[monitor]\nenabled = true\n'
+            f'bindAddr = {toml_value(bind)}\nbindPort = {config["FRP_MONITOR_PORT"]}\nserverID = {toml_value(server_id)}\n'
+            + (f'certFile = {q(cert_file)}\nkeyFile = {q(key_file)}\n' if cert_file else '')
+            + f'databaseFile = {q("control.sqlite")}\nreportIntervalSeconds = {config["FRP_MONITOR_INTERVAL_SECONDS"]}\n'
+            f'historyDataPath = {toml_value(_history_directory(config["FRP_MONITOR_HISTORY_DATA_PATH"], directory))}\n'
+            f'retentionDays = {config["FRP_MONITOR_RETENTION_DAYS"]}\n' + oauth)
+
+
+def render_telemetry(config, directory, *, endpoint, server_id, ca_file="", probes=False,
+                     allow_private_probes=False, allow_insecure_loopback=False):
+    q = lambda name: toml_value(str(directory / name))
+    return ('\n[telemetry]\nenabled = true\n'
+            f'endpoint = {toml_value(endpoint)}\nserverID = {toml_value(server_id)}\n'
+            f'tokenFile = {q("agent.token")}\nintervalSeconds = {config["FRP_MONITOR_INTERVAL_SECONDS"]}\niface = {toml_value(config["FRP_AGENT_IFACE"])}\n'
+            f'allowInsecureLoopback = {str(allow_insecure_loopback).lower()}\nprobeEnabled = {str(probes).lower()}\nprobeAllowPrivate = {str(allow_private_probes).lower()}\n'
+            + (f'caFile = {q(ca_file)}\n' if ca_file else ''))
 
 
 def initialize(destination: Path, *, plain_http=False, probes=False, config=None):
@@ -192,9 +235,6 @@ def initialize(destination: Path, *, plain_http=False, probes=False, config=None
         tasks = [{"id": "local-frp", "name": "本机 FRP 入口", "target": f'127.0.0.1:{c["FRP_SERVER_PORT"]}', "interval": 5}] if probes else []
         node_id = control_database(staging / "control.sqlite", node_name=c["FRP_AGENT_NAME"], token=token, tasks=tasks)
         oauth = github_config(c, staging, destination)
-        # Paths in generated configuration refer to the final private directory.
-        q = lambda name: json.dumps(str(destination / name), ensure_ascii=False)
-        tls_monitor = tls_agent = ""
         if not plain_http:
             try:
                 result = subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "30",
@@ -206,19 +246,15 @@ def initialize(destination: Path, *, plain_http=False, probes=False, config=None
                 raise ValueError("local TLS certificate generation failed (OpenSSL with -addext required)")
             (staging / "local.key").chmod(0o600)
             (staging / "local.crt").chmod(0o600)
-            tls_monitor = f"certFile = {q('local.crt')}\nkeyFile = {q('local.key')}\n"
-            tls_agent = f"caFile = {q('local.crt')}\n"
-        auth = f'auth.method = "token"\nauth.tokenSource.type = "file"\nauth.tokenSource.file.path = {q("frp.token")}\n'
+        auth = render_auth(destination)
         private(staging / "server.toml", f'bindAddr = "127.0.0.1"\nbindPort = {c["FRP_SERVER_PORT"]}\nproxyBindAddr = "127.0.0.1"\n'
-            + auth + f'\n[monitor]\nenabled = true\nbindAddr = "127.0.0.1"\nbindPort = {c["FRP_MONITOR_PORT"]}\nserverID = "local"\n'
-            + f'databaseFile = {q("control.sqlite")}\nreportIntervalSeconds = {c["FRP_MONITOR_INTERVAL_SECONDS"]}\n' + tls_monitor + oauth)
-        with (staging / "server.toml").open("a", encoding="utf-8") as server_config:
-            server_config.write(f'historyDataPath = {json.dumps(_history_directory(c["FRP_MONITOR_HISTORY_DATA_PATH"], destination))}\nretentionDays = {c["FRP_MONITOR_RETENTION_DAYS"]}\n')
+            + auth + render_monitor(c, destination, bind="127.0.0.1", server_id="local",
+                cert_file="" if plain_http else "local.crt", key_file="" if plain_http else "local.key", oauth=oauth))
         scheme = "ws" if plain_http else "wss"
         private(staging / "agent.toml", f'serverAddr = "127.0.0.1"\nserverPort = {c["FRP_SERVER_PORT"]}\nclientID = "{node_id}"\nloginFailExit = false\n'
-            + auth + f'\n[telemetry]\nenabled = true\nserverID = "local"\nendpoint = "{scheme}://127.0.0.1:{c["FRP_MONITOR_PORT"]}/agent/v1/ws"\n'
-            + f'tokenFile = {q("agent.token")}\nintervalSeconds = {c["FRP_MONITOR_INTERVAL_SECONDS"]}\niface = {json.dumps(c["FRP_AGENT_IFACE"])}\n'
-            + f'allowInsecureLoopback = {str(plain_http).lower()}\nprobeEnabled = {str(probes).lower()}\nprobeAllowPrivate = {str(probes).lower()}\n' + tls_agent)
+            + auth + render_telemetry(c, destination, endpoint=f'{scheme}://127.0.0.1:{c["FRP_MONITOR_PORT"]}/agent/v1/ws',
+                server_id="local", ca_file="" if plain_http else "local.crt", probes=probes,
+                allow_private_probes=probes, allow_insecure_loopback=plain_http))
         private(staging / "local.json", json.dumps({"url": f'{"http" if plain_http else "https"}://127.0.0.1:{c["FRP_MONITOR_PORT"]}/', "id": node_id}) + "\n")
         private(staging / "installation.json", json.dumps({"format": 2, "roles": ["server", "agent"]}) + "\n")
         os.rename(staging, destination)

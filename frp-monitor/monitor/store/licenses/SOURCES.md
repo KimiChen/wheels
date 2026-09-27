@@ -1,4 +1,4 @@
-# P2 SQLite 依赖许可来源
+# SQLite 依赖许可来源
 
 随发布包附带本目录完整内容。文件从 Go module 校验和锁定的源包逐字复制。SQLite 向量扩展未启用，仍附其许可；libc 的第三方许可集合必须一并保留。
 
@@ -17,4 +17,4 @@
 | [golang.org/x/tools](https://pkg.go.dev/golang.org/x/tools@v0.48.0) | `v0.48.0` | `golang-tools/LICENSE`, `golang-tools/PATENTS` |
 
 sqlite 标签提交：`c96a4e6cb22254bf70026502a781a54a053c2cf0`。
-go.mod 保持 sqlite 所要求的 `modernc.org/libc v1.75.7`；FRP 本就使用的 UUID、x/sys 不属于本次新增/升级，继续遵循原发布依赖许可。
+go.mod 保持 sqlite 所要求的 `modernc.org/libc v1.75.7`；FRP 的既有 UUID 继续遵循原许可；TSDB 引起的 x/sys 等版本更新见 TSDB-SOURCES.md。

@@ -165,7 +165,7 @@ func TestAmbiguousCommittedWriteFailsClosed(t *testing.T) {
 				t.Fatal("ambiguous commit retained public authorization", response.Code)
 			}
 			request.Header.Set("Authorization", "Bearer "+agent)
-			if s.authenticate(request) != "" {
+			if s.authenticateCredential(request).AgentID != "" {
 				t.Fatal("revoked token remained authorized")
 			}
 			c.SetReadDeadline(time.Now().Add(time.Second))
@@ -190,7 +190,7 @@ func TestInvalidWriteDoesNotRevokeUnchangedCredentials(t *testing.T) {
 	s.controlWriteError(response, request, control.ErrInvalid)
 	s.configMu.Unlock()
 	request.Header.Set("Authorization", "Bearer "+agent)
-	if response.Code != 400 || s.credentialError.Load() || s.authenticate(request) != "1" {
+	if response.Code != 400 || s.credentialError.Load() || s.authenticateCredential(request).AgentID != "1" {
 		t.Fatal("invalid input revoked valid credentials")
 	}
 }
@@ -216,7 +216,7 @@ func TestCommittedRevocationRefreshFailureClosesOldSession(t *testing.T) {
 	}
 	req, _ := http.NewRequest("GET", "http://example.invalid", nil)
 	req.Header.Set("Authorization", "Bearer "+agent)
-	if s.authenticate(req) != "" {
+	if s.authenticateCredential(req).AgentID != "" {
 		t.Fatal("old token survived revocation")
 	}
 }

@@ -1,5 +1,4 @@
-import {UNKNOWN, bytes} from "./format.mjs";
-import {cumulative} from "./history-data.mjs";
+import {UNKNOWN, bytes, cumulative} from "./format.mjs";
 
 export const trafficModes = {max: "Max", total: "total", rx: "rx", tx: "tx"};
 const gib = 1073741824n;

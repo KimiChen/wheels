@@ -6,6 +6,8 @@ import (
 	"errors"
 	"math/big"
 	"time"
+
+	"github.com/fatedier/frp/extension/frpmonitor/shared"
 )
 
 var (
@@ -48,36 +50,30 @@ func DefaultNodeConfig(name string) NodeConfig {
 	return NodeConfig{Name: name, IsPublic: true, PublishTrafficPlan: true, TrafficMode: "max", TrafficResetMode: "monthly", TrafficResetDay: 1, TrafficResetTimezone: "UTC"}
 }
 
-type FRPBinding struct {
-	ServerID    string `json:"server_id"`
-	User        string `json:"user"`
-	RawClientID string `json:"raw_client_id"`
-}
-
 type Node struct {
 	ID string `json:"id"`
 	NodeConfig
-	TokenSHA256            string      `json:"-"`
-	Binding                *FRPBinding `json:"frp_binding"`
-	TrafficPeriodStartAtMS *int64      `json:"traffic_period_start_at_ms"`
-	TrafficPeriodEndAtMS   *int64      `json:"traffic_period_end_at_ms"`
-	TrafficPeriodRXBytes   string      `json:"traffic_period_rx_bytes"`
-	TrafficPeriodTXBytes   string      `json:"traffic_period_tx_bytes"`
-	TrafficAdjustmentBytes string      `json:"traffic_adjustment_bytes"`
-	TrafficPeriodPartial   bool        `json:"traffic_period_partial"`
-	TrafficDay             *string     `json:"traffic_day"`
-	TrafficTodayRXBytes    string      `json:"traffic_today_rx_bytes"`
-	TrafficTodayTXBytes    string      `json:"traffic_today_tx_bytes"`
-	TrafficTodayPartial    bool        `json:"traffic_today_partial"`
-	CounterBootID          *string     `json:"-"`
-	CounterInterface       *string     `json:"-"`
-	CounterScope           *string     `json:"-"`
-	CounterRXBytes         *string     `json:"-"`
-	CounterTXBytes         *string     `json:"-"`
-	CounterReceivedAtMS    *int64      `json:"-"`
-	ConfigRevision         int64       `json:"config_revision"`
-	CreatedAtMS            int64       `json:"created_at_ms"`
-	UpdatedAtMS            int64       `json:"updated_at_ms"`
+	TokenSHA256            string             `json:"-"`
+	Binding                *shared.FRPBinding `json:"frp_binding"`
+	TrafficPeriodStartAtMS *int64             `json:"traffic_period_start_at_ms"`
+	TrafficPeriodEndAtMS   *int64             `json:"traffic_period_end_at_ms"`
+	TrafficPeriodRXBytes   string             `json:"traffic_period_rx_bytes"`
+	TrafficPeriodTXBytes   string             `json:"traffic_period_tx_bytes"`
+	TrafficAdjustmentBytes string             `json:"traffic_adjustment_bytes"`
+	TrafficPeriodPartial   bool               `json:"traffic_period_partial"`
+	TrafficDay             *string            `json:"traffic_day"`
+	TrafficTodayRXBytes    string             `json:"traffic_today_rx_bytes"`
+	TrafficTodayTXBytes    string             `json:"traffic_today_tx_bytes"`
+	TrafficTodayPartial    bool               `json:"traffic_today_partial"`
+	CounterBootID          *string            `json:"-"`
+	CounterInterface       *string            `json:"-"`
+	CounterScope           *string            `json:"-"`
+	CounterRXBytes         *string            `json:"-"`
+	CounterTXBytes         *string            `json:"-"`
+	CounterReceivedAtMS    *int64             `json:"-"`
+	ConfigRevision         int64              `json:"config_revision"`
+	CreatedAtMS            int64              `json:"created_at_ms"`
+	UpdatedAtMS            int64              `json:"updated_at_ms"`
 }
 
 func number(s string) *big.Int {

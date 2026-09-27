@@ -1,7 +1,6 @@
-import {UNKNOWN, bytes, capacity, decimal, percent, percentage, uptime, timeText, sessionLabels, freshnessLabels, frpLabel, reconciliationText} from "./format.mjs";
+import {UNKNOWN, bytes, cumulative, capacity, decimal, percent, percentage, uptime, timeText, sessionLabels, freshnessLabels, frpLabel, reconciliationText} from "./format.mjs";
 import {nodeID, hardwareValue, cpuModel} from "./node-data.mjs";
 import {billingText, todayText, planText, dateTime} from "./node-settings.mjs";
-import {cumulative} from "./history-data.mjs";
 import {connect} from "./transport.mjs";
 import {createHistoryPanel} from "./history-view.mjs";
 
@@ -10,20 +9,20 @@ const write = (element, value) => { const next = String(value ?? UNKNOWN); if (e
 const labels = new Map([...document.querySelectorAll("[data-value]")].map(element => [element.dataset.value, element]));
 const put = (key, value) => write(labels.get(key), value);
 const id = nodeID(window.location.pathname), detail = byID("node-detail"), empty = byID("node-empty"), historyHost = byID("node-history");
-let current = null, activeNode = null, panel = null, connection = null;
+let current = null, panel = null, connection = null;
 
 function showEmpty(title, copy) {
   detail.hidden = true; empty.hidden = false;
   write(byID("empty-title"), title); write(byID("empty-copy"), copy);
 }
 function clearNode() {
-  panel?.stop(); panel = null; historyHost.replaceChildren(); activeNode = null;
+  panel?.stop(); panel = null; historyHost.replaceChildren();
   for (const element of labels.values()) { write(element, UNKNOWN); element.removeAttribute("data-state"); element.removeAttribute("title"); }
   write(byID("traffic-note"), "等待今日统计"); write(byID("footer-sample"), "无可显示的节点数据");
   document.title = "FRP Monitor · 节点详情";
 }
 function patchNode(node) {
-  activeNode = node; detail.hidden = false; empty.hidden = true;
+  detail.hidden = false; empty.hidden = true;
   const metrics = node.metrics ?? {}, hardware = node.hardware;
   document.title = `${node.name} · FRP Monitor`;
   put("name", node.name); put("session", sessionLabels[node.session]); labels.get("session").dataset.state = node.session;
@@ -50,7 +49,7 @@ function patchNode(node) {
   put("sample-time", node.metrics_at ? `资源采样 ${timeText(node.metrics_at)}${node.freshness === "stale" ? " · 已过期" : ""}` : "尚未收到资源报告");
   put("interval", Number.isFinite(node.interval_seconds) && node.interval_seconds > 0 ? `${node.interval_seconds} 秒 / 次` : UNKNOWN);
   write(byID("footer-sample"), `CPU ${percentage(percent(metrics.cpu))} · ↑ ${bytes(decimal(metrics.net_tx), true)} · ↓ ${bytes(decimal(metrics.net_rx), true)}`);
-  if (!panel) panel = createHistoryPanel(historyHost, id, {mode: "detail"});
+  if (!panel) panel = createHistoryPanel(historyHost, id);
   panel.setVisible(document.visibilityState !== "hidden");
 }
 function onSnapshot(data) {

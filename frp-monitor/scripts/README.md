@@ -1,8 +1,8 @@
 # 构建入口
 
 `scripts/frp.py` 是 Python 3.11+ 标准库 CLI；运行平台为 macOS/Linux，需要 Git、
-本机 Go 1.26.6+、Node.js 与 npm。当前输出为 **P4 简化存储、可选 TSDB 与 GitHub 管理登录**，
-已通过本地测试与二进制 smoke，尚未部署。原生 frpc/frps 功能和
+本机 Go 1.26.6+、Node.js 与 npm。输出包含 SQLite 节点存储、可选 TSDB 与 GitHub 管理登录。
+原生 frpc/frps 功能和
 Dashboard 保留；通过 `[telemetry]` / `[monitor]` 显式启用独立采集、探测、存储与网页。
 
 从 `frp-monitor/` 运行：
@@ -12,7 +12,7 @@ python3 scripts/frp.py prepare
 python3 scripts/frp.py test
 python3 scripts/frp.py build --native
 python3 tests/smoke.py --agent dist/darwin-arm64/frp-monitor-agent --server dist/darwin-arm64/frp-monitor-server
-python3 tests/p4_smoke.py --agent dist/darwin-arm64/frp-monitor-agent --server dist/darwin-arm64/frp-monitor-server
+python3 tests/monitor_smoke.py --agent dist/darwin-arm64/frp-monitor-agent --server dist/darwin-arm64/frp-monitor-server
 python3 scripts/frp.py build
 python3 scripts/frp.py package
 ```

@@ -136,9 +136,7 @@ func readPrivate(path string) ([]byte, error) {
 func (s *Service) applyCredentials(creds []credential) {
 	s.mu.Lock()
 	next := make(map[string]*node, len(creds))
-	grants := make(map[string]string, len(creds))
 	for _, c := range creds {
-		grants[c.AgentID] = c.TokenSHA256
 		n := s.nodes[c.AgentID]
 		if n == nil || n.credential.TokenSHA256 != c.TokenSHA256 {
 			n = &node{}
@@ -147,12 +145,11 @@ func (s *Service) applyCredentials(creds []credential) {
 		next[c.AgentID] = n
 	}
 	for conn, grant := range s.connections {
-		if grants[grant.AgentID] != grant.TokenSHA256 {
+		if n := next[grant.AgentID]; n == nil || n.credential.TokenSHA256 != grant.TokenSHA256 {
 			_ = conn.Close()
 		}
 	}
 	s.nodes = next
-	s.credentials = creds
 	s.mu.Unlock()
 	s.credentialError.Store(false)
 	// Remove stale cached public rows immediately when authorization is revoked.

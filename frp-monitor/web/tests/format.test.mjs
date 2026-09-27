@@ -1,10 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {decimal, bytes, ratio, percent, percentage, uptime, loadText, reconciliationText} from "../src/format.mjs";
+import {uint64, cumulative, decimal, bytes, ratio, percent, percentage, uptime, loadText, reconciliationText} from "../src/format.mjs";
 import {overview, select, snapshot} from "../src/store.mjs";
 const ok = value => ({value, quality: "ok"});
 test("uint64 bytes preserve integer precision and distinguish missing from zero", () => {
+  assert.equal(uint64("9007199254740993"), 9007199254740993n);
+  assert.equal(uint64("18446744073709551615"), 18446744073709551615n);
+  assert.equal(uint64("0"), 0n);
+  for (const n of ["18446744073709551616", "01", -1, 9007199254740992, null, "1e3"]) assert.equal(uint64(n), null);
   assert.equal(decimal(ok("18446744073709551615")), 18446744073709551615n);
+  assert.equal(decimal({quality: "unavailable", value: "1"}), null);
+  assert.equal(decimal(ok("18446744073709551616")), null);
   assert.equal(bytes(decimal(ok("18446744073709551615"))), "16.0 EiB");
   assert.equal(bytes(decimal(ok("0")), true), "0 B/s");
   assert.equal(bytes(decimal({value: null, quality: "warming_up"}), true), "—");
@@ -16,6 +22,15 @@ test("uint64 bytes preserve integer precision and distinguish missing from zero"
   assert.equal(percentage(percent(ok(0))), "0.0%");
   assert.equal(uptime(ok("90061")), "1 天 1 小时");
   assert.equal(loadText(ok([0, 1.1, 2.23])), "0.00 / 1.10 / 2.23");
+});
+test("daily traffic sums may exceed uint64 without relaxing resource counter bounds", () => {
+  const raw = "36893488147419103231";
+  assert.equal(cumulative(raw), 36893488147419103231n);
+  assert.equal(bytes(cumulative(raw)), "32.0 EiB");
+  assert.equal(uint64(raw), null);
+  assert.equal(cumulative("0"), 0n);
+  assert.equal(cumulative("9".repeat(80)), BigInt("9".repeat(80)));
+  for (const n of ["9".repeat(81), "01", "-1", "1e8", "1.5", "", null, 123]) assert.equal(cumulative(n), null);
 });
 const nodes = [
   {id: "a", name: "节点 2", session: "online", freshness: "fresh", metrics: {cpu: ok(0), net_rx: ok("9007199254740993"), net_tx: ok("0")}, frp: {control_state: "connected", proxy_total: 0, proxy_running: 0}},

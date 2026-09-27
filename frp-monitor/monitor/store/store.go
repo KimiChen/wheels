@@ -20,7 +20,7 @@ import (
 )
 
 var ErrClosed = errors.New("history store closed")
-var fieldNames = []string{"cpu", "load1", "load2", "load3", "mem_total", "mem_used", "swap_total", "swap_used", "disk_total", "disk_used", "net_rx", "net_tx", "net_rx_total", "net_tx_total", "uptime", "tcp", "udp", "procs"}
+var fieldNames = []string{"cpu", "load1", "load2", "load3", "mem_total", "mem_used", "swap_total", "swap_used", "disk_total", "disk_used", "net_rx", "net_tx", "uptime", "tcp", "udp", "procs"}
 
 // VictoriaMetrics cache settings are process global. The monitor owns one store.
 var instanceMu sync.Mutex
@@ -213,7 +213,7 @@ func (s *Store) Accept(nodeID string, at time.Time, m shared.Metrics) bool {
 	for _, f := range []struct {
 		name string
 		f    shared.Field[uint64]
-	}{{"mem_total", m.MemTotal}, {"mem_used", m.MemUsed}, {"swap_total", m.SwapTotal}, {"swap_used", m.SwapUsed}, {"disk_total", m.DiskTotal}, {"disk_used", m.DiskUsed}, {"net_rx", m.NetRX}, {"net_tx", m.NetTX}, {"net_rx_total", m.NetRXTotal}, {"net_tx_total", m.NetTXTotal}, {"uptime", m.Uptime}, {"tcp", m.TCP}, {"udp", m.UDP}, {"procs", m.Procs}} {
+	}{{"mem_total", m.MemTotal}, {"mem_used", m.MemUsed}, {"swap_total", m.SwapTotal}, {"swap_used", m.SwapUsed}, {"disk_total", m.DiskTotal}, {"disk_used", m.DiskUsed}, {"net_rx", m.NetRX}, {"net_tx", m.NetTX}, {"uptime", m.Uptime}, {"tcp", m.TCP}, {"udp", m.UDP}, {"procs", m.Procs}} {
 		addUint(f.name, f.f)
 	}
 	return s.offer(event{node: nodeID, at: at.UTC(), values: values})

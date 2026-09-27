@@ -1,6 +1,6 @@
 # Agent
 
-P2 由 `collect/` 采样、`service/` 独立上报、`probe/` 执行获准 TCP 任务，上游补丁提供只读 FRP 适配器。
+由 `collect/` 采样、`service/` 独立上报、`probe/` 执行获准 TCP 任务，上游补丁提供只读 FRP 适配器。
 原生 frpc 的 `[telemetry]` 默认为关闭；在现有 TOML 中可加入：
 
 ```toml
@@ -32,7 +32,7 @@ Token 是至少 32 随机字节的无填充 base64url 编码，文件为常规�
 
 本目录由 Overlay 构建映射到固定 FRP `v0.71.0` 源码的
 `extension/frpmonitor/agent`，共享上游 Go module，不建立独立 `go.mod`。
-具体生命周期、传输及 P1 验收规格以根目录 [README.md](../README.md) 为准。
+具体生命周期、传输及验收规格以根目录 [README.md](../README.md) 为准。
 通过窄接口读取 FRP 状态，不得反向 import 上游 `client` 根包而造成循环依赖。
 
 ## Linux 采集器
@@ -78,11 +78,11 @@ statfs，避免远程存储阻塞；本地内核 I/O 不保证硬超时。服务
 参考公开算法的数值口径相同，质量状态与网络集合变更语义采用本项目协议扩展，不能称为
 上游逐字节协议兼容。有效样本之外的差异见 [参考向量](../tests/fixtures/collect/README.md)。
 
-测试通过真实生产 `Metrics` 路径及其解析/拓扑函数消费全部 17 个 P0 fixture。
+测试通过真实生产 `Metrics` 路径及其解析/拓扑函数消费全部 17 个采集 fixture。
 唯一数据源保留在 `tests/fixtures/collect/cases.json`，Overlay 测试时设置
 `FRP_MONITOR_COLLECT_FIXTURES` 为它的绝对路径，不复制第二份。补充测试覆盖错误恢复、
 缺失数据、范围/时钟/重启变化、地址优先级、饱和、并发及非 Linux 合法输出。
 
-P1 生命周期应在首次 FRP 登录前启动，每进程仅一个实例，reload 更新配置快照。
+生命周期在首次 FRP 登录前启动，每进程仅一个实例，reload 更新配置快照。
 默认每秒采样，经独立 WSS 主动上报；无 Proxy 或 FRP 登录失败也能采集。
-P2 增加受限 TCP 探测，本采集器尚不实现探测。协议见 [shared](../shared/README.md)。
+受限 TCP 探测由独立 probe 包实现。协议见 [shared](../shared/README.md)。

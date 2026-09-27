@@ -1,18 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {integer, cumulative, memoryPercent, history, chart, resourceCharts, failureRate, coverage} from "../src/history-data.mjs";
-import {bytes} from "../src/format.mjs";
+import {memoryPercent, history, chart, resourceCharts, failureRate, coverage} from "../src/history-data.mjs";
 import {connectHistory} from "../src/history-transport.mjs";
 
 const generated_at = "2026-09-27T12:00:00Z";
 const payload = (window = "1h") => ({node_id: "node-test", window, generated_at, step_seconds: 60, storage: {state: "ready", dropped: 0}, points: [], probes: []});
 const turn = () => new Promise(resolve => setImmediate(resolve));
 const point = (at, cpu, extra = {}) => ({at: `2026-09-27T11:${at}:00Z`, cpu, samples: 1, ...extra});
-test("history byte values preserve uint64 precision and zero remains known", () => {
-  assert.equal(integer("9007199254740993"), 9007199254740993n);
-  assert.equal(integer("18446744073709551615"), 18446744073709551615n);
-  for (const n of ["18446744073709551616", "01", -1, 9007199254740992, null, "1e3"]) assert.equal(integer(n), null);
-  assert.equal(integer("0"), 0n);
+test("history ratios preserve uint64 precision and zero remains known", () => {
   assert.equal(memoryPercent({mem_used: "9007199254740993", mem_total: "18014398509481986"}), 50);
   assert.equal(memoryPercent({mem_used: "0", mem_total: "1"}), 0);
   assert.equal(memoryPercent({mem_used: "0", mem_total: "0"}), null);
@@ -21,15 +16,6 @@ test("history byte values preserve uint64 precision and zero remains known", () 
   assert.equal(failureRate({failure_rate: 0, samples: 0}), "—");
   assert.equal(failureRate({failure_rate: 25, samples: 4}), "25.0%");
   assert.equal(coverage(0), "0 秒"); assert.equal(coverage(null), "—");
-});
-test("daily traffic sums may exceed uint64 without relaxing resource counter bounds", () => {
-  const raw = "36893488147419103231";
-  assert.equal(cumulative(raw), 36893488147419103231n);
-  assert.equal(bytes(cumulative(raw)), "32.0 EiB");
-  assert.equal(integer(raw), null);
-  assert.equal(cumulative("0"), 0n);
-  assert.equal(cumulative("9".repeat(80)), BigInt("9".repeat(80)));
-  for (const n of ["9".repeat(81), "01", "-1", "1e8", "1.5", "", null, 123]) assert.equal(cumulative(n), null);
 });
 test("SVG paths leave explicit and implicit sample gaps without turning zero into a gap", () => {
   const rows = [point("00", 0), point("01", 50), point("02", null), point("03", 80), point("05", 20), point("06", 40), point("07", 90, {samples: 0})];
@@ -68,7 +54,7 @@ function harness() {
   const resolve = (n, window = "1h") => requests[n].resolve({ok: true, json: async () => payload(window)});
   return {connection, requests, scheduled, data, states, resolve};
 }
-test("history starts only on activation and closing cancels request and future polling", async () => {
+test("history starts only when visible and hiding cancels request and future polling", async () => {
   const h = harness(); assert.equal(h.requests.length, 0);
   h.connection.activate(true); assert.equal(h.requests.length, 1);
   assert.equal(h.requests[0].url, "/api/public/v1/nodes/node-test/history?window=1h");

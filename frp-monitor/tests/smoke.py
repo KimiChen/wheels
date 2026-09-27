@@ -9,13 +9,16 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 import http.client
+import json
 import math
 import os
 from pathlib import Path
 import secrets
+import select
 import signal
 import socket
 import socketserver
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -32,6 +35,182 @@ PAYLOAD = b"frp-monitor baseline smoke\x00" + bytes(range(256)) * 256
 
 class SmokeFailure(RuntimeError):
     """A safe diagnostic containing no raw child output or configuration."""
+
+
+class Bridge:
+    """A disposable byte bridge; dropping it interrupts one transport only."""
+
+    def __init__(self, target: int):
+        self.target = target
+        self.port = 0
+        self.listener: socket.socket | None = None
+        self.connections: set[socket.socket] = set()
+        self.lock = threading.Lock()
+        self.thread: threading.Thread | None = None
+        self.stop_event = threading.Event()
+
+    def start(self) -> None:
+        if self.listener is not None:
+            raise SmokeFailure("test bridge already started")
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind((LOOPBACK, self.port))
+        listener.listen(16)
+        listener.settimeout(.2)
+        self.port = listener.getsockname()[1]
+        self.listener = listener
+        self.stop_event = threading.Event()
+        self.thread = threading.Thread(target=self._accept, args=(listener, self.stop_event), daemon=True)
+        self.thread.start()
+
+    def _accept(self, listener: socket.socket, stop: threading.Event) -> None:
+        while not stop.is_set():
+            try:
+                client, _ = listener.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            threading.Thread(target=self._relay, args=(client, stop), daemon=True).start()
+
+    def _relay(self, client: socket.socket, stop: threading.Event) -> None:
+        upstream = None
+        try:
+            upstream = socket.create_connection((LOOPBACK, self.target), timeout=1)
+            client.settimeout(1)
+            with self.lock:
+                if stop.is_set():
+                    return
+                self.connections.update((client, upstream))
+            while not stop.is_set():
+                readable, _, _ = select.select((client, upstream), (), (), .2)
+                for source in readable:
+                    data = source.recv(65536)
+                    if not data:
+                        return
+                    (upstream if source is client else client).sendall(data)
+        except (OSError, ValueError):
+            pass
+        finally:
+            with self.lock:
+                self.connections.discard(client)
+                if upstream:
+                    self.connections.discard(upstream)
+            client.close()
+            if upstream:
+                upstream.close()
+
+    def stop(self) -> None:
+        self.stop_event.set()
+        if self.listener:
+            self.listener.close()
+            self.listener = None
+        with self.lock:
+            active = list(self.connections)
+        for connection in active:
+            try:
+                connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            connection.close()
+        if self.thread:
+            self.thread.join(timeout=2)
+            if self.thread.is_alive():
+                raise SmokeFailure("test bridge did not stop")
+            self.thread = None
+
+
+class PublicAPI:
+    def __init__(self, port: int, certificate: Path):
+        self.port = port
+        self.context = ssl.create_default_context(cafile=str(certificate))
+
+    def connection(self) -> http.client.HTTPSConnection:
+        return http.client.HTTPSConnection(LOOPBACK, self.port, context=self.context, timeout=3)
+
+    def get(self, path: str, headers: dict[str, str] | None = None) -> tuple[int, dict[str, str], bytes]:
+        connection = self.connection()
+        try:
+            connection.request("GET", path, headers=headers or {})
+            response = connection.getresponse()
+            body = response.read(2 * 1024 * 1024 + 1)
+            if len(body) > 2 * 1024 * 1024:
+                raise SmokeFailure("public response exceeded smoke limit")
+            return response.status, dict(response.getheaders()), body
+        finally:
+            connection.close()
+
+    def snapshot(self) -> dict:
+        status, headers, body = self.get("/api/public/v1/nodes")
+        if status != 200 or headers.get("Cache-Control") != "no-store":
+            raise SmokeFailure("public API is not an uncached JSON 200 response")
+        try:
+            result = json.loads(body)
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise SmokeFailure("public API returned malformed JSON") from exc
+        if not isinstance(result, dict) or not isinstance(result.get("nodes"), list):
+            raise SmokeFailure("public API returned no node list")
+        return result
+
+    def node(self) -> dict:
+        nodes = self.snapshot()["nodes"]
+        if len(nodes) != 1:
+            raise SmokeFailure("public API returned an unexpected node count")
+        return nodes[0]
+
+    def history(self) -> dict:
+        status, headers, raw = self.get("/api/public/v1/nodes/1/history?window=1h")
+        if status != 200 or headers.get("Cache-Control") != "no-store":
+            raise SmokeFailure("history API is not an uncached JSON 200 response")
+        payload = json.loads(raw)
+        if payload.get("node_id") != "1" or payload.get("step_seconds") != 60:
+            raise SmokeFailure("history API returned a wrong node or interval")
+        return payload
+
+    def event(self) -> dict:
+        connection = self.connection()
+        try:
+            connection.request("GET", "/events/public")
+            response = connection.getresponse()
+            if response.status != 200 or response.getheader("Content-Type", "").split(";")[0] != "text/event-stream":
+                raise SmokeFailure("public SSE did not open a stream")
+            event = ""
+            for _ in range(20):
+                line = response.readline(512 * 1024)
+                if line.startswith(b"event:"):
+                    event = line[6:].strip().decode("ascii")
+                if line.startswith(b"data:"):
+                    if event != "snapshot":
+                        raise SmokeFailure("public SSE event is not a snapshot")
+                    return json.loads(line[5:])
+            raise SmokeFailure("public SSE did not send its initial snapshot")
+        finally:
+            connection.close()
+
+
+def assert_redacted(payload: dict, secrets_to_hide: tuple[str, ...]) -> None:
+    forbidden = {"hostname", "ipv4", "ipv6", "kernel", "boot_id", "iface", "raw_client_id", "local_target", "association", "facts", "session_id", "token", "token_sha256"}
+    def walk(value: object) -> None:
+        if isinstance(value, dict):
+            if forbidden.intersection(value):
+                raise SmokeFailure("public response leaked an internal field")
+            for nested in value.values():
+                walk(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                walk(nested)
+    walk(payload)
+    encoded = json.dumps(payload, ensure_ascii=False)
+    if any(secret in encoded for secret in secrets_to_hide):
+        raise SmokeFailure("public response leaked a private test value")
+    for node in payload.get("nodes", []):
+        metrics = node.get("metrics") or {}
+        for name, field in metrics.items():
+            if name in ("scope", "cpu", "load"):
+                continue
+            value = field.get("value")
+            if value is not None and (not isinstance(value, str) or not value.isascii() or not value.isdecimal()):
+                raise SmokeFailure("public uint64 value is not a decimal string")
 
 
 @dataclass(frozen=True)

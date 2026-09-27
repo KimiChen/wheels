@@ -35,7 +35,7 @@ python3 scripts/ops.py server-init \
 管理员只通过 github.com 的 OAuth 登录。初始化前在 `.env` 设置以下四项：
 
 - `FRP_GITHUB_CLIENT_ID`：GitHub OAuth App 的 Client ID。
-- `FRP_GITHUB_CLIENT_SECRET_FILE`：保存 Client Secret 的0600文件路径；工具复制为运行目录 `github.secret`。
+- `FRP_GITHUB_CLIENT_SECRET_FILE`：保存 Client Secret 的0600文件路径；去除首尾空白后须为8–256字节，不能含空格、制表符、换行或 NUL。工具复制为运行目录 `github.secret`。
 - `FRP_GITHUB_CALLBACK_URL`：公开 HTTPS 地址，路径必须为 `/api/admin/v1/auth/github/callback`，与 GitHub App 设置完全一致。
 - `FRP_GITHUB_ADMIN_USERS`：允许管理的 GitHub 登录名，用英文逗号分隔。
 
@@ -85,7 +85,7 @@ Agent 将两处 `server` 改为 `agent`。生成器只输出unit，安装/启用
 尾批持久化留出时间。服务端限制系统目录写入；agent保留宿主挂载/网络视图，避免沙箱改变
 采集口径，仍以无特权用户运行。采集权限缺失会呈现质量状态。服务端业务配置、流量累计和可选历史只写运行目录。替换二进制前停服务，保留旧包和私有备份；不提供自动升级。
 
-发布前分别验证目标架构的构建、配置与采样。源码 `tests/p4_smoke.py` 验证新控制库、
+发布前分别验证目标架构的构建、配置与采样。源码 `tests/monitor_smoke.py` 验证控制库、
 数字节点 ID、公开接口和 agent 接入；GitHub OAuth 与管理权限由服务端测试覆盖。
 测试机地址与凭据不写入公开文档。
 

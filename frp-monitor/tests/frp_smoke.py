@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import argparse
 from contextlib import ExitStack, contextmanager
-import hashlib
 import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -24,6 +23,9 @@ import subprocess
 import sys
 import tempfile
 import threading
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+import local
 
 from smoke import (LOOPBACK, PAYLOAD, SmokeFailure, child, child_environment,
                    echo_matches, echo_server, interrupted, port_open,
@@ -106,7 +108,7 @@ def is_original(binary: Path) -> bool:
 
 def run_pair(agent: Path, server: Path, label: str, wire: str, enhanced_agent: bool,
              enhanced_server: bool, timeout: float) -> None:
-    with tempfile.TemporaryDirectory(prefix="frp-monitor-p3-frp-") as temporary, ExitStack() as stack:
+    with tempfile.TemporaryDirectory(prefix="frp-monitor-protocol-") as temporary, ExitStack() as stack:
         directory = Path(temporary).resolve()
         directory.chmod(0o700)
         reservations = [stack.enter_context(reserve_port()) for _ in range(5)]
@@ -120,27 +122,25 @@ def run_pair(agent: Path, server: Path, label: str, wire: str, enhanced_agent: b
         token, monitor_token, secret = secrets.token_hex(32), secrets.token_urlsafe(32), secrets.token_hex(32)
         common = (f'auth.method = "token"\nauth.token = "{token}"\n'
                   'log.to = "console"\nlog.level = "info"\nlog.disablePrintColor = true\n')
-        credentials, token_file = directory / "credentials.json", directory / "agent.token"
-        write_private(credentials, json.dumps([{"agent_id": "p3-protocol-node", "name": "Protocol test",
-                                               "token_sha256": hashlib.sha256(monitor_token.encode()).hexdigest(),
-                                               "frp_binding": {"server_id": "p3-protocol", "user": "smoke-team", "raw_client_id": "stable-client"}}]))
+        database, token_file = directory / "control.sqlite", directory / "agent.token"
+        local.control_database(database, node_name="Protocol test", token=monitor_token, server_id="protocol")
         write_private(token_file, monitor_token + "\n")
         server_config, agent_config, visitor_config = [directory / name for name in ("frps.toml", "frpc.toml", "visitor.toml")]
         text = (f'bindAddr = "{LOOPBACK}"\nproxyBindAddr = "{LOOPBACK}"\nbindPort = {control_port}\n'
                 f'vhostHTTPPort = {http_port}\nallowPorts = [{{single={remote_port}}},{{single={udp_remote}}}]\n' + common)
         if enhanced_server:
             text += (f'\n[monitor]\nenabled = true\nbindAddr = "{LOOPBACK}"\nbindPort = {monitor_port}\n'
-                     f'serverID = "p3-protocol"\ncredentialsFile = {json.dumps(str(credentials))}\n')
+                     f'serverID = "protocol"\ndatabaseFile = {json.dumps(str(database))}\n')
         write_private(server_config, text)
-        client_common = (f'serverAddr = "{LOOPBACK}"\nserverPort = {control_port}\nuser = "smoke-team"\n'
+        client_common = (f'serverAddr = "{LOOPBACK}"\nserverPort = {control_port}\nuser = ""\n'
                          'loginFailExit = false\ntransport.protocol = "tcp"\ntransport.tls.enable = true\n'
                          f'transport.wireProtocol = "{wire}"\n' + common)
-        text = client_common + 'clientID = "stable-client"\n'
+        text = client_common + 'clientID = "1"\n'
         if enhanced_agent:
             # When the server is original this endpoint remains refused. FRP
             # must still forward while independent monitoring keeps retrying.
             text += (f'\n[telemetry]\nenabled = true\nendpoint = "ws://{LOOPBACK}:{monitor_port}/agent/v1/ws"\n'
-                     f'tokenFile = {json.dumps(str(token_file))}\nserverID = "p3-protocol"\nallowInsecureLoopback = true\n')
+                     f'tokenFile = {json.dumps(str(token_file))}\nserverID = "protocol"\nallowInsecureLoopback = true\n')
         text += (f'\n[[proxies]]\nname = "echo"\ntype = "tcp"\nlocalIP = "{LOOPBACK}"\nlocalPort = {tcp_local}\nremotePort = {remote_port}\n'
                  f'\n[[proxies]]\nname = "datagram"\ntype = "udp"\nlocalIP = "{LOOPBACK}"\nlocalPort = {udp_local}\nremotePort = {udp_remote}\n'
                  f'\n[[proxies]]\nname = "web"\ntype = "http"\nlocalIP = "{LOOPBACK}"\nlocalPort = {http_local}\ncustomDomains = ["smoke.invalid"]\n'

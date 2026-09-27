@@ -27,7 +27,7 @@
 
 扩展包括 TCP 探测、SQLite 节点配置与当前流量、GitHub OAuth 管理入口，以及默认关闭的
 内嵌 VictoriaMetrics 历史。监控模式下接收 TERM/INT 并关闭存储。SQLite、进程退出、
-FRP 对账和 TSDB 依赖变更分别记录在 0002～0005 补丁。
+FRP 对账和 TSDB 依赖变更记录在 0002～0004 补丁。
 
 ## monitor-probe 设计参考
 
@@ -71,7 +71,7 @@ SQLite 核心的公开领域声明与 Go 封装/依赖的许可证分别保留�
 - Source: https://github.com/VictoriaMetrics/VictoriaMetrics
 - Version: `v1.151.0`
 - License: Apache-2.0
-- Dependency patch: `patches/0005-embedded-tsdb-dependency.patch`
+- Dependency patch: `patches/0002-storage-dependencies.patch`
 
 完整模块图和校验值由该补丁中的 `go.mod` / `go.sum` 固定，构建需要 Go 1.26.6
 或更高。TSDB 新增依赖包括 VictoriaMetrics 的 easyproto、fastcache、metrics、

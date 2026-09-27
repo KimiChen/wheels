@@ -282,7 +282,7 @@ func TestUnavailableControlRejectsNewAuthentication(t *testing.T) {
 	s.configMu.Lock()
 	s.reloadCredentials()
 	s.configMu.Unlock()
-	if !s.credentialError.Load() || s.authenticate(&http.Request{Header: http.Header{"Authorization": []string{"Bearer " + agent}}}) != "" {
+	if !s.credentialError.Load() || s.authenticateCredential(&http.Request{Header: http.Header{"Authorization": []string{"Bearer " + agent}}}).AgentID != "" {
 		t.Fatal("unavailable configuration allowed authentication")
 	}
 }

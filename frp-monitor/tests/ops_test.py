@@ -141,13 +141,16 @@ class OpsTests(unittest.TestCase):
         local.private(secret, 'example-oauth-secret\n')
         config = local.settings(self.root, {'FRP_GITHUB_CLIENT_ID': 'example-id', 'FRP_GITHUB_CLIENT_SECRET_FILE': str(secret),
             'FRP_GITHUB_CALLBACK_URL': 'https://monitor.example.invalid/api/admin/v1/auth/github/callback', 'FRP_GITHUB_ADMIN_USERS': 'ExampleAdmin'})
-        args = argparse.Namespace(directory=str(self.root / 'server'), server_id='primary', bind='127.0.0.1',
+        args = argparse.Namespace(directory=str(self.root / 'server🛰'), server_id='primary🛰', bind='127.0.0.1',
             tls_cert=str(certificate_source / 'local.crt'), tls_key=str(certificate_source / 'local.key'))
         with mock.patch.object(ops, 'settings', return_value=config):
             folder = ops.server_init(args)
         text = (folder / 'server.toml').read_text()
         monitor = tomllib.loads(text)['monitor']
+        self.assertEqual(monitor['serverID'], 'primary🛰')
         self.assertEqual(monitor['databaseFile'], str(folder / 'control.sqlite'))
+        self.assertEqual(monitor['certFile'], str(folder / 'tls.crt'))
+        self.assertEqual(monitor['keyFile'], str(folder / 'tls.key'))
         self.assertEqual(monitor['historyDataPath'], '')
         self.assertNotIn('historyEnabled', monitor)
         self.assertEqual(monitor['githubAdminUsers'], ['exampleadmin'])
@@ -158,14 +161,14 @@ class OpsTests(unittest.TestCase):
         self.assertEqual(connection.execute('SELECT count(*) FROM nodes').fetchone(), (0,))
         connection.close()
         archive = ops.backup(folder, self.backups / 'github.tar.gz')
-        restored = ops.restore(archive, self.root / 'github-restored')
+        restored = ops.restore(archive, self.root / 'github-restored🛰')
         self.assertEqual((restored / 'github.secret').read_text(), 'example-oauth-secret\n')
         restored_config = tomllib.loads((restored / 'server.toml').read_text())['monitor']
         self.assertEqual(restored_config['githubClientSecretFile'], str(restored / 'github.secret'))
 
     def test_agent_init_private_config_and_no_plaintext_tokens_in_toml(self):
-        args = argparse.Namespace(directory=str(self.root / 'agent'), monitor_url='wss://monitor.example.invalid:7401/agent/v1/ws',
-              server_addr='frp.example.invalid', server_id='test', client_id='stable-client', user='tenant',
+        args = argparse.Namespace(directory=str(self.root / 'agent🛰'), monitor_url='wss://monitor.example.invalid:7401/agent/v1/ws',
+              server_addr='frp.example.invalid', server_id='test', client_id='stable-client🛰', user='tenant🛰',
               agent_token=str(self.runtime / 'agent.token'), frp_token=str(self.runtime / 'frp.token'),
               ca=None, probes=False, allow_private_probes=False)
         with mock.patch.object(ops, 'settings', return_value=local.settings(self.root, {})):
@@ -173,8 +176,12 @@ class OpsTests(unittest.TestCase):
         folder = Path(args.directory)
         content = (folder / 'agent.toml').read_text()
         config = tomllib.loads(content)
-        self.assertEqual(config['clientID'], 'stable-client')
+        self.assertEqual(config['clientID'], 'stable-client🛰')
+        self.assertEqual(config['user'], 'tenant🛰')
         self.assertFalse(config['telemetry']['probeEnabled'])
+        self.assertFalse(config['telemetry']['allowInsecureLoopback'])
+        self.assertFalse(config['telemetry']['probeAllowPrivate'])
+        self.assertEqual(config['telemetry']['endpoint'], args.monitor_url)
         self.assertNotIn((folder / 'agent.token').read_text().strip(), content)
         self.assertEqual(config['auth']['tokenSource']['file']['path'], str(folder / 'frp.token'))
         self.assertEqual(folder.stat().st_mode & 0o777, 0o700)
@@ -219,7 +226,8 @@ class OpsTests(unittest.TestCase):
     def test_nonregular_archive_and_database_do_not_block(self):
         fifo = self.root / 'pipe'
         os.mkfifo(fifo, 0o600)
-        for action in (lambda: ops.database_snapshot(fifo, self.backups / 'pipe.sqlite'),
+        for action in (lambda: ops.read_private(fifo),
+                       lambda: ops.database_snapshot(fifo, self.backups / 'pipe.sqlite'),
                        lambda: ops.restore(fifo, self.root / 'pipe-restore')):
             errors = []
             def invoke():

@@ -414,6 +414,65 @@ func TestValidationErrorsAreDistinctFromStorageFailures(t *testing.T) {
 	}
 }
 
+func TestBindingValidationMatchesTrustedConfiguration(t *testing.T) {
+	f := setup(t, utc("2026-09-28T12:00:00Z"), time.UTC)
+	n := f.create(DefaultNodeConfig("node"))
+	for _, binding := range []*shared.FRPBinding{
+		{ServerID: "server"},
+		{ServerID: " ", RawClientID: "client"},
+		{ServerID: "server", User: "user\n", RawClientID: "client"},
+		{ServerID: "server", RawClientID: "client\r"},
+	} {
+		if _, err := f.s.CreateNode(context.Background(), n.NodeConfig, strings.Repeat("a", 64), binding); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("created invalid binding %+v: %v", binding, err)
+		}
+		if err := f.s.SetBinding(context.Background(), n.ID, binding, n.ConfigRevision); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("set invalid binding %+v: %v", binding, err)
+		}
+	}
+	// Native FRP's default user is empty; it remains a valid trusted binding.
+	binding := &shared.FRPBinding{ServerID: "server", RawClientID: "client"}
+	if err := f.s.SetBinding(context.Background(), n.ID, binding, n.ConfigRevision); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := f.s.Get(context.Background(), n.ID)
+	if err != nil || updated.ConfigRevision != n.ConfigRevision+1 || *updated.Binding != *binding {
+		t.Fatal(updated, err)
+	}
+	if err := f.s.SetBinding(context.Background(), n.ID, nil, updated.ConfigRevision); err != nil {
+		t.Fatal("cannot clear binding", err)
+	}
+}
+
+func TestNodeLimitIsTransactionalConflict(t *testing.T) {
+	f := setup(t, utc("2026-09-28T12:00:00Z"), time.UTC)
+	// Seed near the cap in one transaction; exercise the API for the boundary.
+	err := f.s.call(context.Background(), func(tx *sql.Tx) error {
+		_, err := tx.Exec(`WITH RECURSIVE ids(n) AS (
+ SELECT 1 UNION ALL SELECT n+1 FROM ids WHERE n<1023
+) INSERT INTO nodes(name,token_sha256,created_at_ms,updated_at_ms)
+ SELECT 'fixture',printf('%064x',n),0,0 FROM ids`)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, err := f.s.CreateNode(context.Background(), DefaultNodeConfig("last"), strings.Repeat("a", 64), nil)
+	if err != nil || n.ID != "1024" {
+		t.Fatal(n, err)
+	}
+	if _, err = f.s.CreateNode(context.Background(), n.NodeConfig, strings.Repeat("b", 64), nil); !errors.Is(err, ErrConflict) {
+		t.Fatal("limit must map to HTTP 409", err)
+	}
+	if err = f.s.DeleteNode(context.Background(), n.ID); err != nil {
+		t.Fatal(err)
+	}
+	n, err = f.s.CreateNode(context.Background(), n.NodeConfig, strings.Repeat("b", 64), nil)
+	if err != nil || n.ID != "1025" {
+		t.Fatal("capacity did not recover without reusing an ID", n, err)
+	}
+}
+
 func TestCanceledQueuedCallsDoNotReadWorkerResults(t *testing.T) {
 	f := setup(t, utc("2026-09-28T12:00:00Z"), time.UTC)
 	n := f.create(DefaultNodeConfig("node"))
@@ -504,7 +563,7 @@ func TestLargeCountersAndCredentialBindingUniqueness(t *testing.T) {
 	if _, err = f.s.CreateNode(context.Background(), cfg, n.TokenSHA256, nil); err == nil {
 		t.Fatal("duplicate token allowed")
 	}
-	b := &FRPBinding{ServerID: "fixture", User: "test", RawClientID: "client"}
+	b := &shared.FRPBinding{ServerID: "fixture", User: "test", RawClientID: "client"}
 	if err = f.s.SetBinding(context.Background(), n.ID, b, n.ConfigRevision); err != nil {
 		t.Fatal(err)
 	}

@@ -1,27 +1,18 @@
-import {UNKNOWN, bytes} from "./format.mjs";
+import {UNKNOWN, bytes, uint64} from "./format.mjs";
 
 export const windows = {"1h": "最近 1 小时", "6h": "最近 6 小时", "24h": "最近 24 小时", "7d": "最近 7 天"};
 const seconds = {"1h": 3600, "6h": 21600, "24h": 86400, "7d": 604800};
-export function integer(raw) {
-  if (typeof raw !== "string" || !/^(0|[1-9][0-9]*)$/.test(raw) || raw.length > 20) return null;
-  const n = BigInt(raw);
-  return n <= 18446744073709551615n ? n : null;
-}
-// Daily sums may exceed a single uint64 counter after counter resets.
-export function cumulative(raw) {
-  return typeof raw === "string" && raw.length <= 80 && /^(0|[1-9][0-9]*)$/.test(raw) ? BigInt(raw) : null;
-}
 export const finite = n => typeof n === "number" && Number.isFinite(n) && n >= 0 ? n : null;
 export const count = n => Number.isSafeInteger(n) && n >= 0;
 export const validDate = raw => typeof raw === "string" && Number.isFinite(Date.parse(raw));
 export function memoryPercent(point) {
-  const used = integer(point.mem_used), total = integer(point.mem_total);
+  const used = uint64(point.mem_used), total = uint64(point.mem_total);
   return used === null || total === null || total === 0n || used > total ? null : Number(used * 10000n / total) / 100;
 }
 export function diskPercent(point) {
   const usedField = point.fields?.disk_used, totalField = point.fields?.disk_total;
-  const used = count(usedField?.samples) && usedField.samples > 0 ? integer(usedField.value) : null;
-  const total = count(totalField?.samples) && totalField.samples > 0 ? integer(totalField.value) : null;
+  const used = count(usedField?.samples) && usedField.samples > 0 ? uint64(usedField.value) : null;
+  const total = count(totalField?.samples) && totalField.samples > 0 ? uint64(totalField.value) : null;
   return used === null || total === null || total === 0n || used > total ? null : Number(used * 10000n / total) / 100;
 }
 export function history(data, nodeID, window) {
@@ -87,7 +78,7 @@ export function chart(rows, series, {window, generatedAt, step, ceiling = null})
 export const resourceCharts = [
   {key: "cpu", title: "CPU 使用率", ceiling: 100, series: [{name: "CPU", read: p => finite(p.cpu) !== null && p.cpu <= 100 ? p.cpu : null, format: n => `${n.toFixed(1)}%`}]},
   {key: "memory", title: "内存使用率", ceiling: 100, series: [{name: "内存", read: memoryPercent, format: n => `${n.toFixed(1)}%`}]},
-  {key: "network", title: "主机收发速率", series: [{name: "接收", read: p => integer(p.net_rx), format: n => bytes(n, true)}, {name: "发送", read: p => integer(p.net_tx), format: n => bytes(n, true)}]},
+  {key: "network", title: "主机收发速率", series: [{name: "接收", read: p => uint64(p.net_rx), format: n => bytes(n, true)}, {name: "发送", read: p => uint64(p.net_tx), format: n => bytes(n, true)}]},
   {key: "disk", title: "硬盘使用率", ceiling: 100, series: [{name: "硬盘", read: diskPercent, format: n => `${n.toFixed(1)}%`}]},
   {key: "load", title: "系统负载", series: [0,1,2].map((index) => ({name: `${[1,5,15][index]} 分钟`, read: p => Array.isArray(p.load) ? finite(p.load[index]) : null, format: n => n.toFixed(2)}))},
 ];

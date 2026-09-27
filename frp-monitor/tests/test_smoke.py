@@ -72,6 +72,39 @@ class HarnessTests(unittest.TestCase):
         with smoke.echo_server() as port:
             self.assertTrue(smoke.echo_matches(port))
 
+    def test_bridge_can_interrupt_and_restart_the_same_endpoint(self):
+        with smoke.echo_server() as port:
+            bridge = smoke.Bridge(port)
+            try:
+                bridge.start()
+                endpoint = bridge.port
+                self.assertTrue(smoke.echo_matches(endpoint))
+                bridge.stop()
+                self.assertFalse(smoke.port_open(endpoint))
+                bridge.start()
+                self.assertEqual(bridge.port, endpoint)
+                self.assertTrue(smoke.echo_matches(endpoint))
+            finally:
+                bridge.stop()
+
+    def test_public_snapshot_supports_last_node_revocation(self):
+        api = object.__new__(smoke.PublicAPI)
+        with mock.patch.object(api, "get", return_value=(200, {"Cache-Control": "no-store"}, b'{"nodes":[]}')):
+            self.assertEqual(api.snapshot()["nodes"], [])
+            with self.assertRaises(smoke.SmokeFailure):
+                api.node()
+        for body in (b'[]', b'{}', b'{"nodes":null}'):
+            with mock.patch.object(api, "get", return_value=(200, {"Cache-Control": "no-store"}, body)):
+                with self.assertRaises(smoke.SmokeFailure):
+                    api.snapshot()
+
+    def test_redaction_rejects_nested_secrets_and_imprecise_uint64(self):
+        for payload in ({"nested": [{"token": "hidden"}]}, {"note": "private-value"},
+                        {"nodes": [{"metrics": {"mem_used": {"value": 9007199254740993}}}]}):
+            with self.assertRaises(smoke.SmokeFailure):
+                smoke.assert_redacted(payload, ("private-value",))
+        smoke.assert_redacted({"nodes": [{"metrics": {"mem_used": {"value": "9007199254740993"}}}]}, ())
+
 
 if __name__ == "__main__":
     unittest.main()
