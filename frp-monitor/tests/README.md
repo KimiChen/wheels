@@ -127,15 +127,50 @@ P2 已运行完整 Go 测试、race/vet、25 项 Python 工具测试和 15 项 N
 并在真实页面验证四个历史窗口、TCP 实测曲线和平台不支持的空态。
 Linux 双架构交叉编译不替代 Linux 实机部署或 100/500 节点负载验收。
 
+## Linux 同机采样验收
+
+`linux_acceptance.py` 只使用 Python 标准库，在运行 agent 的同一 Linux 主机和命名空间
+执行，读取公开 API，不需要管理员或节点 token，不修改服务、配置或凭据。例如：
+
+```sh
+python3 tests/linux_acceptance.py \
+  --url https://127.0.0.1:17401 --ca /private/test/tls.crt --seconds 15
+```
+
+默认要求公开列表仅有一个节点；多节点用 `--node-id` 选择本机 agent。若 agent 配置了
+显式网卡规则，需要传相同的 `--iface`。不要用远端机器的 `/proc` 对照另一个节点。
+HTTPS 校验证书和名称；不支持跳过 TLS 校验。HTTP 仅允许字面回环地址，不使用环境代理，
+不跟随重定向。采样周期 1–10 秒，观察时长至少 `4 × 周期 + 4` 秒，需取得至少 3 个不同
+API 样本；默认 15 秒适用于 1 秒上报。
+
+验收读取 `/proc/stat` 的两次差分（iowait 计 idle、不重加 guest）、`/proc/meminfo`、
+`/proc/net/dev`、socket/进程/uptime/load；按采集器相同挂载与网卡筛选规则汇总。
+内存、交换和磁盘容量要求精确相等，并以 `free --bytes`、筛选后的 `df -B1` 验证容量；
+内存 used 使用 MemTotal−MemAvailable，不能直接拿不同版本 `free` 的 used 列等同。
+磁盘 used 使用 blocks−bfree，排除远程/伪文件系统，并按设备及 ZFS 池去重。
+
+API 的时间是服务端收报时间，与内核读数没有严格同步；工具保留 `3 × 周期 + 2` 秒的
+本地窗口。网络累计计数必须落在该窗口精确上下界内，静态容量没有误差额度；CPU 使用窗口
+包络另加 5 个百分点，内存 used 加 0.5% 总量或 8 MiB，其他动态字段采用输出所列容差。
+因此这是实机取值、质量标志、类型与量级验收，不替代 fixture 的算法精确性证明，也不证明
+容器指标属于宿主机。`scope=unknown` 是采集器的保守表示，允许通过实机数值验收；宿主机
+部署、命名空间与 PID 1 的对照是额外部署上下文，不能由该字段推断。输出仅含固定字段 JSON，列出样本数、各指标失败数、窗口外最大偏差和
+容差；不含 IP、主机名、网卡名、节点标识、路径或原始错误。退出码 0 表示全部通过。
+如需留存，将 stdout 重定向到 ignored 的 `.cache/` 或 `data/`，不要提交机器样本。
+
+`linux_acceptance_test.py` 覆盖 MemAvailable=0 与缺失回退、CPU guest/iowait、过滤去重与
+overmount、uint64/quality、计数器包络边界和错误脱敏。
+
 ## 后续验收
 
-- **P1 实机补验**：Linux 同步采样并对照 `free` / `df`，明确采样时间与挂载筛选差异。
+- **P1 跨架构补验**：Linux arm64 同步采样并对照 `free` / `df`，amd64 已通过。
 - **P2 实机与压力**：Linux 长时采集/重启、慢盘和实际探测网络；按任务量测量队列、
   SQLite 文件增长及保留期清理成本，确定部署容量。
 - **P3 生产补验**：更多Proxy/Visitor类型、reload与认证组合；
   Dashboard 关闭/开启都能取得统计且无重复 collector；监控、数据库及慢浏览器故障
   不阻塞转发；慢浏览器和资源竞争下的持续负载；
-  Linux amd64/arm64、systemd 恢复、备份恢复切换以及 100/500 节点容量验收。
+  Linux arm64 实机、更多部署环境，以及长期 TLS/探测/转发混合负载。
+  amd64 systemd、恢复切换与短时 100/500 synthetic 结果见 [部署记录](DEPLOYMENT.md)。
 
 ## P3 管理、FRP 对账与运维
 
@@ -177,4 +212,27 @@ Node测试新增管理表单、任务uint64版本、CSRF、会话过期与迟到
 P3本轮已完成：完整Go套件、涉及模块race/vet、36项Python工具测试、24项Node测试、
 P0/P1/P2/P3真实二进制回归及6组新旧FRP协议矩阵。真实管理页面验证创建/轮换/撤销、
 绑定/解绑、探测任务保存、窄屏/主题和注销；活跃SQLite在线备份与恢复后双配置verify通过。
-Linux双架构发布包的SHA256与文件白名单另行校验，未执行实机/systemd/容量验收。
+Linux双架构发布包的SHA256与文件白名单另行校验；上述为 P3 开发阶段结果，Linux 实机补验见下。
+
+## Linux amd64 测试部署补验（2026-09-27）
+
+在用户授权的独立测试机上运行已发布增强版，最终 15 秒实机验收取得 10 个不同的 1 秒周期样本：
+16 个公开指标全部通过，窗口外最大偏差为 0；`free` 内存/交换容量与筛选后的 `df` 容量和
+used 对照全部通过。目标默认网卡规则参与汇总的是 1 个接口和 2 个本地挂载，未将这些机器
+标识或采样原文提交到 Git。公开 scope 为 unknown；独立部署检查确认 agent 未启用会改变
+采集范围的 systemd 文件/网络命名空间隔离，其 mount/net namespace 与 PID 1 相同。这是
+该测试部署的上下文证据，不改变采集器对任意未知环境的保守 scope 语义。
+
+Linux 真实二进制回归另完成 P0 wire v1/v2、P1 认证/WSS/独立故障恢复、P2 探测/TERM 尾批
+持久化/数据库降级、P3 CSRF/绑定/凭据轮换撤销。根据 `upstream.lock` 固定 commit 独立构建
+未加补丁的原版 frpc/frps，增强→增强、原版→增强、增强→原版与 wire v1/v2 的 6 组
+TCP/UDP/HTTP/STCP payload 矩阵全部通过。回归置于临时 systemd service 中限制 CPU、内存
+和运行时间，不改正式服务配置；它们是功能验收，不代表持续负载容量。
+
+完整脱敏报告保存在部署工作目录内 ignored 的 `data/`，包括采样 JSON、Linux smoke 与
+协议矩阵结果。Linux arm64 实机、长时运行与慢盘等尚未被这些短时 amd64 验收覆盖。
+
+同轮补充已完成正式systemd TERM、server/agent SIGKILL自动恢复、在线备份实际切换，
+以及100/500节点各60秒 synthetic容量测试；6000/30000条报告全部持久化、dropped=0。
+完整数据与限制见 [部署记录](DEPLOYMENT.md)，复现命令见 [容量工具](CAPACITY.md)。
+新增Linux验收工具后42项Python工具测试通过；capacity工具vet、交叉编译及真实Linux运行通过。
