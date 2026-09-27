@@ -235,5 +235,7 @@ python3 frp-monitor/tests/monitor_smoke.py --agent <native-agent> --server <nati
 python3 frp-monitor/tests/monitor_smoke.py --agent <native-agent> --server <native-server> --history
 ```
 
-GitHub OAuth 流程和管理员权限已由服务端模拟测试覆盖，尚未配置真实 GitHub 账号验收。
-当前验证未部署到测试服务器；Linux 构建与实机验收状态以项目根 README 为准。
+GitHub OAuth 流程和管理员权限由服务端模拟测试覆盖；部署环境已完成真实 GitHub
+登录及节点表格、编辑窗口的只读验收。Linux 主控发布后已验证 HTTPS 静态资源、
+实时 JSON/SSE、全部接入节点在线，以及保留 90 天的 TSDB 历史持续写入。
+服务器地址、发布版本、备份和回滚信息只记录在被忽略的 `.env.serverlist` 中。
