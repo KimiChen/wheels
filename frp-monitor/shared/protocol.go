@@ -343,7 +343,7 @@ func validObjectKey(key string) bool {
 }
 
 func bounded(s string, max int, empty bool) bool {
-	return (empty || strings.TrimSpace(s) != "") && len(s) <= max && !strings.ContainsAny(s, "\x00\r\n")
+	return (empty || strings.TrimSpace(s) != "") && len(s) <= max && utf8.ValidString(s) && !strings.ContainsAny(s, "\x00\r\n")
 }
 func validScope(s Scope) bool { return s == ScopeHost || s == ScopeNamespace || s == ScopeUnknown }
 func validateField[T any](name string, f Field[T], check func(T) bool) error {

@@ -1,6 +1,9 @@
 package shared
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestMonitorConfigurationBoundary(t *testing.T) {
 	a := AgentConfig{Enabled: true, Endpoint: "wss://monitor.example.invalid/agent/v1/ws", TokenFile: "token"}
@@ -27,6 +30,13 @@ func TestMonitorConfigurationBoundary(t *testing.T) {
 	if err := m.Complete(); err != nil || m.BindAddr != "127.0.0.1" || m.BindPort != 7401 {
 		t.Fatalf("defaults: %v", err)
 	}
+	for _, port := range []int{0, 65536} {
+		c := m
+		c.BindPort = port
+		if c.Validate() == nil {
+			t.Errorf("accepted bind port %d", port)
+		}
+	}
 	m.BindAddr = "0.0.0.0"
 	if m.Validate() == nil {
 		t.Fatal("public plaintext listener accepted")
@@ -39,6 +49,36 @@ func TestMonitorConfigurationBoundary(t *testing.T) {
 	m.KeyFile = ""
 	if m.Validate() == nil {
 		t.Fatal("partial TLS config accepted")
+	}
+}
+
+func TestGitHubCallbackValidation(t *testing.T) {
+	m := MonitorConfig{
+		Enabled: true, BindAddr: "127.0.0.1", BindPort: 7401, ServerID: "default",
+		DatabaseFile: "control.sqlite", ReportIntervalSeconds: 1,
+		GitHubClientID: "client", GitHubClientSecretFile: "secret",
+		GitHubCallbackURL: "https://monitor.example.invalid/api/admin/v1/auth/github/callback",
+		GitHubAdminUsers:  []string{"admin"},
+	}
+	for _, callback := range []string{
+		m.GitHubCallbackURL,
+		"https://monitor.example.invalid:8443/api/admin/v1/auth/github/callback",
+		"http://127.0.0.1:8080/api/admin/v1/auth/github/callback",
+	} {
+		m.GitHubCallbackURL = callback
+		if err := m.Validate(); err != nil {
+			t.Errorf("rejected valid callback %s: %v", callback, err)
+		}
+	}
+	for _, callback := range []string{
+		"https://monitor.example.invalid:0/api/admin/v1/auth/github/callback",
+		"https://monitor.example.invalid:65536/api/admin/v1/auth/github/callback",
+		"https://" + strings.Repeat("a", 4096) + ".invalid/api/admin/v1/auth/github/callback",
+	} {
+		m.GitHubCallbackURL = callback
+		if m.Validate() == nil {
+			t.Errorf("accepted forbidden callback %s", callback)
+		}
 	}
 }
 

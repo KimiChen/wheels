@@ -2,9 +2,7 @@ package shared
 
 import (
 	"errors"
-	"strings"
 	"time"
-	"unicode/utf8"
 )
 
 // FRPBinding is trusted monitor configuration, never accepted from an agent
@@ -17,14 +15,10 @@ type FRPBinding struct {
 }
 
 func (b FRPBinding) Validate() error {
-	if !bindingString(b.ServerID, 128, false) || !bindingString(b.User, 128, true) || !bindingString(b.RawClientID, 128, false) {
+	if !bounded(b.ServerID, 128, false) || !bounded(b.User, 128, true) || !bounded(b.RawClientID, 128, false) {
 		return errors.New("invalid FRP binding")
 	}
 	return nil
-}
-
-func bindingString(s string, limit int, empty bool) bool {
-	return len(s) <= limit && (empty || strings.TrimSpace(s) != "") && utf8.ValidString(s) && !strings.ContainsAny(s, "\x00\r\n")
 }
 
 // ServerProvider is called by one monitor background sampler, never by a

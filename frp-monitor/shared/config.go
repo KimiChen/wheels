@@ -118,7 +118,7 @@ func (c MonitorConfig) Validate() error {
 		return nil
 	}
 	ip := net.ParseIP(c.BindAddr)
-	if ip == nil || c.BindPort < 0 || c.BindPort > 65535 {
+	if ip == nil || c.BindPort < 1 || c.BindPort > 65535 {
 		return errors.New("invalid monitor bind address or port")
 	}
 	if !bounded(c.ServerID, 128, false) || c.ReportIntervalSeconds < 1 || c.ReportIntervalSeconds > 3600 {
@@ -138,9 +138,18 @@ func (c MonitorConfig) Validate() error {
 		if !bounded(c.GitHubClientID, 256, false) || !configPath(c.GitHubClientSecretFile, true) || len(c.GitHubAdminUsers) == 0 || len(c.GitHubAdminUsers) > 32 {
 			return errors.New("GitHub client, secret file, callback and administrator usernames are required together")
 		}
+		if len(c.GitHubCallbackURL) > 4096 {
+			return errors.New("GitHub callback URL is too long")
+		}
 		u, err := url.Parse(c.GitHubCallbackURL)
 		if err != nil || u.User != nil || u.Hostname() == "" || u.RawQuery != "" || u.Fragment != "" || u.RawPath != "" || u.Path != "/api/admin/v1/auth/github/callback" {
 			return errors.New("invalid GitHub callback URL")
+		}
+		if p := u.Port(); p != "" {
+			n, err := strconv.Atoi(p)
+			if err != nil || n < 1 || n > 65535 {
+				return errors.New("invalid GitHub callback port")
+			}
 		}
 		ip := net.ParseIP(u.Hostname())
 		if u.Scheme != "https" && !(u.Scheme == "http" && ip != nil && ip.IsLoopback()) {

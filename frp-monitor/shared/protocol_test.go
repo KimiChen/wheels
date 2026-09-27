@@ -106,6 +106,7 @@ func TestValidation(t *testing.T) {
 		{"sequence_zero", func(r *Report) { r.Sequence = 0 }},
 		{"sequence_hello", func(r *Report) { r.Sequence = 1 }},
 		{"missing_session", func(r *Report) { r.SessionID = "" }},
+		{"invalid_utf8_session", func(r *Report) { r.SessionID = string([]byte{0xff}) }},
 		{"bad_time", func(r *Report) { r.CollectedAt = "yesterday" }},
 		{"negative_cpu", func(r *Report) { r.Metrics.CPU = ok(-1.0) }},
 		{"cpu_over_100", func(r *Report) { r.Metrics.CPU = ok(100.001) }},

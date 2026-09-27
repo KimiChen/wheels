@@ -11,7 +11,7 @@ func TestFRPBindingValidation(t *testing.T) {
 			t.Fatalf("rejected %+v", b)
 		}
 	}
-	for _, b := range []FRPBinding{{}, {ServerID: "server"}, {ServerID: "server", RawClientID: " "}, {ServerID: "server", User: "\x00", RawClientID: "id"}, {ServerID: "server", RawClientID: strings.Repeat("x", 129)}} {
+	for _, b := range []FRPBinding{{}, {ServerID: "server"}, {ServerID: "server", RawClientID: " "}, {ServerID: "server", User: "\x00", RawClientID: "id"}, {ServerID: "server", RawClientID: string([]byte{0xff})}, {ServerID: "server", RawClientID: strings.Repeat("x", 129)}} {
 		if b.Validate() == nil {
 			t.Fatal("invalid binding accepted")
 		}
