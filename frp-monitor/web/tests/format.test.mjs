@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {decimal, bytes, ratio, percent, percentage, uptime, loadText} from "../src/format.mjs";
+import {decimal, bytes, ratio, percent, percentage, uptime, loadText, reconciliationText} from "../src/format.mjs";
 import {overview, select, snapshot} from "../src/store.mjs";
 const ok = value => ({value, quality: "ok"});
 test("uint64 bytes preserve integer precision and distinguish missing from zero", () => {
@@ -42,4 +42,15 @@ test("malformed or duplicate identities cannot corrupt the DOM map", () => {
   assert.throws(() => snapshot({nodes: [nodes[0], nodes[0]], generated_at: "2026-01-01T00:00:00Z"}));
   assert.throws(() => snapshot({nodes, generated_at: "invalid"}));
   assert.equal(snapshot({nodes, generated_at: "2026-01-01T00:00:00Z"}).nodes.length, 3);
+});
+
+test("public reconciliation separates registration from agent-reported control state", () => {
+  assert.equal(reconciliationText(null), "等待核对");
+  assert.equal(reconciliationText({control_state: "connected"}), "等待核对");
+  assert.equal(reconciliationText({reconciliation: "unbound", registered: 0}), "未设置可信绑定");
+  assert.equal(reconciliationText({reconciliation: "conflict", server_online: true, registered: 9}), "归属冲突");
+  assert.equal(reconciliationText({reconciliation: "stale", registered: 1}), "节点报告已过期");
+  assert.equal(reconciliationText({reconciliation: "matched", server_online: true, registered: 0}), "已核对 · 服务端在线 · 已登记 0 条");
+  assert.equal(reconciliationText({reconciliation: "matched", server_online: false, registered: 1}), "已核对 · 服务端离线 · 已登记 1 条");
+  assert.equal(reconciliationText({reconciliation: "matched", server_online: null, registered: -1}), "已核对 · 服务端状态未知 · 登记数未知");
 });

@@ -3,7 +3,6 @@
 package monitor
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -36,9 +35,10 @@ const heartbeat = 5 * time.Second
 const readTimeout = 15 * time.Second
 
 type credential struct {
-	AgentID     string `json:"agent_id"`
-	Name        string `json:"name"`
-	TokenSHA256 string `json:"token_sha256"`
+	AgentID     string             `json:"agent_id"`
+	Name        string             `json:"name"`
+	TokenSHA256 string             `json:"token_sha256"`
+	FRPBinding  *shared.FRPBinding `json:"frp_binding,omitempty"`
 }
 type node struct {
 	credential          credential
@@ -54,32 +54,38 @@ type node struct {
 }
 
 type Service struct {
-	cfg         shared.MonitorConfig
-	ctx         context.Context
-	cancel      context.CancelFunc
-	server      *http.Server
-	listener    net.Listener
-	mu          sync.Mutex
-	nodes       map[string]*node
-	credentials []credential
-	connections map[*websocket.Conn]struct{}
-	wg          sync.WaitGroup
-	closeOnce   sync.Once
-	done        chan struct{}
-	handshakes  chan struct{}
-	streams     chan struct{}
-	rateMu      sync.Mutex
-	rateTokens  float64
-	rateAt      time.Time
-	public      atomic.Pointer[PublicSnapshot]
-	store       *store.Store
-	storeFailed bool
-	tasks       atomic.Pointer[probeBook]
-	taskError   atomic.Bool
-	queries     chan struct{}
+	cfg             shared.MonitorConfig
+	ctx             context.Context
+	cancel          context.CancelFunc
+	server          *http.Server
+	listener        net.Listener
+	mu              sync.Mutex
+	nodes           map[string]*node
+	credentials     []credential
+	connections     map[*websocket.Conn]credential
+	wg              sync.WaitGroup
+	closeOnce       sync.Once
+	done            chan struct{}
+	handshakes      chan struct{}
+	streams         chan struct{}
+	rateMu          sync.Mutex
+	rateTokens      float64
+	rateAt          time.Time
+	public          atomic.Pointer[PublicSnapshot]
+	publishMu       sync.Mutex
+	store           *store.Store
+	storeFailed     bool
+	tasks           atomic.Pointer[probeBook]
+	taskError       atomic.Bool
+	queries         chan struct{}
+	configMu        sync.Mutex
+	credentialError atomic.Bool
+	admin           *adminState
+	serverProvider  shared.ServerProvider
+	serverSnapshot  atomic.Pointer[shared.ServerSnapshot]
 }
 
-func Start(ctx context.Context, cfg shared.MonitorConfig) (*Service, error) {
+func Start(ctx context.Context, cfg shared.MonitorConfig, providers ...shared.ServerProvider) (*Service, error) {
 	if !cfg.Enabled {
 		return nil, nil
 	}
@@ -91,7 +97,17 @@ func Start(ctx context.Context, cfg shared.MonitorConfig) (*Service, error) {
 		return nil, err
 	}
 	child, cancel := context.WithCancel(ctx)
-	s := &Service{cfg: cfg, ctx: child, cancel: cancel, nodes: map[string]*node{}, credentials: creds, connections: map[*websocket.Conn]struct{}{}, handshakes: make(chan struct{}, 32), streams: make(chan struct{}, 128), done: make(chan struct{}), rateTokens: 40, rateAt: time.Now()}
+	s := &Service{cfg: cfg, ctx: child, cancel: cancel, nodes: map[string]*node{}, credentials: creds, connections: map[*websocket.Conn]credential{}, handshakes: make(chan struct{}, 32), streams: make(chan struct{}, 128), done: make(chan struct{}), rateTokens: 40, rateAt: time.Now()}
+	if len(providers) > 0 {
+		s.serverProvider = providers[0]
+	}
+	if cfg.AdminCredentialsFile != "" {
+		s.admin, err = newAdmin(cfg.AdminCredentialsFile)
+		if err != nil {
+			cancel()
+			return nil, err
+		}
+	}
 	for _, c := range creds {
 		s.nodes[c.AgentID] = &node{credential: c}
 	}
@@ -103,6 +119,8 @@ func Start(ctx context.Context, cfg shared.MonitorConfig) (*Service, error) {
 	mux.HandleFunc("/api/public/v1/nodes", s.handleNodes)
 	mux.HandleFunc("/api/public/v1/nodes/", s.handleHistory)
 	mux.HandleFunc("/events/public", s.handleEvents)
+	mux.HandleFunc("/api/admin/v1/", s.handleAdmin)
+	mux.HandleFunc("/events/admin", s.handleAdminEvents)
 	mux.Handle("/", web.Handler())
 	s.server = &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 * 1024, ErrorLog: log.New(io.Discard, "", 0), BaseContext: func(net.Listener) context.Context { return child }}
 	ln, err := net.Listen("tcp", net.JoinHostPort(cfg.BindAddr, fmt.Sprint(cfg.BindPort)))
@@ -125,9 +143,9 @@ func Start(ctx context.Context, cfg shared.MonitorConfig) (*Service, error) {
 		s.store, err = store.Open(store.Config{Path: cfg.DatabaseFile, RetentionDays: cfg.RetentionDays, ReportInterval: time.Duration(cfg.ReportIntervalSeconds) * time.Second})
 		s.storeFailed = err != nil
 	}
-	initial := s.snapshot(time.Now())
-	s.public.Store(&initial)
-	s.wg.Add(3)
+	s.publishSnapshot(time.Now())
+	s.wg.Add(4)
+	go s.serverLoop()
 	go s.taskLoop()
 	go func() {
 		defer s.wg.Done()
@@ -138,8 +156,7 @@ func Start(ctx context.Context, cfg shared.MonitorConfig) (*Service, error) {
 			case <-child.Done():
 				return
 			case <-ticker.C:
-				next := s.snapshot(time.Now())
-				s.public.Store(&next)
+				s.publishSnapshot(time.Now())
 			}
 		}
 	}()
@@ -196,17 +213,15 @@ func readCredentials(path string) ([]credential, error) {
 	}
 	defer f.Close()
 	st, err := f.Stat()
-	if err != nil || !st.Mode().IsRegular() || st.Size() > 1024*1024 || (runtime.GOOS != "windows" && st.Mode().Perm() != 0600) {
+	if err != nil || !st.Mode().IsRegular() || !os.SameFile(lst, st) || st.Size() > 1024*1024 || (runtime.GOOS != "windows" && st.Mode().Perm() != 0600) {
 		return nil, errors.New("monitor credentials require a regular 0600 file")
 	}
 	data, err := io.ReadAll(io.LimitReader(f, 1024*1024+1))
 	if err != nil || len(data) > 1024*1024 || !utf8.Valid(data) {
 		return nil, errors.New("invalid monitor credentials")
 	}
-	d := json.NewDecoder(bytes.NewReader(data))
-	d.DisallowUnknownFields()
 	var creds []credential
-	if d.Decode(&creds) != nil || d.Decode(new(any)) != io.EOF || len(creds) == 0 || len(creds) > maxNodes {
+	if strictJSON(data, &creds) != nil || creds == nil || len(creds) > maxNodes {
 		return nil, errors.New("invalid monitor credentials")
 	}
 	ids, hashes := map[string]bool{}, map[string]bool{}
@@ -214,30 +229,36 @@ func readCredentials(path string) ([]credential, error) {
 		if !idPattern.MatchString(c.AgentID) || len(c.Name) > 128 || strings.TrimSpace(c.Name) == "" || strings.ContainsAny(c.Name, "\x00\r\n") || !digestPattern.MatchString(c.TokenSHA256) || ids[c.AgentID] || hashes[c.TokenSHA256] {
 			return nil, errors.New("invalid monitor credentials")
 		}
+		if c.FRPBinding != nil && c.FRPBinding.Validate() != nil {
+			return nil, errors.New("invalid monitor binding")
+		}
 		ids[c.AgentID] = true
 		hashes[c.TokenSHA256] = true
 	}
 	return creds, nil
 }
-func (s *Service) authenticate(r *http.Request) string {
+func (s *Service) authenticate(r *http.Request) string { return s.authenticateCredential(r).AgentID }
+func (s *Service) authenticateCredential(r *http.Request) credential {
 	value := r.Header.Get("Authorization")
 	if !strings.HasPrefix(value, "Bearer ") || len(value) > 512 {
-		return ""
+		return credential{}
 	}
 	token := strings.TrimPrefix(value, "Bearer ")
 	if len(token) < 43 || strings.ContainsAny(token, " \r\n\t") {
-		return ""
+		return credential{}
 	}
 	hash := sha256.Sum256([]byte(token))
 	want := hex.EncodeToString(hash[:])
-	id := ""
+	match := credential{}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	// Constant-time digest comparisons; neither credential values nor client identifiers are logged.
 	for _, c := range s.credentials {
 		if subtle.ConstantTimeCompare([]byte(c.TokenSHA256), []byte(want)) == 1 {
-			id = c.AgentID
+			match = c
 		}
 	}
-	return id
+	return match
 }
 func (s *Service) admit() bool {
 	s.rateMu.Lock()
@@ -263,7 +284,8 @@ func (s *Service) handleWS(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "try later", http.StatusTooManyRequests)
 		return
 	}
-	id := s.authenticate(r)
+	grant := s.authenticateCredential(r)
+	id := grant.AgentID
 	if id == "" {
 		w.Header().Set("WWW-Authenticate", "Bearer")
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -291,7 +313,12 @@ func (s *Service) handleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	default:
 	}
-	s.connections[c] = struct{}{}
+	if n := s.nodes[id]; n == nil || n.credential.TokenSHA256 != grant.TokenSHA256 {
+		s.mu.Unlock()
+		c.Close()
+		return
+	}
+	s.connections[c] = grant
 	s.wg.Add(1)
 	s.mu.Unlock()
 	defer s.wg.Done()
@@ -300,7 +327,7 @@ func (s *Service) handleWS(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		delete(s.connections, c)
 		n := s.nodes[id]
-		if n.conn == c {
+		if n != nil && n.conn == c {
 			n.conn = nil
 		}
 		s.mu.Unlock()
@@ -320,6 +347,11 @@ func (s *Service) handleWS(w http.ResponseWriter, r *http.Request) {
 	hello := frame.Hello
 	s.mu.Lock()
 	n := s.nodes[id]
+	if n == nil || n.credential.TokenSHA256 != grant.TokenSHA256 {
+		s.mu.Unlock()
+		c.Close()
+		return
+	}
 	old := n.conn
 	n.conn = c
 	n.sessionID = hello.SessionID
@@ -349,7 +381,7 @@ func (s *Service) handleWS(w http.ResponseWriter, r *http.Request) {
 	c.SetPongHandler(func(string) error {
 		_ = c.SetReadDeadline(time.Now().Add(readTimeout))
 		s.mu.Lock()
-		if n.conn == c {
+		if n != nil && n.conn == c {
 			n.lastSeen = time.Now()
 		}
 		s.mu.Unlock()
@@ -448,7 +480,7 @@ func (s *Service) handleWS(w http.ResponseWriter, r *http.Request) {
 		}
 		report := frame.Report
 		s.mu.Lock()
-		if n.conn != c || report.SessionID != n.sessionID || report.Sequence <= n.sequence {
+		if s.nodes[id] != n || n.conn != c || report.SessionID != n.sessionID || report.Sequence <= n.sequence {
 			s.mu.Unlock()
 			closeProtocol(c)
 			return
@@ -510,9 +542,12 @@ type PublicMetrics struct {
 	Procs      shared.Field[string]    `json:"procs"`
 }
 type PublicFRP struct {
-	ControlState string `json:"control_state"`
-	ProxyTotal   int    `json:"proxy_total"`
-	ProxyRunning int    `json:"proxy_running"`
+	Reconciliation string `json:"reconciliation"`
+	ServerOnline   *bool  `json:"server_online"`
+	Registered     int    `json:"registered"`
+	ControlState   string `json:"control_state"`
+	ProxyTotal     int    `json:"proxy_total"`
+	ProxyRunning   int    `json:"proxy_running"`
 }
 type PublicNode struct {
 	ID              string         `json:"id"`
@@ -568,6 +603,38 @@ func (s *Service) snapshot(now time.Time) PublicSnapshot {
 			}
 		}
 		out.Nodes = append(out.Nodes, p)
+	}
+	// Public reconciliation needs only identity decisions and counts. Avoid
+	// constructing private per-proxy views on this high-frequency path.
+	inputs := make([]ReconcileNode, 0, len(out.Nodes))
+	for _, p := range out.Nodes {
+		n := s.nodes[p.ID]
+		var report *shared.FRP
+		if n.frp != nil {
+			copy := *n.frp
+			copy.Proxies = nil
+			report = &copy
+		}
+		inputs = append(inputs, ReconcileNode{ID: p.ID, Binding: n.credential.FRPBinding, Report: report, Fresh: n.conn != nil && p.Freshness == "fresh"})
+	}
+	server := s.currentServerSnapshot(now)
+	reconciled := Reconcile(server, inputs)
+	states := make(map[string]NodeReconciliation, len(reconciled.Nodes))
+	registered := map[string]int{}
+	for _, node := range reconciled.Nodes {
+		states[node.ID] = node
+	}
+	for _, proxy := range reconciled.Proxies {
+		if proxy.AgentID != nil && proxy.Online {
+			registered[*proxy.AgentID]++
+		}
+	}
+	for i := range out.Nodes {
+		n := &out.Nodes[i]
+		state := states[n.ID]
+		n.FRP.Reconciliation = state.State
+		n.FRP.ServerOnline = state.ServerOnline
+		n.FRP.Registered = registered[n.ID]
 	}
 	sort.Slice(out.Nodes, func(i, j int) bool { return out.Nodes[i].ID < out.Nodes[j].ID })
 	return out
@@ -632,4 +699,13 @@ func (s *Service) handleEvents(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+}
+
+// Serialize computing and publishing so a pre-revocation snapshot cannot
+// overwrite the immediate post-revocation snapshot in the public cache.
+func (s *Service) publishSnapshot(now time.Time) {
+	s.publishMu.Lock()
+	defer s.publishMu.Unlock()
+	next := s.snapshot(now)
+	s.public.Store(&next)
 }

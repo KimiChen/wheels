@@ -22,3 +22,8 @@ P2 追加 `0002-sqlite-dependency.patch`，锁定纯 Go SQLite 及所需最小�
 `0003-persistence-shutdown.patch` 仅在 monitor 启用时接收 TERM/INT、取消服务 context，
 让原生关闭路径与监控尾批刷新完成。附有 context 取消测试，并由 P2 smoke 验证真实
 二进制 TERM 后的数据库恢复。关闭 monitor 时保留原生信号处理行为。
+
+P3 追加 `0004-frp-reconciliation.patch`：服务端 Registry、Proxy Manager、内存Stats
+提供有界只读快照，监控后台每秒取样；锁繁忙时返回unavailable，不阻塞原生转发。
+保留user和raw clientID身份，client与proxy快照不含认证信息；字节计数以字符串提供。
+对账还需管理员可信预绑定，服务端原始详情只在管理接口可见。

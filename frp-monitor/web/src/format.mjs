@@ -55,3 +55,13 @@ export const freshnessLabels = {fresh: "新鲜", stale: "已过期", waiting: "�
 export function frpLabel(state) {
   return ({connected: "已连接", disconnected: "已断开", connecting: "连接中", unknown: "未知", disabled: "未启用"})[state] ?? "未知";
 }
+
+// Public reconciliation is a server-cropped summary, never raw proxy identity data.
+export function reconciliationText(frp) {
+  const labels = {matched: "已核对", unbound: "未设置可信绑定", conflict: "归属冲突", mismatch: "绑定不匹配", missing: "服务端未登记", stale: "节点报告已过期", transient: "缺少稳定 ID", unavailable: "服务端暂不可核对"};
+  if (!frp || !labels[frp.reconciliation]) return "等待核对";
+  if (frp.reconciliation !== "matched") return labels[frp.reconciliation];
+  const connection = frp.server_online === true ? "服务端在线" : frp.server_online === false ? "服务端离线" : "服务端状态未知";
+  const count = Number.isSafeInteger(frp.registered) && frp.registered >= 0 ? `已登记 ${frp.registered} 条` : "登记数未知";
+  return `已核对 · ${connection} · ${count}`;
+}

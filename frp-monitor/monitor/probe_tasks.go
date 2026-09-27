@@ -1,17 +1,13 @@
 package monitor
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
-	"io"
-	"os"
 	"reflect"
+	"sort"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/fatedier/frp/extension/frpmonitor/shared"
 	"github.com/gorilla/websocket"
@@ -60,29 +56,23 @@ func (s *Service) reloadTasks() {
 
 func (s *Service) readTasks() (*probeBook, error) {
 	invalid := errors.New("invalid local probe task configuration")
-	info, err := os.Lstat(s.cfg.ProbeTasksFile)
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || info.Size() > 1024*1024 {
-		return nil, invalid
-	}
-	f, err := os.Open(s.cfg.ProbeTasksFile)
+	data, err := readPrivate(s.cfg.ProbeTasksFile)
 	if err != nil {
 		return nil, invalid
 	}
-	defer f.Close()
-	actual, err := f.Stat()
-	if err != nil || !actual.Mode().IsRegular() || actual.Mode().Perm() != 0600 {
-		return nil, invalid
-	}
-	data, err := io.ReadAll(io.LimitReader(f, 1024*1024+1))
-	if err != nil || len(data) > 1024*1024 || !utf8.Valid(data) {
-		return nil, invalid
-	}
-	d := json.NewDecoder(bytes.NewReader(data))
-	d.DisallowUnknownFields()
 	var cfg probeFile
-	if d.Decode(&cfg) != nil || d.Decode(new(any)) != io.EOF || cfg.Version == 0 || cfg.Nodes == nil || len(cfg.Nodes) > maxNodes {
+	if strictJSON(data, &cfg) != nil {
 		return nil, invalid
 	}
+	return s.validateTasks(cfg)
+}
+func (s *Service) validateTasks(cfg probeFile) (*probeBook, error) {
+	invalid := errors.New("invalid local probe task configuration")
+	if cfg.Version == 0 || cfg.Nodes == nil || len(cfg.Nodes) > maxNodes {
+		return nil, invalid
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	book := &probeBook{Version: cfg.Version, Nodes: make(map[string][]configuredProbe)}
 	for _, n := range cfg.Nodes {
 		if _, known := s.nodes[n.AgentID]; !known {
@@ -112,9 +102,6 @@ func (s *Service) taskLoop() {
 			s.taskError.Store(true)
 		}
 	}()
-	if s.cfg.ProbeTasksFile == "" {
-		return
-	}
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -122,7 +109,13 @@ func (s *Service) taskLoop() {
 		case <-s.ctx.Done():
 			return
 		case <-ticker.C:
-			s.reloadTasks()
+			func() {
+				s.configMu.Lock()
+				defer s.configMu.Unlock()
+				s.reloadCredentials()
+				s.reloadAdmin()
+				s.reloadTasks()
+			}()
 		}
 	}
 }
@@ -156,7 +149,7 @@ func (s *Service) acceptProbe(id string, c *websocket.Conn, now time.Time, resul
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	n := s.nodes[id]
-	if n.conn != c || result.SessionID != n.sessionID || result.Sequence <= n.sequence {
+	if n == nil || n.conn != c || result.SessionID != n.sessionID || result.Sequence <= n.sequence {
 		return false
 	}
 	book := s.tasks.Load()
@@ -178,4 +171,19 @@ func (s *Service) acceptProbe(id string, c *websocket.Conn, now time.Time, resul
 		}
 	}
 	return false
+}
+
+func probeDocument(book *probeBook) probeFile {
+	out := probeFile{Version: book.Version, Nodes: make([]struct {
+		AgentID string            `json:"agent_id"`
+		Tasks   []configuredProbe `json:"tasks"`
+	}, 0, len(book.Nodes))}
+	for id, tasks := range book.Nodes {
+		out.Nodes = append(out.Nodes, struct {
+			AgentID string            `json:"agent_id"`
+			Tasks   []configuredProbe `json:"tasks"`
+		}{id, tasks})
+	}
+	sort.Slice(out.Nodes, func(i, j int) bool { return out.Nodes[i].AgentID < out.Nodes[j].AgentID })
+	return out
 }

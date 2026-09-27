@@ -1,6 +1,6 @@
 # Tests
 
-本目录保存原生 FRP 基线回归、P1/P2 闭环验收和脱敏参考数据。阶段范围以根目录
+本目录保存原生 FRP 基线回归、P1/P2/P3 闭环验收和脱敏参考数据。阶段范围以根目录
 [README.md](../README.md) 为准；生产部署与容量验收仍待执行。
 
 ## P0 原生基线
@@ -48,8 +48,8 @@ Dashboard 在 v1、v2 两轮均验证，使用独立动态回环端口和临时�
 
 `test_smoke.py` 验证测试工具自身的环境隔离、临时配置权限、子进程提前退出、
 超时、强制清理和二进制 echo；它不替代真实 FRP smoke。当前基线只含 TCP、token、
-wire v1/v2 和上述 Dashboard 页面检查，未覆盖 UDP/HTTP/STCP、OIDC、reload、
-Dashboard 管理 API、Prometheus 或混合新旧二进制。
+wire v1/v2 和上述 Dashboard 页面检查，P3另行覆盖 UDP/HTTP/STCP 与混合新旧二进制；OIDC、reload、
+Dashboard 管理 API和Prometheus仍未纳入此基线harness。
 
 ## P0 协议测试与采集参考向量
 
@@ -87,7 +87,7 @@ P1 smoke 使用动态回环端口、临时独立凭据和真实 TLS 证书，运
 - TCP 二进制载荷一致，FRP 断连与恢复时监控持续在线。
 - 监控断连后 offline/stale，原生 TCP 仍能转发；恢复后新会话继续最新样本。
 - 公开 API/SSE 不含主机名、IP、关联、代理名称/本地目标和凭据，uint64 使用字符串。
-- 静态 allowlist、CSP、无管理路由、正常退出清理。
+- 静态 allowlist、CSP、未配置admin时API关闭、正常退出清理。
 
 Go 测试另覆盖 17 个采集向量、质量与基线恢复、线程安全、首报、TLS 信任、会话替换、
 序号/乱序/过大帧、独立心跳与指标过期、SSE 容量、慢采集有限退出和 3600→1 秒周期协商。
@@ -132,7 +132,49 @@ Linux 双架构交叉编译不替代 Linux 实机部署或 100/500 节点负载�
 - **P1 实机补验**：Linux 同步采样并对照 `free` / `df`，明确采样时间与挂载筛选差异。
 - **P2 实机与压力**：Linux 长时采集/重启、慢盘和实际探测网络；按任务量测量队列、
   SQLite 文件增长及保留期清理成本，确定部署容量。
-- **P3 FRP 与发布**：UDP/HTTP/STCP 及新旧二进制组合；Proxy/Visitor 生命周期；
+- **P3 生产补验**：更多Proxy/Visitor类型、reload与认证组合；
   Dashboard 关闭/开启都能取得统计且无重复 collector；监控、数据库及慢浏览器故障
-  不阻塞转发；公开 API/SSE 字段裁剪、管理鉴权/CSRF、CSP 和输出转义；
-  Linux amd64/arm64、systemd 恢复、备份以及 100/500 节点容量验收。
+  不阻塞转发；慢浏览器和资源竞争下的持续负载；
+  Linux amd64/arm64、systemd 恢复、备份恢复切换以及 100/500 节点容量验收。
+
+## P3 管理、FRP 对账与运维
+
+```sh
+python3 tests/p3_smoke.py \
+  --agent dist/darwin-arm64/frp-monitor-agent \
+  --server dist/darwin-arm64/frp-monitor-server
+python3 tests/p3_frp_smoke.py \
+  --agent dist/darwin-arm64/frp-monitor-agent \
+  --server dist/darwin-arm64/frp-monitor-server \
+  --original-agent /private/path/to/pinned-original-frpc \
+  --original-server /private/path/to/pinned-original-frps
+```
+
+原版二进制必须来自 `upstream.lock` 固定commit，未应用overlay或监控补丁；不可用
+关闭监控的增强版冒充。原版构建同样保留Dashboard静态资源，不使用 `noweb`。
+`p3_frp_smoke.py` 在新新、旧新、新旧三个组合分别运行wire v1/v2，检查TCP二进制echo、
+UDP echo、HTTP虚拟主机路由及STCP visitor。增强server始终启用monitor；增强agent对接
+原版server时，将telemetry设为另一个拒绝连接的回环端口，验证监控故障不影响转发。
+
+`p3_smoke.py` 使用真实TLS完整二进制，验证管理员cookie属性、匿名拒绝、错误token、
+CSRF和错源拒绝；检查预绑定与服务端user前缀后的隧道匹配、解绑后不自动认领；
+读取完整私有facts却不会泄露到公开JSON/SSE；新增节点一次性token、任务版本冲突、
+轮换断开旧监控会话、投递新token重新接入、撤销最后节点及历史404。凭据操作过程中
+原生FRP echo继续工作。最后注销使旧cookie失效。
+
+Go测试覆盖配置重复/大小写alias/非法JSON、会话期限与限额、握手窗口撤销、旧报告拒绝、
+管理员文件轮换、坏配置保留最近有效值；只读Registry/Stats快照在忙锁/超过限额时降级，
+可信binding与声明冲突、同clientID不同user、无稳定ID及普通FRP连接均有用例。
+公开对账仅有状态和计数，不暴露服务端身份/地址/代理名。
+
+`ops_test.py` 覆盖活跃SQLite WAL中的已提交记录、备份后继续写入的快照隔离、完整性检查、
+Unicode恢复目录与配置路径重写、再次备份恢复、0600/0700、拒绝已有目标、软链接、归档
+穿越/重复/校验错误、外部配置引用和systemd参数注入。运维工具不执行安装/远程命令。
+Node测试新增管理表单、任务uint64版本、CSRF、会话过期与迟到一次性token响应丢弃。
+
+上述本地回归不包含OIDC、所有Proxy/Visitor类型或生产负载，也不替代Linux实机/systemd验收。
+
+P3本轮已完成：完整Go套件、涉及模块race/vet、36项Python工具测试、24项Node测试、
+P0/P1/P2/P3真实二进制回归及6组新旧FRP协议矩阵。真实管理页面验证创建/轮换/撤销、
+绑定/解绑、探测任务保存、窄屏/主题和注销；活跃SQLite在线备份与恢复后双配置verify通过。
+Linux双架构发布包的SHA256与文件白名单另行校验，未执行实机/systemd/容量验收。

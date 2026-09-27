@@ -3,15 +3,15 @@
 基于 FRP 的主机与隧道监控项目：`agent` 复用 frpc，`monitor` 复用 frps，
 `web` 基于本仓库的 `web-standard-kit`。三个模块均位于本子项目目录。
 
-> 状态：P2 采集体验，2026-09-27 更新。已实现 Linux 采集、独立 WSS 上报、
-> 节点凭据、FRP 状态、公开 API/SSE、受限 TCP 探测、SQLite 分钟历史、
-> UTC 当日主机流量和节点趋势。管理、服务端隧道对账及生产部署留在 P3。
+> 状态：P3 功能与发布工具，2026-09-27 更新。已实现 Linux 采集、独立 WSS、
+> 探测/历史/主机流量，以及独立管理会话、凭据热轮换、可信 FRP 隧道对账、
+> 在线备份恢复和 systemd 配置生成。Linux 实机部署与容量验收仍待执行。
 
 当前需求将原来的“60 秒上报、最新内存快照、公开 HTML”调整为对齐
 `monitor-probe/agent` 的监控方案。本 README 为当前规划入口；
 `docs/frpc.md`、`docs/frps.md` 保留为历史设计，冲突时以本文为准。
 
-P2 本地入口（在本子项目根目录执行，要求 Python 3.11+、Git、Go、Node.js/npm 和 OpenSSL）：
+P3 本地入口（在本子项目根目录执行，要求 Python 3.11+、Git、Go、Node.js/npm 和 OpenSSL）：
 
 ```bash
 python3 scripts/frp.py prepare
@@ -28,10 +28,13 @@ python3 scripts/local.py run
 `python3 scripts/local.py init --http`，页面为 `http://127.0.0.1:17401/`。
 两种方式均仅监听回环，不修改系统信任。Ctrl-C 同时停止两个进程；配置、凭据和日志
 保留在 ignored 的 `data/local/`。macOS 可验证连接和页面，Linux 专属指标显示“—”。
-P2 初始化默认开启 SQLite 历史，TCP 探测默认关闭。首次初始化加 `--probes` 可显式
-启用对本机 FRP 端口的 TCP 建连探测；已有 P1 目录不会覆盖，可用
-`--directory data/p2-demo` 创建新安装，并在 `run` 时指定同一目录。
+初始化默认开启 SQLite 历史，TCP 探测默认关闭。首次初始化加 `--probes` 可显式
+启用对本机 FRP 端口的 TCP 建连探测；已有目录不会覆盖，可用
+`--directory data/p3-demo` 创建新安装，并在 `run` 时指定同一目录。
 展开节点的“趋势与探测”查看历史，首次分钟写入前显示缺样，通常等待不超过一分钟。
+管理页面为 `/admin/`，使用私有 `data/local/admin.token` 中的独立登录token。
+初始化会预绑定本地FRP身份；管理页面可以创建、轮换和撤销节点凭据、修改可信绑定和探测清单。
+部署、接入配置及在线备份/恢复详见 [packaging/README.md](packaging/README.md)。
 
 本地验证与打包：
 
@@ -40,6 +43,7 @@ P2 初始化默认开启 SQLite 历史，TCP 探测默认关闭。首次初始�
 python3 tests/smoke.py --agent dist/darwin-arm64/frp-monitor-agent --server dist/darwin-arm64/frp-monitor-server
 python3 tests/p1_smoke.py --agent dist/darwin-arm64/frp-monitor-agent --server dist/darwin-arm64/frp-monitor-server
 python3 tests/p2_smoke.py --agent dist/darwin-arm64/frp-monitor-agent --server dist/darwin-arm64/frp-monitor-server
+python3 tests/p3_smoke.py --agent dist/darwin-arm64/frp-monitor-agent --server dist/darwin-arm64/frp-monitor-server
 node --test web/tests/*.test.mjs
 python3 scripts/frp.py package
 ```
@@ -65,7 +69,7 @@ Linux amd64/arm64 已交叉构建并打包，尚未在两种 Linux 实机部署�
 同一环境重复构建 Linux amd64，两份二进制的 SHA256 均一致；发布包白名单及
 包内/包外校验和已验证。生成物和依赖只保留在 ignored 的 `.cache/`、`dist/`。
 
-P2 运行配置：`[monitor]` 的 `databaseFile` 指向独立私有目录中的 SQLite 文件，
+历史与探测配置：`[monitor]` 的 `databaseFile` 指向独立私有目录中的 SQLite 文件，
 `retentionDays` 默认 7、范围 1–31；不设置数据库时仍可使用 P1 实时页面。
 `probeTasksFile` 指向 0600 的本地任务文件，按节点指定公开标签与私有目标，版本递增
 即可热更新；agent 还须显式设置 `[telemetry] probeEnabled = true`。
@@ -225,12 +229,13 @@ Dashboard 关闭也要显式启用该 collector；统一入口保证只注册一
 | `session_id + sequence` | 每次监控连接新会话、会话内递增；只接受当前会话，迟到报告和旧连接退出不得覆盖新连接 |
 | `boot_id` | 仅标识网络计数器范围，不用它判断 agent 进程重启或去重会话 |
 
-FRP 关联键用于对账而非认证，冲突须显式报告，不自动重新绑定。未设置稳定 clientID
+FRP 关联键用于对账而非认证。只有管理员预设的 `frp_binding`、agent新鲜报告和服务端
+注册表三方唯一一致时才归属；冲突显式报告，不自动重新绑定。未设置稳定 clientID
 的普通 frpc 只能作为临时连接记录。监控凭据支持轮换/吊销，服务端保存验证摘要；
 原生 FRP token/OIDC 与监控凭据分开。
 
-原版 frpc 仍可连接 monitor 的 frps 部分，标为“未安装采集能力”；
-增强 agent 与原版 frps 的转发兼容需要回归验证。保持 FRP wire v1/v2、认证、
+原版 frpc 连接增强 frps 时保留为独立服务端连接，未绑定agent；
+新旧二进制的具体转发回归范围见测试文档。保持 FRP wire v1/v2、认证、
 Proxy/Visitor 生命周期、原 Dashboard/API/Prometheus 的原有行为。
 
 ## 5. 协议、调度与状态
@@ -331,7 +336,7 @@ HTML + CSS + 原生 ES Modules，保持 `wsk-` 组件、128 个令牌、`@layer 
 ## 8. 目标目录与构建
 
 以下为完整目标目录。P2 已实现 `agent/collect`、`agent/service`、`agent/probe`、
-`monitor/*.go`、`monitor/store`、`shared` 和 `web`；admin 和生产安装文件在 P3 引入。
+`monitor/*.go`、`monitor/store`、`shared` 和 `web`；管理接口、配置与发布工具均已落地。
 接收/API 代码集中在 monitor 包内，后续随职责增加再拆分子包：
 
 ```text
@@ -389,12 +394,12 @@ frpc/frps 本身不会自动读取它。建议使用 `FRP_MONITOR_*`、`FRP_AGEN
 | P0：契约与构建（已完成） | 目录迁移、字段/协议契约、Overlay 构建、参考 fixture | 固定源码可重复构建；关闭扩展时原生 FRP 基线通过 |
 | P1：实时闭环（已实现，本机联调） | Go 采集、WSS、节点凭据、最小 FRP 连接适配器、最新状态与节点页面 | fixture、协议与本机闭环；Linux 实机采样对照待验收 |
 | P2：完整采集体验（已实现，本机联调） | TCP 探测、SQLite 历史、主机当日流量、趋势与恢复 | 探测语义、会话/重启/网卡变化、流量事务与聚合测试；实机容量待验收 |
-| P3：FRP 与发布完善 | 隧道对账、公开/管理视图、接入配置、备份与 systemd 发布 | 两架构部署；权限/字段裁剪、故障恢复、UI 与 FRP 回归通过 |
+| P3：FRP 与发布完善（功能已实现，实机待验收） | 隧道对账、公开/管理视图、接入配置、备份与 systemd 发布 | 两架构部署；权限/字段裁剪、故障恢复、UI 与 FRP 回归通过 |
 
-P1/P2 当前完成本地受控闭环，P2 覆盖参考 agent 的全部采集类别；
-公开上线须完成 P3 权限、字段裁剪、备份和部署验收。
-节点凭据在监控服务启动时加载，增删/轮换后需重启 server，旧连接随之关闭；
-没有管理接口或热轮换。Telemetry 配置更改需重启 agent；原生 Proxy 配置 reload
+P1/P2/P3 当前以本地受控闭环和自动化回归验证；公开上线仍须完成 Linux 实机、
+systemd故障恢复及容量验收。节点凭据支持管理接口即时新增/轮换/撤销，私有配置文件
+每2秒热加载，撤销关闭已连接与握手中的旧socket；无效配置保留上次有效值并标记degraded。
+管理员凭据热更新清空旧会话。Telemetry 配置更改需重启 agent；原生 Proxy 配置 reload
 和 ProxyStore 的后续变更会进入只读快照。`--config_dir` 模式每进程至多启用一个
 采集实例，应只在一个 frpc 配置中启用 telemetry。
 告警、价格/到期管理、主题市场、远程 Proxy/Visitor CRUD、Shell、自动升级

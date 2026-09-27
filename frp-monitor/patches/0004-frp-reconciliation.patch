@@ -1,0 +1,311 @@
+diff --git a/server/service.go b/server/service.go
+--- a/server/service.go
++++ b/server/service.go
+@@ -380,7 +380,7 @@
+ 					log.Warnf("frp-monitor listener stopped after an internal failure")
+ 				}
+ 			}()
+-			monitor, err := frpmonitor.Start(ctx, svr.cfg.Monitor)
++			monitor, err := frpmonitor.Start(ctx, svr.cfg.Monitor, svr.monitorSnapshot)
+ 			if err != nil {
+ 				log.Warnf("frp-monitor listener initialization failed: %v", err)
+ 				return
+diff --git a/server/registry/monitor.go b/server/registry/monitor.go
+new file mode 100644
+--- /dev/null
++++ b/server/registry/monitor.go
+@@ -0,0 +1,20 @@
++// Copyright 2026 The frp Authors
++// Licensed under the Apache License, Version 2.0.
++package registry
++
++// MonitorSnapshot skips busy or oversized registries rather than queuing
++// monitoring work behind native login/disconnect operations.
++func (cr *ClientRegistry) MonitorSnapshot(limit int) ([]ClientInfo, string) {
++	if !cr.mu.TryRLock() {
++		return nil, "busy"
++	}
++	defer cr.mu.RUnlock()
++	if len(cr.clients) > limit {
++		return nil, "truncated"
++	}
++	out := make([]ClientInfo, 0, len(cr.clients))
++	for _, c := range cr.clients {
++		out = append(out, *c)
++	}
++	return out, "ready"
++}
+diff --git a/server/proxy/monitor.go b/server/proxy/monitor.go
+new file mode 100644
+--- /dev/null
++++ b/server/proxy/monitor.go
+@@ -0,0 +1,20 @@
++// Copyright 2026 The frp Authors
++// Licensed under the Apache License, Version 2.0.
++package proxy
++
++// MonitorSnapshot only copies interface references under the registry lock.
++// Identity/config accessors return immutable lifecycle data after unlocking.
++func (pm *Manager) MonitorSnapshot(limit int) ([]Proxy, string) {
++	if !pm.mu.TryRLock() {
++		return nil, "busy"
++	}
++	defer pm.mu.RUnlock()
++	if len(pm.pxys) > limit {
++		return nil, "truncated"
++	}
++	out := make([]Proxy, 0, len(pm.pxys))
++	for _, p := range pm.pxys {
++		out = append(out, p)
++	}
++	return out, "ready"
++}
+diff --git a/pkg/metrics/mem/monitor.go b/pkg/metrics/mem/monitor.go
+new file mode 100644
+--- /dev/null
++++ b/pkg/metrics/mem/monitor.go
+@@ -0,0 +1,28 @@
++// Copyright 2026 The frp Authors
++// Licensed under the Apache License, Version 2.0.
++package mem
++
++// MonitorSnapshot returns private scalar counters without blocking on a busy
++// collector. Copy only lifecycle data/references under the collector lock;
++// individual counters have their own locks and are read after releasing it.
++func MonitorSnapshot(limit int) ([]*ProxyStats, string) { return sm.monitorSnapshot(limit) }
++
++func (m *serverMetrics) monitorSnapshot(limit int) ([]*ProxyStats, string) {
++	if !m.mu.TryLock() {
++		return nil, "busy"
++	}
++	if len(m.info.ProxyStatistics) > limit {
++		m.mu.Unlock()
++		return nil, "truncated"
++	}
++	copies := make([]ProxyStatistics, 0, len(m.info.ProxyStatistics))
++	for _, p := range m.info.ProxyStatistics {
++		copies = append(copies, *p)
++	}
++	m.mu.Unlock()
++	out := make([]*ProxyStats, 0, len(copies))
++	for i := range copies {
++		out = append(out, toProxyStats(copies[i].Name, &copies[i]))
++	}
++	return out, "ready"
++}
+diff --git a/server/monitor.go b/server/monitor.go
+new file mode 100644
+--- /dev/null
++++ b/server/monitor.go
+@@ -0,0 +1,81 @@
++// Copyright 2026 The frp Authors
++// Licensed under the Apache License, Version 2.0.
++package server
++
++import (
++	"strconv"
++	"time"
++
++	"github.com/fatedier/frp/extension/frpmonitor/shared"
++	"github.com/fatedier/frp/pkg/metrics/mem"
++)
++
++// monitorSnapshot is a read-only private adapter. It never exposes native
++// authentication data, full configs, arbitrary metadata or plugin options.
++// Each native registry copy uses TryLock and has a hard size ceiling.
++func (svr *Service) monitorSnapshot() shared.ServerSnapshot {
++	out := shared.ServerSnapshot{State: "unavailable", ServerID: svr.cfg.Monitor.ServerID, GeneratedAt: time.Now().UTC(), TrafficScope: "server_local_day", Clients: []shared.ServerClient{}, Proxies: []shared.ServerProxy{}}
++	if svr.clientRegistry == nil || svr.pxyManager == nil {
++		return out
++	}
++	clients, state := svr.clientRegistry.MonitorSnapshot(4096)
++	if state != "ready" {
++		out.State = state
++		return out
++	}
++	proxies, state := svr.pxyManager.MonitorSnapshot(32768)
++	if state != "ready" {
++		out.State = state
++		return out
++	}
++	stats, state := mem.MonitorSnapshot(32768)
++	if state != "ready" {
++		out.State = state
++		return out
++	}
++	for _, c := range clients {
++		v := shared.ServerClient{User: c.User, ClientID: c.ClientID(), Hostname: c.Hostname, IP: c.IP, Version: c.Version, WireProtocol: c.WireProtocol, Online: c.Online}
++		if c.RawClientID != "" {
++			id := c.RawClientID
++			v.RawClientID = &id
++		}
++		out.Clients = append(out.Clients, v)
++	}
++	live := make(map[string]shared.ServerProxy, len(proxies))
++	for _, p := range proxies {
++		c := p.GetLoginMsg()
++		if c == nil {
++			continue
++		}
++		id := c.ClientID
++		if id == "" {
++			id = c.RunID
++		}
++		live[p.GetName()] = shared.ServerProxy{Name: p.GetName(), Type: p.GetConfigurer().GetBaseConfig().Type, User: c.User, ClientID: id, Online: true}
++	}
++	for _, p := range stats {
++		v := shared.ServerProxy{Name: p.Name, Type: p.Type, User: p.User, ClientID: p.ClientID, Connections: monitorCounter(p.CurConns), TodayRXBytes: monitorCounter(p.TodayTrafficIn), TodayTXBytes: monitorCounter(p.TodayTrafficOut)}
++		if current, ok := live[p.Name]; ok {
++			if current.User == p.User && current.ClientID == p.ClientID && current.Type == p.Type {
++				v.Online = true
++			} else {
++				v = current
++			}
++			delete(live, p.Name)
++		}
++		out.Proxies = append(out.Proxies, v)
++	}
++	for _, p := range live {
++		out.Proxies = append(out.Proxies, p)
++	}
++	out.State = "ready"
++	return out
++}
++
++func monitorCounter(n int64) *string {
++	if n < 0 {
++		return nil
++	}
++	v := strconv.FormatInt(n, 10)
++	return &v
++}
+diff --git a/server/registry/monitor_test.go b/server/registry/monitor_test.go
+new file mode 100644
+--- /dev/null
++++ b/server/registry/monitor_test.go
+@@ -0,0 +1,26 @@
++package registry
++
++import "testing"
++
++func TestMonitorSnapshotSkipsBusyAndOversize(t *testing.T) {
++	r := NewClientRegistry()
++	r.Register("team", "client", "run", "host", "v", "addr", "v2")
++	r.mu.Lock()
++	_, state := r.MonitorSnapshot(10)
++	r.mu.Unlock()
++	if state != "busy" {
++		t.Fatalf("busy registry: %s", state)
++	}
++	if _, state = r.MonitorSnapshot(0); state != "truncated" {
++		t.Fatalf("oversize registry: %s", state)
++	}
++	values, state := r.MonitorSnapshot(10)
++	if state != "ready" || len(values) != 1 || values[0].RawClientID != "client" {
++		t.Fatalf("snapshot: %#v %s", values, state)
++	}
++	values[0].User = "changed"
++	values, _ = r.MonitorSnapshot(10)
++	if values[0].User != "team" {
++		t.Fatal("snapshot aliased registry")
++	}
++}
+diff --git a/pkg/metrics/mem/monitor_test.go b/pkg/metrics/mem/monitor_test.go
+new file mode 100644
+--- /dev/null
++++ b/pkg/metrics/mem/monitor_test.go
+@@ -0,0 +1,24 @@
++package mem
++
++import "testing"
++
++func TestMonitorSnapshotCountersAndNonblocking(t *testing.T) {
++	m := newServerMetrics()
++	m.NewProxy("monitor-test", "tcp", "team", "client")
++	m.AddTrafficIn("monitor-test", "tcp", 9007199254740993)
++	m.AddTrafficOut("monitor-test", "tcp", 42)
++	m.OpenConnection("monitor-test", "tcp")
++	m.mu.Lock()
++	_, state := m.monitorSnapshot(10)
++	m.mu.Unlock()
++	if state != "busy" {
++		t.Fatalf("busy collector: %s", state)
++	}
++	if _, state = m.monitorSnapshot(0); state != "truncated" {
++		t.Fatalf("oversize collector: %s", state)
++	}
++	values, state := m.monitorSnapshot(10)
++	if state != "ready" || len(values) != 1 || values[0].TodayTrafficIn != 9007199254740993 || values[0].TodayTrafficOut != 42 || values[0].CurConns != 1 {
++		t.Fatalf("snapshot: %#v %s", values, state)
++	}
++}
+diff --git a/server/proxy/monitor_test.go b/server/proxy/monitor_test.go
+new file mode 100644
+--- /dev/null
++++ b/server/proxy/monitor_test.go
+@@ -0,0 +1,20 @@
++package proxy
++
++import "testing"
++
++func TestMonitorSnapshotSkipsBusyAndOversize(t *testing.T) {
++	p := NewManager()
++	p.pxys["test"] = nil
++	p.mu.Lock()
++	_, state := p.MonitorSnapshot(10)
++	p.mu.Unlock()
++	if state != "busy" {
++		t.Fatalf("busy manager: %s", state)
++	}
++	if _, state = p.MonitorSnapshot(0); state != "truncated" {
++		t.Fatalf("oversize manager: %s", state)
++	}
++	if values, state := p.MonitorSnapshot(10); state != "ready" || len(values) != 1 {
++		t.Fatalf("snapshot: %#v %s", values, state)
++	}
++}
+diff --git a/server/monitor_test.go b/server/monitor_test.go
+new file mode 100644
+--- /dev/null
++++ b/server/monitor_test.go
+@@ -0,0 +1,40 @@
++package server
++
++import (
++	"encoding/json"
++	"github.com/fatedier/frp/extension/frpmonitor/shared"
++	v1 "github.com/fatedier/frp/pkg/config/v1"
++	"github.com/fatedier/frp/server/proxy"
++	"github.com/fatedier/frp/server/registry"
++	"strings"
++	"testing"
++)
++
++func TestMonitorSnapshotIncludesNoProxyAndLegacyClients(t *testing.T) {
++	s := &Service{cfg: &v1.ServerConfig{}, clientRegistry: registry.NewClientRegistry(), pxyManager: proxy.NewManager()}
++	s.cfg.Monitor = shared.MonitorConfig{ServerID: "server"}
++	s.clientRegistry.Register("team", "stable", "secret-run-id", "host", "v", "addr", "v2")
++	s.clientRegistry.Register("team", "", "legacy-run-id", "legacy", "old", "old-addr", "v1")
++	snapshot := s.monitorSnapshot()
++	if snapshot.State != "ready" || len(snapshot.Clients) != 2 || snapshot.ServerID != "server" {
++		t.Fatalf("snapshot: %#v", snapshot)
++	}
++	stable, legacy := false, false
++	for _, c := range snapshot.Clients {
++		if c.RawClientID == nil {
++			legacy = c.ClientID == "legacy-run-id"
++		} else {
++			stable = *c.RawClientID == "stable" && c.ClientID == "stable"
++		}
++	}
++	if !stable || !legacy {
++		t.Fatal("client identity lost")
++	}
++	encoded, _ := json.Marshal(snapshot)
++	if strings.Contains(string(encoded), "secret-run-id") {
++		t.Fatal("stable client leaked session run ID")
++	}
++	if *monitorCounter(9007199254740993) != "9007199254740993" || monitorCounter(-1) != nil {
++		t.Fatal("unsafe numeric counter")
++	}
++}

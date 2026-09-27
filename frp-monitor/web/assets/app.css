@@ -170,3 +170,5 @@ main { max-width: 1740px; margin: 0 auto; padding: 39px 40px 0; }
 @media (max-width: 680px) { .fm-history > summary { padding-inline: 17px; }.fm-history > summary > span { font-size: 8px; margin-left: 8px; }.fm-history-body { padding-inline: 17px; }.fm-history-toolbar .fm-select > span { display: inline; }.fm-history-toolbar .fm-select select { font-size: 11px; }.fm-history-heading { gap: 0 10px; }.fm-traffic dd { font-size: 17px; }.fm-chart-times { font-size: 8px; }.fm-probe-stats { gap: 8px; }.fm-probe-stats dt { font-size: 8px; } }
 @media (forced-colors: active) { .fm-chart-series { color: CanvasText; }.fm-chart-grid { stroke: GrayText; } }
 @media (min-width: 681px) { .fm-node-card:has(.fm-history[open]) { grid-column: 1 / -1; }.fm-history-charts { grid-template-columns: repeat(2,minmax(0,1fr)); }.fm-probe-list { grid-template-columns: repeat(2,minmax(0,1fr)); } }
+
+.fm-frp-reconcile dd { text-align: right; max-width: 70%; line-height: 1.7; overflow-wrap: anywhere; }

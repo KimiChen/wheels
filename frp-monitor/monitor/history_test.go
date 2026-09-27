@@ -29,7 +29,7 @@ func p2Config(t *testing.T) (shared.MonitorConfig, string) {
 	token := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
 	digest := sha256.Sum256([]byte(token))
 	path := filepath.Join(dir, "credentials.json")
-	data, _ := json.Marshal([]credential{{"test-node-1", "Public node", hex.EncodeToString(digest[:])}})
+	data, _ := json.Marshal([]credential{{"test-node-1", "Public node", hex.EncodeToString(digest[:]), nil}})
 	if err := os.WriteFile(path, data, 0600); err != nil {
 		t.Fatal(err)
 	}

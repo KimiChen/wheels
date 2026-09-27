@@ -1,4 +1,4 @@
-import {UNKNOWN, bytes, capacity, decimal, percent, percentage, ratio, quality, loadText, uptime, timeText, sessionLabels, freshnessLabels, frpLabel} from "./format.mjs";
+import {UNKNOWN, bytes, capacity, decimal, percent, percentage, ratio, quality, loadText, uptime, timeText, sessionLabels, freshnessLabels, frpLabel, reconciliationText} from "./format.mjs";
 import {select, overview} from "./store.mjs";
 import {connect} from "./transport.mjs";
 import {createHistoryPanel} from "./history-view.mjs";
@@ -26,6 +26,7 @@ function patchCard(card, node) {
   text("session", sessionLabels[node.session]); card.labels.session.dataset.state = node.session;
   text("freshness", freshnessLabels[node.freshness]); card.labels.freshness.dataset.state = node.freshness;
   text("frp", frpLabel(node.frp?.control_state));
+  text("frp-reconciliation", reconciliationText(node.frp));
   const cpu = percent(metric.cpu), mem = ratio(metric.mem_used, metric.mem_total), disk = ratio(metric.disk_used, metric.disk_total);
   text("cpu", percentage(cpu)); text("mem", percentage(mem)); text("disk", percentage(disk));
   meter("cpu", cpu); meter("mem", mem); meter("disk", disk);

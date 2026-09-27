@@ -1,4 +1,4 @@
-// Package web serves only the public monitor application's embedded assets.
+// Package web serves the public and admin applications' embedded static assets.
 package web
 
 import (
@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-//go:embed index.html assets src
+//go:embed index.html admin.html assets src
 var content embed.FS
 
 // This list is intentionally explicit: adding documentation, tests, or Go source
@@ -16,6 +16,10 @@ var content embed.FS
 var publicFiles = map[string]string{
 	"/":                          "index.html",
 	"/index.html":                "index.html",
+	"/admin/":                    "admin.html",
+	"/assets/admin.css":          "assets/admin.css",
+	"/src/admin.mjs":             "src/admin.mjs",
+	"/src/admin-data.mjs":        "src/admin-data.mjs",
 	"/assets/style.css":          "assets/style.css",
 	"/assets/script.js":          "assets/script.js",
 	"/assets/app.css":            "assets/app.css",
@@ -38,6 +42,9 @@ func Handler() http.Handler {
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("Cache-Control", "no-cache")
+		if r.URL.Path == "/admin/" {
+			w.Header().Set("Cache-Control", "no-store")
+		}
 		name, ok := publicFiles[r.URL.Path]
 		if !ok {
 			http.NotFound(w, r)

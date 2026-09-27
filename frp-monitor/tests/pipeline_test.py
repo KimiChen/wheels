@@ -236,6 +236,10 @@ class PipelineTests(unittest.TestCase):
 
     def test_packages_are_deterministic_allowlisted_and_checksummed(self):
         pipeline = self.pipeline()
+        for name in ("scripts/ops.py", "scripts/local.py", "packaging/README.md", ".env.example"):
+            path = self.root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("public operations fixture\n")
         license_path = self.root / "agent/collect/LICENSE.monitor-probe"
         license_path.parent.mkdir(parents=True, exist_ok=True)
         license_path.write_text("fixture MIT license\n")
@@ -263,6 +267,8 @@ class PipelineTests(unittest.TestCase):
             with tarfile.open(package, "r:gz") as archive:
                 members = {"/".join(Path(member.name).parts[1:]): archive.extractfile(member).read() for member in archive.getmembers()}
             self.assertNotIn(".env", members)
+            self.assertIn("scripts/ops.py", members)
+            self.assertIn("packaging/README.md", members)
             self.assertEqual(members["LICENSE.monitor-probe"], b"fixture MIT license\n")
             self.assertEqual(members["licenses/sqlite/LICENSE"], b"fixture BSD license\n")
             self.assertNotIn(b"do-not-package", b"".join(members.values()))

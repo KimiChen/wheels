@@ -23,7 +23,7 @@ func testMonitor(t *testing.T) (*Service, string) {
 	token := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
 	digest := sha256.Sum256([]byte(token))
 	path := filepath.Join(t.TempDir(), "credentials.json")
-	data, _ := json.Marshal([]credential{{"test-node-1", "Test node", hex.EncodeToString(digest[:])}})
+	data, _ := json.Marshal([]credential{{"test-node-1", "Test node", hex.EncodeToString(digest[:]), nil}})
 	if err := os.WriteFile(path, data, 0600); err != nil {
 		t.Fatal(err)
 	}

@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-const Version = "0.2.0-p2"
+const Version = "0.3.0-p3"
 
 // AgentConfig is embedded in the native frpc configuration as [telemetry].
 // Runtime secrets are loaded from private files, never from these public types.
@@ -86,6 +86,7 @@ type MonitorConfig struct {
 	DatabaseFile          string `json:"databaseFile,omitempty"`
 	RetentionDays         int    `json:"retentionDays,omitempty"`
 	ProbeTasksFile        string `json:"probeTasksFile,omitempty"`
+	AdminCredentialsFile  string `json:"adminCredentialsFile,omitempty"`
 }
 
 func (c *MonitorConfig) Complete() error {
@@ -124,7 +125,7 @@ func (c MonitorConfig) Validate() error {
 	if !configPath(c.CredentialsFile, true) || !configPath(c.CertFile, false) || !configPath(c.KeyFile, false) {
 		return errors.New("invalid monitor credential or TLS file path")
 	}
-	if !configPath(c.DatabaseFile, false) || !configPath(c.ProbeTasksFile, false) {
+	if !configPath(c.DatabaseFile, false) || !configPath(c.ProbeTasksFile, false) || !configPath(c.AdminCredentialsFile, false) {
 		return errors.New("invalid monitor database or probe tasks path")
 	}
 	if c.DatabaseFile != "" && (c.RetentionDays < 1 || c.RetentionDays > 31) {

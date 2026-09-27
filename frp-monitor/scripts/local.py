@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Initialize and run a loopback P2 demonstration with private SQLite history."""
+"""Initialize and run a loopback demonstration with private history and administration."""
 from __future__ import annotations
 
 import argparse
@@ -96,8 +96,12 @@ def initialize(destination: Path, *, plain_http=False, probes=False, config=None
         token = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode().rstrip("=")
         private(staging / "agent.token", token + "\n")
         private(staging / "frp.token", secrets.token_hex(32) + "\n")
+        admin_token = secrets.token_urlsafe(32)
+        private(staging / "admin.token", admin_token + "\n")
+        private(staging / "admin.json", json.dumps({"token_sha256": hashlib.sha256(admin_token.encode()).hexdigest()}) + "\n")
         private(staging / "credentials.json", json.dumps([{"agent_id": node_id, "name": c["FRP_AGENT_NAME"],
-                "token_sha256": hashlib.sha256(token.encode()).hexdigest()}], ensure_ascii=False, indent=2) + "\n")
+                "token_sha256": hashlib.sha256(token.encode()).hexdigest(),
+                "frp_binding": {"server_id": "local", "user": "", "raw_client_id": node_id}}], ensure_ascii=False, indent=2) + "\n")
         tasks = [{"id": "local-frp", "name": "本机 FRP 入口", "target": f'127.0.0.1:{c["FRP_SERVER_PORT"]}', "interval": 5}] if probes else []
         private(staging / "probes.json", json.dumps({"version": 1, "nodes": [{"agent_id": node_id, "tasks": tasks}]}, ensure_ascii=False, indent=2) + "\n")
         # Paths in generated configuration refer to the final private directory.
@@ -119,7 +123,7 @@ def initialize(destination: Path, *, plain_http=False, probes=False, config=None
         auth = f'auth.method = "token"\nauth.tokenSource.type = "file"\nauth.tokenSource.file.path = {q("frp.token")}\n'
         private(staging / "server.toml", f'bindAddr = "127.0.0.1"\nbindPort = {c["FRP_SERVER_PORT"]}\nproxyBindAddr = "127.0.0.1"\n'
             + auth + f'\n[monitor]\nenabled = true\nbindAddr = "127.0.0.1"\nbindPort = {c["FRP_MONITOR_PORT"]}\nserverID = "local"\n'
-            + f'credentialsFile = {q("credentials.json")}\nreportIntervalSeconds = {c["FRP_MONITOR_INTERVAL_SECONDS"]}\n' + tls_monitor)
+            + f'credentialsFile = {q("credentials.json")}\nadminCredentialsFile = {q("admin.json")}\nreportIntervalSeconds = {c["FRP_MONITOR_INTERVAL_SECONDS"]}\n' + tls_monitor)
         with (staging / "server.toml").open("a", encoding="utf-8") as server_config:
             server_config.write(f'databaseFile = {q("history.sqlite")}\nretentionDays = {c["FRP_MONITOR_RETENTION_DAYS"]}\nprobeTasksFile = {q("probes.json")}\n')
         scheme = "ws" if plain_http else "wss"
@@ -128,6 +132,7 @@ def initialize(destination: Path, *, plain_http=False, probes=False, config=None
             + f'tokenFile = {q("agent.token")}\nintervalSeconds = {c["FRP_MONITOR_INTERVAL_SECONDS"]}\niface = {json.dumps(c["FRP_AGENT_IFACE"])}\n'
             + f'allowInsecureLoopback = {str(plain_http).lower()}\nprobeEnabled = {str(probes).lower()}\nprobeAllowPrivate = {str(probes).lower()}\n' + tls_agent)
         private(staging / "local.json", json.dumps({"url": f'{"http" if plain_http else "https"}://127.0.0.1:{c["FRP_MONITOR_PORT"]}/', "id": node_id}) + "\n")
+        private(staging / "installation.json", json.dumps({"format": 1, "roles": ["server", "agent"]}) + "\n")
         os.rename(staging, destination)
     finally:
         # Remove only files created by this failed initialization, never an existing installation.
@@ -158,6 +163,7 @@ def run_demo(folder: Path):
             raise ValueError("generated FRP configuration verification failed")
     state = json.loads((folder / "local.json").read_text())
     print(f'Local node page: {state["url"]}', flush=True)
+    print(f'Administration: {state["url"]}admin/ (login token: private admin.token file)', flush=True)
     print("Press Ctrl-C to stop both processes. Linux metrics are unsupported on macOS.", flush=True)
     processes = []
     logs = []

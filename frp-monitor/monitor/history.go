@@ -183,6 +183,14 @@ func (s *Service) handleHistory(w http.ResponseWriter, r *http.Request) {
 	if queryFailed {
 		out.Storage.State = "degraded"
 	}
+	// A credential may be revoked while the bounded database queries run.
+	s.mu.Lock()
+	_, stillAuthorized := s.nodes[id]
+	s.mu.Unlock()
+	if !stillAuthorized {
+		http.NotFound(w, r)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(5 * time.Second))
 	_ = json.NewEncoder(w).Encode(out)

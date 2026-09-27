@@ -275,16 +275,16 @@ def run(agent: Path, monitor: Path, timeout: float) -> None:
         status, headers, body = api.get("/")
         if status != 200 or b"/src/app.mjs" not in body or "script-src 'self'" not in headers.get("Content-Security-Policy", ""):
             raise SmokeFailure("embedded public page or its CSP is missing")
-        for path in ("/README.md", "/handler.go", "/.env", "/admin", "/assets/", "/src/"):
+        for path in ("/README.md", "/handler.go", "/.env", "/api/admin/v1/nodes", "/assets/", "/src/"):
             if api.get(path)[0] != 404:
                 raise SmokeFailure("static handler exposed a non-public resource")
-        print("PASS P1: embedded public page, CSP, static allowlist and absent admin routes", flush=True)
+        print("PASS P1: embedded public page, CSP, static allowlist and disabled admin API", flush=True)
         with child("FRP unavailable agent", [str(agent), "-c", str(failed_config)], directory) as failed:
             wait_for("monitoring before first FRP login", lambda: api.node()["session"] == "online" and api.node()["freshness"] == "fresh" and api.node()["frp"]["control_state"] in ("connecting", "disconnected"), (server, failed), timeout)
             assert_redacted(api.snapshot(), (token, frp_token, private_client_id, private_user, LOOPBACK))
         print("PASS P1: telemetry remains online and fresh while initial FRP login fails", flush=True)
         with child("no-proxy P1 agent", [str(agent), "-c", str(empty_config)], directory) as empty:
-            wait_for("no-proxy FRP and monitoring login", lambda: api.node()["session"] == "online" and api.node()["freshness"] == "fresh" and api.node()["frp"] == {"control_state": "connected", "proxy_total": 0, "proxy_running": 0}, (server, empty), timeout)
+            wait_for("no-proxy FRP and monitoring login", lambda: api.node()["session"] == "online" and api.node()["freshness"] == "fresh" and {key: value for key, value in api.node()["frp"].items() if key in ("control_state", "proxy_total", "proxy_running")} == {"control_state": "connected", "proxy_total": 0, "proxy_running": 0}, (server, empty), timeout)
         print("PASS P1: authenticated agent without proxies reports connected FRP and zero tunnels", flush=True)
         remote.close()
         client = stack.enter_context(child("TCP P1 agent", [str(agent), "-c", str(tcp_config)], directory))
