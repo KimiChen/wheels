@@ -548,6 +548,202 @@ func TestCanceledQueuedCallsDoNotReadWorkerResults(t *testing.T) {
 	}
 }
 
+func TestPartialClearsAfterContinuousInPeriodSample(t *testing.T) {
+	at := utc("2026-09-28T23:59:58Z")
+	f := setup(t, at, time.UTC)
+	n := f.create(DefaultNodeConfig("node"))
+	n = f.sample(n.ID, at, 100, 100)
+	if !n.TrafficTodayPartial || !n.TrafficPeriodPartial {
+		t.Fatal("a first sample only builds the baseline and must stay partial", n)
+	}
+	// 周期内首个与基线连续、完整落在边界之后的样本清除 partial。
+	n = f.sample(n.ID, at.Add(time.Second), 200, 300)
+	if n.TrafficTodayPartial || n.TrafficPeriodPartial {
+		t.Fatal("continuous in-period sample must clear partial", n)
+	}
+	// 跨日分摊属于估算，先标记 partial；新一日内的连续样本再次清除。
+	n = f.sample(n.ID, utc("2026-09-29T00:00:01Z"), 400, 400)
+	if !n.TrafficTodayPartial {
+		t.Fatal("estimated day crossing must mark partial", n)
+	}
+	if n.TrafficPeriodPartial {
+		t.Fatal("an in-period day crossing must keep the period complete", n)
+	}
+	n = f.sample(n.ID, utc("2026-09-29T00:00:02Z"), 500, 500)
+	if n.TrafficTodayPartial || n.TrafficPeriodPartial {
+		t.Fatal("continuous sample inside the new day must clear partial", n)
+	}
+	// 缺口重新标记，恢复连续后再次清除。
+	n = f.sample(n.ID, utc("2026-09-29T00:00:30Z"), 600, 600)
+	if !n.TrafficTodayPartial || !n.TrafficPeriodPartial {
+		t.Fatal("a reporting gap must mark partial", n)
+	}
+	n = f.sample(n.ID, utc("2026-09-29T00:00:31Z"), 700, 700)
+	if n.TrafficTodayPartial || n.TrafficPeriodPartial {
+		t.Fatal("continuous sample after the gap must clear partial", n)
+	}
+	// 账期切换同理。
+	n = f.sample(n.ID, utc("2026-10-01T00:00:01Z"), 800, 800)
+	if !n.TrafficPeriodPartial {
+		t.Fatal("period rollover must mark partial", n)
+	}
+	n = f.sample(n.ID, utc("2026-10-01T00:00:02Z"), 900, 900)
+	if n.TrafficPeriodPartial || n.TrafficTodayPartial {
+		t.Fatal("continuous sample inside the new period must clear partial", n)
+	}
+}
+
+func TestStaleIngestErrorFlushKeepsRecoveredHealth(t *testing.T) {
+	at := utc("2026-09-28T12:00:00Z")
+	f := setup(t, at, time.UTC)
+	n := f.create(DefaultNodeConfig("node"))
+	f.sample(n.ID, at, 100, 100)
+	err := f.s.call(context.Background(), func(tx *sql.Tx) error {
+		_, err := tx.Exec(`CREATE TRIGGER reject_sample BEFORE UPDATE ON nodes WHEN NEW.counter_rx_bytes='200' BEGIN SELECT RAISE(ABORT,'test failure'); END`)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitHealth := func(want bool) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for f.s.Healthy() != want && time.Now().Before(deadline) {
+			time.Sleep(time.Millisecond)
+		}
+		if f.s.Healthy() != want {
+			t.Fatal("accounting health did not become", want)
+		}
+	}
+	f.clock.Store(at.Add(time.Second).UnixMilli())
+	if !f.s.Accept(n.ID, at.Add(time.Second), metrics(200, 200)) {
+		t.Fatal("rejected")
+	}
+	waitHealth(false)
+	err = f.s.call(context.Background(), func(tx *sql.Tx) error { _, err := tx.Exec("DROP TRIGGER reject_sample"); return err })
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 下一个成功批次从持久基线恢复健康，但 ingestErr 仍由 Flush 复述一次。
+	f.clock.Store(at.Add(2 * time.Second).UnixMilli())
+	if !f.s.Accept(n.ID, at.Add(2*time.Second), metrics(300, 300)) {
+		t.Fatal("rejected")
+	}
+	waitHealth(true)
+	if err = f.s.Flush(context.Background()); err == nil {
+		t.Fatal("stale ingest error not reported")
+	}
+	if !f.s.Healthy() {
+		t.Fatal("stale ingest error degraded recovered accounting")
+	}
+	if err = f.s.Flush(context.Background()); err != nil {
+		t.Fatal("ingest error was not cleared", err)
+	}
+}
+
+func TestCloseUnblocksCallsWaitingOnAFullQueue(t *testing.T) {
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(Config{Path: filepath.Join(dir, "control.sqlite"), QueueCapacity: 8})
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, err := s.CreateNode(context.Background(), DefaultNodeConfig("node"), strings.Repeat("a", 64), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	gate := make(chan error, 1)
+	go func() {
+		gate <- s.call(context.Background(), func(*sql.Tx) error { close(started); <-release; return nil })
+	}()
+	<-started
+	at := utc("2026-09-28T12:00:00Z")
+	for i := 0; i < 8; i++ {
+		if !s.Accept(n.ID, at.Add(time.Duration(i+1)*time.Second), metrics(uint64(101+i), uint64(101+i))) {
+			t.Fatal("sample rejected")
+		}
+	}
+	// 队列已满且 worker 被阻塞：Get 停在入队等待，关闭必须让它退出。
+	blocked := make(chan error, 1)
+	go func() { _, err := s.Get(context.Background(), n.ID); blocked <- err }()
+	closing := make(chan struct{})
+	go func() { _ = s.Close(); close(closing) }()
+	select {
+	case err = <-blocked:
+		if !errors.Is(err, ErrClosed) {
+			t.Fatal("a call blocked on a full queue should report closed", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not unblock a call waiting on a full queue")
+	}
+	close(release)
+	if err = <-gate; err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-closing:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not finish after the worker was released")
+	}
+}
+
+func TestInvalidStoredTimezoneFallsBackToUTC(t *testing.T) {
+	at := utc("2026-09-28T12:00:00Z")
+	f := setup(t, at, time.UTC)
+	n := f.create(DefaultNodeConfig("node"))
+	// validateConfig 不会放行非法时区；模拟数据库被外部改动的情况。
+	err := f.s.call(context.Background(), func(tx *sql.Tx) error {
+		_, err := tx.Exec("UPDATE nodes SET traffic_reset_timezone='Bogus/Zone' WHERE id=?", n.ID)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := f.s.Get(context.Background(), n.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.TrafficPeriodEndAtMS == nil || *got.TrafficPeriodEndAtMS != utc("2026-10-01T00:00:00Z").UnixMilli() {
+		t.Fatal("an invalid stored timezone must fall back to UTC", got)
+	}
+	// worker 内的采样路径同样不得因非法时区 panic。
+	n = f.sample(n.ID, at, 100, 100)
+	if n.UsedBytes() != "0" {
+		t.Fatal(n)
+	}
+}
+
+func TestSymlinkAncestorRejectedBeforeCreation(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Chmod(base, 0700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(base, "target")
+	if err = os.Mkdir(target, 0700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "link")
+	if err = os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = Open(Config{Path: filepath.Join(link, "sub", "control.sqlite")}); err == nil {
+		t.Fatal("symlink ancestor accepted")
+	}
+	if _, err = os.Lstat(filepath.Join(target, "sub")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("created a directory through a symlink ancestor", err)
+	}
+}
+
 func TestLargeCountersAndCredentialBindingUniqueness(t *testing.T) {
 	at := utc("2026-09-28T12:00:00Z")
 	f := setup(t, at, time.UTC)

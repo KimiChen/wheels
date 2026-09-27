@@ -6,7 +6,8 @@ import "time"
 
 type Config struct {
 	// Path is a dedicated private directory, not a SQLite database file.
-	Path           string
+	Path string
+	// RetentionDays defaults to 7 and is bounded at 365.
 	RetentionDays  int
 	ReportInterval time.Duration
 	// QueueCapacity defaults to 4096 and is bounded at 65536.

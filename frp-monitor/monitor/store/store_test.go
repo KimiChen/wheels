@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -241,6 +242,14 @@ func TestPrivatePathLimitsAndMaskedOpenError(t *testing.T) {
 	if _, err := Open(Config{Path: link}); err == nil {
 		t.Fatal("symlink accepted")
 	}
+	// A symlink ancestor must be rejected before MkdirAll can create anything
+	// through it at the link target.
+	if _, err := Open(Config{Path: filepath.Join(link, "sub", "dir")}); err == nil {
+		t.Fatal("symlink ancestor accepted")
+	}
+	if _, err := os.Lstat(filepath.Join(target, "sub")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("created a directory through a symlink ancestor", err)
+	}
 	path := privateDir(t)
 	if err := os.WriteFile(filepath.Join(path, "flock.lock"), []byte{}, 0600); err != nil {
 		t.Fatal(err)
@@ -323,6 +332,72 @@ func TestOpenWithUnparsedStandardFlagsAndCacheBudget(t *testing.T) {
 	s.db.UpdateMetrics(&stats)
 	if !flag.Parsed() || stats.MetricIDCacheSizeMaxBytes > 64<<20 || stats.MetricIDCacheSizeMaxBytes == 0 {
 		t.Fatalf("unbounded metric ID cache: %d", stats.MetricIDCacheSizeMaxBytes)
+	}
+}
+
+func TestNodeLimitEvictsLeastRecentlySeen(t *testing.T) {
+	s := openTest(t)
+	s.maxTracked = 4 // 首个样本入队前缩小上限，保持测试轻量
+	base := minute()
+	m := metrics(t)
+	// 节点 ID 不复用：上限满时淘汰最久未见的节点，而不是静默丢弃新节点。
+	for i := 1; i <= 6; i++ {
+		if !s.Accept(strconv.Itoa(i), base.Add(time.Duration(i)*time.Second), m) {
+			t.Fatalf("node %d rejected", i)
+		}
+	}
+	flush(t, s)
+	if st := s.Status(); st.Degraded || st.Dropped != 0 {
+		t.Fatal(st)
+	}
+	if len(s.lastObserved) != 4 || len(s.lastSeen) != 4 {
+		t.Fatal("baseline tables not bounded", len(s.lastObserved), len(s.lastSeen))
+	}
+	for _, evicted := range []string{"1", "2"} {
+		if _, ok := s.lastObserved[evicted]; ok {
+			t.Fatal("least recently seen node not evicted", evicted)
+		}
+	}
+	if _, ok := s.lastObserved["6"]; !ok {
+		t.Fatal("newest node was evicted")
+	}
+	h, err := s.History(context.Background(), "6", base, base.Add(2*time.Minute), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	samples := 0
+	for _, p := range h.Points {
+		samples += p.Samples
+	}
+	if samples != 1 {
+		t.Fatal("new node history was dropped", h)
+	}
+}
+
+func TestInvalidInputDropsWithoutDegrading(t *testing.T) {
+	s := openTest(t)
+	at := minute()
+	m := metrics(t)
+	if s.Accept("node", at, m) || s.Accept("1", time.Time{}, m) || s.AcceptProbe("1", "task", at, math.NaN()) {
+		t.Fatal("invalid input accepted")
+	}
+	// 校验失败是调用方错误：只计入丢弃数，不置 Degraded。
+	if st := s.Status(); st.Degraded || st.Dropped != 3 {
+		t.Fatal(st)
+	}
+	if !s.Accept("1", at, m) {
+		t.Fatal("valid sample rejected")
+	}
+	flush(t, s)
+	if st := s.Status(); st.Degraded || st.Dropped != 3 {
+		t.Fatal(st)
+	}
+}
+
+func TestDefaultRetentionIsOneWeek(t *testing.T) {
+	s := openPath(t, privateDir(t), 0)
+	if s.cfg.RetentionDays != 7 {
+		t.Fatal(s.cfg.RetentionDays)
 	}
 }
 

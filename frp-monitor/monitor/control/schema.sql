@@ -49,5 +49,7 @@ CREATE TABLE settings (
  probe_json TEXT NOT NULL CHECK (json_valid(probe_json) AND json_type(probe_json)='object')
 );
 INSERT INTO settings(id,probe_json) VALUES (1,'{"version":1,"nodes":[]}');
+-- Database identity; must match the restore check in scripts/ops.py
+-- and the startup check in monitor/control/store.go.
 PRAGMA application_id=1179798836;
 PRAGMA user_version=4;

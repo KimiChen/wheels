@@ -34,6 +34,7 @@ type Store struct {
 	db        *sql.DB
 	cfg       Config
 	queue     chan request
+	stop      chan struct{}
 	done      chan struct{}
 	mu        sync.RWMutex
 	closed    bool
@@ -119,13 +120,19 @@ func Open(cfg Config) (*Store, error) {
 	if mode != "wal" {
 		return fail(errors.New("control WAL unavailable"))
 	}
-	s := &Store{db: db, cfg: cfg, queue: make(chan request, cfg.QueueCapacity), done: make(chan struct{})}
+	s := &Store{db: db, cfg: cfg, queue: make(chan request, cfg.QueueCapacity), stop: make(chan struct{}), done: make(chan struct{})}
 	go s.run()
 	return s, nil
 }
 
 func securePath(path string) error {
 	parent := filepath.Dir(path)
+	// Validate the existing ancestor chain before creating anything: MkdirAll
+	// would otherwise traverse a symlink ancestor and create directories at its
+	// target. The full chain is re-checked after creation.
+	if err := realDirChain(parent); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(parent, 0700); err != nil {
 		return err
 	}
@@ -170,6 +177,25 @@ func securePath(path string) error {
 	return f.Close()
 }
 
+// realDirChain requires every existing component of path to be a real
+// directory, never a symlink. Missing components are left for the caller to
+// create and re-check.
+func realDirChain(path string) error {
+	for p := path; ; p = filepath.Dir(p) {
+		st, err := os.Lstat(p)
+		if err == nil {
+			if !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
+				return errors.New("control parent must be a real directory")
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		if p == filepath.Dir(p) {
+			return nil
+		}
+	}
+}
+
 func (s *Store) run() {
 	defer close(s.done)
 	var pending *request
@@ -179,33 +205,31 @@ func (s *Store) run() {
 			r = *pending
 			pending = nil
 		} else {
-			var ok bool
-			r, ok = <-s.queue
-			if !ok {
-				return
+			select {
+			case r = <-s.queue:
+			case <-s.stop:
+				// Drain requests enqueued before Close. A request racing the
+				// drain may stay queued; its caller unblocks through s.done or
+				// its own context instead.
+				for {
+					select {
+					case r = <-s.queue:
+						s.serve(r)
+					default:
+						return
+					}
+				}
 			}
 		}
 		if r.sample == nil {
-			tx, err := s.db.BeginTx(r.ctx, nil)
-			if err == nil {
-				err = r.call(tx)
-				if err == nil {
-					err = tx.Commit()
-				} else {
-					tx.Rollback()
-				}
-			}
-			r.done <- err
+			s.serveCall(r)
 			continue
 		}
 		batch := []*sample{r.sample}
 	collect:
 		for len(batch) < 256 {
 			select {
-			case next, ok := <-s.queue:
-				if !ok {
-					break collect
-				}
+			case next := <-s.queue:
 				if next.sample == nil {
 					pending = &next
 					break collect
@@ -215,12 +239,39 @@ func (s *Store) run() {
 				break collect
 			}
 		}
-		err := s.applyBatch(batch)
-		if err != nil {
-			s.ingestErr = err
-		}
-		s.unhealthy.Store(err != nil)
+		s.apply(batch)
 	}
+}
+
+// apply records one counter batch and reflects its outcome in ingest health.
+func (s *Store) apply(batch []*sample) {
+	err := s.applyBatch(batch)
+	if err != nil {
+		s.ingestErr = err
+	}
+	s.unhealthy.Store(err != nil)
+}
+
+// serve handles a single request during shutdown draining, without batching.
+func (s *Store) serve(r request) {
+	if r.sample == nil {
+		s.serveCall(r)
+		return
+	}
+	s.apply([]*sample{r.sample})
+}
+
+func (s *Store) serveCall(r request) {
+	tx, err := s.db.BeginTx(r.ctx, nil)
+	if err == nil {
+		err = r.call(tx)
+		if err == nil {
+			err = tx.Commit()
+		} else {
+			tx.Rollback()
+		}
+	}
+	r.done <- err
 }
 
 func (s *Store) applyBatch(batch []*sample) error {
@@ -270,33 +321,61 @@ func (s *Store) Accept(id string, at time.Time, m shared.Metrics) bool {
 	}
 }
 
+// ingestReport wraps an earlier batch failure retold by Flush. The worker
+// already updated ingest health when the failure happened, so the retelling
+// must not degrade a store that has since recovered.
+type ingestReport struct{ err error }
+
+func (e ingestReport) Error() string { return e.err.Error() }
+func (e ingestReport) Unwrap() error { return e.err }
+
 func (s *Store) call(ctx context.Context, fn func(*sql.Tx) error) error {
 	r := request{ctx: ctx, call: fn, done: make(chan error, 1)}
 	s.mu.RLock()
-	if s.closed {
-		s.mu.RUnlock()
+	closed := s.closed
+	s.mu.RUnlock()
+	if closed {
 		return ErrClosed
 	}
+	// Never hold the lock across a blocking send: a full queue would otherwise
+	// stall Close waiting for the write lock. Closing or cancellation unblocks
+	// the wait, mirroring the history store's Flush.
 	select {
 	case s.queue <- r:
-		s.mu.RUnlock()
+	case <-s.stop:
+		return ErrClosed
 	case <-ctx.Done():
-		s.mu.RUnlock()
 		return ctx.Err()
 	}
 	select {
 	case err := <-r.done:
-		var constraint interface{ Code() int }
-		if errors.As(err, &constraint) && (constraint.Code() == 2067 || constraint.Code() == 1555) {
-			err = fmt.Errorf("%w: duplicate node credential or FRP binding", ErrConflict)
+		return s.classify(err)
+	case <-s.done:
+		// A request the worker completed before exiting still has its real
+		// result queued; only unanswered requests report closed.
+		select {
+		case err := <-r.done:
+			return s.classify(err)
+		default:
+			return ErrClosed
 		}
-		if err != nil && !errors.Is(err, ErrInvalid) && !errors.Is(err, ErrConflict) && !errors.Is(err, ErrNotFound) {
-			s.unhealthy.Store(true)
-		}
-		return err
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// classify maps SQLite constraint violations to conflicts and marks real
+// storage failures unhealthy. Flush retellings (ingestReport) are exempt.
+func (s *Store) classify(err error) error {
+	var constraint interface{ Code() int }
+	if errors.As(err, &constraint) && (constraint.Code() == 2067 || constraint.Code() == 1555) {
+		err = fmt.Errorf("%w: duplicate node credential or FRP binding", ErrConflict)
+	}
+	var report ingestReport
+	if err != nil && !errors.Is(err, ErrInvalid) && !errors.Is(err, ErrConflict) && !errors.Is(err, ErrNotFound) && !errors.As(err, &report) {
+		s.unhealthy.Store(true)
+	}
+	return err
 }
 
 // Healthy reports durable accounting availability. A successful counter batch
@@ -308,14 +387,26 @@ func (s *Store) Healthy() bool {
 }
 
 func (s *Store) Flush(ctx context.Context) error {
-	return s.call(ctx, func(*sql.Tx) error { err := s.ingestErr; s.ingestErr = nil; return err })
+	err := s.call(ctx, func(*sql.Tx) error {
+		err := s.ingestErr
+		s.ingestErr = nil
+		if err != nil {
+			return ingestReport{err}
+		}
+		return nil
+	})
+	var report ingestReport
+	if errors.As(err, &report) {
+		return report.err
+	}
+	return err
 }
 
 func (s *Store) Close() error {
 	s.closeOnce.Do(func() {
 		s.mu.Lock()
 		s.closed = true
-		close(s.queue)
+		close(s.stop)
 		s.mu.Unlock()
 		<-s.done
 		s.closeErr = errors.Join(s.ingestErr, s.db.Close())

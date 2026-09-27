@@ -221,9 +221,7 @@ func (s *Store) Get(ctx context.Context, id string) (*Node, error) {
 		if err != nil {
 			return err
 		}
-		before := *n
-		s.refresh(n, s.cfg.Now())
-		if before != *n {
+		if s.refresh(n, s.cfg.Now()) {
 			if err = saveNode(tx, n); err != nil {
 				return err
 			}
@@ -259,9 +257,7 @@ func (s *Store) Nodes(ctx context.Context) ([]*Node, error) {
 		}
 		now := s.cfg.Now()
 		for _, n := range result {
-			before := *n
-			s.refresh(n, now)
-			if before != *n {
+			if s.refresh(n, now) {
 				if err = saveNode(tx, n); err != nil {
 					return err
 				}
@@ -303,7 +299,7 @@ func (s *Store) UpdateNode(ctx context.Context, id string, cfg NodeConfig, usedB
 			n.TrafficAdjustmentBytes = new(big.Int).Sub(number(used), n.rawUsed()).String()
 		}
 		if n.TrafficResetMode == "monthly" {
-			loc, _ := time.LoadLocation(n.TrafficResetTimezone)
+			loc := loadResetLocation(n.TrafficResetTimezone)
 			_, end := periodBounds(now, n.TrafficResetDay, loc)
 			n.TrafficPeriodEndAtMS = ptr(end.UnixMilli())
 		} else {
@@ -312,6 +308,9 @@ func (s *Store) UpdateNode(ctx context.Context, id string, cfg NodeConfig, usedB
 		if reset {
 			n.TrafficPeriodStartAtMS = ptr(now.UnixMilli())
 			n.TrafficPeriodRXBytes, n.TrafficPeriodTXBytes, n.TrafficAdjustmentBytes = "0", "0", "0"
+			// A baseline exactly at the reset keeps the new period exact;
+			// otherwise observe clears the flag after the first complete
+			// sample that continues the baseline inside the period.
 			n.TrafficPeriodPartial = n.CounterReceivedAtMS == nil || *n.CounterReceivedAtMS != now.UnixMilli()
 		}
 		if usedBytes != nil {

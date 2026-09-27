@@ -63,28 +63,50 @@ func periodBounds(at time.Time, day int, loc *time.Location) (time.Time, time.Ti
 	return start, resetInMonth(next.Year(), next.Month(), day, loc)
 }
 
-func (s *Store) refresh(n *Node, at time.Time) {
+// loadResetLocation resolves the plan timezone. Configurations are validated
+// before being stored, so a failure here means the row was modified outside
+// the API; fall back to UTC instead of panicking inside the worker goroutine.
+func loadResetLocation(name string) *time.Location {
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		return time.UTC
+	}
+	return loc
+}
+
+// refresh advances the day and plan period boundaries and reports whether it
+// changed the node. A boundary switch marks the totals partial: the crossing
+// delta is prorated by receive time, i.e. an estimate. observe clears the flag
+// once a sample continues the baseline completely inside the new boundary.
+func (s *Store) refresh(n *Node, at time.Time) bool {
+	changed := false
 	local := at.In(s.cfg.Location)
 	day := local.Format("2006-01-02")
 	if n.TrafficDay == nil || *n.TrafficDay != day {
 		n.TrafficDay = ptr(day)
 		n.TrafficTodayRXBytes, n.TrafficTodayTXBytes = "0", "0"
 		boundary := midnight(local.Year(), local.Month(), local.Day(), s.cfg.Location).UnixMilli()
+		// A baseline exactly on the boundary keeps the new day exact; that is
+		// rare, and every other crossing is cleared later by observe instead.
 		n.TrafficTodayPartial = n.CounterReceivedAtMS == nil || *n.CounterReceivedAtMS != boundary
+		changed = true
 	}
 	if n.TrafficResetMode == "monthly" {
-		loc, _ := time.LoadLocation(n.TrafficResetTimezone)
+		loc := loadResetLocation(n.TrafficResetTimezone)
 		start, end := periodBounds(at, n.TrafficResetDay, loc)
 		if n.TrafficPeriodStartAtMS == nil || n.TrafficPeriodEndAtMS == nil || at.UnixMilli() >= *n.TrafficPeriodEndAtMS {
 			n.TrafficPeriodStartAtMS, n.TrafficPeriodEndAtMS = ptr(start.UnixMilli()), ptr(end.UnixMilli())
 			n.TrafficPeriodRXBytes, n.TrafficPeriodTXBytes, n.TrafficAdjustmentBytes = "0", "0", "0"
 			n.TrafficPeriodPartial = n.CounterReceivedAtMS == nil || *n.CounterReceivedAtMS != start.UnixMilli()
+			changed = true
 		}
 	} else if n.TrafficPeriodStartAtMS == nil {
 		n.TrafficPeriodStartAtMS = ptr(at.UnixMilli())
 		n.TrafficPeriodEndAtMS = nil
 		n.TrafficPeriodPartial = true
+		changed = true
 	}
+	return changed
 }
 
 func addFraction(current string, delta uint64, from, to, boundary int64) string {
@@ -131,12 +153,12 @@ func (s *Store) observe(n *Node, next sample) bool {
 		n.TrafficPeriodRXBytes = addFraction(n.TrafficPeriodRXBytes, rx, from, next.at, periodBoundary)
 		n.TrafficPeriodTXBytes = addFraction(n.TrafficPeriodTXBytes, tx, from, next.at, periodBoundary)
 		gap := next.at-from > max(10*time.Second, 3*s.cfg.ReportInterval).Milliseconds()
-		if gap || from < dayBoundary {
-			n.TrafficTodayPartial = true
-		}
-		if gap || from < periodBoundary {
-			n.TrafficPeriodPartial = true
-		}
+		// A gap or a boundary-crossing estimate marks the totals partial. The
+		// flag clears once a sample continues the baseline completely inside
+		// the boundary (from >= boundary, no gap): from then on every counted
+		// byte of the new day/period is attributed exactly, not estimated.
+		n.TrafficTodayPartial = gap || from < dayBoundary
+		n.TrafficPeriodPartial = gap || from < periodBoundary
 	} else {
 		n.TrafficTodayPartial, n.TrafficPeriodPartial = true, true
 	}

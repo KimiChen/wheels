@@ -47,8 +47,13 @@ type Store struct {
 	queryMu                  sync.RWMutex
 	dropped, writes, queries atomic.Uint64
 	failure                  atomic.Pointer[string]
+	// maxTracked bounds per-node coverage baselines; zero selects the default
+	// 1024. Node IDs are never reused, so a full map evicts the least recently
+	// seen node instead of rejecting every new node.
+	maxTracked int
 	// Only the worker accesses coverage baselines and its bounded write batch.
 	lastObserved map[string]map[string]int64
+	lastSeen     map[string]int64
 	rows         []storage.MetricRow
 }
 
@@ -64,7 +69,7 @@ func memoryBudget(limit uint64) (int, error) {
 
 func Open(cfg Config) (out *Store, err error) {
 	if cfg.RetentionDays == 0 {
-		cfg.RetentionDays = 30
+		cfg.RetentionDays = 7
 	}
 	if cfg.ReportInterval == 0 {
 		cfg.ReportInterval = time.Second
@@ -130,13 +135,19 @@ func Open(cfg Config) (out *Store, err error) {
 		db.MustClose()
 		return nil, errors.New("history disk space low")
 	}
-	s := &Store{db: db, cfg: cfg, queue: make(chan event, cfg.QueueCapacity), stop: make(chan struct{}), done: make(chan struct{}), lastObserved: map[string]map[string]int64{}}
+	s := &Store{db: db, cfg: cfg, queue: make(chan event, cfg.QueueCapacity), stop: make(chan struct{}), done: make(chan struct{}), maxTracked: 1024, lastObserved: map[string]map[string]int64{}, lastSeen: map[string]int64{}}
 	instanceOpen = true
 	go s.run()
 	return s, nil
 }
 
 func secureDirectory(path string) error {
+	// Validate the existing ancestor chain before creating anything: MkdirAll
+	// would otherwise traverse a symlink ancestor and create directories at its
+	// target. The full chain is re-checked after creation.
+	if err := realDirChain(path); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(path, 0700); err != nil {
 		return errors.New("cannot create history directory")
 	}
@@ -153,6 +164,25 @@ func secureDirectory(path string) error {
 		}
 	}
 	return nil
+}
+
+// realDirChain requires every existing component of path to be a real
+// directory, never a symlink. Missing components are left for the caller to
+// create and re-check.
+func realDirChain(path string) error {
+	for p := path; ; p = filepath.Dir(p) {
+		st, err := os.Lstat(p)
+		if err == nil {
+			if !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
+				return errors.New("history path must be a real directory")
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return errors.New("cannot inspect history directory")
+		}
+		if p == filepath.Dir(p) {
+			return nil
+		}
+	}
 }
 
 func validNode(s string) bool {
@@ -190,7 +220,9 @@ func (s *Store) offer(e event) bool {
 }
 func (s *Store) Accept(nodeID string, at time.Time, m shared.Metrics) bool {
 	if !validNode(nodeID) || !validAt(at) || m.Validate() != nil {
-		s.drop("invalid_sample")
+		// Invalid input is a caller bug, not a storage failure: count the drop
+		// without degrading the store (degraded would persist until restart).
+		s.dropped.Add(1)
 		return false
 	}
 	values := map[string]float64{}
@@ -220,7 +252,8 @@ func (s *Store) Accept(nodeID string, at time.Time, m shared.Metrics) bool {
 }
 func (s *Store) AcceptProbe(nodeID, taskID string, at time.Time, latencyMS float64) bool {
 	if !validNode(nodeID) || !validTask(taskID) || !validAt(at) || math.IsNaN(latencyMS) || math.IsInf(latencyMS, 0) || latencyMS < 0 && latencyMS != -1 || latencyMS > 900 {
-		s.drop("invalid_probe")
+		// As in Accept, invalid input only counts as dropped, never degraded.
+		s.dropped.Add(1)
 		return false
 	}
 	return s.offer(event{node: nodeID, task: taskID, at: at.UTC(), latency: latencyMS})
@@ -329,12 +362,21 @@ func (s *Store) consume(e event) {
 		s.drop("disk_space_low")
 		return
 	}
+	limit := s.maxTracked
+	if limit <= 0 {
+		limit = 1024
+	}
 	if _, ok := s.lastObserved[e.node]; !ok {
-		if len(s.lastObserved) >= 1024 {
-			s.drop("node_limit")
-			return
+		if len(s.lastObserved) >= limit {
+			// Node IDs are AUTOINCREMENT and never reused; without eviction a
+			// full table would silently drop every new node's history and hold
+			// Degraded. Evict the node unseen for the longest time instead.
+			s.evictOldestNode()
 		}
 		s.lastObserved[e.node] = map[string]int64{}
+	}
+	if at := e.at.UnixNano(); s.lastSeen[e.node] < at {
+		s.lastSeen[e.node] = at
 	}
 	if e.values == nil {
 		// A probe keeps its failure as -1; it is excluded from the mean at query time.
@@ -349,6 +391,23 @@ func (s *Store) consume(e event) {
 		_ = s.persist(false)
 	}
 }
+
+// evictOldestNode drops the coverage baselines of the node unseen for the
+// longest time, keeping the table bounded. Stored history itself is untouched;
+// if the evicted node reports again, its baselines start over like a new node.
+func (s *Store) evictOldestNode() {
+	var oldest string
+	var seen int64
+	first := true
+	for node, at := range s.lastSeen {
+		if first || at < seen {
+			oldest, seen, first = node, at, false
+		}
+	}
+	delete(s.lastObserved, oldest)
+	delete(s.lastSeen, oldest)
+}
+
 func metricRow(field, node, task string, at int64, value float64) storage.MetricRow {
 	labels := []prompb.Label{{Name: "__name__", Value: "frpmonitor_" + field}, {Name: "node_id", Value: node}}
 	if task != "" {
