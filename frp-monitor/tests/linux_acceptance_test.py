@@ -13,6 +13,49 @@ SPEC.loader.exec_module(acceptance)
 
 
 class LinuxAcceptanceTests(unittest.TestCase):
+    def public_node(self):
+        return {"id": "1", "name": "example", "session": "waiting", "freshness": "waiting",
+                "last_seen": None, "metrics_at": None, "interval_seconds": 1,
+                "frp": {"reconciliation": "", "server_online": None, "registered": 0,
+                        "control_state": "unknown", "proxy_total": 0, "proxy_running": 0,
+                        "today_rx_bytes": None, "today_tx_bytes": None, "traffic_scope": ""},
+                "hardware": None, "metrics": None, "public_note": "",
+                "traffic_today": {"day": "2026-09-28", "timezone": "UTC", "rx_bytes": "0",
+                                  "tx_bytes": "0", "partial": True},
+                "accounting_state": "ready"}
+
+    def test_public_node_accepts_current_fields_and_optional_published_data(self):
+        billing = {"price_minor": None, "currency": None, "billing_cycle": None,
+                   "expires_at_ms": None, "renewal_note": ""}
+        plan = {"quota_bytes": None, "mode": "max", "reset_mode": "manual", "reset_day": 1,
+                "reset_timezone": "UTC", "period_start_at_ms": None, "period_end_at_ms": None,
+                "rx_bytes": "0", "tx_bytes": "0", "used_bytes": "0", "partial": True}
+        for optional in ({}, {"billing": billing}, {"traffic_plan": plan},
+                         {"billing": billing, "traffic_plan": plan}):
+            with self.subTest(optional_fields=tuple(optional)):
+                acceptance.validate_public_node(dict(self.public_node(), **optional))
+
+    def test_public_node_requires_fields_and_rejects_private_or_unknown_fields(self):
+        for field in ("hardware", "public_note", "traffic_today", "accounting_state"):
+            node = self.public_node()
+            del node[field]
+            with self.subTest(missing=field), self.assertRaisesRegex(acceptance.AcceptanceError, "^invalid_public_node_fields$"):
+                acceptance.validate_public_node(node)
+        for field in ("facts", "hostname", "private_note", "token_sha256", "unknown"):
+            with self.subTest(extra=field), self.assertRaisesRegex(acceptance.AcceptanceError, "^invalid_public_node_fields$"):
+                acceptance.validate_public_node(dict(self.public_node(), **{field: "private value"}))
+
+    def test_invalid_public_fields_report_is_sanitized(self):
+        output = io.StringIO()
+        node = dict(self.public_node(), private_note="private path and credentials")
+        with mock.patch("sys.argv", ["linux_acceptance.py", "--url", "https://private.invalid"]), \
+                mock.patch.object(acceptance, "run", side_effect=lambda args: acceptance.validate_public_node(node)), \
+                contextlib.redirect_stdout(output):
+            self.assertEqual(acceptance.main(), 1)
+        self.assertEqual(json.loads(output.getvalue()),
+                         {"schema": 1, "passed": False, "error": "invalid_public_node_fields"})
+        self.assertNotIn("private", output.getvalue())
+
     def test_memory_zero_available_and_missing_fallback(self):
         text = "MemTotal: 100 kB\nMemAvailable: 0 kB\nMemFree: 10 kB\nBuffers: 5 kB\nCached: 15 kB\nSwapTotal: 20 kB\nSwapFree: 8 kB\n"
         self.assertEqual(acceptance.meminfo(text)["mem_used"], 100 * 1024)

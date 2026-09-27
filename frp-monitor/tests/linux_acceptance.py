@@ -22,7 +22,8 @@ SKIP_FS = set("tmpfs devtmpfs proc sysfs cgroup cgroup2 devpts mqueue hugetlbfs 
 SKIP_IFACE = tuple("lo docker veth br- virbr tap tun wg tailscale cni flannel podman fwbr fwpr fwln ifb gretap erspan kube cali nerdctl lxc cilium zt".split())
 UINT_FIELDS = "mem_total mem_used swap_total swap_used disk_total disk_used net_rx net_tx net_rx_total net_tx_total uptime tcp udp procs".split()
 METRIC_FIELDS = set(UINT_FIELDS + ["scope", "cpu", "load"])
-PUBLIC_FIELDS = set("id name session freshness last_seen metrics_at interval_seconds frp metrics".split())
+PUBLIC_FIELDS = set("id name session freshness last_seen metrics_at interval_seconds frp hardware metrics public_note traffic_today accounting_state".split())
+PUBLIC_OPTIONAL_FIELDS = {"billing", "traffic_plan"}
 MAX_U64 = 2**64 - 1
 
 
@@ -234,6 +235,11 @@ def metric_value(name, field):
     return value
 
 
+def validate_public_node(node):
+    if not isinstance(node, dict) or not PUBLIC_FIELDS <= node.keys() or node.keys() - PUBLIC_FIELDS - PUBLIC_OPTIONAL_FIELDS:
+        raise AcceptanceError("invalid_public_node_fields")
+
+
 def compare(metrics, refs, results):
     if not isinstance(metrics, dict) or set(metrics) != METRIC_FIELDS or metrics["scope"] not in {"host", "namespace", "unknown"}:
         raise AcceptanceError("invalid_public_metric_fields")
@@ -293,8 +299,7 @@ def run(args):
         if len(nodes) != 1:
             raise AcceptanceError("select_exactly_one_local_node")
         node = nodes[0]
-        if set(node) != PUBLIC_FIELDS:
-            raise AcceptanceError("invalid_public_node_fields")
+        validate_public_node(node)
         if node["session"] != "online" or node["freshness"] != "fresh":
             raise AcceptanceError("node_not_online_and_fresh")
         interval = node["interval_seconds"]
