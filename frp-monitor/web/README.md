@@ -60,6 +60,9 @@ git show 6d41d588b3537b2d2460d73f999d958fd37eb00d:web-standard-kit/script.js
 `id` 是 SQLite 自增正整数，以十进制字符串传输，范围不超过有符号 64 位整数。
 节点路由拒绝 0、前导零、负数、溢出值和额外路径片段。
 `name` 是管理员保存的名称；`metrics.scope` 是采集范围字符串。
+`accounting_state` 由服务端随快照下发（`ready` / `degraded`），当前页面不直接读取：
+记账降级时服务端已把 `traffic_today` 与 `traffic_plan` 的 `partial` 置真，页面经
+`partial` 标注「统计不完整」。保留该字段供诊断与未来客户端展示使用。
 硬件与其他实时指标使用 `{value, quality, reason?}`：CPU、load 和逻辑核心数为
 number，硬件文本为 string，uint64 指标为十进制 string。容量和流量单位为 bytes，
 网速为 bytes/s，运行时间为秒。浏览器使用 `BigInt` 处理字节值，避免超过 `2^53`
@@ -181,7 +184,8 @@ FRP 绑定和探测表单。授权详情包含主机事实、地址、代理本�
 `/admin/` 返回 no-store，源文件没有任何私有节点值；API/SSE 鉴权由 monitor 负责。
 
 静态响应设置 CSP（脚本、样式、连接等只允许同源）、nosniff、拒绝 iframe 和
-no-referrer。页面不依赖外部字体、CDN 或跨子项目运行时资源；GitHub 登录通过顶层跳转完成。
+no-referrer，并携带内容哈希 ETag；`If-None-Match` 命中（含弱比较）时返回 304。
+页面不依赖外部字体、CDN 或跨子项目运行时资源；GitHub 登录通过顶层跳转完成。
 
 公开字段必须由服务端白名单裁剪，不能将私有数据下发后再用 CSS 隐藏。
 `is_public=false` 的节点不进入公开快照或历史接口；费用默认不公开、套餐默认公开，
@@ -200,7 +204,7 @@ GO111MODULE=off go test ./frp-monitor/web
 JavaScript 测试覆盖数字节点 ID、uint64/大整数精度、未知与零、金额与
 GiB 换算、校准留空及显式零、额度超用、快照状态、同源 CSRF、会话失效清理、
 迟到响应、探测版本、重连、历史范围和缺样图表。静态 Go 测试覆盖资源 allowlist、
-MIME、CSP、数字详情路由、只读方法及不含私有值的 GitHub 登录壳。
+MIME、CSP、ETag 与 304 校验、数字详情路由、只读方法及不含私有值的 GitHub 登录壳。
 
 本地临时 fixture 已用真实 Chrome 验证卡片与详情、设置保存、切换计费类型不额外
 提交校准值、150 GiB 手工校准、带版本的套餐重置、GitHub 拒绝访问提示；历史面板

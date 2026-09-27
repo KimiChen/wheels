@@ -31,7 +31,7 @@ function patchCard(card, node) {
   const text = (key, next) => { for (const el of card.labels.get(key) ?? []) write(el, next); };
   const state = (key, next) => { for (const el of card.labels.get(key) ?? []) el.dataset.state = next; };
   const metric = node.metrics ?? {};
-  const meter = (key, n) => { for (const el of card.meters.get(key)) { el.hidden = n === null; if (n !== null && el.value !== n) el.value = n; } };
+  const meter = (key, n) => { for (const el of card.meters.get(key) ?? []) { el.hidden = n === null; if (n !== null && el.value !== n) el.value = n; } };
   text("name", node.name);
   for (const link of [card.element.querySelector(".fm-open-node"), card.row.lastElementChild.querySelector("a")]) link.setAttribute("aria-label", `${node.name} · 节点详情`);
   text("hardware", hardwareText(node.hardware)); text("cpu-label", cpuLabel(node.hardware));

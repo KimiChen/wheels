@@ -55,6 +55,45 @@ func TestAdminStaticShellContainsNoPrivateValues(t *testing.T) {
 	}
 }
 
+func TestETagValidation(t *testing.T) {
+	h := Handler()
+	etags := map[string]string{}
+	for _, path := range []string{"/", "/assets/style.css", "/src/app.mjs", "/node/1", "/admin/"} {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: status %d", path, w.Code)
+		}
+		etag := w.Header().Get("ETag")
+		if !strings.HasPrefix(etag, `"`) || !strings.HasSuffix(etag, `"`) || len(etag) != 34 {
+			t.Fatalf("%s: malformed ETag %q", path, etag)
+		}
+		etags[path] = etag
+	}
+	if etags["/"] == etags["/src/app.mjs"] || etags["/"] == etags["/node/1"] {
+		t.Fatal("distinct documents share an ETag")
+	}
+	for _, header := range []string{etags["/"], `W/` + etags["/"], `"other", ` + etags["/"], "*"} {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		r.Header.Set("If-None-Match", header)
+		h.ServeHTTP(w, r)
+		if w.Code != http.StatusNotModified || w.Body.Len() != 0 {
+			t.Fatalf("If-None-Match %q: status %d, body %d bytes", header, w.Code, w.Body.Len())
+		}
+		if w.Header().Get("ETag") != etags["/"] {
+			t.Fatal("304 lost the validator")
+		}
+	}
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.Header.Set("If-None-Match", `"stale"`)
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK || w.Body.Len() == 0 {
+		t.Fatalf("stale validator: status %d", w.Code)
+	}
+}
+
 func TestNodePageRoutes(t *testing.T) {
 	h := Handler()
 	for _, path := range []string{"/node/1", "/node/1/", "/node/9223372036854775807"} {

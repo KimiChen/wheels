@@ -18,6 +18,7 @@ function showEmpty(title, copy) {
 function clearNode() {
   panel?.stop(); panel = null; historyHost.replaceChildren();
   for (const element of labels.values()) { write(element, UNKNOWN); element.removeAttribute("data-state"); element.removeAttribute("title"); }
+  byID("node-public-note").hidden = true; write(byID("node-public-note"), "");
   write(byID("traffic-note"), "等待今日统计"); write(byID("footer-sample"), "无可显示的节点数据");
   document.title = "FRP Monitor · 节点详情";
 }

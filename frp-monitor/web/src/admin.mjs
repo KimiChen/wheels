@@ -238,7 +238,7 @@ $("probe-add").addEventListener("click", () => { const row = addProbe(); row.que
 $("probes-form").addEventListener("submit", event => {
   event.preventDefault(); if (!probes) return;
   let next;
-  try { const rows = [...$("probe-rows").children].map(row => Object.fromEntries([...row.querySelectorAll("input,select")].map(input => [input.name, input.value]))); next = nextProbeDocument(probes, rows, new Set(snapshot.nodes.map(node => node.id))); }
+  try { const rows = [...$("probe-rows").children].map(row => Object.fromEntries([...row.querySelectorAll("input,select")].map(input => [input.name, input.value]))); next = nextProbeDocument(probes, rows, new Set((snapshot?.nodes ?? []).map(node => node.id))); }
   catch (error) { $("probe-status").textContent = error.message; return; }
   mutation(async () => { probes = probeDocument(await client.request("/api/admin/v1/probes", {method: "PUT", body: next})); $("probe-status").textContent = "任务清单已保存。已接入且开启探测的节点将接收新清单。"; }, "探测任务已保存。");
 });

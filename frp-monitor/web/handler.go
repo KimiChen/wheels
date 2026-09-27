@@ -3,7 +3,9 @@ package web
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -45,6 +47,38 @@ var publicFiles = map[string]string{
 // Do not turn arbitrary paths into a catch-all application route.
 var nodePagePath = regexp.MustCompile(`^/node/[1-9][0-9]{0,18}/?$`)
 
+// ETags are strong validators derived from embedded content, which is immutable
+// for the lifetime of the process; Cache-Control: no-cache clients revalidate
+// with them and receive 304 instead of the unchanged body.
+var etags = func() map[string]string {
+	names := make(map[string]struct{}, len(publicFiles)+1)
+	for _, name := range publicFiles {
+		names[name] = struct{}{}
+	}
+	names["node.html"] = struct{}{}
+	result := make(map[string]string, len(names))
+	for name := range names {
+		data, err := content.ReadFile(name)
+		if err != nil {
+			continue
+		}
+		sum := sha256.Sum256(data)
+		result[name] = `"` + hex.EncodeToString(sum[:16]) + `"`
+	}
+	return result
+}()
+
+// If-None-Match uses weak comparison; the embedded validators are strong.
+func etagMatch(header, etag string) bool {
+	for _, candidate := range strings.Split(header, ",") {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "*" || strings.TrimPrefix(candidate, "W/") == etag {
+			return true
+		}
+	}
+	return false
+}
+
 // Handler provides the static application only. The monitor owns API/SSE routes.
 func Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -70,6 +104,13 @@ func Handler() http.Handler {
 			w.Header().Set("Allow", "GET, HEAD")
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
+		}
+		if etag, ok := etags[name]; ok {
+			w.Header().Set("ETag", etag)
+			if etagMatch(r.Header.Get("If-None-Match"), etag) {
+				w.WriteHeader(http.StatusNotModified)
+				return
+			}
 		}
 		data, err := content.ReadFile(name)
 		if err != nil {

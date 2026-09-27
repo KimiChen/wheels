@@ -33,29 +33,27 @@ test("daily traffic sums may exceed uint64 without relaxing resource counter bou
   for (const n of ["9".repeat(81), "01", "-1", "1e8", "1.5", "", null, 123]) assert.equal(cumulative(n), null);
 });
 const nodes = [
-  {id: "a", name: "节点 2", session: "online", freshness: "fresh", metrics: {cpu: ok(0), net_rx: ok("9007199254740993"), net_tx: ok("0")}, frp: {control_state: "connected", proxy_total: 0, proxy_running: 0}},
-  {id: "b", name: "节点 10", session: "offline", freshness: "stale", metrics: {cpu: ok(10), net_rx: ok("9999"), net_tx: ok("9999")}, frp: {control_state: "disconnected", proxy_total: 9, proxy_running: 9}},
-  {id: "c", name: "等待", session: "waiting", freshness: "waiting", metrics: null},
+  {id: "1", name: "节点 2", session: "online", freshness: "fresh", metrics: {cpu: ok(0), net_rx: ok("9007199254740993"), net_tx: ok("0")}},
+  {id: "2", name: "节点 10", session: "offline", freshness: "stale", metrics: {cpu: ok(10), net_rx: ok("9999"), net_tx: ok("9999")}},
+  {id: "3", name: "等待", session: "waiting", freshness: "waiting", metrics: null},
 ];
 test("name search preserves server order and does not change the input", () => {
   const ordered = [nodes[1], nodes[0], nodes[2]];
-  assert.deepEqual(select(ordered, " 节点 ").map(n => n.id), ["b","a"]);
-  assert.deepEqual(select(ordered).map(n => n.id), ["b","a","c"]);
+  assert.deepEqual(select(ordered, " 节点 ").map(n => n.id), ["2","1"]);
+  assert.deepEqual(select(ordered).map(n => n.id), ["2","1","3"]);
   assert.deepEqual(select(nodes, "不存在"), []);
   const named = [{...nodes[0], name: "Test Node"}];
   assert.deepEqual(select(named, " tEsT "), named);
-  assert.deepEqual(ordered.map(n => n.id), ["b","a","c"]);
-  assert.deepEqual(nodes.map(n => n.id), ["a","b","c"]);
+  assert.deepEqual(ordered.map(n => n.id), ["2","1","3"]);
+  assert.deepEqual(nodes.map(n => n.id), ["1","2","3"]);
 });
 test("overview excludes stale and disconnected samples, but valid zero remains zero", () => {
   const stats = overview(nodes);
   assert.equal(stats.rx.value, 9007199254740993n);
   assert.equal(stats.tx.value, 0n);
-  assert.equal(stats.proxyRunning, 0);
   assert.equal(stats.online, 1);
-  assert.equal(stats.stale, 1);
+  assert.equal(stats.offline, 1);
   assert.equal(overview([]).rx.value, null);
-  assert.equal(overview([]).proxyTotal, null);
 });
 test("CPU average includes valid zero and excludes stale, offline and unknown samples", () => {
   const node = (cpu, session = "online", freshness = "fresh") => ({session, freshness, metrics: {cpu}});
@@ -77,6 +75,8 @@ test("CPU average includes valid zero and excludes stale, offline and unknown sa
 test("malformed or duplicate identities cannot corrupt the DOM map", () => {
   assert.throws(() => snapshot({nodes: [nodes[0], nodes[0]], generated_at: "2026-01-01T00:00:00Z"}));
   assert.throws(() => snapshot({nodes, generated_at: "invalid"}));
+  for (const id of ["0", "01", "-1", "1.5", "9223372036854775808", "", "../escape", 1]) assert.throws(() => snapshot({nodes: [{...nodes[0], id}], generated_at: "2026-01-01T00:00:00Z"}));
+  assert.equal(snapshot({nodes: [{...nodes[0], id: "9223372036854775807"}], generated_at: "2026-01-01T00:00:00Z"}).nodes[0].id, "9223372036854775807");
   assert.equal(snapshot({nodes, generated_at: "2026-01-01T00:00:00Z"}).nodes.length, 3);
 });
 
