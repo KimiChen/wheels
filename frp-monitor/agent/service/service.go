@@ -23,8 +23,30 @@ import (
 	"github.com/fatedier/frp/extension/frpmonitor/agent/collect"
 	"github.com/fatedier/frp/extension/frpmonitor/agent/probe"
 	"github.com/fatedier/frp/extension/frpmonitor/shared"
+	"github.com/fatedier/frp/pkg/util/log"
 	"github.com/gorilla/websocket"
 )
+
+// minStableSession is the lifetime a session must reach to prove a healthy
+// endpoint; shorter sessions keep the reconnect backoff growing. It is a
+// variable so tests can shrink it.
+var minStableSession = 10 * time.Second
+
+// warnEvery throttles a repeating warning to at most one log line per interval.
+type warnEvery struct {
+	mu   sync.Mutex
+	last time.Time
+}
+
+func (w *warnEvery) allow(now time.Time, interval time.Duration) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if now.Sub(w.last) < interval {
+		return false
+	}
+	w.last = now
+	return true
+}
 
 type sampler interface {
 	Facts() shared.Facts
@@ -56,6 +78,8 @@ type Service struct {
 	ready           chan struct{}
 	done            chan struct{}
 	readyOnce       sync.Once
+	sampleWarn      warnEvery
+	connectWarn     warnEvery
 }
 
 func Start(ctx context.Context, cfg shared.AgentConfig, snapshot func() shared.FRP) (*Service, error) {
@@ -82,10 +106,9 @@ func start(ctx context.Context, cfg shared.AgentConfig, snapshot func() shared.F
 		if err != nil || len(pem) > 1024*1024 {
 			return nil, errors.New("telemetry CA unavailable")
 		}
-		pool, err := x509.SystemCertPool()
-		if err != nil {
-			pool = x509.NewCertPool()
-		}
+		// An explicit caFile pins trust to that CA alone: merging the system
+		// roots would let any public CA impersonate the monitor.
+		pool := x509.NewCertPool()
 		if !pool.AppendCertsFromPEM(pem) {
 			return nil, errors.New("telemetry CA invalid")
 		}
@@ -162,6 +185,9 @@ func (s *Service) Close() {
 func (s *Service) sample() {
 	value := observation{facts: s.collector.Facts(), metrics: s.collector.Metrics(), frp: s.frpSnapshot(), at: time.Now().UTC()}
 	if value.facts.Validate() != nil || value.metrics.Validate() != nil {
+		if s.sampleWarn.allow(time.Now(), 5*time.Minute) {
+			log.Warnf("frp-monitor telemetry keeps dropping invalid local samples")
+		}
 		return
 	}
 	s.mu.Lock()
@@ -230,16 +256,25 @@ func (s *Service) connectLoop() {
 		if s.ctx.Err() != nil {
 			return
 		}
-		connected, unauthorized := s.connect()
+		stable, unauthorized := s.connect()
 		if s.ctx.Err() != nil {
 			return
 		}
-		if connected {
+		if stable {
 			delay = time.Second
-		} else if delay < 30*time.Second {
-			delay *= 2
-			if delay > 30*time.Second {
-				delay = 30 * time.Second
+		} else {
+			if s.connectWarn.allow(time.Now(), 5*time.Minute) {
+				if unauthorized {
+					log.Warnf("frp-monitor telemetry was rejected by the monitor; check the token")
+				} else {
+					log.Warnf("frp-monitor telemetry cannot hold a monitor session; reconnecting with backoff")
+				}
+			}
+			if delay < 30*time.Second {
+				delay *= 2
+				if delay > 30*time.Second {
+					delay = 30 * time.Second
+				}
 			}
 		}
 		wait := jitter(delay)
@@ -260,6 +295,10 @@ func jitter(base time.Duration) time.Duration {
 	_, _ = rand.Read(raw[:])
 	return base*3/4 + time.Duration(raw[0])*base/512
 }
+
+// connect returns stable=true only when the session survived minStableSession.
+// A server that drops sessions right after accepting hello must not reset the
+// reconnect backoff.
 func (s *Service) connect() (bool, bool) {
 	header := http.Header{}
 	header.Set("Authorization", "Bearer "+s.token)
@@ -328,6 +367,8 @@ func (s *Service) connect() (bool, bool) {
 		default:
 		}
 	}
+	established := time.Now()
+	stable := func() bool { return time.Since(established) >= minStableSession }
 	_ = c.SetReadDeadline(time.Now().Add(15 * time.Second))
 	c.SetPongHandler(func(string) error { return c.SetReadDeadline(time.Now().Add(15 * time.Second)) })
 	var probes *probe.Engine
@@ -383,30 +424,38 @@ func (s *Service) connect() (bool, bool) {
 		if report.Validate() != nil {
 			return false
 		}
-		if writeFrame(c, "report", "", report) != nil {
-			return false
+		if err := writeFrame(c, "report", "", report); err != nil {
+			// FRP extensions are the only field that can push a report past the
+			// frame limit; drop them and retry once before giving up.
+			if !errors.Is(err, errFrameTooLarge) || report.Extensions == nil {
+				return false
+			}
+			report.Extensions = nil
+			if writeFrame(c, "report", "", report) != nil {
+				return false
+			}
 		}
 		lastGeneration = latest.generation
 		return true
 	}
 	if !send() {
-		return true, false
+		return stable(), false
 	}
 	ping := time.NewTicker(5 * time.Second)
 	defer ping.Stop()
 	for {
 		select {
 		case <-s.ctx.Done():
-			return true, false
+			return stable(), false
 		case <-readDone:
-			return true, false
+			return stable(), false
 		case <-ping.C:
 			if c.WriteControl(websocket.PingMessage, nil, time.Now().Add(3*time.Second)) != nil {
-				return true, false
+				return stable(), false
 			}
 		case <-s.notify:
 			if !send() {
-				return true, false
+				return stable(), false
 			}
 		case result := <-results:
 			if !probes.Current(result.TaskVersion, result.TaskID) {
@@ -415,7 +464,7 @@ func (s *Service) connect() (bool, bool) {
 			sequence++
 			payload := shared.PingResult{Meta: shared.Meta{Schema: shared.SchemaVersion, SessionID: session, Sequence: sequence, CollectedAt: result.CollectedAt.Format(time.RFC3339Nano)}, TaskVersion: result.TaskVersion, TaskID: result.TaskID, LatencyMS: result.LatencyMS}
 			if payload.Validate() != nil || writeFrame(c, "ping.result", "", payload) != nil {
-				return true, false
+				return stable(), false
 			}
 		}
 	}
@@ -431,6 +480,11 @@ func capabilities(c []string, probeEnabled bool) bool {
 	}
 	return metrics
 }
+
+// errFrameTooLarge marks a frame that exceeds shared.MaxFrameBytes before any
+// byte was written, so callers may safely retry with a smaller payload.
+var errFrameTooLarge = errors.New("telemetry frame exceeds the protocol byte limit")
+
 func writeFrame(c *websocket.Conn, method, id string, params any) error {
 	data, err := json.Marshal(struct {
 		JSONRPC string `json:"jsonrpc"`
@@ -438,8 +492,11 @@ func writeFrame(c *websocket.Conn, method, id string, params any) error {
 		Method  string `json:"method"`
 		Params  any    `json:"params"`
 	}{"2.0", id, method, params})
-	if err != nil || len(data) > shared.MaxFrameBytes {
+	if err != nil {
 		return errors.New("invalid telemetry frame")
+	}
+	if len(data) > shared.MaxFrameBytes {
+		return errFrameTooLarge
 	}
 	_ = c.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	return c.WriteMessage(websocket.TextMessage, data)

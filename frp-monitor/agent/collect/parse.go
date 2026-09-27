@@ -178,7 +178,7 @@ func parseMounts(text string) ([]string, error) {
 	}
 	return out, nil
 }
-func parseSockets(v4, v6 string, hasV6 bool) (uint64, uint64, error) {
+func parseSockets(v4, v6 string) (uint64, uint64, error) {
 	get := func(text, prefix, key string) (uint64, error) {
 		for _, line := range strings.Split(text, "\n") {
 			fields := strings.Fields(line)
@@ -206,17 +206,15 @@ func parseSockets(v4, v6 string, hasV6 bool) (uint64, uint64, error) {
 	if err != nil {
 		return 0, 0, err
 	}
-	if hasV6 {
-		t, e := get(v6, "TCP6:", "inuse")
-		if e != nil {
-			return 0, 0, e
-		}
-		u, e := get(v6, "UDP6:", "inuse")
-		if e != nil {
-			return 0, 0, e
-		}
-		tcp = satAdd(tcp, t)
-		udp = satAdd(udp, u)
+	t, e := get(v6, "TCP6:", "inuse")
+	if e != nil {
+		return 0, 0, e
 	}
+	u, e := get(v6, "UDP6:", "inuse")
+	if e != nil {
+		return 0, 0, e
+	}
+	tcp = satAdd(tcp, t)
+	udp = satAdd(udp, u)
 	return tcp, udp, nil
 }

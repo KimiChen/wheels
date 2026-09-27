@@ -179,11 +179,8 @@ func (c *Collector) networkMetrics(m *shared.Metrics) {
 	}
 	current := netReading{values: values, epoch: epoch(boot, values), at: c.deps.now()}
 	previous := c.network
-	// Never replace a valid clock baseline with a non-monotonic injected reading.
-	if previous != nil && !current.at.After(previous.at) {
-		return
-	}
-	c.network = &current
+	// Totals and the boot epoch do not depend on the rate baseline: publish
+	// them even when this sample cannot produce a rate.
 	m.BootID = good(current.epoch)
 	var rx, tx uint64
 	for _, value := range values {
@@ -191,6 +188,13 @@ func (c *Collector) networkMetrics(m *shared.Metrics) {
 		tx = satAdd(tx, value.tx)
 	}
 	m.NetRXTotal, m.NetTXTotal = good(rx), good(tx)
+	// Never replace a valid clock baseline with a non-monotonic injected
+	// reading; only the rates of this sample stay unknown.
+	if previous != nil && !current.at.After(previous.at) {
+		m.NetRX, m.NetTX = missing[uint64](shared.QualityUnavailable, ""), missing[uint64](shared.QualityUnavailable, "")
+		return
+	}
+	c.network = &current
 	reason := ""
 	if previous == nil {
 		reason = "no_baseline"

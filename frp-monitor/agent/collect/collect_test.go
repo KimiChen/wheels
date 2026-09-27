@@ -65,9 +65,13 @@ func TestNetworkResetScopeAndClock(t *testing.T) {
 		t.Fatal("boot change reused network baseline")
 	}
 	fake.files["/proc/net/dev"] = netText(map[string][2]uint64{"eth0": {210, 420}})
-	if got := c.Metrics(); got.NetRX.Quality != shared.QualityUnavailable {
-		t.Fatal("equal monotonic timestamps accepted")
+	frozen := c.Metrics()
+	if frozen.NetRX.Quality != shared.QualityUnavailable || frozen.NetTX.Quality != shared.QualityUnavailable || frozen.NetRX.Reason != "" {
+		t.Fatal("equal monotonic timestamps produced a rate")
 	}
+	expectValue(t, frozen.NetRXTotal, uint64(210))
+	expectValue(t, frozen.NetTXTotal, uint64(420))
+	expectValue(t, frozen.BootID, *reboot.BootID.Value)
 	fake.now = fake.now.Add(time.Second)
 	expectValue(t, c.Metrics().NetRX, uint64(100))
 }

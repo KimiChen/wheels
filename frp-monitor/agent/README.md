@@ -17,7 +17,8 @@ iface = ""
 ```
 
 占位地址与路径须替换；本机可直接用根 README 的 `scripts/local.py` 生成有效配置。
-远程连接必须 WSS 并校验服务器证书，默认使用系统 CA，`caFile` 可附加自有 CA。
+远程连接必须 WSS 并校验服务器证书；默认使用系统 CA，配置 `caFile` 后仅信任该 CA，
+系统根池不再参与校验，避免任一公共 CA 冒充主控。
 只有显式 `allowInsecureLoopback = true` 才允许指向 IP 字面量回环地址的 `ws://`。
 Token 是至少 32 随机字节的无填充 base64url 编码，文件为常规文件、权限恰为 0600，
 与 FRP token 分离；服务端保存编码文本的 SHA256 摘要，格式见 monitor README。
@@ -25,7 +26,9 @@ Token 是至少 32 随机字节的无填充 base64url 编码，文件为常规�
 [probe/README.md](probe/README.md)。只有配置的目标会被测量，不执行远程命令。
 
 本地 `intervalSeconds` 为初始 1–3600 秒周期，握手后以服务端下发周期为准并立即调整。
-只保留最新样本，不积累离线队列；心跳与采样独立。监控在首次 FRP 登录前异步启动，
+只保留最新样本，不积累离线队列；心跳与采样独立。重连按 1–30 秒指数退避，
+握手后存活不足 10 秒的会话视为失败连接，继续退避而不重置。report 超过 256 KiB
+帧上限时先丢弃 FRP 扩展信息重发一次，仍超限才断开会话。监控在首次 FRP 登录前异步启动，
 若需在 FRP 登录失败后持续监控，原生配置须使用 `loginFailExit = false`。
 改动 telemetry 配置或 token 后重启 agent；原生 Proxy reload/ProxyStore 变化会自动反映。
 `--monitor-version` 同时输出监控版本与 FRP 基线，原生 `-v` 保持 FRP 版本输出。
@@ -56,7 +59,8 @@ Token 是至少 32 随机字节的无填充 base64url 编码，文件为常规�
   `boot_id` 是内核 boot ID 加排序后的实际计数接口集合 FNV-1a 摘要。
 - CPU/网速无基线为 `warming_up/no_baseline`；读取错误为 `unavailable/read_error`，
   不覆盖有效基线。网络范围变化或计数器回退先重建基线，下一次有效样本才给速率；
-  网速用实际单调时差，向下取整，首次仍保留有效的内核累计字节数。
+  网速用实际单调时差，向下取整，首次仍保留有效的内核累计字节数；时钟未前进时
+  不替换基线，当次仍发布 boot ID 与累计字节数，仅速率为 unknown。
 - TCP 为 IPv4 inuse + tw + IPv6 inuse，UDP 为两族 inuse；不是 established 数。
 - 主机地址优先公网、再优先稳定 IPv6；屏蔽容器/隧道名称、未运行、回环及链路本地地址。
   桥和 bond 可持有主机地址，地址选择不沿用流量叠加设备过滤。

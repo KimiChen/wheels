@@ -329,7 +329,7 @@ func (c *Collector) socketMetrics() (shared.Field[uint64], shared.Field[uint64])
 	if e6 != nil {
 		return unavailable[uint64](), unavailable[uint64]()
 	}
-	tcp, udp, err := parseSockets(v4, v6, true)
+	tcp, udp, err := parseSockets(v4, v6)
 	if err != nil {
 		return unavailable[uint64](), unavailable[uint64]()
 	}

@@ -167,6 +167,10 @@ func transientIPv6(text string) map[string]bool {
 
 // The public preference follows the pinned reference's ranges. It does not
 // consult an external service and does not claim a NAT guest's exit address.
+// Unlike probe.allowed, which is an outbound SSRF policy, this ranking keeps
+// documentation and deprecated ranges (192.0.2.0/24, 198.51.100.0/24,
+// 203.0.113.0/24, 192.88.99.0/24, special-purpose 2001::/23) displayable:
+// reporting the host's own addresses follows the reference and is intentional.
 func publicAddress(ip net.IP) bool {
 	if v4 := ip.To4(); v4 != nil {
 		a, b, c := v4[0], v4[1], v4[2]
