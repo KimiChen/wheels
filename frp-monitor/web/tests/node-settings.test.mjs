@@ -14,12 +14,24 @@ test("current traffic uses the snapshot independently of optional history", () =
   assert.equal(todayText({rx_bytes: 1}).rx, "—");
 });
 test("quota keeps zero, missing limits and overage distinct with exact integers", () => {
-  assert.equal(planText({used_bytes: "0", quota_bytes: null}).quota, "未设上限");
+  const unlimited = planText({used_bytes: "184467440737095516160", quota_bytes: null});
+  assert.equal(unlimited.quota, "∞"); assert.equal(unlimited.percent, "0.0%"); assert.equal(unlimited.meter, 0);
   assert.equal(planText({used_bytes: "1", quota_bytes: "0"}).quota, "0 B");
   assert.equal(planText({used_bytes: "1", quota_bytes: "0"}).percent, "—");
+  assert.equal(planText({used_bytes: "1", quota_bytes: "0"}).meter, null);
   const plan = planText({used_bytes: "27021597764222979", quota_bytes: "18014398509481986", mode: "total", reset_mode: "manual", partial: false});
-  assert.equal(plan.percent, "150.0%"); assert.match(plan.remaining, /^超出 /); assert.match(plan.note, /total · 手动重置/);
+  assert.equal(plan.percent, "150.0%"); assert.equal(plan.meter, 100); assert.match(plan.remaining, /^超出 /); assert.match(plan.note, /total · 手动重置/);
   assert.equal(planText({used_bytes: null, quota_bytes: "1"}).used, "—");
+  const finite = planText({used_bytes: "1", quota_bytes: "3"});
+  assert.equal(finite.percent, "33.3%"); assert.equal(finite.meter, 33.3);
+});
+test("private or invalid plans stay unknown instead of becoming unlimited", () => {
+  for (const plan of [undefined, null, {}, {used_bytes: "1"}, {used_bytes: "1", quota_bytes: "bad"}]) {
+    const result = planText(plan);
+    assert.equal(result.quota, "—"); assert.equal(result.percent, "—"); assert.equal(result.meter, null);
+  }
+  const missingUsage = planText({quota_bytes: null});
+  assert.equal(missingUsage.quota, "∞"); assert.equal(missingUsage.percent, "—"); assert.equal(missingUsage.meter, null);
 });
 test("GiB conversion round-trips large exact byte totals without floating point", () => {
   for (const bytes of ["0", "1", "1073741824", "9007199254740993", "18446744073709551615"]) assert.equal(gibBytes(gibInput(bytes)), bytes);

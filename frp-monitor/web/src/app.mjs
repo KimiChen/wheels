@@ -1,7 +1,7 @@
 import {UNKNOWN, bytes, capacity, decimal, percent, percentage, ratio, quality, loadText, uptime, timeText, sessionLabels, freshnessLabels, frpLabel, reconciliationText} from "./format.mjs";
 import {select, overview} from "./store.mjs";
 import {connect} from "./transport.mjs";
-import {billingText, todayText, planText} from "./node-settings.mjs";
+import {planText} from "./node-settings.mjs";
 import {nodeURL, hardwareText, cpuLabel} from "./node-data.mjs";
 
 const byID = id => document.getElementById(id);
@@ -46,19 +46,15 @@ function patchCard(card, node) {
   const cpu = percent(metric.cpu), mem = ratio(metric.mem_used, metric.mem_total), disk = ratio(metric.disk_used, metric.disk_total);
   text("cpu", percentage(cpu)); text("mem", percentage(mem)); text("disk", percentage(disk));
   meter("cpu", cpu); meter("mem", mem); meter("disk", disk);
+  text("mem-label", `内存 ${bytes(decimal(metric.mem_total))}`);
+  text("disk-label", `硬盘 ${bytes(decimal(metric.disk_total))}`);
   text("cpu-note", cpu === null ? quality(metric.cpu) : "CPU 使用率");
-  text("card-cpu-note", cpu === null ? quality(metric.cpu) : loadText(metric.load));
   text("mem-note", capacity(metric.mem_used, metric.mem_total));
   text("disk-note", capacity(metric.disk_used, metric.disk_total));
   text("rx", bytes(decimal(metric.net_rx), true)); text("tx", bytes(decimal(metric.net_tx), true));
-  const rxTotal = decimal(metric.net_rx_total), txTotal = decimal(metric.net_tx_total);
-  text("rx-total", `累计 ${bytes(rxTotal)}`); text("tx-total", `累计 ${bytes(txTotal)}`);
-  text("traffic-total", bytes(rxTotal === null || txTotal === null ? null : rxTotal + txTotal));
-  const today = todayText(node.traffic_today), plan = planText(node.traffic_plan);
-  text("today-flow", `↓ ${today.rx} / ↑ ${today.tx}`); text("today-note", today.note);
-  text("plan-flow", `${plan.used} / ${plan.quota}${node.traffic_plan?.partial ? " · 不完整" : ""}`);
-  text("billing", billingText(node.billing)); text("public-note", node.public_note);
-  for (const [section, shown] of [["plan", node.traffic_plan], ["billing", node.billing], ["public-note", node.public_note]]) card.element.querySelector(`[data-section="${section}"]`).hidden = !shown;
+  const plan = planText(node.traffic_plan);
+  text("traffic-label", `流量 ${plan.quota}`); text("traffic", plan.percent); meter("traffic", plan.meter);
+  card.element.querySelector('[data-value="traffic"]').title = node.traffic_plan?.partial ? "周期流量统计不完整" : "周期流量使用率";
   text("load", loadText(metric.load)); text("uptime", uptime(metric.uptime));
   const frp = node.frp;
   text("proxies", frp?.control_state && frp.control_state !== "unknown" && Number.isSafeInteger(frp.proxy_running) && Number.isSafeInteger(frp.proxy_total) ? `${frp.proxy_running} / ${frp.proxy_total}` : UNKNOWN);

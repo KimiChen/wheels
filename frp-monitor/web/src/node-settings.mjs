@@ -57,8 +57,11 @@ export function todayText(today) {
 }
 export function planText(plan) {
   const used = cumulative(plan?.used_bytes), quota = cumulative(plan?.quota_bytes);
-  const percent = used === null || quota === null || quota === 0n ? UNKNOWN : `${used * 1000n / quota / 10n}.${used * 1000n / quota % 10n}%`;
-  return {used: bytes(used), quota: quota === null ? "未设上限" : bytes(quota), percent,
+  const unlimited = plan?.quota_bytes === null;
+  const tenths = used === null ? null : unlimited ? 0n : quota === null || quota === 0n ? null : used * 1000n / quota;
+  const percent = tenths === null ? UNKNOWN : `${tenths / 10n}.${tenths % 10n}%`;
+  return {used: bytes(used), quota: unlimited ? "∞" : bytes(quota), percent,
+    meter: tenths === null ? null : Number(tenths > 1000n ? 1000n : tenths) / 10,
     remaining: used === null || quota === null ? UNKNOWN : `${used > quota ? "超出 " : "剩余 "}${bytes(used > quota ? used - quota : quota - used)}`,
     note: plan ? `${trafficModes[plan.mode] ?? "未知类型"} · ${plan.reset_mode === "manual" ? "手动重置" : `每月 ${plan.reset_day} 日重置 · ${plan.reset_timezone || "UTC"}`}${plan.partial ? " · 统计不完整" : ""}` : "套餐未公开"};
 }
