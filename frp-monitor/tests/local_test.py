@@ -180,6 +180,64 @@ class LocalTests(unittest.TestCase):
                     local.initialize(root / "demo", config=local.settings(root, {}))
             self.assertEqual(list(root.iterdir()), [keep])
 
+    def test_run_demo_verifies_with_timeout_and_survives_cleanup_race(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            folder = root / "demo"
+            folder.mkdir()
+            (folder / "local.json").write_text(json.dumps({"url": "https://127.0.0.1:17401/", "id": "1"}) + "\n")
+            binaries = []
+            for name in ("server", "agent"):
+                binary = root / name
+                binary.write_text("#!/bin/sh\n")
+                binary.chmod(0o755)
+                binaries.append(binary)
+            runs = []
+
+            class Raced:
+                """Exited in the main loop, then again gone when the cleanup signals it."""
+                pid = 424242
+
+                def __init__(self):
+                    self.polls = 0
+
+                def poll(self):
+                    self.polls += 1
+                    return 1 if self.polls == 1 else None
+
+                def wait(self, timeout=None):
+                    return 1
+
+            def fake_run(*args, **kwargs):
+                runs.append(kwargs)
+                return mock.Mock(returncode=0)
+
+            killpg = mock.Mock(side_effect=ProcessLookupError)
+            with mock.patch.object(local, "native_binaries", return_value=tuple(binaries)), \
+                    mock.patch.object(local.subprocess, "run", side_effect=fake_run), \
+                    mock.patch.object(local.subprocess, "Popen", side_effect=lambda *a, **k: Raced()), \
+                    mock.patch.object(local.os, "killpg", killpg), \
+                    mock.patch("builtins.print"):
+                with self.assertRaises(ValueError):
+                    local.run_demo(folder)
+            self.assertEqual(len(runs), 2)
+            self.assertTrue(all(call.get("timeout") == 30 for call in runs))
+            killpg.assert_called()
+
+    def test_run_demo_verify_timeout_is_an_initialization_error(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            folder = root / "demo"
+            folder.mkdir()
+            binary = root / "server"
+            binary.write_text("#!/bin/sh\n")
+            binary.chmod(0o755)
+            with mock.patch.object(local, "native_binaries", return_value=(binary, binary)), \
+                    mock.patch.object(local.subprocess, "run", side_effect=local.subprocess.TimeoutExpired("verify", 30)), \
+                    mock.patch("builtins.print"):
+                with self.assertRaises(ValueError):
+                    local.run_demo(folder)
+
 
 if __name__ == "__main__":
     unittest.main()

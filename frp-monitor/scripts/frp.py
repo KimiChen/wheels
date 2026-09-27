@@ -335,9 +335,11 @@ class Pipeline:
 
     def go_environment(self) -> dict:
         env = dict(os.environ)
-        # Do not let ambient Go flags, workspaces or automatic toolchain downloads change the build.
+        # Do not let ambient Go flags, workspaces, module fetch/verification settings
+        # or automatic toolchain downloads change the build.
         for name in ("GOOS", "GOARCH", "GOAMD64", "GOARM", "GOARM64", "GO386", "GOMIPS", "GOMIPS64", "GOPPC64", "GORISCV64",
-                     "GOEXPERIMENT", "GOFIPS140", "GODEBUG", "GOFLAGS", "GOWORK", "GOENV", "GOTOOLCHAIN"):
+                     "GOEXPERIMENT", "GOFIPS140", "GODEBUG", "GOFLAGS", "GOWORK", "GOENV", "GOTOOLCHAIN",
+                     "GOPATH", "GOPROXY", "GOSUMDB", "GONOPROXY", "GONOSUMDB", "GOPRIVATE", "GOVCS"):
             env.pop(name, None)
         env.update({"CGO_ENABLED": "0", "GOTOOLCHAIN": "local", "GOWORK": "off", "GOENV": "off", "GOFLAGS": "",
                     "GOCACHE": str(self.cache / "go-build"), "GOMODCACHE": str(self.cache / "go-mod"),
@@ -468,6 +470,8 @@ class Pipeline:
             payload["LICENSE.monitor-probe"] = read_regular(self.root / "agent/collect/LICENSE.monitor-probe")
             license_dir = self.root / "monitor/store/licenses"
             license_names = {"LICENSE.txt", "LICENSE.libyaml", "NOTICE", "LICENSE", "LICENSE-SQLITE", "LICENSE-SQLITE_VEC", "LICENSE-3RD-PARTY.md", "AUTHORS", "PATENTS", "SOURCES.md", "TSDB-SOURCES.md"}
+            if license_dir.is_symlink() or not license_dir.is_dir():
+                raise PipelineError("Missing dependency license directory: monitor/store/licenses")
             for license_path in sorted(license_dir.rglob("*")):
                 if license_path.name in license_names:
                     payload["licenses/" + license_path.relative_to(license_dir).as_posix()] = read_regular(license_path)

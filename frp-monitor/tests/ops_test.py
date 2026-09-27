@@ -284,6 +284,24 @@ class OpsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ops.backup(self.runtime, self.backups / 'bad-metadata.tar.gz')
 
+    def test_literal_rejects_whitespace_in_shared_operational_fields(self):
+        for value in ('has space', 'tab\tseparated', 'line\nbreak', ' lead', 'trail '):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                ops.literal(value, 'field')
+        self.assertEqual(ops.literal('plain-value', 'field'), '"plain-value"')
+        args = argparse.Namespace(directory=str(self.root / 'agent-ws'), monitor_url='wss://monitor.example.invalid:7401/agent/v1/ws',
+              server_addr='frp example.invalid', server_id='test', client_id='stable-client', user='',
+              agent_token=str(self.runtime / 'agent.token'), frp_token=str(self.runtime / 'frp.token'),
+              ca=None, probes=False, allow_private_probes=False)
+        config = local.settings(self.root, {})
+        with mock.patch.object(ops, 'settings', return_value=config), self.assertRaises(ValueError):
+            ops.agent_init(args)
+        args.directory = str(self.root / 'agent-ws2')
+        args.server_addr = 'frp.example.invalid'
+        args.monitor_url = 'wss://monitor example.invalid:7401/agent/v1/ws'
+        with mock.patch.object(ops, 'settings', return_value=config), self.assertRaises(ValueError):
+            ops.agent_init(args)
+
 
 if __name__ == '__main__':
     unittest.main()

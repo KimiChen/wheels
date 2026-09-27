@@ -234,6 +234,36 @@ class PipelineTests(unittest.TestCase):
             pipeline.web_assets()
             self.assertEqual(len(builds), 6)
 
+    def test_go_environment_drops_ambient_module_fetch_settings(self):
+        ambient = {"GOPATH": "/tmp/ambient-gopath", "GOPROXY": "https://proxy.invalid", "GOSUMDB": "off",
+                   "GONOPROXY": "*.internal", "GONOSUMDB": "*.internal", "GOPRIVATE": "*.internal", "GOVCS": "off"}
+        with mock.patch.dict(os.environ, ambient):
+            env = self.pipeline().go_environment()
+        for name in ambient:
+            self.assertNotIn(name, env)
+        self.assertEqual(env["GOWORK"], "off")
+        self.assertEqual(env["GOFLAGS"], "")
+
+    def test_package_requires_dependency_license_directory(self):
+        pipeline = self.pipeline()
+        license_path = self.root / "agent/collect/LICENSE.monitor-probe"
+        license_path.parent.mkdir(parents=True, exist_ok=True)
+        license_path.write_text("fixture MIT license\n")
+        for name in ("scripts/ops.py", "scripts/local.py", "packaging/README.md", ".env.example", "monitor/control/schema.sql"):
+            path = self.root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("public operations fixture\n")
+        pipeline.output.mkdir()
+        directory = pipeline.output / "linux-amd64"
+        directory.mkdir()
+        for name in ("frp-monitor-agent", "frp-monitor-server"):
+            (directory / name).write_bytes(b"fixture-binary")
+        (directory / "BUILD.json").write_text(json.dumps({"target": "linux/amd64", "source_date_epoch": 1234567890}))
+        # Without monitor/store/licenses, packaging must fail rather than omit licenses.
+        with mock.patch.object(pipeline, "build", return_value={"output_dirs": [str(directory)]}):
+            with self.assertRaises(frp.PipelineError):
+                pipeline.package()
+
     def test_packages_are_deterministic_allowlisted_and_checksummed(self):
         pipeline = self.pipeline()
         for name in ("scripts/ops.py", "scripts/local.py", "packaging/README.md", ".env.example", "monitor/control/schema.sql"):

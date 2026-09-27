@@ -276,13 +276,24 @@ def native_binaries():
     return folder / "frp-monitor-server", folder / "frp-monitor-agent"
 
 
+def _signal_group(process, sig):
+    """Signal a local demo process group that may have exited since the last poll."""
+    try:
+        os.killpg(process.pid, sig)
+    except ProcessLookupError:
+        pass
+
+
 def run_demo(folder: Path):
     binaries = native_binaries()
     environment = {k: v for k, v in os.environ.items() if k in ("PATH", "HOME", "TMPDIR")}
     for binary, config in zip(binaries, ("server.toml", "agent.toml")):
         if not binary.is_file() or not os.access(binary, os.X_OK):
             raise ValueError("native binaries missing; run scripts/frp.py build --native")
-        check = subprocess.run([str(binary), "verify", "-c", str(folder / config)], env=environment, capture_output=True)
+        try:
+            check = subprocess.run([str(binary), "verify", "-c", str(folder / config)], env=environment, capture_output=True, timeout=30)
+        except subprocess.TimeoutExpired as exc:
+            raise ValueError("generated FRP configuration verification timed out") from exc
         if check.returncode:
             raise ValueError("generated FRP configuration verification failed")
     state = json.loads((folder / "local.json").read_text())
@@ -304,12 +315,12 @@ def run_demo(folder: Path):
     finally:
         for process in processes:
             if process.poll() is None:
-                os.killpg(process.pid, signal.SIGTERM)
+                _signal_group(process, signal.SIGTERM)
         for process in processes:
             try:
                 process.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                os.killpg(process.pid, signal.SIGKILL)
+                _signal_group(process, signal.SIGKILL)
                 process.wait(timeout=5)
         for log in logs:
             log.close()

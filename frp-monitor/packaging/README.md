@@ -49,7 +49,8 @@ python3 scripts/ops.py server-init \
 
 安全传递独立的agent token和FRP token文件到目标机器，权限0600。不要把token放入URL、
 命令行参数、环境变量或公开仓库。将管理员预绑定的 `raw_client_id` 作为 `--client-id`，
-`--server-id` / `--user` 必须和预绑定及FRP配置一致。
+`--server-id` / `--user` 必须和预绑定及FRP配置一致。`--server-id`、`--client-id`、
+`--user`、`--server-addr`、`--monitor-url` 等字面量参数不允许空格等空白字符。
 
 ```sh
 python3 scripts/ops.py agent-init \

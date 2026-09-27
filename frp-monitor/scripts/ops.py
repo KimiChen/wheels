@@ -15,6 +15,7 @@ import secrets
 import shutil
 import sqlite3
 import stat
+import sys
 import tarfile
 import tempfile
 import time
@@ -49,7 +50,8 @@ def private_directory(value):
 
 
 def literal(value, name, maximum=128, empty=False):
-    if (not empty and not value.strip()) or len(value.encode()) > maximum or any(ord(c) < 32 for c in value):
+    # Reject all whitespace (including spaces and tabs), not just control characters.
+    if (not empty and not value.strip()) or len(value.encode()) > maximum or any(c.isspace() or ord(c) < 32 for c in value):
         raise ValueError('invalid ' + name)
     return toml_value(value)
 
@@ -323,6 +325,8 @@ def restore(archive_path, directory):
         if db.exists():
             with closing(sqlite3.connect(db.as_uri() + '?mode=ro', uri=True)) as connection:
                 integrity_check(connection, time.monotonic() + 30)
+                # Database identity constants; must match monitor/control/schema.sql
+                # and the startup check in monitor/control/store.go.
                 if connection.execute('PRAGMA application_id').fetchone() != (1179798836,) or connection.execute('PRAGMA user_version').fetchone() != (4,):
                     raise ValueError('unsupported control database schema')
         # Generated TOML uses JSON-compatible quoted strings for file paths.
@@ -422,7 +426,7 @@ def main():
             print(f'Created private {args.action} output: {result}')
     except (OSError, ValueError, KeyError, TypeError, sqlite3.Error, tarfile.TarError) as exc:
         # Never echo paths/configuration details from parser/SQLite errors containing credentials.
-        print(f'frp-monitor operations failed ({type(exc).__name__}); check input format, permissions and destination.', file=__import__('sys').stderr)
+        print(f'frp-monitor operations failed ({type(exc).__name__}); check input format, permissions and destination.', file=sys.stderr)
         return 1
     return 0
 

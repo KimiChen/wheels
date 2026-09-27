@@ -79,7 +79,9 @@ dist/<本机OS>-<本机架构>/         --native 产物
   计算两个完整 dist 树的摘要，缺文件、额外文件或内容变化会触发重建。
 - Go 使用本机工具链，显式 `GOTOOLCHAIN=local`、`GOENV=off`、`GOWORK=off`、
   `CGO_ENABLED=0`、`-mod=readonly`、`-trimpath`、`-buildvcs=false` 和空 build ID。
-  清除影响架构、实验功能及默认调试行为的 Go 环境选项，不自动下载 Go 工具链。
+  清除影响架构、实验功能、默认调试行为及模块下载/校验来源（`GOPATH`、`GOPROXY`、
+  `GOSUMDB`、`GONOPROXY`、`GONOSUMDB`、`GOPRIVATE`、`GOVCS`）的 Go 环境选项，
+  不自动下载 Go 工具链。
   工具链必须满足补丁后的 `go.mod`，内嵌 VictoriaMetrics 要求 Go 1.26.6+；`BUILD.json` 记录本次 Go/Node/npm 版本、上游身份、
   构建脚本/补丁/扩展摘要、原生网页资源摘要以及二进制摘要。
 - 重现构建要求相同源码、依赖、操作系统、Go/Node/npm 工具链及构建条件；不承诺
