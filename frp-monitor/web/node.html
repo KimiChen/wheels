@@ -38,9 +38,13 @@
         <div class="fm-node-info"><dt>处理器</dt><dd data-value="cpu-model">—</dd><dd class="fm-node-info-note">当前 CPU <b data-value="cpu">—</b></dd></div>
         <div class="fm-node-info"><dt>内存 / 硬盘</dt><dd class="fm-capacities"><span><small>内存</small><b data-value="memory">—</b></span><span><small>硬盘</small><b data-value="disk">—</b></span></dd><dd class="fm-node-info-note">已用 / 总容量</dd></div>
         <div class="fm-node-info"><dt>系统环境</dt><dd data-value="environment">—</dd><dd class="fm-node-info-note">进程 <b data-value="processes">—</b> · TCP <b data-value="tcp">—</b> · UDP <b data-value="udp">—</b></dd></div>
-        <div class="fm-node-info"><dt>今日流量 <span>UTC</span></dt><dd class="fm-capacities"><span><small>↓ 接收</small><b data-value="traffic-rx">—</b></span><span><small>↑ 发送</small><b data-value="traffic-tx">—</b></span></dd><dd class="fm-node-info-note" id="traffic-note">等待历史记录</dd></div>
-        <div class="fm-node-info"><dt>FRP 隧道</dt><dd><b data-value="proxies">—</b><small> 运行 / 已配置</small></dd><dd class="fm-node-info-note" data-value="frp-reconciliation">等待核对</dd></div>
+        <div class="fm-node-info"><dt>今日流量</dt><dd class="fm-capacities"><span><small>↓ 接收</small><b data-value="traffic-rx">—</b></span><span><small>↑ 发送</small><b data-value="traffic-tx">—</b></span></dd><dd class="fm-node-info-note" id="traffic-note">等待今日统计</dd></div>
+        <div class="fm-node-info"><dt>系统累计流量</dt><dd class="fm-capacities"><span><small>↓ 接收</small><b data-value="system-rx">—</b></span><span><small>↑ 发送</small><b data-value="system-tx">—</b></span></dd><dd class="fm-node-info-note">系统网卡累计计数，可能随重启归零</dd></div>
+        <div class="fm-node-info" id="node-plan"><dt>套餐已用 / 额度</dt><dd data-value="plan-usage">—</dd><dd class="fm-node-info-note" data-value="plan-remaining">—</dd><dd class="fm-node-info-note" data-value="plan-note">—</dd><dd class="fm-node-info-note" data-value="plan-period">—</dd></div>
+        <div class="fm-node-info" id="node-billing"><dt>费用与到期</dt><dd data-value="billing">—</dd><dd class="fm-node-info-note" data-value="renewal-note">—</dd></div>
+        <div class="fm-node-info"><dt>FRP 隧道</dt><dd><b data-value="proxies">—</b><small> 运行 / 已配置</small></dd><dd class="fm-node-info-note" data-value="frp-reconciliation">等待核对</dd><dd class="fm-node-info-note" data-value="frp-traffic">—</dd><dd class="fm-node-info-note">FRP 服务端本地日 · 独立于主机流量</dd></div>
       </dl>
+      <p id="node-public-note" class="fm-node-public-note" hidden></p>
       <p class="fm-node-sampling"><span data-value="sample-time">尚未收到资源报告</span><span data-value="interval">—</span><span>FRP 控制连接 <b data-value="frp">—</b></span></p>
       <section class="fm-node-history" aria-label="节点历史趋势"><div id="node-history"></div></section>
     </article>

@@ -43,12 +43,12 @@ func TestAdminStaticShellContainsNoPrivateValues(t *testing.T) {
 		t.Fatal("admin shell caching")
 	}
 	body := w.Body.String()
-	for _, required := range []string{"/src/admin.mjs", "id=\"login-token\"", "id=\"workspace\" hidden", "id=\"secret-token\""} {
+	for _, required := range []string{"/src/admin.mjs", "id=\"github-login\"", "id=\"workspace\" hidden", "id=\"secret-token\""} {
 		if !strings.Contains(body, required) {
 			t.Fatalf("missing %s", required)
 		}
 	}
-	for _, forbidden := range []string{"<script>", "onclick=", "token_sha256", "localStorage"} {
+	for _, forbidden := range []string{"<script>", "onclick=", "token_sha256", "localStorage", "id=\"login-token\"", "id=\"login-form\""} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("unexpected %s", forbidden)
 		}
@@ -57,7 +57,7 @@ func TestAdminStaticShellContainsNoPrivateValues(t *testing.T) {
 
 func TestNodePageRoutes(t *testing.T) {
 	h := Handler()
-	for _, path := range []string{"/node/test-node-1", "/node/test-node-1/"} {
+	for _, path := range []string{"/node/1", "/node/1/", "/node/9223372036854775807"} {
 		for _, method := range []string{http.MethodGet, http.MethodHead} {
 			w := httptest.NewRecorder()
 			h.ServeHTTP(w, httptest.NewRequest(method, path, nil))
@@ -69,7 +69,7 @@ func TestNodePageRoutes(t *testing.T) {
 			}
 		}
 	}
-	for _, path := range []string{"/node/short", "/node/", "/node/test-node-1/extra", "/node/test%2Fnode1", "/node/../admin.html", "/node.html", "/node/" + strings.Repeat("a", 129)} {
+	for _, path := range []string{"/node/0", "/node/01", "/node/-1", "/node/9223372036854775808", "/node/short", "/node/", "/node/1/extra", "/node/test%2Fnode1", "/node/../admin.html", "/node.html", "/node/" + strings.Repeat("a", 129)} {
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
 		if w.Code != http.StatusNotFound {
@@ -77,11 +77,11 @@ func TestNodePageRoutes(t *testing.T) {
 		}
 	}
 	w := httptest.NewRecorder()
-	h.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/node/test-node-1", nil))
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/node/1", nil))
 	if w.Code != http.StatusMethodNotAllowed {
 		t.Fatal("node page accepted a write")
 	}
-	for _, path := range []string{"/src/node.mjs", "/src/node-data.mjs", "/assets/node.css"} {
+	for _, path := range []string{"/src/node.mjs", "/src/node-data.mjs", "/src/node-settings.mjs", "/assets/node.css"} {
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
 		if w.Code != http.StatusOK {

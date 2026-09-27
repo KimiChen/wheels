@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 OFFICIAL_REPOSITORY = "https://github.com/fatedier/frp.git"
 OVERLAYS = ("agent", "monitor", "shared", "web")
 CONFIG_KEYS = {"FRP_MONITOR_CACHE_DIR", "FRP_MONITOR_OUTPUT_DIR", "FRP_MONITOR_UPSTREAM_MIRROR"}
-BASELINE = "P3 monitoring, private administration, FRP reconciliation, TCP probes and SQLite history"
+BASELINE = "P4 SQLite node control, GitHub administration and optional embedded TSDB"
 LOCK_KEYS = {"schema_version", "repository", "tag", "tag_object", "commit", "license"}
 NATIVE_TESTS = ("./pkg/config/...", "./pkg/msg/...", "./pkg/util/...", "./pkg/metrics/...", "./client", "./server", "./server/registry", "./server/proxy", "./extension/frpmonitor/...")
 
@@ -441,7 +441,7 @@ class Pipeline:
             try:
                 target_env = {**env, "GOOS": goos, "GOARCH": goarch, "SOURCE_DATE_EPOCH": str(prepared["source_date_epoch"])}
                 for name, command in (("frp-monitor-agent", "frpc"), ("frp-monitor-server", "frps")):
-                    print(f"Building {name} ({target}, P3 monitoring)...", file=sys.stderr, flush=True)
+                    print(f"Building {name} ({target}, P4 monitoring)...", file=sys.stderr, flush=True)
                     run(["go", "build", "-mod=readonly", "-trimpath", "-buildvcs=false", "-ldflags=-buildid=",
                          "-tags", command, "-o", str(staging / name), "./cmd/" + command], cwd=self.source, env=target_env, capture=False)
                 manifest = {key: value for key, value in prepared.items() if key != "source_dir"}
@@ -467,17 +467,18 @@ class Pipeline:
             payload.update({name: read_regular(self.root / name) for name in ("LICENSE", "THIRD_PARTY_NOTICES.md", "upstream.lock")})
             payload["LICENSE.monitor-probe"] = read_regular(self.root / "agent/collect/LICENSE.monitor-probe")
             license_dir = self.root / "monitor/store/licenses"
-            license_names = {"LICENSE", "LICENSE-SQLITE", "LICENSE-SQLITE_VEC", "LICENSE-3RD-PARTY.md", "AUTHORS", "PATENTS", "SOURCES.md"}
+            license_names = {"LICENSE.txt", "LICENSE.libyaml", "NOTICE", "LICENSE", "LICENSE-SQLITE", "LICENSE-SQLITE_VEC", "LICENSE-3RD-PARTY.md", "AUTHORS", "PATENTS", "SOURCES.md", "TSDB-SOURCES.md"}
             for license_path in sorted(license_dir.rglob("*")):
                 if license_path.name in license_names:
                     payload["licenses/" + license_path.relative_to(license_dir).as_posix()] = read_regular(license_path)
-            payload["README.txt"] = ("frp-monitor P3: " + BASELINE + ".\nThese executables retain native frpc/frps CLI and configuration.\n"
+            payload["README.txt"] = ("frp-monitor P4: " + BASELINE + ".\nThese executables retain native frpc/frps CLI and configuration.\n"
                                       "Monitoring is opt-in via [telemetry]/[monitor]; use private credentials and verified TLS.\n"
-                                      "History requires a private database directory. TCP probes are disabled until explicitly configured.\n"
+                                      "SQLite control storage is required; embedded history is optional. Administration uses GitHub OAuth only.\n"
                                       "Operations and systemd instructions: packaging/README.md; tools require Python 3.11+.\n"
                                       "Build provenance and exact Go version: BUILD.json.\n").encode("utf-8")
             for name in ("scripts/ops.py", "scripts/local.py", "packaging/README.md", ".env.example"):
                 payload[name] = read_regular(self.root / name)
+            payload["monitor/control/schema.sql"] = read_regular(self.root / "monitor/control/schema.sql")
             payload["SHA256SUMS"] = "".join(f"{digest(data)}  {name}\n" for name, data in sorted(payload.items())).encode("utf-8")
             basename = f"frp-monitor-{self.lock['tag']}-{manifest['target'].replace('/', '-')}"
             path = self.output / (basename + ".tar.gz")

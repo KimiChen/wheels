@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/fatedier/frp/extension/frpmonitor/monitor"
+	"github.com/fatedier/frp/extension/frpmonitor/monitor/control"
 	"github.com/fatedier/frp/extension/frpmonitor/shared"
 	"github.com/gorilla/websocket"
 )
@@ -180,9 +181,21 @@ func TestClientAndMonitorEndToEndTLS(t *testing.T) {
 	tokenData, _ := os.ReadFile(cfg.TokenFile)
 	token := strings.TrimSpace(string(tokenData))
 	digest := sha256.Sum256([]byte(token))
-	credentials := filepath.Join(dir, "credentials.json")
-	data, _ := json.Marshal([]map[string]string{{"agent_id": "example-node-id", "name": "Synthetic node", "token_sha256": hex.EncodeToString(digest[:])}})
-	os.WriteFile(credentials, data, 0600)
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Chmod(realDir, 0700)
+	database := filepath.Join(realDir, "control.sqlite")
+	db, err := control.Open(control.Config{Path: database})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.CreateNode(context.Background(), control.DefaultNodeConfig("Synthetic node"), hex.EncodeToString(digest[:]), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
 	certSource := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	certificate := certSource.TLS.Certificates[0]
 	certSource.Close()
@@ -193,7 +206,7 @@ func TestClientAndMonitorEndToEndTLS(t *testing.T) {
 		t.Fatal(err)
 	}
 	os.WriteFile(keyFile, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), 0600)
-	mon, err := monitor.Start(context.Background(), shared.MonitorConfig{Enabled: true, BindAddr: "127.0.0.1", ServerID: "example", CredentialsFile: credentials, CertFile: certFile, KeyFile: keyFile, ReportIntervalSeconds: 1})
+	mon, err := monitor.Start(context.Background(), shared.MonitorConfig{Enabled: true, BindAddr: "127.0.0.1", ServerID: "example", DatabaseFile: database, CertFile: certFile, KeyFile: keyFile, ReportIntervalSeconds: 1})
 	if err != nil {
 		t.Fatal(err)
 	}

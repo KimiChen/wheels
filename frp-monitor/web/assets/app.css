@@ -269,3 +269,9 @@ main { max-width: 1500px; margin: 0 auto; padding: 24px 32px 88px; }
   .fm-chart-grid { stroke: GrayText; }
   .fm-view-button[aria-pressed="true"], .fm-detail-toggle[aria-expanded="true"] { border-color: Highlight; }
 }
+
+.fm-card-business { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); display: grid; gap: 7px; }
+.fm-card-business > div { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; font-size: 10px; }
+.fm-card-business span { color: var(--muted); white-space: nowrap; }
+.fm-card-business b { color: var(--text); font-size: 11px; font-weight: 500; text-align: right; overflow-wrap: anywhere; }
+.fm-card-business p { margin: 0; font-size: 10px; color: var(--muted-soft); line-height: 1.65; overflow-wrap: anywhere; white-space: pre-wrap; }

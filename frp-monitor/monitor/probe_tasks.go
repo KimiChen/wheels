@@ -1,6 +1,7 @@
 package monitor
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -34,10 +35,6 @@ type probeFile struct {
 }
 
 func (s *Service) reloadTasks() {
-	if s.cfg.ProbeTasksFile == "" {
-		s.tasks.Store(&probeBook{Version: 1, Nodes: map[string][]configuredProbe{}})
-		return
-	}
 	next, err := s.readTasks()
 	if err != nil {
 		s.taskError.Store(true)
@@ -56,7 +53,9 @@ func (s *Service) reloadTasks() {
 
 func (s *Service) readTasks() (*probeBook, error) {
 	invalid := errors.New("invalid local probe task configuration")
-	data, err := readPrivate(s.cfg.ProbeTasksFile)
+	ctx, cancel := context.WithTimeout(s.ctx, 2*time.Second)
+	defer cancel()
+	data, err := s.control.ReadProbes(ctx)
 	if err != nil {
 		return nil, invalid
 	}

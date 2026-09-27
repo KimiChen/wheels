@@ -14,7 +14,7 @@
     <div class="fm-page-heading"><div><div class="fm-eyebrow">INFRASTRUCTURE / ADMINISTRATION</div><h1>管理工作台<span class="fm-title-dot"></span></h1><p>核对主机与隧道，管理节点接入和 TCP 探测。</p></div><span class="fa-private">私有 · 管理员</span></div>
     <div id="notice" class="fa-notice" role="status" aria-live="polite">正在检查管理会话…</div>
     <noscript><p class="fa-notice">请启用 JavaScript 使用管理工作台。</p></noscript>
-    <section id="login-panel" class="fa-panel fa-login" aria-labelledby="login-title" hidden><div class="fa-eyebrow">安全访问</div><h2 id="login-title">登录管理工作台</h2><p>使用部署时生成的管理令牌。节点令牌与原生 FRP Dashboard 密码不能用于此处。</p><form id="login-form"><label for="login-token">管理令牌</label><input id="login-token" type="password" required maxlength="512" autocomplete="off" spellcheck="false"><button class="wsk-button fa-primary" type="submit">登录</button></form></section>
+    <section id="login-panel" class="fa-panel fa-login" aria-labelledby="login-title" hidden><div class="fa-eyebrow">管理访问</div><h2 id="login-title">登录管理工作台</h2><p id="login-copy">使用已授权的 GitHub 账号登录。</p><a class="wsk-button fa-primary" id="github-login" href="/api/admin/v1/auth/github">使用 GitHub 登录</a></section>
     <div id="workspace" hidden>
       <section id="credential-result" class="fa-panel fa-secret" aria-labelledby="secret-title" hidden><h2 id="secret-title">保存节点接入令牌</h2><p>令牌只显示这一次。复制到节点的私有令牌文件后清除；刷新页面或退出后无法再次查看。</p><label for="secret-id">节点 ID</label><input id="secret-id" readonly autocomplete="off"><label for="secret-token">节点令牌</label><textarea id="secret-token" readonly rows="2" autocomplete="off" spellcheck="false"></textarea><div class="fa-actions"><button id="secret-copy" class="wsk-button" type="button">复制令牌</button><button id="secret-clear" class="wsk-button" type="button">已保存，清除显示</button></div></section>
       <section class="fa-panel fa-create" aria-labelledby="create-title"><div><h2 id="create-title">节点接入</h2><p>名称会显示在公开总览。新节点凭据创建后等待 agent 接入。</p></div><form id="create-form"><label class="fa-sr-only" for="node-name">公开节点名称</label><input id="node-name" placeholder="公开节点名称" required maxlength="128" autocomplete="off"><button class="wsk-button fa-primary" type="submit">创建节点</button></form></section>
@@ -23,6 +23,29 @@
         <section id="node-panel" class="fa-panel fa-node" aria-labelledby="node-title" hidden>
           <div class="fa-section-title"><div><span class="fa-eyebrow">节点详情</span><h2 id="node-title"></h2><p id="node-id" class="fa-node-id"></p></div><span id="node-session" class="fm-badge"></span></div>
           <div id="node-details"></div>
+          <section class="fa-section" aria-labelledby="settings-title"><h3 id="settings-title">节点设置</h3><p>费用与到期由管理员维护。套餐变更立即生效，切换计费类型会保留当前已用量。</p>
+            <form id="settings-form">
+              <div class="fa-settings-grid">
+                <label>节点名称<input name="name" required maxlength="128" autocomplete="off"></label>
+                <label>费用金额<input name="price" inputmode="decimal" placeholder="未设置" autocomplete="off"></label>
+                <label>币种<input name="currency" maxlength="3" placeholder="CNY" autocomplete="off"></label>
+                <label>付费周期<input name="billing_cycle" maxlength="64" placeholder="月付、年付、一次性等" autocomplete="off"></label>
+                <label>到期时间（当前浏览器时区）<input name="expires_at_ms" type="datetime-local" step="1"></label>
+                <label>流量额度（GiB）<input name="traffic_quota" inputmode="decimal" placeholder="留空表示未设上限" autocomplete="off"></label>
+                <label>套餐计费类型<select name="traffic_mode"><option value="max">Max · 累计收发取较大值</option><option value="total">total · 累计收发相加</option><option value="rx">rx · 累计接收</option><option value="tx">tx · 累计发送</option></select></label>
+                <label>套餐重置方式<select name="traffic_reset_mode"><option value="monthly">每月固定日期</option><option value="manual">仅手动重置</option></select></label>
+                <label>每月重置日<input name="traffic_reset_day" type="number" min="1" max="31" step="1" required></label>
+                <label>套餐重置时区<input name="traffic_reset_timezone" required maxlength="64" placeholder="UTC 或 Asia/Shanghai" autocomplete="off"></label>
+                <label>校准本周期已用（GiB）<input name="traffic_used" inputmode="decimal" placeholder="留空保持当前累计" autocomplete="off"></label>
+                <label class="fa-settings-wide">公开备注<textarea name="public_note" rows="2" maxlength="4096"></textarea></label>
+                <label class="fa-settings-wide">私有备注<textarea name="private_note" rows="2" maxlength="4096"></textarea></label>
+                <label class="fa-settings-wide">续费说明<textarea name="renewal_note" rows="2" maxlength="4096" placeholder="人工维护，不会自动续费"></textarea></label>
+              </div>
+              <div class="fa-checks"><label><input name="is_public" type="checkbox">公开此节点</label><label><input name="publish_billing" type="checkbox">公开费用、到期与续费说明</label><label><input name="publish_traffic_plan" type="checkbox">公开流量套餐</label></div>
+              <p id="settings-current" class="fa-muted"></p><p id="settings-status" class="fa-muted" role="status"></p>
+              <div class="fa-actions"><button class="wsk-button fa-primary" type="submit">保存节点设置</button><button id="settings-reload" class="wsk-button" type="button">重新读取</button><button id="traffic-reset" class="wsk-button" type="button">重置套餐周期</button></div>
+            </form>
+          </section>
           <section class="fa-section" aria-labelledby="binding-title"><h3 id="binding-title">FRP 可信绑定</h3><p>人工核对 server ID、用户与稳定 client ID 后设置。节点自行报告的关联信息不会自动授予隧道归属。</p><form id="binding-form"><div class="fa-form-grid"><label>Server ID<input name="server_id" required maxlength="128" autocomplete="off"></label><label>FRP 用户<input name="user" maxlength="128" autocomplete="off"></label><label>稳定 client ID<input name="raw_client_id" required maxlength="128" autocomplete="off"></label></div><div class="fa-actions"><button class="wsk-button" type="submit">保存可信绑定</button><button id="binding-clear" class="wsk-button" type="button">解除绑定</button></div></form></section>
           <section class="fa-section" aria-labelledby="access-title"><h3 id="access-title">接入凭据</h3><p>轮换立即使旧令牌失效并断开旧监控会话。撤销移除节点接入权限。操作不修改原生 FRP 隧道配置。</p><div class="fa-actions"><button id="rotate" class="wsk-button" type="button">轮换令牌</button><button id="revoke" class="wsk-button fa-danger" type="button">撤销节点</button></div><div id="confirm-action" class="fa-confirm" hidden><p id="confirm-copy"></p><div class="fa-actions"><button id="confirm-yes" class="wsk-button fa-danger" type="button"></button><button id="confirm-no" class="wsk-button" type="button">取消</button></div></div></section>
         </section>

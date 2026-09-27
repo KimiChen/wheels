@@ -6,6 +6,8 @@ import (
 	"embed"
 	"net/http"
 	"regexp"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -30,6 +32,7 @@ var publicFiles = map[string]string{
 	"/src/app.mjs":               "src/app.mjs",
 	"/src/node.mjs":              "src/node.mjs",
 	"/src/node-data.mjs":         "src/node-data.mjs",
+	"/src/node-settings.mjs":     "src/node-settings.mjs",
 	"/src/format.mjs":            "src/format.mjs",
 	"/src/store.mjs":             "src/store.mjs",
 	"/src/transport.mjs":         "src/transport.mjs",
@@ -40,7 +43,7 @@ var publicFiles = map[string]string{
 
 // A node page is a public shell; the live snapshot determines whether it exists.
 // Do not turn arbitrary paths into a catch-all application route.
-var nodePagePath = regexp.MustCompile(`^/node/[A-Za-z0-9_-]{8,128}/?$`)
+var nodePagePath = regexp.MustCompile(`^/node/[1-9][0-9]{0,18}/?$`)
 
 // Handler provides the static application only. The monitor owns API/SSE routes.
 func Handler() http.Handler {
@@ -55,7 +58,9 @@ func Handler() http.Handler {
 		}
 		name, ok := publicFiles[r.URL.Path]
 		if !ok && nodePagePath.MatchString(r.URL.Path) {
-			name, ok = "node.html", true
+			if _, err := strconv.ParseInt(strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/node/"), "/"), 10, 64); err == nil {
+				name, ok = "node.html", true
+			}
 		}
 		if !ok {
 			http.NotFound(w, r)

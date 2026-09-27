@@ -3,6 +3,8 @@ import hashlib
 import importlib.util
 import json
 import os
+import sqlite3
+from contextlib import closing
 from pathlib import Path
 import tempfile
 import tomllib
@@ -21,17 +23,27 @@ class LocalTests(unittest.TestCase):
             config = local.settings(Path(root), {})
             local.initialize(folder, plain_http=True, config=config)
             token = (folder / "agent.token").read_text().strip()
-            credentials = json.loads((folder / "credentials.json").read_text())[0]
+            with closing(sqlite3.connect(folder / "control.sqlite")) as database:
+                database.row_factory = sqlite3.Row
+                credentials = dict(database.execute("SELECT * FROM nodes").fetchone())
+                self.assertEqual(database.execute("PRAGMA user_version").fetchone()[0], 4)
             agent = tomllib.loads((folder / "agent.toml").read_text())
             server = tomllib.loads((folder / "server.toml").read_text())
             self.assertEqual(credentials["token_sha256"], hashlib.sha256(token.encode()).hexdigest())
-            self.assertEqual(credentials["agent_id"], agent["clientID"])
+            self.assertEqual(str(credentials["id"]), agent["clientID"])
             self.assertEqual(agent["telemetry"]["tokenFile"], str(folder / "agent.token"))
-            self.assertEqual(server["monitor"]["credentialsFile"], str(folder / "credentials.json"))
+            self.assertEqual(credentials["id"], 1)
+            self.assertNotIn("credentialsFile", server["monitor"])
+            self.assertEqual(server["monitor"]["githubAdminUsers"], [])
+            self.assertEqual(server["monitor"]["historyDataPath"], "")
+            self.assertNotIn("historyEnabled", server["monitor"])
+            self.assertFalse((folder / "history").exists())
+            for old in ("admin.token", "admin.json", "credentials.json", "probes.json"):
+                self.assertFalse((folder / old).exists())
             self.assertTrue(agent["telemetry"]["allowInsecureLoopback"])
             self.assertFalse(agent["telemetry"]["probeEnabled"])
             self.assertEqual(server["monitor"]["retentionDays"], 7)
-            self.assertEqual(server["monitor"]["databaseFile"], str(folder / "history.sqlite"))
+            self.assertEqual(server["monitor"]["databaseFile"], str(folder / "control.sqlite"))
             self.assertNotIn(token, (folder / "agent.toml").read_text())
             self.assertNotEqual(token, (folder / "frp.token").read_text().strip())
             self.assertEqual(folder.stat().st_mode & 0o777, 0o700)
@@ -60,8 +72,50 @@ class LocalTests(unittest.TestCase):
             config = tomllib.loads((folder / "agent.toml").read_text())
             self.assertTrue(config["telemetry"]["probeEnabled"])
             self.assertTrue(config["telemetry"]["probeAllowPrivate"])
-            tasks = json.loads((folder / "probes.json").read_text())["nodes"][0]["tasks"]
+            with closing(sqlite3.connect(folder / "control.sqlite")) as database:
+                document = json.loads(database.execute("SELECT probe_json FROM settings").fetchone()[0])
+            tasks = document["nodes"][0]["tasks"]
+            self.assertEqual(document["nodes"][0]["agent_id"], "1")
             self.assertEqual(tasks[0]["target"], "127.0.0.1:17000")
+
+    def test_github_login_copies_secret_and_uses_allowlist_without_token_fallback(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root).resolve()
+            secret = root / "oauth-secret"
+            local.private(secret, "example-client-secret\n")
+            env = {"FRP_GITHUB_CLIENT_ID": "example-client-id", "FRP_GITHUB_CLIENT_SECRET_FILE": str(secret),
+                   "FRP_GITHUB_CALLBACK_URL": "https://monitor.example.invalid/api/admin/v1/auth/github/callback", "FRP_GITHUB_ADMIN_USERS": "ExampleAdmin,second-admin,ExampleAdmin", "FRP_MONITOR_HISTORY_DATA_PATH": "history", "FRP_MONITOR_RETENTION_DAYS": "365"}
+            config = local.settings(root, env)
+            local.initialize(root / "demo", plain_http=True, config=config)
+            content = (root / "demo/server.toml").read_text()
+            monitor = tomllib.loads(content)["monitor"]
+            self.assertEqual(monitor["githubAdminUsers"], ["exampleadmin", "second-admin"])
+            self.assertEqual(monitor["githubClientSecretFile"], str(root / "demo/github.secret"))
+            self.assertEqual((root / "demo/github.secret").stat().st_mode & 0o777, 0o600)
+            self.assertNotIn("example-client-secret", content)
+            self.assertEqual(monitor["historyDataPath"], str(root / "demo/history"))
+            self.assertFalse((root / "demo/history").exists())
+            for changed in ({"FRP_GITHUB_CLIENT_ID": ""}, {"FRP_GITHUB_ADMIN_USERS": "bad login"}, {"FRP_GITHUB_CALLBACK_URL": "http://example.invalid/callback"}, {"FRP_MONITOR_HISTORY_DATA_PATH": "../outside"}):
+                with self.subTest(changed=changed), self.assertRaises(ValueError):
+                    local.settings(root, {**env, **changed})
+
+    def test_history_path_is_optional_and_confined_to_private_runtime(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            destination = root / "demo"
+            self.assertEqual(local._history_directory("", destination), "")
+            self.assertEqual(local._history_directory("history", destination), str(destination / "history"))
+            self.assertEqual(local._history_directory(str(destination / "metrics/history"), destination), str(destination / "metrics/history"))
+            for name in ("..", "../outside", ".", str(root / "outside"), "control.sqlite", "agent.token/cache"):
+                with self.subTest(name=name), self.assertRaises(ValueError):
+                    local._history_directory(name, destination)
+            destination.mkdir(mode=0o700)
+            (destination / "linked").symlink_to(root, target_is_directory=True)
+            (destination / "public").mkdir(mode=0o755)
+            (destination / "file").write_text("not a directory")
+            for name in ("linked/cache", "public", "file"):
+                with self.subTest(name=name), self.assertRaises(ValueError):
+                    local._history_directory(name, destination)
 
     def test_paths_stay_in_private_data_and_symlinks_rejected(self):
         with tempfile.TemporaryDirectory() as root, mock.patch.object(local, "ROOT", Path(root)):

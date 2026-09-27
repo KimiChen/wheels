@@ -69,3 +69,11 @@
 @media(max-width:1050px) { .fa-grid { grid-template-columns: 230px minmax(0,1fr); }.fa-form-grid { grid-template-columns: 1fr; }.fa-probe-row { grid-template-columns: repeat(3,minmax(0,1fr)); } }
 @media(max-width:680px) { .fa-topbar { padding: 15px 16px; align-items: start; }.fa-topbar .fm-brand { font-size: 15px; }.fa-topbar .fa-actions { justify-content: end; gap: 8px; }.fa-topbar .fa-actions a { font-size: 10px; }.fa-topbar .wsk-button { min-height: 28px; padding: 4px 6px; font-size: 10px; }.fa-main { padding: 26px 16px 0; }.fa-private { display: none; }.fa-panel { padding: 18px; }.fa-create { display: block; }.fa-create form { margin-top: 15px; }.fa-grid { grid-template-columns: minmax(0,1fr); }.fa-node-list { max-height: 250px; }.fa-detail-list { gap: 14px; }.fa-probe-row { grid-template-columns: minmax(0,1fr); }.fa-login { margin-top: 25px; padding: 23px; }.fa-table th,.fa-table td { padding: 9px; }.fa-main .fm-page-heading h1 { font-size: 25px; } }
 @media(forced-colors:active) { .fa-node-list > button[aria-pressed="true"] { outline: 2px solid Highlight; }.fa-notice,.fa-private { border: 1px solid CanvasText; } }
+
+.fa-settings-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 14px; margin-bottom: 18px; }
+.fa-settings-wide { grid-column: 1 / -1; }
+.fa-checks { display: flex; flex-wrap: wrap; gap: 14px; margin-bottom: 18px; }
+.fa-main .fa-checks label { display: flex; align-items: center; gap: 7px; }
+.fa-main .fa-checks input { width: 16px; height: 16px; margin: 0; }
+.fa-login > .wsk-button { display: inline-flex; margin-top: 8px; }
+@media(max-width:680px) { .fa-settings-grid { grid-template-columns: minmax(0,1fr); } }

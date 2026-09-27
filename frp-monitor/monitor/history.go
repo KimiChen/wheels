@@ -40,15 +40,14 @@ type publicProbe struct {
 	Points          []store.ProbePoint `json:"points"`
 }
 type publicHistory struct {
-	NodeID      string              `json:"node_id"`
-	GeneratedAt time.Time           `json:"generated_at"`
-	Window      string              `json:"window"`
-	StepSeconds int64               `json:"step_seconds"`
-	Storage     storageState        `json:"storage"`
-	ProbesState string              `json:"probes_state"`
-	Points      []historyPoint      `json:"points"`
-	Traffic     store.TrafficResult `json:"traffic"`
-	Probes      []publicProbe       `json:"probes"`
+	NodeID      string         `json:"node_id"`
+	GeneratedAt time.Time      `json:"generated_at"`
+	Window      string         `json:"window"`
+	StepSeconds int64          `json:"step_seconds"`
+	Storage     storageState   `json:"storage"`
+	ProbesState string         `json:"probes_state"`
+	Points      []historyPoint `json:"points"`
+	Probes      []publicProbe  `json:"probes"`
 }
 
 func (s *Service) storageStatus() storageState {
@@ -107,7 +106,8 @@ func (s *Service) handleHistory(w http.ResponseWriter, r *http.Request) {
 	n, exists := s.nodes[id]
 	probeEnabled := exists && n.probeEnabled && n.conn != nil
 	s.mu.Unlock()
-	if !exists {
+	configs := s.configs.Load()
+	if !exists || configs == nil || (*configs)[id] == nil || !(*configs)[id].IsPublic {
 		http.NotFound(w, r)
 		return
 	}
@@ -129,7 +129,7 @@ func (s *Service) handleHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := time.Now().UTC()
-	out := publicHistory{NodeID: id, GeneratedAt: now, Window: window, StepSeconds: int64(b.step / time.Second), Storage: s.storageStatus(), Points: []historyPoint{}, Probes: []publicProbe{}, Traffic: store.TrafficResult{Day: now.Format("2006-01-02")}, ProbesState: "disabled"}
+	out := publicHistory{NodeID: id, GeneratedAt: now, Window: window, StepSeconds: int64(b.step / time.Second), Storage: s.storageStatus(), Points: []historyPoint{}, Probes: []publicProbe{}, ProbesState: "disabled"}
 	book := s.tasks.Load()
 	if len(book.Nodes[id]) > 0 {
 		out.ProbesState = "waiting"
@@ -153,12 +153,7 @@ func (s *Service) handleHistory(w http.ResponseWriter, r *http.Request) {
 				out.Points = append(out.Points, projectPoint(p))
 			}
 		}
-		traffic, err := s.store.Traffic(ctx, id, now)
-		if err != nil {
-			queryFailed = true
-		} else {
-			out.Traffic = traffic
-		}
+
 	}
 	for _, task := range book.Nodes[id] {
 		p := publicProbe{ID: task.ID, Name: task.Name, IntervalSeconds: task.Interval, Points: []store.ProbePoint{}}
@@ -187,7 +182,8 @@ func (s *Service) handleHistory(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	_, stillAuthorized := s.nodes[id]
 	s.mu.Unlock()
-	if !stillAuthorized {
+	configs = s.configs.Load()
+	if !stillAuthorized || configs == nil || (*configs)[id] == nil || !(*configs)[id].IsPublic {
 		http.NotFound(w, r)
 		return
 	}

@@ -1,4 +1,5 @@
 import {value, bytes, decimal, quality} from "./format.mjs";
+import {validNodeID} from "./node-data.mjs";
 
 export const reconciliationLabels = {matched: "已核对", unbound: "未设可信绑定", conflict: "归属冲突", mismatch: "报告与绑定不一致", missing: "服务端未登记", stale: "节点报告已过期", transient: "未配置稳定 ID", unavailable: "服务端快照不可用", ready: "可用", disabled: "未启用"};
 export const clientProxyLabels = {unknown: "未知", disabled: "未启用", starting: "启动中", running: "运行中", error: "错误", closed: "已关闭"};
@@ -9,7 +10,7 @@ export function adminSnapshot(raw) {
   if (!raw || !Array.isArray(raw.nodes) || raw.nodes.length > 1024 || !Number.isFinite(Date.parse(raw.generated_at)) || !["ready", "degraded"].includes(raw.credentials_state)) throw new Error("invalid_snapshot");
   const ids = new Set();
   for (const node of raw.nodes) {
-    if (!node || typeof node.id !== "string" || !/^[A-Za-z0-9_-]{8,128}$/.test(node.id) || ids.has(node.id) || typeof node.name !== "string" || node.name.length > 128 || !["online", "offline", "waiting"].includes(node.session) || !["fresh", "stale", "waiting"].includes(node.freshness)) throw new Error("invalid_node");
+    if (!node || !validNodeID(node.id) || ids.has(node.id) || typeof node.name !== "string" || node.name.length > 128 || !["online", "offline", "waiting"].includes(node.session) || !["fresh", "stale", "waiting"].includes(node.freshness)) throw new Error("invalid_node");
     ids.add(node.id);
   }
   return raw;
@@ -18,7 +19,7 @@ export function probeDocument(raw) {
   if (!raw || !Number.isSafeInteger(raw.version) || raw.version < 0 || !Array.isArray(raw.nodes) || raw.nodes.length > 1024) throw new Error("invalid_probes");
   const ids = new Set();
   for (const node of raw.nodes) {
-    if (!node || typeof node.agent_id !== "string" || ids.has(node.agent_id) || !Array.isArray(node.tasks) || node.tasks.length > 64) throw new Error("invalid_probes");
+    if (!node || !validNodeID(node.agent_id) || ids.has(node.agent_id) || !Array.isArray(node.tasks) || node.tasks.length > 64) throw new Error("invalid_probes");
     ids.add(node.agent_id);
     const tasks = new Set();
     for (const task of node.tasks) {
@@ -55,7 +56,7 @@ export function errorText(error) {
   return ({400: "输入内容无效，请检查后重试。", 401: "管理会话已失效，请重新登录。", 403: "请求校验未通过，请重新登录后重试。", 404: "所选节点或功能不可用，请刷新。", 409: "配置已变更或存在冲突，请重新读取后再保存。", 413: "内容超过允许大小，请减少任务数量。", 429: "请求过于频繁，请稍后重试。", 503: "服务暂不可用或配置写入失败，请稍后重试。"})[error?.status] ?? "请求失败，请检查连接后重试。";
 }
 
-// Tokens live only in this instance and in request bodies; never in storage or URLs.
+// The CSRF token lives only in this instance; GitHub OAuth credentials stay on the server.
 export function adminClient({fetcher = globalThis.fetch, onExpired = () => {}, timer = setTimeout, cancel = clearTimeout} = {}) {
   let csrf = null, epoch = 0;
   const active = new Set();
@@ -85,5 +86,5 @@ export function adminClient({fetcher = globalThis.fetch, onExpired = () => {}, t
     if (!data || typeof data.csrf_token !== "string" || data.csrf_token.length < 16 || data.csrf_token.length > 256 || !Number.isFinite(Date.parse(data.expires_at))) throw new Error("invalid_session");
     csrf = data.csrf_token; return data;
   }
-  return {request, clear, session: async () => acceptSession(await request("/api/admin/v1/session")), login: async token => acceptSession(await request("/api/admin/v1/login", {method: "POST", body: {token}, anonymous: true})), logout: async () => { try { await request("/api/admin/v1/logout", {method: "POST"}); } finally { clear(); } }};
+  return {request, clear, session: async () => acceptSession(await request("/api/admin/v1/session")), logout: async () => { try { await request("/api/admin/v1/logout", {method: "POST"}); } finally { clear(); } }};
 }

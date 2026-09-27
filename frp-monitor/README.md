@@ -3,92 +3,80 @@
 基于 FRP 的主机与隧道监控项目：`agent` 复用 frpc，`monitor` 复用 frps，
 `web` 基于本仓库的 `web-standard-kit`。三个模块均位于本子项目目录。
 
-> 状态：P3 功能与发布工具，2026-09-28 更新。已实现 Linux 采集、独立 WSS、
-> 探测/历史/主机流量，以及独立管理会话、凭据热轮换、可信 FRP 隧道对账、
-> 在线备份恢复和 systemd 配置生成。Linux amd64 测试机已部署，实机采样、
-> FRP 回归与 systemd 恢复已通过；短时容量结果见测试部署记录。
+> 状态：P4 已实现并通过本地验收。当前代码采用两张 SQLite 业务表、内存实时状态、
+> 可选内嵌 VictoriaMetrics 历史，以及 GitHub 管理登录。开发期直接创建新库，
+> 不兼容旧配置或数据；本轮尚未部署，实际 GitHub 账号登录需配置 OAuth App。
 
-节点数据结构见第 6 节；简化存储与可选 TSDB 的开发计划见第 9 节。
+节点数据结构见第 6 节，当前开发范围与验收要求见第 9 节。
+本 README 是当前项目入口；`docs/frpc.md`、`docs/frps.md` 中的旧方案不作为实现依据。
 
-当前需求将原来的“60 秒上报、最新内存快照、公开 HTML”调整为对齐
-`monitor-probe/agent` 的监控方案。本 README 为当前规划入口；
-`docs/frpc.md`、`docs/frps.md` 保留为历史设计，冲突时以本文为准。
-
-P3 本地入口（在本子项目根目录执行，要求 Python 3.11+、Git、Go、Node.js/npm 和 OpenSSL）：
+本地入口（在本子项目根目录执行，要求 Python 3.11+、Git、Go 1.26.6+、Node.js/npm 和 OpenSSL）：
 
 ```bash
 python3 scripts/frp.py prepare
 python3 -m unittest discover -s tests -p '*test*.py'
 python3 scripts/frp.py test
 python3 scripts/frp.py build --native
-# 生成 0700 私有目录、0600 凭据与回环 TLS 配置；已有目录不会覆盖。
+# 生成私有控制库、节点凭据和回环 TLS 配置；已有目录不会覆盖。
 python3 scripts/local.py init
 python3 scripts/local.py run
 ```
 
-默认页面为 `https://127.0.0.1:17401/`，本地生成证书有效期 30 天，agent 显式信任
-该证书；浏览器需由使用者自行信任。若只需本机明文演示，可在首次初始化时使用
-`python3 scripts/local.py init --http`，页面为 `http://127.0.0.1:17401/`。
-两种方式均仅监听回环，不修改系统信任。Ctrl-C 同时停止两个进程；配置、凭据和日志
-保留在 ignored 的 `data/local/`。macOS 可验证连接和页面，Linux 专属指标显示“—”。
-初始化默认开启 SQLite 历史，TCP 探测默认关闭。首次初始化加 `--probes` 可显式
-启用对本机 FRP 端口的 TCP 建连探测；已有目录不会覆盖，可用
-`--directory data/p3-demo` 创建新安装，并在 `run` 时指定同一目录。
-公开监控页使用顶部导航、卡片/表格切换、名称搜索和底部实时汇总，不包含地球、
-可用性视图或分组/标签/状态/排序筛选。点击卡片进入 `/node/{id}`，查看
-硬件概况、实时资源、历史与网络延迟；卡片为 CPU/内存/硬盘/流量四格内容。
-历史首次分钟写入前显示缺样，通常等待不超过一分钟。
-管理页面为 `/admin/`，使用私有 `data/local/admin.token` 中的独立登录token。
-初始化会预绑定本地FRP身份；管理页面可以创建、轮换和撤销节点凭据、修改可信绑定和探测清单。
-部署、接入配置及在线备份/恢复详见 [packaging/README.md](packaging/README.md)。
+默认页面为 `https://127.0.0.1:17401/`。本地生成的证书有效期 30 天，agent 显式信任
+该证书；浏览器信任由使用者配置。首次初始化可用 `--http` 选择回环明文开发，
+页面为 `http://127.0.0.1:17401/`。两种方式均仅监听回环，不修改系统信任。
+Ctrl-C 停止两个进程；配置、数据库与日志保留在 ignored 的 `data/local/`。
+macOS 可验证连接和页面，Linux 专属指标显示“—”。需要新安装时使用
+`--directory data/p4-demo`，运行时指定同一目录。
+
+初始化创建 `control.sqlite`，预置数字 ID 的本地节点与可信 FRP 绑定；历史默认关闭。
+设置 `FRP_MONITOR_HISTORY_DATA_PATH=history` 后，初始化配置会启用主控进程内的 TSDB，
+相对目录以本次运行数据目录为基准，保留期默认 7 天。首次初始化加 `--probes` 可开启对本机 FRP
+端口的 TCP 建连探测；探测配置保存在控制库的 `settings.probe_json`。
+
+公开页面提供卡片/表格切换、名称搜索和底部实时汇总，不包含地球、可用性或
+分组/标签/状态/排序筛选。`/node/{id}` 展示硬件、实时资源、今日及套餐流量和历史曲线。
+系统累计、主控时区今日、套餐周期与 FRP 隧道流量分别展示。
+
+两端共用 FRP 的配置入口：通过 `-c` 指定单一 TOML/YAML/JSON 文件，
+监控使用 `monitor` / `telemetry` 配置段。环境变量使用 FRP 原生模板显式引用，
+启动配置修改后重启；加载规则见 [monitor/README.md](monitor/README.md#配置加载)。
+
+管理页面 `/admin/` **仅通过 github.com 登录**。在主控配置中填写
+`githubClientID`、`githubClientSecretFile`、`githubCallbackURL`、`githubAdminUsers`；
+客户端密钥使用外部 0600 文件，允许登录的 GitHub 用户名由管理员显式列出。
+未配置 GitHub OAuth 时管理功能不可用，公开监控和节点上报仍可运行。
+管理页支持节点创建、凭据轮换/撤销、公开策略、费用到期、套餐校准/重置、可信绑定及探测。
+配置详情见 [monitor/README.md](monitor/README.md)，部署与备份见
+[packaging/README.md](packaging/README.md)。
 
 本地验证与打包：
 
 ```bash
-# macOS arm64 本机的回归示例；其他宿主使用实际 GOOS-GOARCH 路径。
+# 示例使用 macOS arm64；其他宿主使用实际 GOOS-GOARCH 路径。
 python3 tests/smoke.py --agent dist/darwin-arm64/frp-monitor-agent --server dist/darwin-arm64/frp-monitor-server
-python3 tests/p1_smoke.py --agent dist/darwin-arm64/frp-monitor-agent --server dist/darwin-arm64/frp-monitor-server
-python3 tests/p2_smoke.py --agent dist/darwin-arm64/frp-monitor-agent --server dist/darwin-arm64/frp-monitor-server
-python3 tests/p3_smoke.py --agent dist/darwin-arm64/frp-monitor-agent --server dist/darwin-arm64/frp-monitor-server
+python3 tests/p4_smoke.py --agent dist/darwin-arm64/frp-monitor-agent --server dist/darwin-arm64/frp-monitor-server
 node --test web/tests/*.test.mjs
 python3 scripts/frp.py package
 ```
 
-`.env` 为可选本地配置，缺省值见 `.env.example`。初次准备和构建需要网络下载
-固定源码、Go 依赖和上游 Dashboard 的 npm 依赖；网页在构建时编译，运行二进制不需
-Node 服务。完整参数与工具链规则见 [scripts/README.md](scripts/README.md)，
-协议 v1、字段和质量约束见 [shared/README.md](shared/README.md)，
-测试覆盖与尚未实现的验收见 [tests/README.md](tests/README.md)。
-Linux 采集参考向量位于 `tests/fixtures/collect/`，全部 17 组已接入真实 Go 采集函数。
+`.env` 是可选本地配置，默认值与可配置项见 `.env.example`。初次准备和构建需要下载
+固定源码、Go 依赖和上游 Dashboard 的 npm 依赖；运行二进制不需要 Node 服务或独立 TSDB
+进程。工具链规则见 [scripts/README.md](scripts/README.md)，协议和质量约束见
+[shared/README.md](shared/README.md)，测试命令与待验收范围见 [tests/README.md](tests/README.md)。
+Linux 采集的 17 组脱敏参考向量位于 `tests/fixtures/collect/`。
 
-开发验证使用 macOS arm64、Go 1.26.5、Node 26.5.0 和 npm 11.17.0。
-P1 协议/采集/接收器/上报器测试与 race 检查覆盖凭据、TLS、重连、旧会话、序号、
-过期、公开字段裁剪、慢采集退出与采样周期协商。具体已执行范围见测试文档。
-P2 增加真实 TCP 探测、任务替换、分钟平均、整数精度、事务回滚、WAL 崩溃恢复、
-重启后历史保留且节点等待接入，以及数据库故障隔离的验证。
-Linux amd64 已完成 `free`/`df` 对照、P0–P3 与新旧协议矩阵、正常/异常重启、
-在线备份及恢复切换。范围和容量结果见 [测试部署记录](tests/DEPLOYMENT.md)。
-Linux arm64 实机、长时保留期/慢盘、TLS与转发并发负载仍待补验。
+`[monitor] databaseFile` 必须指向私有目录内的 SQLite 控制库。历史由
+`historyDataPath` 留空关闭历史，非空指定 TSDB 目录并启用；`retentionDays` 默认 7，
+开启历史时允许 1–365 天。关闭或损坏历史后端不影响 SQLite 当前流量记账。
+控制库不可用时不能继续接受未经可靠授权的节点或管理写入；原生 FRP 转发保持独立。
 
-P0 已完成的基线验证：
-构建脚本/协议测试、shared race/vet 和短时模糊测试通过；本机原生 FRP 的 wire v1/v2
-配置校验、无 Proxy 登录、TCP 转发、服务端重启后重连及 Dashboard 认证/资源访问通过。
-Linux amd64/arm64 已交叉构建并打包；amd64 已部署测试机，arm64 实机尚未验收。
-同一环境重复构建 Linux amd64，两份二进制的 SHA256 均一致；发布包白名单及
-包内/包外校验和已验证。生成物和依赖只保留在 ignored 的 `.cache/`、`dist/`。
-
-历史与探测配置：`[monitor]` 的 `databaseFile` 指向独立私有目录中的 SQLite 文件，
-`retentionDays` 默认 7、范围 1–31；不设置数据库时仍可使用 P1 实时页面。
-`probeTasksFile` 指向 0600 的本地任务文件，按节点指定公开标签与私有目标，版本递增
-即可热更新；agent 还须显式设置 `[telemetry] probeEnabled = true`。
-目标策略默认仅允许公网单播，私网/回环需要额外 `probeAllowPrivate = true`。
-任务示例和边界见 [monitor/README.md](monitor/README.md)、
-[agent/probe/README.md](agent/probe/README.md)，事务与覆盖语义见
-[monitor/store/README.md](monitor/store/README.md)。
-
-历史按分钟批量写盘，正常 TERM/INT 退出刷新尾批；强制终止可能丢失尚未提交的一分钟。
-存储失败时公开接口显示 degraded，实时上报和原生 FRP 继续工作。主机流量仅统计
-同一计数范围内已接收的增量，不能当作运营商账单或隧道流量。
+探测任务通过管理接口写入 SQLite，agent 还需设置 `[telemetry] probeEnabled = true`。
+默认仅允许公网单播，访问私网/回环需额外 `probeAllowPrivate = true`。
+详情见 [agent/probe/README.md](agent/probe/README.md) 和
+[monitor/store/README.md](monitor/store/README.md)。当前套餐账本使用精确整数；TSDB 曲线
+使用浮点样本，不用于恢复人工校准量或生成运营商账单。正常退出刷新已接受的尾批，
+强制终止可能丢失尚未提交的样本；持久数据不恢复在线状态。
 
 ## 1. 推荐架构
 
@@ -278,7 +266,7 @@ Go 端用整数处理累计字节，浏览器 DTO 使用十进制字符串防止
 ## 6. 存储与节点数据结构
 
 采用 SQLite 保存配置和业务数据、内存保存实时状态、可选 TSDB 保存指标历史。
-本节是 P4 的目标设计，功能交付与验收安排见第 9 节。开发期按新结构建库，
+本节对应当前 P4 实现，整体验收安排见第 9 节。开发期按新结构建库，
 不要求兼容或导入现有配置、数据库和历史数据。
 
 ### 6.1 存储职责
@@ -296,7 +284,7 @@ TSDB 默认关闭，关闭或后端不可用不应影响 SQLite 记账和实时�
 ### 6.2 合并后的 nodes 表
 
 节点核心数据只保存当前值。费用、到期、续费说明、套餐配置、当前周期、今日流量
-和基线全部并入 `nodes`，不另建账单、续费记录、套餐版本、每日或周期账本表。
+和基线全部并入 `nodes`，不另建账单、续费记录、套餐版本、每日或周期账本表。节点凭据摘要及 FRP 绑定也保存于此。
 管理员直接修改费用、到期和续费说明，不自动扣款或延长到期时间。
 
 ```sql
@@ -351,6 +339,10 @@ CREATE TABLE nodes (
     created_at_ms               INTEGER NOT NULL,
     updated_at_ms               INTEGER NOT NULL,
 
+    -- 当前节点凭据和可信 FRP 绑定
+    token_sha256                TEXT NOT NULL UNIQUE,
+    frp_binding                 TEXT,          -- NULL 或绑定对象 JSON
+
     CHECK (price_minor IS NULL OR price_minor >= 0),
     CHECK (traffic_mode IN ('max', 'total', 'rx', 'tx')),
     CHECK (traffic_reset_mode IN ('monthly', 'manual')),
@@ -358,9 +350,25 @@ CREATE TABLE nodes (
 );
 ```
 
+实际建库约束与唯一索引见 [monitor/control/schema.sql](monitor/control/schema.sql)。
+另一张表只保存一份探测文档：
+
+```sql
+CREATE TABLE settings (
+    id         INTEGER PRIMARY KEY CHECK (id = 1),
+    probe_json TEXT NOT NULL CHECK (json_valid(probe_json)
+                                   AND json_type(probe_json) = 'object')
+);
+```
+
+`probe_json` 为 `{ "version": 1, "nodes": [] }` 形式，更新时递增版本。删除节点时，
+同一事务删除其探测配置并在发生变化时递增版本。两张表不保存管理员账户或管理会话。
+
 字段约定：
 
-- 关联字段 `node_id` 使用 INTEGER，节点详情地址使用 `/node/{id}`。自增 ID 不回收复用。
+- `nodes.id` 为 SQLite 自增整数，API 和 URL 使用其十进制字符串，例如 `/node/1`。删除后不复用 ID。
+- `token_sha256` 只保存当前节点令牌的 SHA256 小写摘要；轮换立即撤销旧凭据。
+  `frp_binding` 保存管理员明确设置的 `{server_id,user,raw_client_id}`，非空绑定不能重复。
 - `price_minor` 保存币种最小单位，例如人民币“分”；NULL 表示未设置，0 表示免费。
   `currency` 使用 CNY、USD 等币种码；`billing_cycle` 可填月付、季付、年付、一次性等。
   付费周期与套餐流量周期独立，`expires_at_ms` 为空表示未设置到期时间。
@@ -398,8 +406,10 @@ CREATE TABLE nodes (
 随后 RX=110、TX=120，显示 170。Max 必须对整个周期累计收发取较大值，不能逐样本
 取 max 后相加。单个服务商已用数字无法还原其历史 RX/TX，手工值用于校准显示用量。
 
-套餐设置修改立即应用当前周期。**待定：修改计费类型时，保留修改前的已用量还是
-按新类型重算，需在实现前确定；两种方式均使用同一校准差额字段。**
+套餐设置修改立即应用当前周期。切换计费类型时保留修改前的已用量，重新计算
+`traffic_adjustment_bytes = 原已用量 - 新类型 F(RX, TX)`，随后按新类型继续累计。
+例如 RX=100、TX=80、Max 已校准为 150，切换 total 后差额为 -30，已用仍为 150；
+管理员仍可随时重新校准。设置修改携带 `config_revision`，过期版本返回冲突。
 
 重置仅支持两种方式：
 
@@ -431,7 +441,9 @@ CREATE TABLE nodes (
 不把 lifetime 总量记成今日或套餐新增。无效/缺失计数器不能用零覆盖基线。
 
 同一 SQLite 事务更新基线、今日增量和当前周期增量；失败整体回滚，避免重试重复累计。
-使用有界写队列和批量持久化，不在 FRP 转发线程执行数据库操作。主控日边界按系统
+使用有界写队列和批量持久化，不在 FRP 转发线程执行数据库操作。跨日或跨套餐边界的
+采样增量按接收时间比例分摊，并标记统计不完整；失败保留旧基线，下一有效采样继续累计。
+主控日边界按系统
 时区日历计算，不将一天固定写成 86400 秒。界面保留统计不完整的标记，不承诺与
 服务商计费账单完全一致。
 
@@ -468,18 +480,16 @@ HTML + CSS + 原生 ES Modules，保持 `wsk-` 组件、128 个令牌、`@layer 
 
 公开硬件摘要仅含 OS、架构、虚拟化、CPU 型号/逻辑核数与 agent 版本。
 默认公开 DTO 不含本地目标、IP、主机名、精确内核及凭据，不能仅用 CSS 隐藏。
-管理端采用服务端会话、安全 Cookie、写操作 CSRF 防护；探测配置限制操作者与目标策略，
+管理端采用GitHub OAuth 登录、服务端会话、安全 Cookie、写操作 CSRF 防护；探测配置限制操作者与目标策略，
 不开放任意命令执行。独立 Listener 默认回环，HTTPS 反向代理发布；远程 agent 校验证书。
 
-公共 JSON/SSE、静态资源、历史和管理页是对旧纯 HTML 方案的明确调整。
-原 Dashboard/API/metrics 保持独立路由与认证；按新 JS/CSS/SSE 制定 CSP，
-不能直接沿用旧页面禁止脚本的策略。节点和 Dashboard 凭据不进入浏览器。
+公共 JSON/SSE、静态资源、历史和管理页使用独立路由和安全头；原 Dashboard/API/metrics
+保持自身路由与认证。节点与 Dashboard 凭据不进入公开网页。
 
-## 8. 目标目录与构建
+## 8. 目录与构建
 
-以下为完整目标目录。P2 已实现 `agent/collect`、`agent/service`、`agent/probe`、
-`monitor/*.go`、`monitor/store`、`shared` 和 `web`；管理接口、配置与发布工具均已落地。
-接收/API 代码集中在 monitor 包内，后续随职责增加再拆分子包：
+当前采集、接收、管理和发布代码集中在下列目录。接收/API 保留在 monitor 包内，
+SQLite 控制库与可选 TSDB 分别由 control/store 子包负责，不为规划中的功能提前拆包：
 
 ```text
 frp-monitor/
@@ -488,16 +498,18 @@ frp-monitor/
 ├── .env.example
 ├── upstream.lock
 ├── agent/
-│   ├── service/               # 生命周期、调度、FRP 只读适配器
+│   ├── service/               # 生命周期、WSS、认证、调度和重连
 │   ├── collect/               # Linux Facts / Metrics
-│   ├── probe/                 # TCP 探测
-│   └── transport/             # WSS、认证、重连
+│   └── probe/                 # TCP 探测
 ├── monitor/
-│   ├── service/               # 生命周期、FRP Registry / Stats 适配器
-│   ├── ingest/                # 认证、接收、会话
-│   ├── store/                 # SQLite 配置与当前流量、可选 TSDB 历史
-│   ├── api/                   # 公开/管理 DTO、查询、SSE
-│   └── auth/                  # 管理会话与凭据
+│   ├── service.go             # Listener、节点认证、接收、会话、公开快照
+│   ├── admin.go / github.go   # 管理 API、GitHub OAuth、Cookie 和 CSRF
+│   ├── nodes.go               # 节点配置、费用和流量 DTO
+│   ├── history.go             # 公开历史查询
+│   ├── probe_tasks.go         # 探测配置与下发
+│   ├── reconcile.go           # FRP 注册表与指标对账
+│   ├── control/               # SQLite nodes/settings、当前流量及计数器基线
+│   └── store/                 # 可选内嵌 VictoriaMetrics 指标历史
 ├── web/
 │   ├── index.html
 │   ├── admin.html
@@ -513,9 +525,7 @@ frp-monitor/
 └── dist/                      # 发布包，ignored
 ```
 
-原 `overlay/client/telemetry`、`overlay/server/publicclientinfo`、
-`overlay/web` 已迁到 agent/monitor/web，不维护两份目录。构建仍采用 Overlay：
-显式映射到临时上游树的 `extension/frpmonitor/{agent,monitor,shared,web}`，
+构建采用 Overlay，将项目扩展显式映射到临时上游树的 `extension/frpmonitor/{agent,monitor,shared,web}`，
 共享上游 Go module；嵌入代码放到资源父目录，避免 `go:embed` 跨目录使用 `..`。
 生命周期入口通过窄接口依赖扩展，扩展不能反向 import 上游 client/server 根包而形成循环。
 
@@ -529,59 +539,39 @@ frpc/frps 本身不会自动读取它。建议使用 `FRP_MONITOR_*`、`FRP_AGEN
 前缀。真实配置、数据库、凭据及生成物在引入前配置 ignore，只提交脱敏
 `.env.example`，不将秘密注入前端。
 
-## 9. 实施阶段与验收
+## 9. 当前开发与验收
 
-| 阶段 | 交付 | 验收门槛 |
-|---|---|---|
-| P0：契约与构建（已完成） | 目录迁移、字段/协议契约、Overlay 构建、参考 fixture | 固定源码可重复构建；关闭扩展时原生 FRP 基线通过 |
-| P1：实时闭环（已实现，amd64 实机通过） | Go 采集、WSS、节点凭据、最小 FRP 连接适配器、最新状态与节点页面 | fixture、协议、本机闭环与 Linux amd64 采样对照通过 |
-| P2：完整采集体验（已实现，amd64 实机通过） | TCP 探测、SQLite 历史、主机当日流量、趋势与恢复 | 探测语义、会话/重启/网卡变化、事务与聚合测试；短时 synthetic 容量见部署记录 |
-| P3：FRP 与发布完善（已部署 amd64 测试机） | 隧道对账、公开/管理视图、接入配置、备份与 systemd 发布 | amd64 部署、权限/裁剪、恢复、UI 与 FRP 回归通过；arm64 和长时负载待补 |
-| P4：简化存储与可选 TSDB（下一步，尚未实施） | 合并节点配置与当前流量统计；可选指标历史后端及节点详情曲线 | 自增节点 ID、主控时区换日、套餐校准/重置；历史开关、查询、重启恢复、保留期清理及后端故障隔离 |
+P4 已完成本地实现与验收，当前交付范围为：
 
-**P4 开发范围：**
+- 两张 SQLite 表：`nodes` 保存自增 ID、节点凭据/绑定、费用与当前套餐/今日统计；
+  `settings` 保存探测文档。直接创建新库，不导入旧配置和历史数据。
+- 管理员手动维护费用、到期和续费说明；套餐支持 Max/total/rx/tx、每月固定日期或
+  手动重置。修改立即生效，切换计费类型保留当前已用量，原始 RX/TX 不被校准覆盖。
+- 管理页面只使用 GitHub OAuth，显式用户名允许列表；会话和 CSRF 状态保存在内存。
+- 可选内嵌 VictoriaMetrics，默认关闭。启用后保存 CPU、内存、磁盘、负载、速率及
+  TCP 探测历史，不需要独立服务。保留期默认 7 天，可设 1–365 天。
+- 实时状态与业务统计继续分离。历史未启用、无数据与后端降级分别显示；
+  节点断线和缺样保留缺口，不补零，不从数据库恢复在线状态。
 
-- SQLite 的 `nodes.id` 使用 `INTEGER PRIMARY KEY AUTOINCREMENT`。费用、到期、
-  续费说明、套餐配置、当前套餐周期、今日流量和计数器基线合并到 `nodes`，不再
-  单独建立账单、续费记录、套餐版本、每日账本或周期账本表；不保留往日/往期账本。
-- 价格、到期、续费及本周期已用由管理员手动维护；已用量通过人工校准差额调整，
-  原始周期 RX/TX 保留。套餐支持 Max/total/rx/tx，每月固定日期或手动重置，
-  套餐设置修改立即应用当前周期。今日流量按主控机器系统时区划日，时间戳仍存 UTC。
-- 项目处于开发期，新结构直接建库，不要求兼容或导入旧配置、旧数据库及历史数据。
-- 下一步接入一个**可选 TSDB 后端，默认关闭**，提供启用开关、存储位置和保留天数。
-  具体后端在该阶段选定；先完成单一后端，不建设多后端扩展框架。
-- TSDB 保存 CPU、内存、磁盘、负载、网络速率及 TCP 探测历史，按数字 `node_id`
-  关联。提供时间范围和采样步长查询，接入现有节点详情曲线；指标时间戳使用 UTC，
-  页面时间按主控时区显示。断线和缺样保留缺口，不补成零。
-- SQLite 保存配置及当前流量统计，内存保存实时状态；TSDB 不参与流量记账事务，
-  不作为费用、套餐或人工校准值的权威来源。关闭或后端故障时，节点鉴权、实时监控、
-  今日及套餐流量统计仍应工作；页面区分历史未启用、无样本与后端降级。
+已通过完整 Go 测试、关键包 race、扩展包 vet、41 项 Python 和 36 项 Node 测试。
+真实 Darwin 二进制通过历史开启/关闭、重启恢复及原生 FRP wire v1/v2 的 TCP 转发与重连；
+浏览器 fixture 检查通过节点卡片、详情、管理表单及窄屏布局。OAuth 使用受控替身验证，
+尚未以真实 GitHub 账号验收。配置加载已覆盖 TOML/YAML/JSON 与显式环境变量模板。
+Linux amd64/arm64 发布包已构建，包内校验和、SQLite schema 与许可证检查通过。
 
-P4 验收包括：启用后历史可写可查、进程重启后可查询、超过保留期自动清理；
-关闭 TSDB 不创建历史后端、不影响核心监控；后端超时/不可用时写入队列和查询有界，
-不阻塞实时接收、SQLite 记账与 FRP 转发。另验证主控本地午夜、套餐月末/手动重置、
-Max 整周期累计取较大值，以及人工校准后继续累计。以上均为待开发验收项。
+验收入口为 `scripts/frp.py test`、Python/Node 测试及 `tests/p4_smoke.py`，覆盖自增 ID 不复用、主控本地午夜和 DST、月末/手动重置、Max 整周期累计、
+人工校准及切换类型、事务失败后不重复记账、重启恢复、GitHub 允许列表与
+state/PKCE/CSRF、公开字段裁剪，以及 TSDB 开关/查询/保留期/故障隔离。
 
-P1/P2/P3 已完成本地受控闭环及 Linux amd64 测试部署；公开生产上线仍需验证
-目标环境、arm64（若使用）与真实业务的持续负载。节点凭据支持管理接口即时新增/轮换/撤销，私有配置文件
-每2秒热加载，撤销关闭已连接与握手中的旧socket；无效配置保留上次有效值并标记degraded。
-管理员凭据热更新清空旧会话。Telemetry 配置更改需重启 agent；原生 Proxy 配置 reload
-和 ProxyStore 的后续变更会进入只读快照。`--config_dir` 模式每进程至多启用一个
-采集实例，应只在一个 frpc 配置中启用 telemetry。
-价格/到期管理已列入 P4。告警、主题市场、远程 Proxy/Visitor CRUD、Shell、自动升级
-不纳入采集同等目标，可后续单独规划。
+部署前仍需执行 UDP/HTTP/STCP 和新旧二进制矩阵，确保监控、
+存储故障及慢浏览器不阻塞转发。Linux 实机采样、systemd 重启与备份恢复、
+长时慢盘和持续负载应以本轮产物重新验收。既有部署数据见 [测试部署记录](tests/DEPLOYMENT.md)，
+不能替代 P4 验收；100/500 节点是容量测试档位，不是性能承诺。
 
-关键验证：
-
-- 同一套 /proc、/sys、statvfs 和时钟 fixture 对照参考算法；实机并行采样须明确时间误差。
-- 首样本、内存 available 为 0、读取失败、特殊挂载、接口过滤、计数器回退、进程/主机重启。
-- TCP 成功/拒绝/超时、DNS 超时、多地址回退、任务更新、资源限额。
-- FRP user 下同名 clientID 不串节点，旧会话迟到不覆盖新会话，令牌轮换能终止旧会话。
-- TCP/UDP/HTTP 及实际使用的 STCP 等隧道、新旧二进制组合；监控/数据库/慢浏览器不阻塞转发。
-- Monitor 启用时，Dashboard 开启/关闭两种配置均能统计隧道流量，collector 不重复计数。
-- 按 100/500 节点、默认每秒报告验证 CPU、内存、写盘和网页开销；这是容量测试档位，
-  不是已证明的性能承诺。设置限额，按结果决定聚合与配置降频。
-- 公开 API/SSE 无私有字段，管理写操作有鉴权；浅/深主题、窄屏、键盘、实时刷新焦点检查通过。
+节点凭据及探测通过管理接口即时更新；主控启动配置和 GitHub 允许列表变化后重启。
+Agent 的 telemetry 配置变化也需重启。原生 Proxy reload 会进入只读快照；
+`--config_dir` 模式每进程至多启用一个采集实例。
+告警、主题市场、远程 Proxy/Visitor CRUD、Shell 和自动升级不在当前开发范围内。
 
 ## 10. 许可证与来源
 
@@ -590,6 +580,6 @@ P1/P2/P3 已完成本地受控闭环及 Linux amd64 测试部署；公开生产�
 `THIRD_PARTY_NOTICES.md`。协议、构建脚本与合成向量为本项目实现；P1 的 Go
 采集算法参考固定 monitor-probe 版本移植，保留 `agent/collect/LICENSE.monitor-probe`，
 发布包同时附带该 MIT 许可证。网页复制锁定的 web-standard-kit 资源并记录来源。
-P2 使用锁定的纯 Go SQLite，新增依赖许可证保存于 `monitor/store/licenses/` 并随包发布。
+SQLite 和内嵌 VictoriaMetrics 使用锁定依赖；适用依赖许可证保存在 `monitor/store/licenses/` 并随包发布。
 FRP 源码仅获取到 ignored 临时目录用于构建，二进制随包保留适用许可证与第三方声明。
 FRP 完整固定来源记录在 `upstream.lock` 与 `THIRD_PARTY_NOTICES.md`。

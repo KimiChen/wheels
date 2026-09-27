@@ -1,176 +1,211 @@
 # Monitor
 
-P3 实现独立 Listener、节点凭据握手、当前会话与内存最新状态、公开/管理 JSON 与 SSE，
-以及本地探测任务、SQLite 历史、当日主机流量和 FRP 服务端注册表对账。
-由构建工具映射到固定 FRP 源码的 `extension/frpmonitor/monitor`，不依赖上游
-`server` 根包，也不改 FRP 转发协议。入口为 `Start(ctx, shared.MonitorConfig, ...shared.ServerProvider)`、
-`Service.Address()`、`Service.Close()`；初始化失败由上游生命周期适配器降级。
-该隔离从配置通过校验后开始；格式/范围错误的监控配置在原生 `verify` 和加载阶段报错。
+主控提供独立 Listener、节点认证、内存实时状态、公开/管理 JSON 与 SSE、当前流量统计、
+可选指标历史和 FRP 服务端对账。P4 已通过本地 Go/race/vet 与二进制验收，尚未部署本轮代码。
+构建时映射到固定 FRP 源码的 `extension/frpmonitor/monitor`，不依赖上游 `server` 根包。
+入口为 `Start(ctx, shared.MonitorConfig, ...shared.ServerProvider)`、`Service.Address()`、
+`Service.Close()`。监控与原生 FRP 转发的监听、认证和生命周期相互隔离。
 
-## 配置与凭据
+## 启动配置
 
-原生 frps 配置的 `[monitor]` 默认为关闭。启用后默认 `127.0.0.1:7401`；
-对非 loopback 监听必须配置 `certFile` / `keyFile`。可用内置 TLS，或在本机
-loopback 前放置 HTTPS/WSS 反向代理。管理会话只根据当前连接是否 TLS 设置 Secure，
-不信任 `X-Forwarded-*`；启用管理时使用内置 TLS，或让代理向监控 Listener 继续使用 TLS
-并保留原始 Host。HTTP 仅用于显式本地 loopback 开发。Web 与上报共用独立监控 Listener，
-不得复用原生 Dashboard 或 FRP 控制端口。
+原生 frps 的 `[monitor]` 默认关闭。启用后默认监听 `127.0.0.1:7401`，需要指定
+`databaseFile`。非 loopback 监听必须配置 `certFile` / `keyFile`；可以使用内置 TLS，
+或在回环 Listener 前放置 HTTPS/WSS 反向代理。不要复用 Dashboard 或 FRP 控制端口。
 
-`credentialsFile` 是 UTF-8、常规、权限 `0600` 的 JSON 文件，最多 1 MiB、
-1,024 个节点。每 2 秒重新读取；有效变更立即更新允许列表，格式错误保留最近有效
-版本并在管理快照标记 `credentials_state: "degraded"`。空数组 `[]` 撤销全部节点；
-`null`、重复 ID/摘要/JSON 字段、未知字段、字段大小写别名均拒绝。每条记录包含：
+```toml
+[monitor]
+enabled = true
+bindAddr = "127.0.0.1"
+bindPort = 7401
+databaseFile = "/private/frp-monitor/control.sqlite"
+reportIntervalSeconds = 1
+historyDataPath = "" # 留空关闭；填写私有目录即启用
+retentionDays = 7
 
-```json
-[
-  {
-    "agent_id": "example-node-0001",
-    "name": "示例节点",
-    "token_sha256": "替换为独立节点凭据编码文本的 SHA256 小写十六进制摘要",
-    "frp_binding": {
-      "server_id": "example-server",
-      "user": "example-user",
-      "raw_client_id": "example-client"
-    }
-  }
-]
+# 以下四项一起配置后开放 GitHub 管理登录。
+githubClientID = "OAUTH_APP_CLIENT_ID"
+githubClientSecretFile = "/private/frp-monitor/github.secret"
+githubCallbackURL = "https://monitor.example.invalid/api/admin/v1/auth/github/callback"
+githubAdminUsers = ["example-admin"]
 ```
 
-上例摘要是占位符，不能直接用于运行。`agent_id` 为安装时持久化的随机标识，
-8–128 位 ASCII 字母、数字、`_`、`-`；展示名为 1–128 字节 UTF-8。ID 和摘要
-都不能重复。token 使用至少 32 个随机字节的无填充 base64url 编码；服务端存储
-该**编码文本**的 SHA256，不存明文。不得复用 FRP token/OIDC 凭据。
-`frp_binding` 可省略，只接受操作员配置或管理接口写入；详细归属规则见下文。
-令牌轮换关闭旧令牌的所有连接，包括已经升级但尚未完成 hello 的连接，清空当前
-会话/快照至 `waiting`。撤销从公开列表立即移除节点，公开历史入口返回 404；SQLite
-旧聚合按保留期存在，不等于删除历史文件。原生 FRP 凭据和控制连接不随监控撤销改变。
+以上地址和身份仅为占位示例。OAuth callback 必须是实际管理入口的 HTTPS URL，
+本机开发可显式使用字面量 loopback 的 HTTP 地址；路径固定为
+`/api/admin/v1/auth/github/callback`。代理应保留外部 Host。安全 Cookie 根据 TLS
+连接或配置的 HTTPS callback 设置，不信任客户端提供的转发头。
+启动配置改变后重启，密钥必须是外部 0600 常规文件，不写入 SQLite、页面或公开 API。
 
-客户端通过 `/agent/v1/ws`，在握手时传 `Authorization: Bearer <token>`。
-服务端从摘要确定节点归属，正文不能注册节点或改变归属；拒绝浏览器 Origin。
-先接收 `hello`，返回接受的会话、能力与 `report_interval`，再接收 `report`。
-接受 `metrics.v1` / `frp.v1`；显式启用探测的 agent 还协商 `ping.v1`。
-没有协商探测的连接不会收到任务，也不能提交探测结果。
+## 配置加载
 
-## 历史与探测配置
+借鉴哪吒的单文件配置方式，复用 FRP 原生加载器，不增加监控专用配置文件或加载库。
+服务端与客户端各使用自己的单一配置文件；分别将 `monitor` / `telemetry` 放入原生
+FRP 配置中。TOML、YAML、JSON 使用相同的 camelCase 字段。
 
-`[monitor] databaseFile` 为 SQLite 文件路径，直接父目录必须私有（0700），路径中不能有
-符号链接，现有数据库与 WAL/SHM 必须为私有常规文件。`retentionDays` 默认 7，范围 1–31。
-不配置数据库为 disabled；打开/查询/写盘错误为 degraded，监控 Listener 与原生 FRP
-继续运行。内部队列/桶有限，丢样数量公开；状态与历史不伪装成完整覆盖。
+```sh
+frp-monitor-server verify -c /private/frp-monitor/server.yaml
+frp-monitor-server -c /private/frp-monitor/server.yaml
+frp-monitor-agent -c /private/frp-monitor/agent.toml
+```
 
-`probeTasksFile` 是 0600 的 UTF-8 本地配置（最多 1 MiB），只允许凭据表中已知节点：
+启动顺序为：读取 `-c` 指定文件 → 展开 FRP 的 `{{ .Envs.NAME }}` 环境变量模板 →
+按格式解析 → 补默认值 → 校验配置 → 初始化 SQLite、管理登录与可选 TSDB。
+保留原生严格模式，未知字段报错。运行二进制不自动读取 `.env`、不扫描其他目录，
+不合并第二份监控配置，也不自动回写文件。
+
+环境变量只影响显式引用它的字段，不自动覆盖同名配置。例如以下 YAML 片段：
+
+```yaml
+monitor:
+  enabled: true
+  databaseFile: /private/frp-monitor/control.sqlite
+  historyDataPath: {{ printf "%q" (or .Envs.FRP_MONITOR_HISTORY_DATA_PATH "") }}
+  retentionDays: 7
+  githubClientID: OAUTH_APP_CLIENT_ID
+  githubClientSecretFile: /private/frp-monitor/github.secret
+  githubCallbackURL: https://monitor.example.invalid/api/admin/v1/auth/github/callback
+  githubAdminUsers: [example-admin]
+```
+
+未提供环境变量时，例中的历史目录为空；设置变量后启用。管理员名单仍直接写在主控
+配置里。密钥用外部私有文件，配置模板只引用路径。相对运行路径按进程工作目录解析，
+部署建议使用绝对路径或固定 systemd `WorkingDirectory`。今日统计取主控系统时区，
+也可由启动进程的标准 `TZ` 环境变量确定；不增加第二套今日时区配置。
+
+`.env` 只供 `local.py` / `ops.py` 初始化和构建工具使用；这些工具读取顺序是默认值 →
+子项目 `.env` → 进程环境变量，生成 TOML 后不会继续联动。已有安装修改实际运行配置并
+重启。节点、套餐与探测属于 SQLite 业务数据，通过管理界面即时修改，不回写启动配置。
+
+参考：[哪吒配置加载源码](https://github.com/nezhahq/nezha/blob/master/model/config.go)、
+[哪吒 TSDB 目录开关](https://nezha.wiki/guide/q15.html)。哪吒的 `NZ_` 环境变量映射和配置
+回写属于其自身实现，本项目沿用 FRP 的显式模板机制，避免出现两套覆盖规则。
+
+## SQLite 控制库与节点凭据
+
+`control` 包保存两张业务表：
+
+| 表 | 内容 |
+|---|---|
+| `nodes` | 自增数字 ID、节点名称/公开策略、费用到期、套餐、当前周期和今日流量、计数器基线、当前令牌摘要及可信 FRP 绑定 |
+| `settings` | `id=1` 的单行，`probe_json` 保存带版本的探测文档 |
+
+精确结构见 [control/schema.sql](control/schema.sql) 和[项目数据结构](../README.md#6-存储与节点数据结构)。
+只创建新结构，不导入旧库。`nodes.id` 使用 `INTEGER PRIMARY KEY AUTOINCREMENT`，
+删除后不复用；API 使用其十进制字符串，例如 `"1"`。最多 1,024 个节点。
+
+数据库直接父目录必须是 0700，数据库及 WAL/SHM 必须为私有常规文件，路径拒绝符号链接。
+使用 WAL 和 FULL 同步；配置更新与当前流量更新由同一串行 worker 处理。
+`config_revision` 只随管理员修改递增，采样不修改版本。
+控制库是认证和记账的权威来源，失败必须报告不可用，不能作为可选历史后端处理。
+
+节点令牌由至少 32 个随机字节进行无填充 base64url 编码；`token_sha256` 只保存该
+编码文本的 SHA256 小写摘要。创建和轮换响应仅返回一次明文，读取接口不返回令牌或摘要。
+不复用 FRP/OIDC/Dashboard 凭据。轮换关闭旧监控连接，包括尚未完成 hello 的连接；
+删除节点同时清理其探测配置，公开列表和历史入口立即不再提供该节点。
+原生 FRP 连接与凭据不随监控凭据操作改变。
+
+客户端连接 `/agent/v1/ws`，通过 `Authorization: Bearer <token>` 握手，禁止浏览器 Origin。
+节点归属由数据库凭据确定，正文不允许注册或指定节点。先完成 `hello`，再发送 `report`；
+能力为 `metrics.v1`、`frp.v1` 和 agent 显式开启的 `ping.v1`。
+
+## 当前流量与校准
+
+系统累计、主控时区今日、套餐周期、FRP 隧道流量分别展示，不相加。
+SQLite 只保留当前日和当前套餐周期；跨边界覆盖旧值，不保留历史账本。
+
+- 首个有效样本只建立基线。boot、接口、scope 变化或累计回退时重建基线并标记不完整。
+- 同一事务保存基线、今日 RX/TX 和周期 RX/TX；失败整体回滚，下一样本从旧基线继续。
+- 今日按主控 `time.Local` 的日历零点划分，支持夏令时，不固定按 86400 秒划日。
+- 套餐按独立时区每月固定日期重置，日期不存在时取月末；也支持仅手动重置。
+  重置清空周期 RX/TX 和校准差额，保留今日与系统基线。
+- Max 使用整周期累计 RX/TX 的较大值；total 为两者之和，rx/tx 为对应方向。
+  已用量等于原始计费用量加校准差额。管理员输入非负已用值时只重算差额。
+- 套餐修改立即生效；切换计费类型时重算差额以保持已用值，再按新类型继续累计。
+- 跨边界增量按接收时间比例分摊；缺口、重建或估算保留 `partial` 标记。
+
+队列有界，批量写入不阻塞 FRP 转发线程。`Healthy()` 在队列满或写事务失败时返回 false，
+下一次成功的计数器批次可以从持久基线恢复。重启恢复累计，不恢复在线状态。
+流量使用精确整数和十进制字符串，不能把未知数据当成零或服务商账单。
+
+## 可选历史与探测
+
+`historyDataPath` 默认空，历史关闭；填写目录后在主控进程内运行
+VictoriaMetrics `lib/storage`，不启动额外服务或端口。主控配置 `retentionDays` 默认 7，
+允许 1–365；历史目录独立于控制库。历史不可用时实时上报与当前流量记账继续工作。
+历史状态区分 `disabled`、`ready`、`degraded`，无样本保持空值，不补零。
+TSDB 以浮点数保存曲线指标，不能替代 SQLite 的精确套餐账本。实现细节见
+[store/README.md](store/README.md)。
+
+探测完整文档通过管理接口读写，保存到 `settings.probe_json`：
 
 ```json
 {
   "version": 1,
   "nodes": [{
-    "agent_id": "example-node-0001",
+    "agent_id": "1",
     "tasks": [{"id": "public-service", "name": "服务连通性", "target": "probe.example.invalid:443", "interval": 5}]
   }]
 }
 ```
 
-示例目标不可直接运行。每节点最多 64 项，间隔 5–3600 秒，名称是独立公开标签。
-每 2 秒重新读取；增加 `version` 后以完整列表替换，`tasks: []` 清空该节点，省略节点
-同样清空。格式错误、版本回退或同版本改内容保留上一有效列表并标记 degraded。
-重连重新发送当前完整列表；旧版本在途结果丢弃，未知任务/未来版本/重复序号拒绝。
-目标变化后以内部目标摘要隔离历史，不将前一个目标的数据拼接到新目标。
-agent 的本地目标策略始终再次校验解析后的 IP，操作员文件不能绕过客户端的显式授权。
+示例目标不可直接运行。只允许已知节点；每节点最多 64 项，间隔 5–3600 秒。
+修改时递增版本并提交完整列表，空列表清空。旧版本在途结果丢弃，未知任务、未来版本和
+重复序号拒绝。目标变化使用新的内部任务摘要，避免串接不同目标的历史。
+agent 仍会校验解析后的 IP；主控任务配置不能绕过 agent 的目标授权策略。
 
-## 状态、边界与恢复
+## 实时与历史 API
 
-- 同一节点的新连接替换旧连接；连接指针、`session_id` 和严格递增的 `sequence`
-  共同约束当前所有权，旧连接退出不能把新会话标为离线。重复、迟到及错误会话拒绝。
-- WebSocket 文本帧最大 256 KiB；握手 10 秒、读超时 15 秒；每 5 秒独立 ping/pong，
-  与 1–3,600 秒的指标间隔无关。心跳只更新会话接收时间，不伪造新指标。
-- 首次无数据为 `waiting`。新鲜度使用服务端指标接收时间，超过
-  `max(10 秒, 3 × reportIntervalSeconds)` 为 `stale`。监控会话与指标新鲜度、
-  FRP 控制连接状态及运行隧道数分别显示。
-- 上报握手全局限速 20 次/秒、突发 40；同时最多 32 个未完成握手，普通节点每秒
-  2 个应用帧、突发 8；探测连接每秒 40 帧、突发 80。SSE 同时最多 128 个连接，
-  写入超过 5 秒关闭慢消费者。历史查询同时最多 8 个，每请求数据库预算 2 秒。
-- 关闭先取消请求与连接，最多等待 2 秒回收监控 worker；监控失败不会等待网络恢复。
-  同进程不保证 OOM 或所有第三方未恢复 panic 时的数据面存活。
+`GET /api/public/v1/nodes` 返回 `{nodes, generated_at}`；`GET /events/public` 立即及每秒
+发送同结构 `event: snapshot`。API/SSE 使用 `Cache-Control: no-store`。
+隐藏节点不进入公开列表或公开历史接口。
 
-## 公开接口
+公开节点包括会话/新鲜度、硬件摘要、实时指标、`public_note`、`traffic_today` 和按公开
+策略裁剪的 `billing` / `traffic_plan`。费用默认不公开，套餐默认公开。`traffic_today`
+包含 `day/timezone/rx_bytes/tx_bytes/partial`；`traffic_plan` 包含额度、类型、重置设置、
+周期起止、RX/TX、已用与不完整标记。系统累计仍在实时 metrics 中，FRP 流量保留自己的口径。
+`hardware` 只含 `os/arch/virt/cpu_name/cpu_cores/agent_version`，保留质量标记。
 
-`GET /api/public/v1/nodes` 返回 `{nodes: [...], generated_at: ...}`。
-`GET /events/public` 立即发送 `event: snapshot`，之后每秒发送同结构完整快照。
-API/SSE 均 `Cache-Control: no-store`，页面静态资源由 `web.Handler()` 提供安全头。
-没有公开原始 report / Facts 的路由。`hardware` 是独立白名单摘要，仅投影
-`os, arch, virt, cpu_name, cpu_cores, agent_version`，保留质量字段；未收到 Facts
-时为 null。主机名、IP、精确内核和其他身份信息仍不公开。
+公开投影不含私有备注、主机名、IP、精确内核、boot/interface 标识、FRP 身份/目标和凭据。
+实时 uint64 与费用最小单位、流量字节值使用十进制字符串，缺样为 null。
 
-每个节点只有 `id`、`name`、`session`、`freshness`、`last_seen`、`metrics_at`、
-`interval_seconds`、`frp`、`hardware`、`metrics`。时间为服务端 UTC RFC3339，缺样时为 null。
-`frp` 仅含 `control_state`、`proxy_total`、`proxy_running`、`reconciliation`、
-`server_online`（无可信匹配为 null）、`registered`（可信服务端在线代理数）；
-没有名称、关联、目标、服务端注册表明细或隧道流量。
-`metrics` 使用独立 allowlist DTO，明确排除主机名、IP、精确内核、boot ID、iface、
-原始 FRP client ID、用户、代理名称/本地目标及凭据。
+`GET /api/public/v1/nodes/{id}/history?window=1h` 的窗口支持 `1h/6h/24h/7d`，
+对应 1/1/5/30 分钟步长，最多 500 点。返回 storage 状态、样本数、估计覆盖秒数、字段均值，
+以及探测公开标签、延迟、失败率和最新结果；不再从历史接口提供今日流量。
+历史查询最多 8 个并发、请求预算 2 秒，匿名访问仍受节点公开策略约束。
 
-`metrics` 未接收时为 null；收到后包括 `scope`、CPU 百分比、三项 load、内存/
-交换/磁盘总量与用量、网络 byte/s 与原始累计 bytes、uptime 秒、TCP/UDP/进程数。
-每个观测值保留 `{value, quality, reason?}`；所有 uint64 值使用十进制字符串，
-避免浏览器精度损失。实时快照的网络累计只是当前采集口径的原始计数；
-P2 另外提供可跨会话续算、基于有效计数器差分的 UTC 当日统计，与原始累计值分开显示。
+## GitHub 管理登录与 API
 
-`GET /api/public/v1/nodes/{id}/history?window=1h` 提供分钟聚合；window 只允许
-`1h` / `6h` / `24h` / `7d`，分别以 1/1/5/30 分钟步长返回，最多 500 点。
-返回 storage 状态、每桶样本数/估计覆盖秒数、逐字段有效样本平均、当日 traffic，
-以及任务公开标签、成功延迟均值、最新结果和 `0–100` 百分比 TCP 探测失败率。
-没有有效样本为 null；uint 字段平均向下取整后仍用十进制字符串，不经 float64。
-公开投影不含目标、主机标识、路径或凭据；公开接口不能修改任务或数据库。
-管理会话可通过受 CSRF 保护的专用接口修改任务文件。
-历史最多延迟约一分钟，正常 TERM/INT 退出刷新尾批；强制终止可能丢未提交窗口。
-持久化数据不恢复在线状态，重启后必须重新握手。具体存储保证见 [store/README.md](store/README.md)。
+只接受 github.com OAuth；不提供管理员密码或令牌登录，也没有本地管理员表。
+未配置 OAuth 时 `GET /api/admin/v1/auth` 返回 `{provider:"github",enabled:false}`，
+管理读写和 SSE 不开放。配置四项 OAuth 参数后，使用 state、短期 cookie 和 PKCE
+完成授权码交换；只有 `githubAdminUsers` 中的个人账号可创建管理会话。
+GitHub access token 只用于本次身份查询，不持久化，也不发送给浏览器。
 
-## 管理认证与接口
-
-`adminCredentialsFile` 为空时所有管理 API/SSE 返回 404。启用时提供独立 0600 常规文件：
-
-```json
-{"token_sha256": "替换为独立管理令牌编码文本的 SHA256 小写十六进制摘要"}
-```
-
-管理令牌须由 32 个随机字节进行无填充 base64url 编码（43 字符），与节点、FRP、
-原生 Dashboard 凭据分别生成。服务端只保存摘要；登录不接受低熵密码代替此令牌。
-初次加载文件非法时该监控实例初始化失败；已运行时每 2 秒热加载，坏文件保留最近
-有效摘要并报告 `admin_credentials_state: "degraded"`。有效摘要变化撤销全部管理会话。
-
-登录创建服务端内存会话，固定 8 小时过期，重启不会恢复。cookie 名为
-`frp_monitor_admin`，Path=/、HttpOnly、SameSite=Strict，TLS 连接设置 Secure。
-会话令牌与 CSRF 令牌各自随机生成，服务端只保存会话令牌摘要；最多 64 个会话。
-登录全局限速为每 3 秒恢复 1 次、突发 5 次，耗尽返回 429。
-
-所有管理响应 `Cache-Control: no-store`。管理请求检查 Origin（若携带必须精确匹配
-当前 scheme/Host，拒绝跨源 Fetch Metadata）；CLI 可不发送 Origin。登录以外的
-写请求必须带当前会话的 `X-CSRF-Token`。JSON 请求使用 `Content-Type: application/json`，
-最大 1 MiB，拒绝重复、未知、大小写别名字段与不合法 null。错误为简短纯文本和
-HTTP 状态码：未登录 401、同源/CSRF 拒绝 403、无配置/无节点 404、版本冲突 409、
-服务暂不可用 503。不允许跨域 CORS，不复用原生 Dashboard 登录。
+管理会话保存在内存，固定 8 小时过期，最多 64 个；重启需重新登录。
+会话 Cookie 为 `frp_monitor_admin`，Path=/、HttpOnly、SameSite=Strict；OAuth 临时
+Cookie 为 SameSite=Lax，便于回调。写请求检查同源和 `X-CSRF-Token`，JSON 最大 1 MiB，
+拒绝重复、未知、大小写别名字段和非法 null。所有管理响应禁止缓存，不开放 CORS。
 
 | 方法与路径 | 请求 / 结果 |
-| --- | --- |
-| `POST /api/admin/v1/login` | `{token}` → `{csrf_token, expires_at}`，设置会话 cookie |
-| `GET /api/admin/v1/session` | 返回当前 `{csrf_token, expires_at}` |
-| `POST /api/admin/v1/logout` | 使当前会话失效，204；现有管理 SSE 下一次发送前关闭 |
-| `GET /api/admin/v1/nodes` | `{generated_at, nodes, credentials_state, admin_credentials_state, probes_state, frp}` |
-| `GET /events/admin` | 立即及每秒发送同结构的 `event: snapshot` |
-| `POST /api/admin/v1/nodes` | `{name, frp_binding?}` → 201 `{id, name, token}` |
-| `POST /api/admin/v1/nodes/{id}/rotate` | 无正文 → `{id, token}`，旧令牌即刻失效 |
-| `DELETE /api/admin/v1/nodes/{id}` | 撤销节点，204，允许撤销最后节点 |
-| `PUT /api/admin/v1/nodes/{id}/binding` | `{server_id, user, raw_client_id}` → 204 |
-| `DELETE /api/admin/v1/nodes/{id}/binding` | 解除可信绑定，204 |
-| `GET /api/admin/v1/probes` | 返回当前有效 `{version, nodes:[{agent_id,tasks}]}`；未配置文件为 404 |
-| `PUT /api/admin/v1/probes` | 同上完整文档，version 须大于当前版本；200 返回生效文档 |
+|---|---|
+| `GET /api/admin/v1/auth` | 查询 GitHub 登录是否可用 |
+| `GET /api/admin/v1/auth/github` | 跳转 github.com 授权 |
+| `GET /api/admin/v1/auth/github/callback` | 校验回调并建立会话 |
+| `GET /api/admin/v1/session` | 当前登录名、CSRF 与过期时间 |
+| `POST /api/admin/v1/logout` | 注销当前会话 |
+| `GET /api/admin/v1/nodes`、`GET /events/admin` | 节点配置/实时状态、存储状态与私有 FRP 对账 |
+| `POST /api/admin/v1/nodes` | `{name,frp_binding?}`，返回数字 ID 字符串及一次性节点 token |
+| `PATCH /api/admin/v1/nodes/{id}/settings` | 完整可编辑配置、`config_revision`、可选 `traffic_used_bytes` |
+| `POST /api/admin/v1/nodes/{id}/reset-traffic` | `{config_revision}`，重置当前套餐周期 |
+| `POST /api/admin/v1/nodes/{id}/rotate` | 返回新的一次性节点 token |
+| `DELETE /api/admin/v1/nodes/{id}` | 删除节点及其探测配置 |
+| `PUT /api/admin/v1/nodes/{id}/binding` | `{server_id,user,raw_client_id}` |
+| `DELETE /api/admin/v1/nodes/{id}/binding` | 解除可信绑定 |
+| `GET /api/admin/v1/probes` | 当前完整探测文档 |
+| `PUT /api/admin/v1/probes` | 提交版本递增的完整探测文档 |
 
-创建/轮换的明文 token **仅在该响应返回一次**，任何读取接口不返回 token 或摘要。
-配置更新以同目录 0600 临时文件、fsync、原子替换写入；不接受符号链接文件。
-节点管理详情包含公开字段、`frp_summary`、浏览器精度安全的 `facts`、agent 原始 `frp`
-扩展和可信 `frp_binding`；`facts` 中的 uint64 同样转为十进制字符串。
-顶层 `frp` 是独立服务端对账详情，其中包含客户端身份/IP/主机名、代理名称及流量，
-只在管理接口出现。管理界面不提供原生 FRP 代理 CRUD、远程 shell 或自动更新。
+配置和计费修改写入 SQLite，不改外部 JSON 文件。修订冲突返回 409，未知节点 404，
+未登录 401，同源/CSRF 拒绝 403，非法输入 400，存储不可用 503。
+管理 DTO 包含 `settings`、费用/流量和私有 Facts/FRP；公开 API 始终使用独立白名单。
 
 ## FRP 对账与信任边界
 
@@ -200,12 +235,7 @@ FRP 隧道 RX/TX 是服务器侧转发量；主机 RX/TX、探测结果与该值
 
 ## 验证
 
-测试覆盖 TLS 信任校验、凭据权限/认证、能力限制、会话替换、旧连接退出、乱序拒绝、
-状态和新鲜度分离、公开字段裁剪、大整数、SSE 首帧，以及客户端断线后新会话先 Facts
-再最新样本。客户端只保存最新样本、通知队列容量 1，不回补断线期间的 missed ticks；
-指数退避加抖动，401 使用约 60 秒慢重试。采集器异常局部降级，异步首样本与有限关闭
-保证慢采集不阻塞 FRP 启动/退出；操作系统中不可中断的采集调用可能延后 worker 真正退出。
-
-P3 另外覆盖管理身份隔离、Secure cookie、会话过期/节流、CSRF/同源、管理 SSE 退出、
-凭据创建/轮换/最后节点撤销、pending hello 撤销、热加载失败恢复、严格配置 JSON、
-探测版本事务、可信绑定与公开对账裁剪；管理模块和存储模块通过 race 与 vet 检查。
+当前验收命令见 [tests/README.md](../tests/README.md)。核心控制库测试覆盖自增 ID、
+凭据/绑定唯一性、精确大整数、主控时区与 DST、月末/手动重置、校准/计费类型切换、
+基线重建、事务失败恢复和重启；整体验收还需结合 OAuth、Web、历史后端、真实二进制
+与原生 FRP 回归，不能将单个包测试通过视为部署完成。

@@ -1,6 +1,7 @@
 import {UNKNOWN, bytes, capacity, decimal, percent, percentage, ratio, quality, loadText, uptime, timeText, sessionLabels, freshnessLabels, frpLabel, reconciliationText} from "./format.mjs";
 import {select, overview} from "./store.mjs";
 import {connect} from "./transport.mjs";
+import {billingText, todayText, planText} from "./node-settings.mjs";
 import {nodeURL, hardwareText, cpuLabel} from "./node-data.mjs";
 
 const byID = id => document.getElementById(id);
@@ -53,6 +54,11 @@ function patchCard(card, node) {
   const rxTotal = decimal(metric.net_rx_total), txTotal = decimal(metric.net_tx_total);
   text("rx-total", `累计 ${bytes(rxTotal)}`); text("tx-total", `累计 ${bytes(txTotal)}`);
   text("traffic-total", bytes(rxTotal === null || txTotal === null ? null : rxTotal + txTotal));
+  const today = todayText(node.traffic_today), plan = planText(node.traffic_plan);
+  text("today-flow", `↓ ${today.rx} / ↑ ${today.tx}`); text("today-note", today.note);
+  text("plan-flow", `${plan.used} / ${plan.quota}${node.traffic_plan?.partial ? " · 不完整" : ""}`);
+  text("billing", billingText(node.billing)); text("public-note", node.public_note);
+  for (const [section, shown] of [["plan", node.traffic_plan], ["billing", node.billing], ["public-note", node.public_note]]) card.element.querySelector(`[data-section="${section}"]`).hidden = !shown;
   text("load", loadText(metric.load)); text("uptime", uptime(metric.uptime));
   const frp = node.frp;
   text("proxies", frp?.control_state && frp.control_state !== "unknown" && Number.isSafeInteger(frp.proxy_running) && Number.isSafeInteger(frp.proxy_total) ? `${frp.proxy_running} / ${frp.proxy_total}` : UNKNOWN);

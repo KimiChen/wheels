@@ -23,7 +23,7 @@ func TestMonitorConfigurationBoundary(t *testing.T) {
 	if err := a.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	m := MonitorConfig{Enabled: true, CredentialsFile: "credentials.json"}
+	m := MonitorConfig{Enabled: true, DatabaseFile: "control.sqlite"}
 	if err := m.Complete(); err != nil || m.BindAddr != "127.0.0.1" || m.BindPort != 7401 {
 		t.Fatalf("defaults: %v", err)
 	}
@@ -43,19 +43,23 @@ func TestMonitorConfigurationBoundary(t *testing.T) {
 }
 
 func TestHistoryConfiguration(t *testing.T) {
-	c := MonitorConfig{Enabled: true, CredentialsFile: "credentials.json", DatabaseFile: "history.sqlite"}
+	c := MonitorConfig{Enabled: true, DatabaseFile: "control.sqlite", HistoryDataPath: "history"}
 	if err := c.Complete(); err != nil || c.RetentionDays != 7 {
 		t.Fatalf("history defaults: %v", err)
 	}
-	for _, days := range []int{-1, 0, 32} {
+	for _, days := range []int{-1, 0, 366} {
 		c.RetentionDays = days
 		if c.Validate() == nil {
 			t.Fatalf("accepted retention %d", days)
 		}
 	}
 	c.RetentionDays = 7
-	c.ProbeTasksFile = "invalid\x00path"
+	c.HistoryDataPath = ""
+	if err := c.Validate(); err != nil {
+		t.Fatal("empty history path must disable history", err)
+	}
+	c.HistoryDataPath = "invalid\x00path"
 	if c.Validate() == nil {
-		t.Fatal("accepted invalid probe path")
+		t.Fatal("accepted invalid history path")
 	}
 }

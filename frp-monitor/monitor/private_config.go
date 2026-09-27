@@ -2,11 +2,11 @@ package monitor
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"os"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"time"
@@ -41,16 +41,24 @@ func strictJSON(data []byte, target any) error {
 				return errors.New("expected object")
 			}
 			fields := map[string]reflect.Type{}
-			for i := 0; i < t.NumField(); i++ {
-				f := t.Field(i)
-				key := strings.Split(f.Tag.Get("json"), ",")[0]
-				if key != "-" {
-					if key == "" {
-						key = f.Name
+			var addFields func(reflect.Type)
+			addFields = func(typ reflect.Type) {
+				for i := 0; i < typ.NumField(); i++ {
+					f := typ.Field(i)
+					if f.Anonymous && f.Type.Kind() == reflect.Struct {
+						addFields(f.Type)
+						continue
 					}
-					fields[key] = f.Type
+					key := strings.Split(f.Tag.Get("json"), ",")[0]
+					if key != "-" {
+						if key == "" {
+							key = f.Name
+						}
+						fields[key] = f.Type
+					}
 				}
 			}
+			addFields(t)
 			seen := map[string]bool{}
 			for d.More() {
 				key, err := d.Token()
@@ -123,56 +131,6 @@ func readPrivate(path string) ([]byte, error) {
 	return data, nil
 }
 
-// Write a complete 0600 replacement on the same filesystem, then fsync its parent.
-// Existing files must remain regular private files; symlink replacement is refused.
-func writePrivate(path string, value any) error {
-	data, err := json.MarshalIndent(value, "", "  ")
-	if err != nil {
-		return err
-	}
-	data = append(data, '\n')
-	if len(data) > 1024*1024 {
-		return errors.New("configuration too large")
-	}
-	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 {
-		return errors.New("private file unavailable")
-	}
-	parent := filepath.Dir(path)
-	f, err := os.CreateTemp(parent, ".monitor-config-*")
-	if err != nil {
-		return err
-	}
-	name := f.Name()
-	defer os.Remove(name)
-	if err = f.Chmod(0600); err == nil {
-		_, err = f.Write(data)
-	}
-	if err == nil {
-		err = f.Sync()
-	}
-	closeErr := f.Close()
-	if err == nil {
-		err = closeErr
-	}
-	if err != nil {
-		return err
-	}
-	current, err := os.Lstat(path)
-	if err != nil || !os.SameFile(info, current) {
-		return errors.New("configuration changed concurrently")
-	}
-	if err = os.Rename(name, path); err != nil {
-		return err
-	}
-	dir, err := os.Open(parent)
-	if err != nil {
-		return err
-	}
-	defer dir.Close()
-	return dir.Sync()
-}
-
 // Caller holds configMu. An unchanged credential preserves the latest snapshot;
 // token rotation clears it and closes every socket, including pending hellos.
 func (s *Service) applyCredentials(creds []credential) {
@@ -201,10 +159,9 @@ func (s *Service) applyCredentials(creds []credential) {
 	s.publishSnapshot(time.Now())
 }
 func (s *Service) reloadCredentials() {
-	creds, err := readCredentials(s.cfg.CredentialsFile)
-	if err != nil {
+	ctx, cancel := context.WithTimeout(s.ctx, 2*time.Second)
+	defer cancel()
+	if s.refreshNodes(ctx) != nil {
 		s.credentialError.Store(true)
-		return
 	}
-	s.applyCredentials(creds)
 }

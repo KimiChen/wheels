@@ -4,12 +4,13 @@ import {nodeID, nodeURL, hardwareValue, hardwareText, cpuCores, cpuLabel, cpuMod
 import {diskPercent, resourceCharts, chart} from "../src/history-data.mjs";
 
 const ok = value => ({quality: "ok", value});
-test("node links and direct paths accept only public node identities", () => {
-  assert.equal(nodeURL("node_test-001"), "/node/node_test-001");
-  assert.equal(nodeID("/node/node_test-001/"), "node_test-001");
-  assert.equal(nodeID("/node/%6eode_test-001"), "node_test-001");
-  for (const id of ["short", "../private", "test/node", "a".repeat(129), "<script>", "node id_1", null]) assert.equal(nodeURL(id), null);
-  for (const path of ["/node/node_001/other", "/node/node%2f001", "/node/%E0%A4%A", "/admin/node_001", "/node/../node_001"]) assert.equal(nodeID(path), null);
+test("node links and direct paths accept only positive SQLite integer identities", () => {
+  assert.equal(nodeURL("1"), "/node/1");
+  assert.equal(nodeURL("9223372036854775807"), "/node/9223372036854775807");
+  assert.equal(nodeID("/node/123/"), "123");
+  assert.equal(nodeID("/node/%31"), "1");
+  for (const id of ["0", "01", "-1", "1.1", "9223372036854775808", "node_test-001", "../private", "test/node", "<script>", null, 1]) assert.equal(nodeURL(id), null);
+  for (const path of ["/node/1/other", "/node/1%2f2", "/node/%E0%A4%A", "/admin/1", "/node/../1"]) assert.equal(nodeID(path), null);
 });
 test("hardware display projects only known fields and quality-ok values", () => {
   const hardware = {os: ok("Linux"), arch: ok("amd64"), virt: ok("kvm"), cpu_name: ok("Example CPU"), cpu_cores: ok(8), hostname: ok("private-host"), kernel: ok("private-kernel"), agent_version: ok("test")};

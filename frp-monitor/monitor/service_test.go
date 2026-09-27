@@ -3,9 +3,7 @@ package monitor
 import (
 	"bufio"
 	"context"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"os"
@@ -14,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fatedier/frp/extension/frpmonitor/monitor/control"
 	"github.com/fatedier/frp/extension/frpmonitor/shared"
 	"github.com/gorilla/websocket"
 )
@@ -21,13 +20,8 @@ import (
 func testMonitor(t *testing.T) (*Service, string) {
 	t.Helper()
 	token := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
-	digest := sha256.Sum256([]byte(token))
-	path := filepath.Join(t.TempDir(), "credentials.json")
-	data, _ := json.Marshal([]credential{{"test-node-1", "Test node", hex.EncodeToString(digest[:]), nil}})
-	if err := os.WriteFile(path, data, 0600); err != nil {
-		t.Fatal(err)
-	}
-	s, err := Start(context.Background(), shared.MonitorConfig{Enabled: true, BindAddr: "127.0.0.1", ServerID: "example", CredentialsFile: path, ReportIntervalSeconds: 1})
+	cfg := testControlConfig(t, "Test node", token)
+	s, err := Start(context.Background(), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +129,7 @@ func TestSessionOwnershipSequenceAndRedaction(t *testing.T) {
 	}
 	r.SessionID = "session-second"
 	send(t, second, "report", "", r)
-	eventually(t, func() bool { s.mu.Lock(); defer s.mu.Unlock(); return s.nodes["test-node-1"].sequence == 2 })
+	eventually(t, func() bool { s.mu.Lock(); defer s.mu.Unlock(); return s.nodes["1"].sequence == 2 })
 	data, _ := json.Marshal(s.snapshot(time.Now()))
 	for _, secret := range []string{"hostname", "ipv4", "ipv6", "kernel", "boot_id", "iface", "raw_client_id", "local_target", "example-client", "example-node", "example-boot-id", "token"} {
 		if strings.Contains(string(data), secret) {
@@ -218,19 +212,42 @@ func TestPublicAPIAndImmediateSSE(t *testing.T) {
 		t.Fatal("missing immediate snapshot", line, err)
 	}
 }
-func TestCredentialBoundsAndPermissions(t *testing.T) {
-	s, _ := testMonitor(t)
-	path := s.cfg.CredentialsFile
-	if err := os.Chmod(path, 0644); err != nil {
+func testControlConfig(t *testing.T, name, token string) shared.MonitorConfig {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := readCredentials(path); err == nil {
-		t.Fatal("permissive credential accepted")
+	if err = os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
 	}
-	os.Chmod(path, 0600)
-	os.WriteFile(path, []byte(`[{"agent_id":"test-node-1","name":"x","token_sha256":"bad"}]`), 0600)
-	if _, err := readCredentials(path); err == nil {
-		t.Fatal("bad digest accepted")
+	path := filepath.Join(dir, "control.sqlite")
+	db, err := control.Open(control.Config{Path: path, ReportInterval: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.CreateNode(context.Background(), control.DefaultNodeConfig(name), tokenHash(token), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return shared.MonitorConfig{Enabled: true, BindAddr: "127.0.0.1", ServerID: "example", ReportIntervalSeconds: 1, DatabaseFile: path}
+}
+func TestControlDatabaseRequiredAndPrivate(t *testing.T) {
+	token, _ := randomToken()
+	cfg := testControlConfig(t, "A", token)
+	if err := os.Chmod(cfg.DatabaseFile, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if svc, err := Start(context.Background(), cfg); err == nil {
+		svc.Close()
+		t.Fatal("public database accepted")
+	}
+	cfg.DatabaseFile = ""
+	if _, err := Start(context.Background(), cfg); err == nil {
+		t.Fatal("missing control database accepted")
 	}
 }
 func TestCloseTerminatesOpenSession(t *testing.T) {

@@ -1,10 +1,11 @@
-// Package store keeps bounded, asynchronous minute aggregates and traffic counters.
-// It never persists connection or online state.
+// Package store provides optional embedded VictoriaMetrics history.
+// It never owns business traffic counters, connection state or online state.
 package store
 
 import "time"
 
 type Config struct {
+	// Path is a dedicated private directory, not a SQLite database file.
 	Path           string
 	RetentionDays  int
 	ReportInterval time.Duration

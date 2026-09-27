@@ -1,13 +1,13 @@
 package monitor
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,64 +16,41 @@ import (
 	"sync"
 	"time"
 
+	"github.com/fatedier/frp/extension/frpmonitor/monitor/control"
 	"github.com/fatedier/frp/extension/frpmonitor/shared"
 )
 
 const adminCookie = "frp_monitor_admin"
 const adminTTL = 8 * time.Hour
 
-type adminCredential struct {
-	TokenSHA256 string `json:"token_sha256"`
-}
 type adminSession struct {
 	CSRF      string    `json:"csrf_token"`
 	ExpiresAt time.Time `json:"expires_at"`
+	Login     string    `json:"login"`
 }
 type adminState struct {
 	mu       sync.Mutex
-	digest   string
 	sessions map[string]adminSession
 	tokens   float64
 	at       time.Time
-	degraded bool
+	github   *githubAuth
 }
 
-func readAdmin(path string) (string, error) {
-	data, err := readPrivate(path)
-	if err != nil {
-		return "", err
-	}
-	var cfg adminCredential
-	if strictJSON(data, &cfg) != nil || !digestPattern.MatchString(cfg.TokenSHA256) {
-		return "", errors.New("invalid admin credentials")
-	}
-	return cfg.TokenSHA256, nil
-}
-func newAdmin(path string) (*adminState, error) {
-	digest, err := readAdmin(path)
-	if err != nil {
-		return nil, errors.New("admin credentials unavailable")
-	}
-	return &adminState{digest: digest, sessions: map[string]adminSession{}, tokens: 5, at: time.Now()}, nil
-}
 func (s *Service) reloadAdmin() {
 	if s.admin == nil {
 		return
 	}
-	digest, err := readAdmin(s.cfg.AdminCredentialsFile)
 	s.admin.mu.Lock()
 	defer s.admin.mu.Unlock()
-	s.admin.degraded = err != nil
-	if err != nil {
-		return
-	}
-	if digest != s.admin.digest {
-		s.admin.digest = digest
-		s.admin.sessions = map[string]adminSession{}
-	}
+	now := time.Now()
 	for id, session := range s.admin.sessions {
-		if !time.Now().Before(session.ExpiresAt) {
+		if !now.Before(session.ExpiresAt) {
 			delete(s.admin.sessions, id)
+		}
+	}
+	for id, attempt := range s.admin.github.pending {
+		if !now.Before(attempt.expires) {
+			delete(s.admin.github.pending, id)
 		}
 	}
 }
@@ -89,10 +66,6 @@ func tokenHash(value string) string {
 	return hex.EncodeToString(digest[:])
 }
 func equalToken(a, b string) bool { return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1 }
-func validAdminToken(token string) bool {
-	raw, err := base64.RawURLEncoding.DecodeString(token)
-	return err == nil && len(raw) == 32
-}
 
 func sameOrigin(r *http.Request) bool {
 	if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" && site != "none" {
@@ -152,17 +125,29 @@ func (s *Service) handleAdmin(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(5 * time.Second))
 	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(10 * time.Second))
-	if s.admin == nil {
+	path := strings.TrimPrefix(r.URL.Path, "/api/admin/v1/")
+	if path == "auth" {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(405)
+			return
+		}
+		adminJSON(w, 200, map[string]any{"provider": "github", "enabled": s.admin != nil})
+		return
+	}
+	if s.admin == nil || path == "login" {
 		http.NotFound(w, r)
 		return
 	}
-	if !sameOrigin(r) {
-		http.Error(w, "same origin required", http.StatusForbidden)
+	if path == "auth/github" {
+		s.githubStart(w, r)
 		return
 	}
-	path := strings.TrimPrefix(r.URL.Path, "/api/admin/v1/")
-	if path == "login" {
-		s.handleLogin(w, r)
+	if path == "auth/github/callback" {
+		s.githubCallback(w, r)
+		return
+	}
+	if !s.adminSameOrigin(r) {
+		http.Error(w, "same origin required", http.StatusForbidden)
 		return
 	}
 	session, key, ok := s.session(r)
@@ -189,7 +174,7 @@ func (s *Service) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		s.admin.mu.Lock()
 		delete(s.admin.sessions, key)
 		s.admin.mu.Unlock()
-		http.SetCookie(w, &http.Cookie{Name: adminCookie, Path: "/", MaxAge: -1, Secure: r.TLS != nil, HttpOnly: true, SameSite: http.SameSiteStrictMode})
+		http.SetCookie(w, &http.Cookie{Name: adminCookie, Path: "/", MaxAge: -1, Secure: s.secureAdminCookie(r), HttpOnly: true, SameSite: http.SameSiteStrictMode})
 		w.WriteHeader(204)
 	case "nodes":
 		if r.Method == http.MethodGet {
@@ -211,67 +196,6 @@ func (s *Service) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 	}
 }
-func (s *Service) handleLogin(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		w.WriteHeader(405)
-		return
-	}
-	a := s.admin
-	a.mu.Lock()
-	now := time.Now()
-	a.tokens += now.Sub(a.at).Seconds() / 3
-	if a.tokens > 5 {
-		a.tokens = 5
-	}
-	a.at = now
-	if a.tokens < 1 {
-		a.mu.Unlock()
-		w.Header().Set("Retry-After", "3")
-		http.Error(w, "try later", 429)
-		return
-	}
-	a.tokens--
-	a.mu.Unlock()
-	var input struct {
-		Token string `json:"token"`
-	}
-	if !decodeAdmin(w, r, &input) {
-		return
-	}
-	sessionToken, err := randomToken()
-	if err != nil {
-		http.Error(w, "unavailable", 503)
-		return
-	}
-	csrf, err := randomToken()
-	if err != nil {
-		http.Error(w, "unavailable", 503)
-		return
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if !validAdminToken(input.Token) || !equalToken(tokenHash(input.Token), a.digest) {
-		http.Error(w, "unauthorized", 401)
-		return
-	}
-	for id, session := range a.sessions {
-		if !now.Before(session.ExpiresAt) {
-			delete(a.sessions, id)
-		}
-	}
-	// Login replaces this browser's existing session, preventing fixation and leaks.
-	if old, err := r.Cookie(adminCookie); err == nil {
-		delete(a.sessions, tokenHash(old.Value))
-	}
-	if len(a.sessions) >= 64 {
-		http.Error(w, "session limit", 503)
-		return
-	}
-	session := adminSession{CSRF: csrf, ExpiresAt: now.Add(adminTTL)}
-	a.sessions[tokenHash(sessionToken)] = session
-	http.SetCookie(w, &http.Cookie{Name: adminCookie, Value: sessionToken, Path: "/", Expires: session.ExpiresAt, MaxAge: int(adminTTL.Seconds()), Secure: r.TLS != nil, HttpOnly: true, SameSite: http.SameSiteStrictMode})
-	adminJSON(w, 200, session)
-}
 
 type adminNode struct {
 	ID              string               `json:"id"`
@@ -286,6 +210,10 @@ type adminNode struct {
 	Facts           *shared.BrowserFacts `json:"facts"`
 	FRP             *shared.FRP          `json:"frp"`
 	FRPBinding      *shared.FRPBinding   `json:"frp_binding"`
+	Settings        *nodeSettings        `json:"settings"`
+	Billing         *nodeBilling         `json:"billing"`
+	TrafficToday    *nodeToday           `json:"traffic_today"`
+	TrafficPlan     *nodePlan            `json:"traffic_plan"`
 }
 type adminSnapshot struct {
 	GeneratedAt           time.Time      `json:"generated_at"`
@@ -297,23 +225,18 @@ type adminSnapshot struct {
 }
 
 func (s *Service) adminSnapshot() adminSnapshot {
+	// Settings/revision and billing/usage must describe the same configuration.
+	// Otherwise an editor could submit old calibrated usage with a newer revision.
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
 	now := time.Now()
-	public := s.snapshot(now)
+	public := s.snapshotFor(now, true)
 	out := adminSnapshot{GeneratedAt: now.UTC(), Nodes: []adminNode{}, CredentialsState: "ready", AdminCredentialsState: "ready", ProbesState: "ready"}
-	if s.cfg.ProbeTasksFile == "" {
-		out.ProbesState = "disabled"
-	} else if s.taskError.Load() {
+	if s.taskError.Load() {
 		out.ProbesState = "degraded"
 	}
 	if s.credentialError.Load() {
 		out.CredentialsState = "degraded"
-	}
-	if s.admin != nil {
-		s.admin.mu.Lock()
-		if s.admin.degraded {
-			out.AdminCredentialsState = "degraded"
-		}
-		s.admin.mu.Unlock()
 	}
 	reconcile := make([]ReconcileNode, 0, len(public.Nodes))
 	s.mu.Lock()
@@ -329,7 +252,13 @@ func (s *Service) adminSnapshot() adminSnapshot {
 				facts = &b
 			}
 		}
-		out.Nodes = append(out.Nodes, adminNode{p.ID, p.Name, p.Session, p.Freshness, p.LastSeen, p.MetricsAt, p.IntervalSeconds, p.Metrics, p.FRP, facts, n.frp, n.credential.FRPBinding})
+		row := adminNode{ID: p.ID, Name: p.Name, Session: p.Session, Freshness: p.Freshness, LastSeen: p.LastSeen, MetricsAt: p.MetricsAt, IntervalSeconds: p.IntervalSeconds, Metrics: p.Metrics, FRPSummary: p.FRP, Facts: facts, FRP: n.frp, FRPBinding: n.credential.FRPBinding, Billing: p.Billing, TrafficToday: p.TrafficToday, TrafficPlan: p.TrafficPlan}
+		if configs := s.configs.Load(); configs != nil {
+			if config := (*configs)[p.ID]; config != nil {
+				row.Settings = &nodeSettings{config.NodeConfig, config.ConfigRevision}
+			}
+		}
+		out.Nodes = append(out.Nodes, row)
 		reconcile = append(reconcile, ReconcileNode{ID: p.ID, Binding: n.credential.FRPBinding, Report: n.frp, Fresh: n.conn != nil && p.Freshness == "fresh"})
 	}
 	s.mu.Unlock()
@@ -351,11 +280,6 @@ func (s *Service) createNode(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid node", 400)
 		return
 	}
-	id, err := randomToken()
-	if err != nil {
-		http.Error(w, "unavailable", 503)
-		return
-	}
 	token, err := randomToken()
 	if err != nil {
 		http.Error(w, "unavailable", 503)
@@ -363,22 +287,25 @@ func (s *Service) createNode(w http.ResponseWriter, r *http.Request) {
 	}
 	s.configMu.Lock()
 	defer s.configMu.Unlock()
-	creds, err := readCredentials(s.cfg.CredentialsFile)
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+	nodes, err := s.control.Nodes(ctx)
 	if err != nil {
-		http.Error(w, "credentials unavailable", 503)
+		controlError(w, r, err)
 		return
 	}
-	if len(creds) >= maxNodes {
+	if len(nodes) >= maxNodes {
 		http.Error(w, "node limit", 409)
 		return
 	}
-	creds = append(creds, credential{AgentID: id, Name: input.Name, TokenSHA256: tokenHash(token), FRPBinding: input.FRPBinding})
-	if writePrivate(s.cfg.CredentialsFile, creds) != nil {
-		http.Error(w, "credentials unavailable", 503)
+	created, err := s.control.CreateNode(ctx, control.DefaultNodeConfig(input.Name), tokenHash(token), bindingToControl(input.FRPBinding))
+	if err != nil {
+		s.controlWriteError(w, r, err)
 		return
 	}
-	s.applyCredentials(creds)
-	adminJSON(w, 201, map[string]string{"id": id, "name": input.Name, "token": token})
+	s.refreshCommitted(ctx)
+	adminJSON(w, 201, map[string]string{"id": created.ID, "name": created.Name, "token": token})
+
 }
 func (s *Service) mutateNode(w http.ResponseWriter, r *http.Request, path string) {
 	parts := strings.Split(path, "/")
@@ -390,6 +317,10 @@ func (s *Service) mutateNode(w http.ResponseWriter, r *http.Request, path string
 	action := ""
 	if len(parts) == 2 {
 		action = parts[1]
+	}
+	if action == "settings" || action == "reset-traffic" {
+		s.updateSettings(w, r, id, action == "reset-traffic")
+		return
 	}
 	if !(action == "" && r.Method == http.MethodDelete || action == "rotate" && r.Method == http.MethodPost || action == "binding" && (r.Method == http.MethodPut || r.Method == http.MethodDelete)) {
 		w.WriteHeader(405)
@@ -417,46 +348,37 @@ func (s *Service) mutateNode(w http.ResponseWriter, r *http.Request, path string
 	}
 	s.configMu.Lock()
 	defer s.configMu.Unlock()
-	creds, err := readCredentials(s.cfg.CredentialsFile)
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+	current, err := s.control.Get(ctx, id)
 	if err != nil {
-		http.Error(w, "credentials unavailable", 503)
-		return
-	}
-	index := -1
-	for i, c := range creds {
-		if c.AgentID == id {
-			index = i
-			break
-		}
-	}
-	if index < 0 {
-		http.NotFound(w, r)
+		controlError(w, r, err)
 		return
 	}
 	switch action {
 	case "":
-		creds = append(creds[:index], creds[index+1:]...)
+		err = s.control.DeleteNode(ctx, id)
 	case "rotate":
-		creds[index].TokenSHA256 = tokenHash(token)
+		err = s.control.RotateToken(ctx, id, tokenHash(token))
 	case "binding":
-		creds[index].FRPBinding = binding
+		err = s.control.SetBinding(ctx, id, bindingToControl(binding), current.ConfigRevision)
 	}
-	if writePrivate(s.cfg.CredentialsFile, creds) != nil {
-		http.Error(w, "credentials unavailable", 503)
+	if err != nil {
+		s.controlWriteError(w, r, err)
 		return
 	}
-	s.applyCredentials(creds)
+	s.refreshCommitted(ctx)
+	if action == "" {
+		s.reloadTasks()
+	}
 	if action == "rotate" {
 		adminJSON(w, 200, map[string]string{"id": id, "token": token})
 		return
 	}
 	w.WriteHeader(204)
 }
+
 func (s *Service) handleAdminProbes(w http.ResponseWriter, r *http.Request) {
-	if s.cfg.ProbeTasksFile == "" {
-		http.NotFound(w, r)
-		return
-	}
 	if r.Method != http.MethodGet && r.Method != http.MethodPut {
 		w.WriteHeader(405)
 		return
@@ -477,8 +399,15 @@ func (s *Service) handleAdminProbes(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "increase version", 409)
 			return
 		}
-		if writePrivate(s.cfg.ProbeTasksFile, input) != nil {
+		data, marshalErr := json.Marshal(input)
+		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+		defer cancel()
+		if marshalErr != nil {
 			http.Error(w, "probe configuration unavailable", 503)
+			return
+		}
+		if err := s.control.WriteProbes(ctx, data); err != nil {
+			s.controlWriteError(w, r, err)
 			return
 		}
 		s.tasks.Store(next)
@@ -498,7 +427,7 @@ func (s *Service) handleAdminEvents(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(405)
 		return
 	}
-	if !sameOrigin(r) {
+	if !s.adminSameOrigin(r) {
 		http.Error(w, "same origin required", 403)
 		return
 	}

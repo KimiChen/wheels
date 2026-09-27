@@ -21,15 +21,15 @@ import time
 import tomllib
 from urllib.parse import urlsplit
 
-from local import private, settings
+from local import private, settings, control_database, github_config, _history_directory
 
-FILES = frozenset(('server.toml', 'agent.toml', 'credentials.json', 'admin.json', 'admin.token',
-                   'frp.token', 'agent.token', 'local.crt', 'local.key', 'tls.crt', 'tls.key',
-                   'ca.crt', 'probes.json', 'local.json', 'installation.json', 'history.sqlite'))
+FILES = frozenset(('server.toml', 'agent.toml', 'github.secret', 'frp.token', 'agent.token',
+                   'local.crt', 'local.key', 'tls.crt', 'tls.key', 'ca.crt', 'local.json',
+                   'installation.json', 'control.sqlite'))
 MAX_FILE = 1024 * 1024 * 1024
 MAX_TOTAL = 2 * MAX_FILE
-PATH_KEYS = frozenset(('path', 'tokenFile', 'caFile', 'certFile', 'keyFile', 'credentialsFile',
-                       'adminCredentialsFile', 'databaseFile', 'probeTasksFile'))
+PATH_KEYS = frozenset(('path', 'tokenFile', 'caFile', 'certFile', 'keyFile',
+                       'githubClientSecretFile', 'databaseFile', 'historyDataPath'))
 
 
 def path_without_links(value):
@@ -88,12 +88,9 @@ def server_init(args):
     cert = read_private(path_without_links(args.tls_cert))
     key = read_private(path_without_links(args.tls_key))
     def write(stage, final):
-        admin = secrets.token_urlsafe(32)
-        private(stage / 'admin.token', admin + '\n')
-        private(stage / 'admin.json', json.dumps({'token_sha256': hashlib.sha256(admin.encode()).hexdigest()}) + '\n')
         private(stage / 'frp.token', secrets.token_hex(32) + '\n')
-        private(stage / 'credentials.json', '[]\n')
-        private(stage / 'probes.json', '{"version":1,"nodes":[]}\n')
+        control_database(stage / 'control.sqlite')
+        oauth = github_config(config, stage, final)
         private(stage / 'tls.crt', cert.decode('utf-8'))
         private(stage / 'tls.key', key.decode('utf-8'))
         # Verify the exact bytes being installed, even if a certificate renewal
@@ -104,10 +101,10 @@ def server_init(args):
         private(stage / 'server.toml', f'bindAddr = {json.dumps(address)}\nbindPort = {config["FRP_SERVER_PORT"]}\n'
                 f'auth.method = "token"\nauth.tokenSource.type = "file"\nauth.tokenSource.file.path = {q("frp.token")}\n'
                 f'\n[monitor]\nenabled = true\nbindAddr = {json.dumps(address)}\nbindPort = {config["FRP_MONITOR_PORT"]}\nserverID = {server_id}\n'
-                f'certFile = {q("tls.crt")}\nkeyFile = {q("tls.key")}\ncredentialsFile = {q("credentials.json")}\n'
-                f'adminCredentialsFile = {q("admin.json")}\nprobeTasksFile = {q("probes.json")}\ndatabaseFile = {q("history.sqlite")}\n'
-                f'retentionDays = {config["FRP_MONITOR_RETENTION_DAYS"]}\nreportIntervalSeconds = {config["FRP_MONITOR_INTERVAL_SECONDS"]}\n')
-        private(stage / 'installation.json', '{"format":1,"roles":["server"]}\n')
+                f'certFile = {q("tls.crt")}\nkeyFile = {q("tls.key")}\ndatabaseFile = {q("control.sqlite")}\n'
+                f'historyDataPath = {json.dumps(_history_directory(config["FRP_MONITOR_HISTORY_DATA_PATH"], final))}\n'
+                f'retentionDays = {config["FRP_MONITOR_RETENTION_DAYS"]}\nreportIntervalSeconds = {config["FRP_MONITOR_INTERVAL_SECONDS"]}\n' + oauth)
+        private(stage / 'installation.json', '{"format":2,"roles":["server"]}\n')
     return new_directory(args.directory, write)
 
 
@@ -142,7 +139,7 @@ def agent_init(args):
                 + (f'caFile = {q("ca.crt")}\n' if ca else ''))
         if ca:
             private(stage / 'ca.crt', ca.decode('utf-8'))
-        private(stage / 'installation.json', '{"format":1,"roles":["agent"]}\n')
+        private(stage / 'installation.json', '{"format":2,"roles":["agent"]}\n')
     if args.allow_private_probes and not args.probes:
         raise ValueError('--allow-private-probes requires --probes')
     return new_directory(args.directory, write)
@@ -154,11 +151,11 @@ def managed_files(folder, reference_directory=None):
     if not isinstance(metadata, dict):
         raise ValueError('invalid installation metadata')
     roles = metadata.get('roles')
-    if (metadata.get('format') != 1 or not isinstance(roles, list) or not roles
+    if (metadata.get('format') != 2 or not isinstance(roles, list) or not roles
             or any(role not in ('server', 'agent') for role in roles)):
         raise ValueError('requires configuration created by local.py or ops.py')
     files = {}
-    for name in sorted(FILES - {'history.sqlite'}):
+    for name in sorted(FILES - {'control.sqlite'}):
         path = folder / name
         if path.exists() or path.is_symlink():
             files[name] = read_private(path)
@@ -170,9 +167,13 @@ def managed_files(folder, reference_directory=None):
                     raise ValueError('backup does not support external includes')
                 if key in PATH_KEYS and isinstance(item, str) and item:
                     path = Path(item)
+                    if key == 'historyDataPath':
+                        history = Path(_history_directory(item, reference_directory, check_files=False))
+                        _history_directory(str(folder / history.relative_to(reference_directory)), folder)
+                        continue
                     if path.parent != reference_directory or path.name not in FILES:
                         raise ValueError('backup requires all runtime file references inside its directory')
-                    if path.name != 'history.sqlite' and path.name not in files:
+                    if path.name != 'control.sqlite' and path.name not in files:
                         raise ValueError('referenced private file is missing')
                 check(item)
         elif isinstance(value, list):
@@ -180,6 +181,8 @@ def managed_files(folder, reference_directory=None):
                 check(item)
     for role in roles:
         check(tomllib.loads(files[role + '.toml'].decode('utf-8')))
+    if 'server' in roles and not (folder / 'control.sqlite').is_file():
+        raise ValueError('control database is required for server installations')
     return files
 
 
@@ -228,6 +231,11 @@ def remap_paths(text, old, final):
     names = '|'.join(sorted(PATH_KEYS))
     assignment = re.compile(r'^(\s*(?:[A-Za-z0-9_-]+\.)*(?:' + names + r')\s*=\s*)("(?:[^"\\]|\\.)*")(\s*(?:#.*)?)$')
     replacements = {str(Path(old) / name): str(final / name) for name in FILES}
+    document = tomllib.loads(text)
+    history = document.get('monitor', {}).get('historyDataPath', '')
+    if history:
+        history = Path(_history_directory(history, Path(old), check_files=False))
+        replacements[str(history)] = str(final / history.relative_to(old))
     lines = []
     for line in text.splitlines(keepends=True):
         ending = '\n' if line.endswith('\n') else ''
@@ -261,12 +269,12 @@ def backup(directory, output):
     files = managed_files(folder)
     with tempfile.TemporaryDirectory(prefix='.frp-backup-', dir=output.parent) as temporary:
         temporary = Path(temporary)
-        if (folder / 'history.sqlite').exists() or (folder / 'history.sqlite').is_symlink():
-            database_snapshot(folder / 'history.sqlite', temporary / 'history.sqlite')
-        manifest = {'format': 1, 'original_directory': str(folder), 'created_at': int(time.time()), 'sha256': {}}
+        if (folder / 'control.sqlite').exists() or (folder / 'control.sqlite').is_symlink():
+            database_snapshot(folder / 'control.sqlite', temporary / 'control.sqlite')
+        manifest = {'format': 2, 'original_directory': str(folder), 'created_at': int(time.time()), 'sha256': {}}
         payload = {**files}
-        if (temporary / 'history.sqlite').exists():
-            payload['history.sqlite'] = temporary / 'history.sqlite'
+        if (temporary / 'control.sqlite').exists():
+            payload['control.sqlite'] = temporary / 'control.sqlite'
         staged = temporary / 'backup.tar.gz'
         private(staged, '')
         with tarfile.open(staged, 'w:gz') as archive:
@@ -311,7 +319,7 @@ def restore(archive_path, directory):
                         or member.size > MAX_FILE or total > MAX_TOTAL):
                     raise ValueError('invalid backup inventory')
                 names.add(member.name)
-                if member.name != 'history.sqlite' and member.size > 1024 * 1024:
+                if member.name != 'control.sqlite' and member.size > 1024 * 1024:
                     raise ValueError('configuration exceeds size limit')
                 with archive.extractfile(member) as source:
                     dest = os.open(stage / member.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -322,17 +330,19 @@ def restore(archive_path, directory):
             raise ValueError('invalid backup manifest')
         hashes = manifest.get('sha256')
         old = manifest.get('original_directory')
-        if (manifest.get('format') != 1 or not isinstance(old, str) or not Path(old).is_absolute()
+        if (manifest.get('format') != 2 or not isinstance(old, str) or not Path(old).is_absolute()
                 or not isinstance(hashes, dict) or set(hashes) != names - {'BACKUP.json'}):
             raise ValueError('invalid backup manifest')
         for name, expected in hashes.items():
             with (stage / name).open('rb') as source:
                 if hashlib.file_digest(source, 'sha256').hexdigest() != expected:
                     raise ValueError('backup checksum mismatch')
-        db = stage / 'history.sqlite'
+        db = stage / 'control.sqlite'
         if db.exists():
             with closing(sqlite3.connect(db.as_uri() + '?mode=ro', uri=True)) as connection:
                 integrity_check(connection, time.monotonic() + 30)
+                if connection.execute('PRAGMA application_id').fetchone() != (1179798836,) or connection.execute('PRAGMA user_version').fetchone() != (4,):
+                    raise ValueError('unsupported control database schema')
         # Generated TOML uses JSON-compatible quoted strings for file paths.
         for name in ('server.toml', 'agent.toml'):
             path = stage / name

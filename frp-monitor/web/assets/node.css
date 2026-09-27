@@ -98,3 +98,5 @@
 }
 @media (max-width: 390px) { .fm-node-overview { grid-template-columns: minmax(0,1fr); } .fm-node-info { min-height: auto; } }
 @media (forced-colors: active) { .fm-history-tab[aria-pressed="true"], .fm-history-range[aria-pressed="true"] { border-color: Highlight; } }
+
+.fm-node-public-note { color: var(--muted); font-size: 12px; line-height: 1.8; white-space: pre-wrap; overflow-wrap: anywhere; }

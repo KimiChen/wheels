@@ -3,9 +3,11 @@ package monitor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,26 +18,49 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+func githubFixtureClient(login string) *http.Client {
+	return &http.Client{Timeout: time.Second, Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		body := `{"access_token":"github-test","token_type":"bearer"}`
+		switch r.URL.String() {
+		case "https://github.com/login/oauth/access_token":
+			if r.Method != "POST" || r.ParseForm() != nil || r.Form.Get("code_verifier") == "" {
+				return nil, errors.New("missing PKCE")
+			}
+		case "https://api.github.com/user":
+			if r.Header.Get("Authorization") != "Bearer github-test" {
+				return nil, errors.New("missing authorization")
+			}
+			body = `{"login":"` + login + `","id":42,"type":"User"}`
+		default:
+			return nil, errors.New("unexpected OAuth endpoint")
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body)), Header: http.Header{}}, nil
+	})}
+}
 func testAdmin(t *testing.T) (*Service, string, string) {
 	t.Helper()
-	dir := t.TempDir()
 	agentToken, _ := randomToken()
-	adminToken, _ := randomToken()
-	creds := filepath.Join(dir, "agents.json")
-	admin := filepath.Join(dir, "admin.json")
-	probes := filepath.Join(dir, "probes.json")
-	for path, value := range map[string]any{creds: []credential{{AgentID: "test-node-1", Name: "Public name", TokenSHA256: tokenHash(agentToken)}}, admin: adminCredential{tokenHash(adminToken)}, probes: probeFile{Version: 1, Nodes: probeDocument(&probeBook{Nodes: map[string][]configuredProbe{}}).Nodes}} {
-		data, _ := json.Marshal(value)
-		if err := os.WriteFile(path, data, 0600); err != nil {
-			t.Fatal(err)
-		}
+	cfg := testControlConfig(t, "Public name", agentToken)
+	secret := filepath.Join(filepath.Dir(cfg.DatabaseFile), "github.secret")
+	if err := os.WriteFile(secret, []byte("synthetic-oauth-secret"), 0600); err != nil {
+		t.Fatal(err)
 	}
-	s, err := Start(context.Background(), shared.MonitorConfig{Enabled: true, BindAddr: "127.0.0.1", ServerID: "example", CredentialsFile: creds, AdminCredentialsFile: admin, ProbeTasksFile: probes, ReportIntervalSeconds: 1})
+	cfg.GitHubClientID = "synthetic-client"
+	cfg.GitHubClientSecretFile = secret
+	cfg.GitHubCallbackURL = "http://127.0.0.1:1/api/admin/v1/auth/github/callback"
+	cfg.GitHubAdminUsers = []string{"operator"}
+	s, err := Start(context.Background(), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(s.Close)
-	return s, agentToken, adminToken
+	s.cfg.GitHubCallbackURL = "http://" + s.Address() + "/api/admin/v1/auth/github/callback"
+	s.admin.github.callback = s.cfg.GitHubCallbackURL
+	s.admin.github.client = githubFixtureClient("operator")
+	return s, agentToken, "github-test"
 }
 func adminRequest(t *testing.T, s *Service, method, path, body string, cookie *http.Cookie, csrf string, headers http.Header) *http.Response {
 	t.Helper()
@@ -61,24 +86,66 @@ func adminRequest(t *testing.T, s *Service, method, path, body string, cookie *h
 	t.Cleanup(func() { resp.Body.Close() })
 	return resp
 }
-func login(t *testing.T, s *Service, token string) (*http.Cookie, adminSession) {
+func oauthStart(t *testing.T, s *Service) (*http.Cookie, string) {
 	t.Helper()
-	resp := adminRequest(t, s, "POST", "/api/admin/v1/login", `{"token":"`+token+`"}`, nil, "", nil)
-	if resp.StatusCode != 200 {
-		t.Fatalf("login status %d", resp.StatusCode)
-	}
-	var session adminSession
-	if err := json.NewDecoder(resp.Body).Decode(&session); err != nil {
+	client := &http.Client{Timeout: time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	res, err := client.Get("http://" + s.Address() + "/api/admin/v1/auth/github")
+	if err != nil {
 		t.Fatal(err)
 	}
-	cookies := resp.Cookies()
-	if len(cookies) != 1 {
-		t.Fatal("missing cookie")
+	defer res.Body.Close()
+	if res.StatusCode != 302 {
+		t.Fatalf("OAuth start: %d", res.StatusCode)
 	}
-	if !cookies[0].HttpOnly || cookies[0].SameSite != http.SameSiteStrictMode || cookies[0].Secure || cookies[0].MaxAge != 28800 {
-		t.Fatal("unsafe local session cookie")
+	u, err := url.Parse(res.Header.Get("Location"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	return cookies[0], session
+	if u.Host != "github.com" || u.Query().Get("code_challenge_method") != "S256" || len(u.Query().Get("code_challenge")) != 43 || u.Query().Get("scope") != "" {
+		t.Fatal("unsafe OAuth authorization request")
+	}
+	cookies := res.Cookies()
+	if len(cookies) != 1 || cookies[0].SameSite != http.SameSiteLaxMode || !cookies[0].HttpOnly {
+		t.Fatal("OAuth cookie")
+	}
+	return cookies[0], u.Query().Get("state")
+}
+func oauthCallback(t *testing.T, s *Service, cookie *http.Cookie, state string) *http.Response {
+	t.Helper()
+	client := &http.Client{Timeout: time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	req, _ := http.NewRequest("GET", "http://"+s.Address()+"/api/admin/v1/auth/github/callback?code=synthetic-code&state="+url.QueryEscape(state), nil)
+	if cookie != nil {
+		req.AddCookie(cookie)
+	}
+	res, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { res.Body.Close() })
+	return res
+}
+func login(t *testing.T, s *Service, _ string) (*http.Cookie, adminSession) {
+	t.Helper()
+	oauthCookie, state := oauthStart(t, s)
+	res := oauthCallback(t, s, oauthCookie, state)
+	if res.StatusCode != 303 || res.Header.Get("Location") != "/admin/" {
+		t.Fatalf("OAuth callback %d %s", res.StatusCode, res.Header.Get("Location"))
+	}
+	var cookie *http.Cookie
+	for _, c := range res.Cookies() {
+		if c.Name == adminCookie {
+			cookie = c
+		}
+	}
+	if cookie == nil || !cookie.HttpOnly || cookie.SameSite != http.SameSiteStrictMode || cookie.MaxAge != 28800 {
+		t.Fatal("unsafe admin cookie")
+	}
+	response := adminRequest(t, s, "GET", "/api/admin/v1/session", "", cookie, "", nil)
+	var session adminSession
+	if response.StatusCode != 200 || json.NewDecoder(response.Body).Decode(&session) != nil {
+		t.Fatal("session unavailable")
+	}
+	return cookie, session
 }
 func expectStatus(t *testing.T, response *http.Response, want int) {
 	t.Helper()
@@ -94,7 +161,7 @@ func TestAdminAuthenticationCSRFAndRedaction(t *testing.T) {
 	for _, path := range []string{"/api/admin/v1/session", "/api/admin/v1/nodes", "/api/admin/v1/probes", "/events/admin"} {
 		expectStatus(t, adminRequest(t, s, "GET", path, "", nil, "", nil), 401)
 	}
-	expectStatus(t, adminRequest(t, s, "POST", "/api/admin/v1/login", `{"token":"`+admin+`"}`, nil, "", http.Header{"Origin": []string{"https://evil.invalid"}}), 403)
+	expectStatus(t, adminRequest(t, s, "POST", "/api/admin/v1/login", `{"token":"`+admin+`"}`, nil, "", http.Header{"Origin": []string{"https://evil.invalid"}}), 404)
 	cookie, session := login(t, s, admin)
 	if len(session.CSRF) != 43 || time.Until(session.ExpiresAt) < 7*time.Hour {
 		t.Fatal("bad session")
@@ -131,17 +198,23 @@ func TestAdminSessionExpirySecureCookieAndLoginThrottle(t *testing.T) {
 	s.admin.sessions[tokenHash(cookie.Value)] = session
 	s.admin.mu.Unlock()
 	expectStatus(t, adminRequest(t, s, "GET", "/api/admin/v1/session", "", cookie, "", nil), 401)
-	req := httptest.NewRequest("POST", "https://monitor.invalid/api/admin/v1/login", strings.NewReader(`{"token":"`+admin+`"}`))
-	req.Header.Set("Content-Type", "application/json")
+	req := httptest.NewRequest("GET", "https://monitor.invalid/", nil)
 	record := httptest.NewRecorder()
-	s.handleAdmin(record, req)
-	if record.Code != 200 || !record.Result().Cookies()[0].Secure {
-		t.Fatal("TLS cookie is not secure")
+	if err := s.createAdminSession(record, req, "operator"); err != nil {
+		t.Fatal(err)
 	}
-	for i := 0; i < 3; i++ {
-		expectStatus(t, adminRequest(t, s, "POST", "/api/admin/v1/login", `{"token":"invalid"}`, nil, "", nil), 401)
+	if !record.Result().Cookies()[0].Secure {
+		t.Fatal("TLS cookie not secure")
 	}
-	expectStatus(t, adminRequest(t, s, "POST", "/api/admin/v1/login", `{"token":"`+admin+`"}`, nil, "", nil), 429)
+	s.admin.mu.Lock()
+	s.admin.tokens = 0
+	s.admin.at = time.Now()
+	s.admin.mu.Unlock()
+	record = httptest.NewRecorder()
+	s.githubStart(record, httptest.NewRequest("GET", "http://"+s.Address()+"/api/admin/v1/auth/github", nil))
+	if record.Code != 429 {
+		t.Fatal("OAuth attempts unbounded")
+	}
 }
 func TestAdminRotationRevocationAndPendingHello(t *testing.T) {
 	s, agent, admin := testAdmin(t)
@@ -153,7 +226,7 @@ func TestAdminRotationRevocationAndPendingHello(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pending.Close()
-	response := adminRequest(t, s, "POST", "/api/admin/v1/nodes/test-node-1/rotate", "", cookie, session.CSRF, nil)
+	response := adminRequest(t, s, "POST", "/api/admin/v1/nodes/1/rotate", "", cookie, session.CSRF, nil)
 	expectStatus(t, response, 200)
 	var rotated map[string]string
 	if err = json.NewDecoder(response.Body).Decode(&rotated); err != nil {
@@ -177,12 +250,12 @@ func TestAdminRotationRevocationAndPendingHello(t *testing.T) {
 	}
 	r.Body.Close()
 	dial(t, s, rotated["token"], "after-rotation")
-	expectStatus(t, adminRequest(t, s, "DELETE", "/api/admin/v1/nodes/test-node-1", "", cookie, session.CSRF, nil), 204)
-	creds, err := readCredentials(s.cfg.CredentialsFile)
+	expectStatus(t, adminRequest(t, s, "DELETE", "/api/admin/v1/nodes/1", "", cookie, session.CSRF, nil), 204)
+	creds, err := s.control.Nodes(context.Background())
 	if err != nil || len(creds) != 0 {
 		t.Fatalf("last credential revoke: %v", err)
 	}
-	expectStatus(t, adminRequest(t, s, "GET", "/api/public/v1/nodes/test-node-1/history", "", nil, "", nil), 404)
+	expectStatus(t, adminRequest(t, s, "GET", "/api/public/v1/nodes/1/history", "", nil, "", nil), 404)
 	if len(s.public.Load().Nodes) != 0 {
 		t.Fatal("revoked node remains publicly cached")
 	}
@@ -190,53 +263,28 @@ func TestAdminRotationRevocationAndPendingHello(t *testing.T) {
 	expectStatus(t, response, 201)
 	var created map[string]string
 	_ = json.NewDecoder(response.Body).Decode(&created)
-	if len(created["id"]) != 43 || len(created["token"]) != 43 {
+	if created["id"] != "2" || len(created["token"]) != 43 {
 		t.Fatal("invalid new credential")
 	}
-	creds, err = readCredentials(s.cfg.CredentialsFile)
-	if err != nil || len(creds) != 1 || creds[0].FRPBinding == nil {
+	creds, err = s.control.Nodes(context.Background())
+	if err != nil || len(creds) != 1 || creds[0].Binding == nil {
 		t.Fatal("binding not persisted")
 	}
-	bytes, _ := os.ReadFile(s.cfg.CredentialsFile)
+	bytes, _ := os.ReadFile(s.cfg.DatabaseFile)
 	if strings.Contains(string(bytes), created["token"]) {
 		t.Fatal("plaintext token persisted")
 	}
 	expectStatus(t, adminRequest(t, s, "DELETE", "/api/admin/v1/nodes/"+created["id"]+"/binding", "", cookie, session.CSRF, nil), 204)
 }
-func TestCredentialsReloadKeepsValidConfigAndRevokesSessions(t *testing.T) {
-	s, agent, admin := testAdmin(t)
-	cookie, _ := login(t, s, admin)
-	c := dial(t, s, agent, "reload")
-	if err := os.WriteFile(s.cfg.CredentialsFile, []byte(`[{"invalid":true}]`), 0600); err != nil {
-		t.Fatal(err)
-	}
+func TestUnavailableControlRejectsNewAuthentication(t *testing.T) {
+	s, agent, _ := testAdmin(t)
+	s.control.Close()
 	s.configMu.Lock()
 	s.reloadCredentials()
 	s.configMu.Unlock()
-	if !s.credentialError.Load() || s.authenticate(&http.Request{Header: http.Header{"Authorization": []string{"Bearer " + agent}}}) == "" {
-		t.Fatal("invalid reload discarded valid credentials")
+	if !s.credentialError.Load() || s.authenticate(&http.Request{Header: http.Header{"Authorization": []string{"Bearer " + agent}}}) != "" {
+		t.Fatal("unavailable configuration allowed authentication")
 	}
-	if err := os.WriteFile(s.cfg.CredentialsFile, []byte(`[]`), 0600); err != nil {
-		t.Fatal(err)
-	}
-	s.configMu.Lock()
-	s.reloadCredentials()
-	s.configMu.Unlock()
-	c.SetReadDeadline(time.Now().Add(time.Second))
-	if _, _, err := c.ReadMessage(); err == nil {
-		t.Fatal("revocation did not terminate socket")
-	}
-	if s.credentialError.Load() {
-		t.Fatal("reload error not cleared")
-	}
-	replacement, _ := randomToken()
-	data, _ := json.Marshal(adminCredential{tokenHash(replacement)})
-	if err := os.WriteFile(s.cfg.AdminCredentialsFile, data, 0600); err != nil {
-		t.Fatal(err)
-	}
-	s.reloadAdmin()
-	expectStatus(t, adminRequest(t, s, "GET", "/api/admin/v1/session", "", cookie, "", nil), 401)
-	login(t, s, replacement)
 }
 func TestStrictPrivateJSONAndProbeWrites(t *testing.T) {
 	s, _, admin := testAdmin(t)
@@ -244,7 +292,7 @@ func TestStrictPrivateJSONAndProbeWrites(t *testing.T) {
 	for _, body := range []string{`{"name":"A","name":"B"}`, `{"Name":"A"}`, `{"name":null}`, `{"name":"A","unknown":1}`} {
 		expectStatus(t, adminRequest(t, s, "POST", "/api/admin/v1/nodes", body, cookie, session.CSRF, nil), 400)
 	}
-	body := `{"version":2,"nodes":[{"agent_id":"test-node-1","tasks":[{"id":"reach","name":"Public","target":"example.invalid:443","interval":30}]}]}`
+	body := `{"version":2,"nodes":[{"agent_id":"1","tasks":[{"id":"reach","name":"Public","target":"example.invalid:443","interval":30}]}]}`
 	expectStatus(t, adminRequest(t, s, "PUT", "/api/admin/v1/probes", body, cookie, session.CSRF, nil), 200)
 	expectStatus(t, adminRequest(t, s, "PUT", "/api/admin/v1/probes", body, cookie, session.CSRF, nil), 409)
 	expectStatus(t, adminRequest(t, s, "PUT", "/api/admin/v1/probes", `{"version":3,"nodes":[{"agent_id":"unknown-node","tasks":[]}]}`, cookie, session.CSRF, nil), 400)
@@ -275,29 +323,39 @@ func TestRevokedNodeLateProbeAndAdminSSE(t *testing.T) {
 	s.configMu.Lock()
 	s.applyCredentials([]credential{})
 	s.configMu.Unlock()
-	if s.acceptProbe("test-node-1", nil, time.Now(), shared.PingResult{}) {
+	if s.acceptProbe("1", nil, time.Now(), shared.PingResult{}) {
 		t.Fatal("late result from revoked node accepted")
 	}
 }
-func TestPrivateFilesRejectAliasesAndAdminReloadDegraded(t *testing.T) {
-	s, _, admin := testAdmin(t)
-	cookie, _ := login(t, s, admin)
-	for _, data := range []string{`null`, `[{"Agent_ID":"test-node-1","name":"A","token_sha256":"` + strings.Repeat("a", 64) + `"}]`, `[{"agent_id":"test-node-1","name":"A","name":"B","token_sha256":"` + strings.Repeat("a", 64) + `"}]`} {
-		if err := os.WriteFile(s.cfg.CredentialsFile, []byte(data), 0600); err != nil {
-			t.Fatal(err)
+func TestGitHubRejectsMissingStateReplayAndNonAdmin(t *testing.T) {
+	s, _, _ := testAdmin(t)
+	cookie, state := oauthStart(t, s)
+	if res := oauthCallback(t, s, nil, state); res.Header.Get("Location") != "/admin/?auth_error=failed" {
+		t.Fatal("missing browser state accepted")
+	}
+	if res := oauthCallback(t, s, cookie, state); res.Header.Get("Location") != "/admin/" {
+		t.Fatal("valid state rejected")
+	}
+	if res := oauthCallback(t, s, cookie, state); res.Header.Get("Location") != "/admin/?auth_error=failed" {
+		t.Fatal("replayed state accepted")
+	}
+	cookie, state = oauthStart(t, s)
+	s.admin.github.client = githubFixtureClient("outsider")
+	res := oauthCallback(t, s, cookie, state)
+	if res.Header.Get("Location") != "/admin/?auth_error=access_denied" {
+		t.Fatal("non-admin GitHub identity accepted")
+	}
+	for _, c := range res.Cookies() {
+		if c.Name == adminCookie && c.Value != "" {
+			t.Fatal("non-admin received session")
 		}
-		if _, err := readCredentials(s.cfg.CredentialsFile); err == nil {
-			t.Fatal("ambiguous credential accepted")
-		}
 	}
-	if err := os.WriteFile(s.cfg.AdminCredentialsFile, []byte(`{"token_sha256":null}`), 0600); err != nil {
-		t.Fatal(err)
-	}
-	s.reloadAdmin()
-	expectStatus(t, adminRequest(t, s, "GET", "/api/admin/v1/session", "", cookie, "", nil), 200)
-	if s.adminSnapshot().AdminCredentialsState != "degraded" {
-		t.Fatal("admin reload error hidden")
-	}
+}
+func TestGitHubOnlyAndUnconfiguredAdmin(t *testing.T) {
+	s, _ := testMonitor(t)
+	expectStatus(t, adminRequest(t, s, "GET", "/api/admin/v1/auth", "", nil, "", nil), 200)
+	expectStatus(t, adminRequest(t, s, "POST", "/api/admin/v1/login", `{"token":"anything"}`, nil, "", nil), 404)
+	expectStatus(t, adminRequest(t, s, "GET", "/api/admin/v1/auth/github", "", nil, "", nil), 404)
 }
 func TestPublicReconciliationCropsIdentityAndTraffic(t *testing.T) {
 	s, _, _ := testAdmin(t)
@@ -308,7 +366,7 @@ func TestPublicReconciliationCropsIdentityAndTraffic(t *testing.T) {
 	count := "123"
 	s.serverSnapshot.Store(&shared.ServerSnapshot{State: "ready", ServerID: serverID, GeneratedAt: time.Now(), Clients: []shared.ServerClient{{RawClientID: &raw, ClientID: raw, Hostname: "secret-host", IP: "192.0.2.44", Online: online}}, Proxies: []shared.ServerProxy{{Name: "secret-tunnel", ClientID: raw, Online: true, TodayRXBytes: &count}}})
 	s.mu.Lock()
-	n := s.nodes["test-node-1"]
+	n := s.nodes["1"]
 	n.frp = report
 	n.credential.FRPBinding = &shared.FRPBinding{ServerID: serverID, RawClientID: raw}
 	n.conn = &websocket.Conn{}
@@ -320,7 +378,7 @@ func TestPublicReconciliationCropsIdentityAndTraffic(t *testing.T) {
 		t.Fatalf("unexpected summary %+v", out.Nodes[0].FRP)
 	}
 	data, _ := json.Marshal(out)
-	for _, private := range []string{raw, "secret-host", "192.0.2.44", "secret-tunnel", "today_rx_bytes"} {
+	for _, private := range []string{raw, "secret-host", "192.0.2.44", "secret-tunnel"} {
 		if strings.Contains(string(data), private) {
 			t.Fatalf("public reconciliation leaked %s", private)
 		}

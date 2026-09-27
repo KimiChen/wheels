@@ -2,13 +2,10 @@ package store
 
 import (
 	"context"
-	"database/sql"
-	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"math"
-	"math/big"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -17,82 +14,57 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/VictoriaMetrics/VictoriaMetrics/lib/prompb"
+	"github.com/VictoriaMetrics/VictoriaMetrics/lib/storage"
 	"github.com/fatedier/frp/extension/frpmonitor/shared"
-	_ "modernc.org/sqlite"
 )
-
-const maxPending = 16384
 
 var ErrClosed = errors.New("history store closed")
 var fieldNames = []string{"cpu", "load1", "load2", "load3", "mem_total", "mem_used", "swap_total", "swap_used", "disk_total", "disk_used", "net_rx", "net_tx", "net_rx_total", "net_tx_total", "uptime", "tcp", "udp", "procs"}
 
-type sum struct {
-	Sum      string
-	N        int
-	Coverage float64
-	Integer  bool
-}
-type bucket struct {
-	Samples  int
-	Coverage float64
-	Fields   map[string]sum
-}
-type key struct {
-	Node string
-	At   int64
-	Task string
-}
-type baseline struct {
-	Boot, Iface string
-	RX, TX      uint64
-	At          int64
-}
-type daily struct {
-	RX, TX        string
-	Coverage      float64
-	Resets, Pairs int
-}
-type probe struct {
-	Total             float64
-	Samples, Failures int
-	LastAt            int64
-	LastLatency       float64
-}
-type observation struct {
-	values   map[string]sum
-	baseline *baseline
-}
+// VictoriaMetrics cache settings are process global. The monitor owns one store.
+var instanceMu sync.Mutex
+var instanceOpen bool
+var settingsOnce sync.Once
+var readMemoryLimit = platformMemoryLimit
+
 type event struct {
 	node, task string
 	at         time.Time
-	sample     *observation
+	values     map[string]float64
 	latency    float64
 	flush      chan error
-	ctx        context.Context
 }
 
 type Store struct {
-	db                       *sql.DB
+	db                       *storage.Storage
 	cfg                      Config
 	queue                    chan event
 	stop, done               chan struct{}
 	mu                       sync.RWMutex
 	closed                   bool
 	closeErr                 error
+	queryMu                  sync.RWMutex
 	dropped, writes, queries atomic.Uint64
 	failure                  atomic.Pointer[string]
-	// All mutable aggregation state below is owned by the worker.
-	metrics      map[key]*bucket
-	probes       map[key]*probe
-	baselines    map[string]baseline
-	changed      map[string]baseline
-	traffic      map[key]*daily
+	// Only the worker accesses coverage baselines and its bounded write batch.
 	lastObserved map[string]map[string]int64
+	rows         []storage.MetricRow
 }
 
-func Open(cfg Config) (*Store, error) {
+func memoryBudget(limit uint64) (int, error) {
+	// Keep optional TSDB off when there is no reliable budget. VM fatally exits
+	// if memory.allowedBytes consumes the entire physical/cgroup memory limit.
+	if limit < 64<<20 {
+		return 0, errors.New("history memory limit too low or unavailable")
+	}
+	budget := min(uint64(128<<20), limit/8)
+	return int(budget), nil
+}
+
+func Open(cfg Config) (out *Store, err error) {
 	if cfg.RetentionDays == 0 {
-		cfg.RetentionDays = 7
+		cfg.RetentionDays = 30
 	}
 	if cfg.ReportInterval == 0 {
 		cfg.ReportInterval = time.Second
@@ -100,158 +72,94 @@ func Open(cfg Config) (*Store, error) {
 	if cfg.QueueCapacity == 0 {
 		cfg.QueueCapacity = 4096
 	}
-	if cfg.RetentionDays < 1 || cfg.RetentionDays > 31 || cfg.ReportInterval < time.Second || cfg.ReportInterval > time.Hour || cfg.QueueCapacity < 1 || cfg.QueueCapacity > 65536 {
+	if cfg.RetentionDays < 1 || cfg.RetentionDays > 365 || cfg.ReportInterval < time.Second || cfg.ReportInterval > time.Hour || cfg.QueueCapacity < 1 || cfg.QueueCapacity > 65536 {
 		return nil, errors.New("invalid history limits")
 	}
 	if cfg.Path == "" || strings.ContainsAny(cfg.Path, "\x00\r\n") {
 		return nil, errors.New("invalid history path")
 	}
-	path, err := filepath.Abs(cfg.Path)
+	cfg.Path, err = filepath.Abs(cfg.Path)
+	if err != nil {
+		return nil, errors.New("invalid history path")
+	}
+	limit, err := readMemoryLimit()
+	if err != nil {
+		return nil, errors.New("history memory limit unavailable")
+	}
+	budget, err := memoryBudget(limit)
 	if err != nil {
 		return nil, err
 	}
-	cfg.Path = path
-	if err = securePath(path); err != nil {
+	if err = secureDirectory(cfg.Path); err != nil {
 		return nil, err
 	}
-	u := url.URL{Scheme: "file", Path: path}
-	q := url.Values{}
-	for _, v := range []string{"busy_timeout(1000)", "synchronous(FULL)", "foreign_keys(ON)"} {
-		q.Add("_pragma", v)
+	instanceMu.Lock()
+	defer instanceMu.Unlock()
+	if instanceOpen {
+		return nil, errors.New("history store already open")
 	}
-	u.RawQuery = q.Encode()
-	db, err := sql.Open("sqlite", u.String())
-	if err != nil {
-		return nil, err
-	}
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
-	fail := func(e error) (*Store, error) { db.Close(); return nil, e }
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	var mode string
-	if err = db.QueryRowContext(ctx, "PRAGMA journal_mode=WAL").Scan(&mode); err != nil || mode != "wal" {
-		if err == nil {
-			err = errors.New("WAL unavailable")
+	defer func() {
+		if recover() != nil {
+			out = nil
+			err = errors.New("history open failed")
 		}
-		return fail(err)
-	}
-	if err = migrate(ctx, db); err != nil {
-		return fail(err)
-	}
-	s := &Store{db: db, cfg: cfg, queue: make(chan event, cfg.QueueCapacity), stop: make(chan struct{}), done: make(chan struct{}), metrics: map[key]*bucket{}, probes: map[key]*probe{}, baselines: map[string]baseline{}, changed: map[string]baseline{}, traffic: map[key]*daily{}, lastObserved: map[string]map[string]int64{}}
-	rows, err := db.QueryContext(ctx, "SELECT node,boot,iface,rx,tx,at FROM traffic_state LIMIT 1025")
-	if err != nil {
-		return fail(err)
-	}
-	for rows.Next() {
-		var node, rx, tx string
-		var b baseline
-		if err = rows.Scan(&node, &b.Boot, &b.Iface, &rx, &tx, &b.At); err != nil {
-			break
+	}()
+	settingsOnce.Do(func() {
+		// FRP uses Cobra; the standard flag set may never have been parsed. VM
+		// requires it before initializing memory. Parse no FRP command arguments.
+		if err := flag.Set("memory.allowedBytes", strconv.Itoa(budget)); err != nil {
+			panic(err)
 		}
-		b.RX, err = strconv.ParseUint(rx, 10, 64)
-		if err != nil {
-			break
+		if !flag.Parsed() {
+			if err := flag.CommandLine.Parse(nil); err != nil {
+				panic(err)
+			}
 		}
-		b.TX, err = strconv.ParseUint(tx, 10, 64)
-		if err != nil {
-			break
-		}
-		s.baselines[node] = b
+		// Cache budgets, not a process-wide memory limit. No HTTP listener is started.
+		// metricID_tsid has no dedicated setter; VM gives it allowedBytes/16 (at most 8 MiB).
+		storage.SetTSIDCacheSize(32 << 20)
+		storage.SetMetricNameCacheSize(8 << 20)
+		storage.SetTagFiltersCacheSize(8 << 20)
+		storage.SetMetadataStorageSize(1 << 20)
+		storage.SetFreeDiskSpaceLimit(1 << 30)
+		storage.SetDataFlushInterval(5 * time.Second)
+		storage.SetDedupInterval(time.Millisecond)
+	})
+	db := storage.MustOpenStorage(cfg.Path, storage.OpenOptions{Retention: time.Duration(cfg.RetentionDays) * 24 * time.Hour})
+	if db.IsReadOnly() {
+		db.MustClose()
+		return nil, errors.New("history disk space low")
 	}
-	if err == nil {
-		err = rows.Err()
-	}
-	rows.Close()
-	if err != nil {
-		return fail(err)
-	}
-	if len(s.baselines) > 1024 {
-		return fail(errors.New("history node limit exceeded"))
-	}
+	s := &Store{db: db, cfg: cfg, queue: make(chan event, cfg.QueueCapacity), stop: make(chan struct{}), done: make(chan struct{}), lastObserved: map[string]map[string]int64{}}
+	instanceOpen = true
 	go s.run()
 	return s, nil
 }
 
-// Refuse symlinks and existing public files; the directory is private so WAL/SHM
-// inherit a safe enclosing boundary without changing process-wide umask.
-func securePath(path string) error {
-	parent := filepath.Dir(path)
-	if err := os.MkdirAll(parent, 0700); err != nil {
-		return err
+func secureDirectory(path string) error {
+	if err := os.MkdirAll(path, 0700); err != nil {
+		return errors.New("cannot create history directory")
 	}
-	for p := parent; ; p = filepath.Dir(p) {
-		st, e := os.Lstat(p)
-		if e != nil {
-			return e
+	for p := path; ; p = filepath.Dir(p) {
+		st, err := os.Lstat(p)
+		if err != nil || !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
+			return errors.New("history path must be a real directory")
 		}
-		if st.Mode()&os.ModeSymlink != 0 || !st.IsDir() {
-			return errors.New("history parent must be a real directory")
+		if p == path && st.Mode().Perm()&0077 != 0 {
+			return errors.New("history directory must have private permissions")
 		}
 		if p == filepath.Dir(p) {
 			break
 		}
 	}
-	st, err := os.Stat(parent)
-	if err != nil {
-		return err
-	}
-	if st.Mode().Perm()&0077 != 0 {
-		return errors.New("history directory must have private permissions")
-	}
-	for _, p := range []string{path, path + "-wal", path + "-shm"} {
-		st, e := os.Lstat(p)
-		if errors.Is(e, os.ErrNotExist) {
-			continue
-		}
-		if e != nil {
-			return e
-		}
-		if !st.Mode().IsRegular() || st.Mode().Perm()&0077 != 0 {
-			return errors.New("history files must be regular and private")
-		}
-	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
-	if errors.Is(err, os.ErrExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	return f.Close()
+	return nil
 }
 
-func migrate(ctx context.Context, db *sql.DB) error {
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	var version int
-	if err = tx.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
-		return err
-	}
-	if version > 1 {
-		return errors.New("unsupported history schema version")
-	}
-	if version == 0 {
-		for _, query := range []string{
-			"CREATE TABLE metrics_1m(node TEXT NOT NULL,at INTEGER NOT NULL,data TEXT NOT NULL,PRIMARY KEY(node,at)) WITHOUT ROWID",
-			"CREATE TABLE probes_1m(node TEXT NOT NULL,task TEXT NOT NULL,at INTEGER NOT NULL,data TEXT NOT NULL,PRIMARY KEY(node,task,at)) WITHOUT ROWID",
-			"CREATE TABLE traffic_state(node TEXT PRIMARY KEY,boot TEXT NOT NULL,iface TEXT NOT NULL,rx TEXT NOT NULL,tx TEXT NOT NULL,at INTEGER NOT NULL) WITHOUT ROWID",
-			"CREATE TABLE traffic_daily(node TEXT NOT NULL,at INTEGER NOT NULL,data TEXT NOT NULL,PRIMARY KEY(node,at)) WITHOUT ROWID",
-			"CREATE INDEX metrics_expiry ON metrics_1m(at)", "CREATE INDEX probes_expiry ON probes_1m(at)", "CREATE INDEX traffic_expiry ON traffic_daily(at)", "PRAGMA user_version=1",
-		} {
-			if _, err = tx.ExecContext(ctx, query); err != nil {
-				return err
-			}
-		}
-	}
-	return tx.Commit()
+func validNode(s string) bool {
+	n, err := strconv.ParseInt(s, 10, 64)
+	return err == nil && n > 0 && strconv.FormatInt(n, 10) == s
 }
-
-func validID(s string) bool {
+func validTask(s string) bool {
 	if len(s) == 0 || len(s) > 128 {
 		return false
 	}
@@ -263,7 +171,8 @@ func validID(s string) bool {
 	}
 	return true
 }
-func validAt(at time.Time) bool { return !at.IsZero() && at.Year() >= 2000 && at.Year() <= 2261 }
+func validAt(at time.Time) bool     { return !at.IsZero() && at.Year() >= 2000 && at.Year() <= 2261 }
+func (s *Store) drop(reason string) { s.dropped.Add(1); s.failure.Store(&reason) }
 func (s *Store) offer(e event) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -279,27 +188,26 @@ func (s *Store) offer(e event) bool {
 		return false
 	}
 }
-func (s *Store) drop(reason string) { s.dropped.Add(1); s.failure.Store(&reason) }
 func (s *Store) Accept(nodeID string, at time.Time, m shared.Metrics) bool {
-	if !validID(nodeID) || !validAt(at) || m.Validate() != nil {
+	if !validNode(nodeID) || !validAt(at) || m.Validate() != nil {
 		s.drop("invalid_sample")
 		return false
 	}
-	o := observation{values: map[string]sum{}}
+	values := map[string]float64{}
 	addFloat := func(name string, f shared.Field[float64]) {
 		if f.Quality == shared.QualityOK && f.Value != nil {
-			o.values[name] = sum{Sum: strconv.FormatFloat(*f.Value, 'g', -1, 64), N: 1}
+			values[name] = *f.Value
 		}
 	}
 	addUint := func(name string, f shared.Field[uint64]) {
 		if f.Quality == shared.QualityOK && f.Value != nil {
-			o.values[name] = sum{Sum: strconv.FormatUint(*f.Value, 10), N: 1, Integer: true}
+			values[name] = float64(*f.Value)
 		}
 	}
 	addFloat("cpu", m.CPU)
 	if m.Load.Quality == shared.QualityOK && m.Load.Value != nil {
 		for i, v := range *m.Load.Value {
-			o.values["load"+strconv.Itoa(i+1)] = sum{Sum: strconv.FormatFloat(v, 'g', -1, 64), N: 1}
+			values["load"+strconv.Itoa(i+1)] = v
 		}
 	}
 	for _, f := range []struct {
@@ -308,13 +216,10 @@ func (s *Store) Accept(nodeID string, at time.Time, m shared.Metrics) bool {
 	}{{"mem_total", m.MemTotal}, {"mem_used", m.MemUsed}, {"swap_total", m.SwapTotal}, {"swap_used", m.SwapUsed}, {"disk_total", m.DiskTotal}, {"disk_used", m.DiskUsed}, {"net_rx", m.NetRX}, {"net_tx", m.NetTX}, {"net_rx_total", m.NetRXTotal}, {"net_tx_total", m.NetTXTotal}, {"uptime", m.Uptime}, {"tcp", m.TCP}, {"udp", m.UDP}, {"procs", m.Procs}} {
 		addUint(f.name, f.f)
 	}
-	if m.BootID.Quality == shared.QualityOK && m.BootID.Value != nil && m.Iface.Quality == shared.QualityOK && m.Iface.Value != nil && m.NetRXTotal.Quality == shared.QualityOK && m.NetRXTotal.Value != nil && m.NetTXTotal.Quality == shared.QualityOK && m.NetTXTotal.Value != nil {
-		o.baseline = &baseline{Boot: string(m.Scope) + ":" + *m.BootID.Value, Iface: *m.Iface.Value, RX: *m.NetRXTotal.Value, TX: *m.NetTXTotal.Value, At: at.UnixNano()}
-	}
-	return s.offer(event{node: nodeID, at: at.UTC(), sample: &o})
+	return s.offer(event{node: nodeID, at: at.UTC(), values: values})
 }
 func (s *Store) AcceptProbe(nodeID, taskID string, at time.Time, latencyMS float64) bool {
-	if !validID(nodeID) || !validID(taskID) || !validAt(at) || math.IsNaN(latencyMS) || math.IsInf(latencyMS, 0) || latencyMS < 0 && latencyMS != -1 || latencyMS > 900 {
+	if !validNode(nodeID) || !validTask(taskID) || !validAt(at) || math.IsNaN(latencyMS) || math.IsInf(latencyMS, 0) || latencyMS < 0 && latencyMS != -1 || latencyMS > 900 {
 		s.drop("invalid_probe")
 		return false
 	}
@@ -322,9 +227,9 @@ func (s *Store) AcceptProbe(nodeID, taskID string, at time.Time, latencyMS float
 }
 func (s *Store) Status() Status {
 	out := Status{Dropped: s.dropped.Load(), WriteErrors: s.writes.Load(), QueryErrors: s.queries.Load(), QueueDepth: len(s.queue)}
-	if v := s.failure.Load(); v != nil {
-		out.LastError = *v
+	if reason := s.failure.Load(); reason != nil {
 		out.Degraded = true
+		out.LastError = *reason
 	}
 	return out
 }
@@ -337,10 +242,8 @@ func (s *Store) Flush(ctx context.Context) error {
 		return ErrClosed
 	}
 	select {
-	case s.queue <- event{flush: answer, ctx: ctx}:
+	case s.queue <- event{flush: answer}:
 	case <-s.stop:
-		return ErrClosed
-	case <-s.done:
 		return ErrClosed
 	case <-ctx.Done():
 		return ctx.Err()
@@ -348,10 +251,10 @@ func (s *Store) Flush(ctx context.Context) error {
 	select {
 	case err := <-answer:
 		return err
-	case <-ctx.Done():
-		return ctx.Err()
 	case <-s.done:
 		return ErrClosed
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 func (s *Store) Close(ctx context.Context) error {
@@ -382,23 +285,35 @@ func (s *Store) run() {
 			close(s.stop)
 		}
 		s.mu.Unlock()
-		s.db.Close()
+		s.queryMu.Lock()
+		func() {
+			defer func() {
+				if recover() != nil {
+					s.closeErr = errors.New("history close failed")
+				}
+			}()
+			s.db.MustClose()
+		}()
+		s.queryMu.Unlock()
+		instanceMu.Lock()
+		instanceOpen = false
+		instanceMu.Unlock()
 	}()
-	ticker := time.NewTicker(time.Minute)
+	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {
 		case e := <-s.queue:
 			s.consume(e)
 		case <-ticker.C:
-			s.persistBounded(context.Background())
+			_ = s.persist(true)
 		case <-s.stop:
 			for {
 				select {
 				case e := <-s.queue:
 					s.consume(e)
 				default:
-					s.closeErr = s.persistBounded(context.Background())
+					s.closeErr = s.persist(true)
 					return
 				}
 			}
@@ -407,245 +322,79 @@ func (s *Store) run() {
 }
 func (s *Store) consume(e event) {
 	if e.flush != nil {
-		e.flush <- s.persistBounded(e.ctx)
+		e.flush <- s.persist(true)
 		return
 	}
-	k := key{Node: e.node, At: e.at.Truncate(time.Minute).Unix(), Task: e.task}
-	if len(s.metrics)+len(s.probes)+len(s.traffic) >= maxPending {
-		s.drop("pending_full")
+	if s.db.IsReadOnly() {
+		s.drop("disk_space_low")
 		return
 	}
-	if e.sample != nil {
-		if _, ok := s.lastObserved[e.node]; !ok {
-			if len(s.lastObserved) >= 1024 {
-				s.drop("node_limit")
-				return
-			}
-			s.lastObserved[e.node] = map[string]int64{}
+	if _, ok := s.lastObserved[e.node]; !ok {
+		if len(s.lastObserved) >= 1024 {
+			s.drop("node_limit")
+			return
 		}
-		b := s.metrics[k]
-		if b == nil {
-			b = &bucket{Fields: map[string]sum{}}
-			s.metrics[k] = b
-		}
-		b.Samples++
-		b.Coverage = math.Min(60, b.Coverage+s.coverage(e.node, "", e.at))
-		for name, v := range e.sample.values {
-			v.Coverage = s.coverage(e.node, name, e.at)
-			old := b.Fields[name]
-			b.Fields[name] = mergeSum(old, v, 60)
-		}
-		if e.sample.baseline != nil {
-			s.observeTraffic(e.node, e.at, *e.sample.baseline)
-		}
+		s.lastObserved[e.node] = map[string]int64{}
+	}
+	if e.values == nil {
+		// A probe keeps its failure as -1; it is excluded from the mean at query time.
+		s.rows = append(s.rows, metricRow("probe", e.node, e.task, e.at.UnixMilli(), e.latency))
 	} else {
-		p := s.probes[k]
-		if p == nil {
-			p = &probe{}
-			s.probes[k] = p
+		s.rows = append(s.rows, metricRow("reports", e.node, "", e.at.UnixMilli(), s.coverage(e.node, "", e.at)))
+		for name, value := range e.values {
+			s.rows = append(s.rows, metricRow(name, e.node, "", e.at.UnixMilli(), value), metricRow(name+"_coverage", e.node, "", e.at.UnixMilli(), s.coverage(e.node, name, e.at)))
 		}
-		p.Samples++
-		if e.latency < 0 {
-			p.Failures++
-		} else {
-			p.Total += e.latency
-		}
-		if e.at.UnixNano() >= p.LastAt {
-			p.LastAt = e.at.UnixNano()
-			p.LastLatency = e.latency
-		}
+	}
+	if len(s.rows) >= 512 {
+		_ = s.persist(false)
 	}
 }
-func mergeSum(a, b sum, cap float64) sum {
-	if a.N == 0 {
-		a.Integer = b.Integer
-		a.Sum = "0"
+func metricRow(field, node, task string, at int64, value float64) storage.MetricRow {
+	labels := []prompb.Label{{Name: "__name__", Value: "frpmonitor_" + field}, {Name: "node_id", Value: node}}
+	if task != "" {
+		labels = append(labels, prompb.Label{Name: "task_id", Value: task})
 	}
-	if b.N == 0 {
-		return a
-	}
-	if a.Integer {
-		x, _ := new(big.Int).SetString(a.Sum, 10)
-		y, _ := new(big.Int).SetString(b.Sum, 10)
-		if x == nil || y == nil {
-			panic("invalid integer aggregate")
-		}
-		a.Sum = x.Add(x, y).String()
-	} else {
-		x, okX := new(big.Rat).SetString(a.Sum)
-		y, okY := new(big.Rat).SetString(b.Sum)
-		if !okX || !okY {
-			panic("invalid decimal aggregate")
-		}
-		a.Sum = x.Add(x, y).RatString()
-	}
-	a.N += b.N
-	a.Coverage = math.Min(cap, a.Coverage+b.Coverage)
-	return a
+	return storage.MetricRow{MetricNameRaw: storage.MarshalMetricNameRaw(nil, labels), Timestamp: at, Value: value}
 }
-func addDecimal(a, b string) string {
-	x, _ := new(big.Int).SetString(a, 10)
-	y, _ := new(big.Int).SetString(b, 10)
-	if x == nil || y == nil {
-		panic("invalid traffic count")
+func (s *Store) coverage(node, name string, at time.Time) float64 {
+	times := s.lastObserved[node]
+	now := at.UnixNano()
+	old, exists := times[name]
+	if exists && now <= old {
+		return 0
 	}
-	return x.Add(x, y).String()
+	times[name] = now
+	if !exists {
+		return math.Min(60, s.cfg.ReportInterval.Seconds())
+	}
+	return math.Min(s.cfg.ReportInterval.Seconds(), float64(now-old)/1e9)
 }
-func (s *Store) observeTraffic(node string, at time.Time, next baseline) {
-	old, exists := s.baselines[node]
-	if !exists && len(s.baselines) >= 1024 {
-		s.drop("node_limit")
-		return
-	}
-	if exists && next.At <= old.At {
-		return
-	} // Duplicates/reordered receive clocks never move the baseline backwards.
-	k := key{Node: node, At: time.Date(at.Year(), at.Month(), at.Day(), 0, 0, 0, 0, time.UTC).Unix()}
-	d := s.traffic[k]
-	if d == nil {
-		d = &daily{RX: "0", TX: "0"}
-		s.traffic[k] = d
-	}
-	if exists {
-		if old.Boot == next.Boot && old.Iface == next.Iface && next.RX >= old.RX && next.TX >= old.TX {
-			d.RX = addDecimal(d.RX, strconv.FormatUint(next.RX-old.RX, 10))
-			d.TX = addDecimal(d.TX, strconv.FormatUint(next.TX-old.TX, 10))
-			d.Pairs++
-			d.Coverage += math.Min(float64(next.At-old.At)/1e9, 2*s.cfg.ReportInterval.Seconds())
-		} else {
-			d.Resets++
+func (s *Store) persist(flush bool) (err error) {
+	defer func() {
+		if recover() != nil {
+			err = errors.New("history write failed")
 		}
-	}
-	s.baselines[node] = next
-	s.changed[node] = next
-}
-func (s *Store) persistBounded(parent context.Context) error {
-	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
-	defer cancel()
-	err := s.persist(ctx)
-	if err != nil {
-		s.writes.Add(1)
-		reason := "write_failed"
-		s.failure.Store(&reason)
-	}
-	return err
-}
-func mergeBucket(a, b *bucket) {
-	a.Samples += b.Samples
-	a.Coverage = math.Min(60, a.Coverage+b.Coverage)
-	if a.Fields == nil {
-		a.Fields = map[string]sum{}
-	}
-	for k, v := range b.Fields {
-		a.Fields[k] = mergeSum(a.Fields[k], v, 60)
-	}
-}
-func readJSON(tx *sql.Tx, ctx context.Context, query string, dst any, args ...any) error {
-	var raw string
-	err := tx.QueryRowContext(ctx, query, args...).Scan(&raw)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if len(raw) > 65536 {
-		return errors.New("aggregate too large")
-	}
-	return decodeAggregate(raw, dst)
-}
-func writeJSON(tx *sql.Tx, ctx context.Context, query string, value any, args ...any) error {
-	raw, err := json.Marshal(value)
-	if err != nil {
-		return err
-	}
-	args = append(args, string(raw))
-	_, err = tx.ExecContext(ctx, query, args...)
-	return err
-}
-func (s *Store) persist(ctx context.Context) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	for k, b := range s.metrics {
-		var old bucket
-		if err = readJSON(tx, ctx, "SELECT data FROM metrics_1m WHERE node=? AND at=?", &old, k.Node, k.At); err != nil {
-			return err
+		if err != nil {
+			s.writes.Add(1)
+			reason := "write_failed"
+			s.failure.Store(&reason)
 		}
-		mergeBucket(&old, b)
-		if err = writeJSON(tx, ctx, "INSERT OR REPLACE INTO metrics_1m(node,at,data) VALUES(?,?,?)", old, k.Node, k.At); err != nil {
-			return err
-		}
+		// A failed batch is not retried: its commit outcome may be unknown.
+		s.rows = nil
+	}()
+	if s.db.IsReadOnly() {
+		return errors.New("history disk space low")
 	}
-	for k, p := range s.probes {
-		var old probe
-		if err = readJSON(tx, ctx, "SELECT data FROM probes_1m WHERE node=? AND task=? AND at=?", &old, k.Node, k.Task, k.At); err != nil {
-			return err
-		}
-		old.Total += p.Total
-		old.Samples += p.Samples
-		old.Failures += p.Failures
-		if p.LastAt >= old.LastAt {
-			old.LastAt = p.LastAt
-			old.LastLatency = p.LastLatency
-		}
-		if err = writeJSON(tx, ctx, "INSERT OR REPLACE INTO probes_1m(node,task,at,data) VALUES(?,?,?,?)", old, k.Node, k.Task, k.At); err != nil {
-			return err
-		}
+	if len(s.rows) > 0 {
+		s.db.AddRows(s.rows, 64)
 	}
-	for k, d := range s.traffic {
-		old := daily{RX: "0", TX: "0"}
-		if err = readJSON(tx, ctx, "SELECT data FROM traffic_daily WHERE node=? AND at=?", &old, k.Node, k.At); err != nil {
-			return err
-		}
-		old.RX = addDecimal(old.RX, d.RX)
-		old.TX = addDecimal(old.TX, d.TX)
-		old.Coverage = math.Min(86400, old.Coverage+d.Coverage)
-		old.Resets += d.Resets
-		old.Pairs += d.Pairs
-		if err = writeJSON(tx, ctx, "INSERT OR REPLACE INTO traffic_daily(node,at,data) VALUES(?,?,?)", old, k.Node, k.At); err != nil {
-			return err
-		}
+	if flush {
+		s.db.DebugFlush()
 	}
-	for node, b := range s.changed {
-		if _, err = tx.ExecContext(ctx, "INSERT OR REPLACE INTO traffic_state(node,boot,iface,rx,tx,at) VALUES(?,?,?,?,?,?)", node, b.Boot, b.Iface, strconv.FormatUint(b.RX, 10), strconv.FormatUint(b.TX, 10), b.At); err != nil {
-			return err
-		}
-	}
-	cutoff := time.Now().UTC().Add(-time.Duration(s.cfg.RetentionDays) * 24 * time.Hour).Truncate(time.Minute).Unix()
-	for _, table := range []string{"metrics_1m", "probes_1m", "traffic_daily"} {
-		boundary := cutoff
-		if table == "traffic_daily" {
-			boundary = time.Unix(cutoff, 0).UTC().Truncate(24 * time.Hour).Unix()
-		}
-		if _, err = tx.ExecContext(ctx, "DELETE FROM "+table+" WHERE at < ?", boundary); err != nil {
-			return err
-		}
-	}
-	// Baselines are tiny and persist across retention, so a long outage does not
-	// silently re-count a node's all-time counters. They do not imply online state.
-	if err = tx.Commit(); err != nil {
-		return err
-	}
-	clear(s.metrics)
-	clear(s.probes)
-	clear(s.changed)
-	clear(s.traffic)
 	return nil
 }
-
-func (s *Store) queryError(err error) error {
-	if err != nil {
-		s.queries.Add(1)
-		reason := "query_failed"
-		s.failure.Store(&reason)
-	}
-	return err
-}
 func queryRange(node string, from, to time.Time, step time.Duration) (time.Time, time.Time, time.Duration, error) {
-	if !validID(node) || !validAt(from) || !validAt(to) || !to.After(from) || to.Sub(from) > 31*24*time.Hour || step < 0 || step > 31*24*time.Hour {
+	if !validNode(node) || !validAt(from) || !validAt(to) || !to.After(from) || to.Sub(from) > 31*24*time.Hour || step < 0 || step > 31*24*time.Hour {
 		return from, to, step, errors.New("invalid history range")
 	}
 	from = from.UTC().Truncate(time.Minute)
@@ -663,6 +412,107 @@ func queryRange(node string, from, to time.Time, step time.Duration) (time.Time,
 	}
 	return from, to, step, nil
 }
+func (s *Store) queryError(err error) error {
+	if err != nil {
+		s.queries.Add(1)
+		reason := "query_failed"
+		s.failure.Store(&reason)
+	}
+	return err
+}
+
+// scan streams TSDB blocks into bounded result buckets. No raw history array is
+// retained. VictoriaMetrics' deadline plus per-block context checks bound work;
+// an operating-system disk stall can still delay the storage library itself.
+func (s *Store) scan(ctx context.Context, node, task string, from, to time.Time, visit func(string, int64, float64) error) (err error) {
+	defer func() {
+		if recover() != nil {
+			err = errors.New("history query failed")
+		}
+		err = s.queryError(err)
+	}()
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	if err = ctx.Err(); err != nil {
+		return err
+	}
+	s.queryMu.RLock()
+	defer s.queryMu.RUnlock()
+	s.mu.RLock()
+	closed := s.closed
+	s.mu.RUnlock()
+	if closed {
+		return ErrClosed
+	}
+	tfs := storage.NewTagFilters()
+	if err = tfs.Add([]byte("node_id"), []byte(node), false, false); err != nil {
+		return err
+	}
+	if task != "" {
+		if err = tfs.Add(nil, []byte("frpmonitor_probe"), false, false); err != nil {
+			return err
+		}
+		if err = tfs.Add([]byte("task_id"), []byte(task), false, false); err != nil {
+			return err
+		}
+	} else {
+		if err = tfs.Add(nil, []byte("frpmonitor_probe"), true, false); err != nil {
+			return err
+		}
+	}
+	tr := storage.TimeRange{MinTimestamp: from.UnixMilli(), MaxTimestamp: to.UnixMilli() - 1}
+	deadline, _ := ctx.Deadline()
+	var search storage.Search
+	search.Init(nil, s.db, []*storage.TagFilters{tfs}, tr, 2*len(fieldNames)+1, uint64(deadline.Unix()+1))
+	defer search.MustClose()
+	var timestamps []int64
+	var values []float64
+	seen := 0
+	for search.NextMetricBlock() {
+		if err = ctx.Err(); err != nil {
+			return err
+		}
+		mbr := search.MetricBlockRef
+		var mn storage.MetricName
+		if err = mn.Unmarshal(mbr.MetricName); err != nil {
+			return errors.New("invalid history series")
+		}
+		field := strings.TrimPrefix(string(mn.MetricGroup), "frpmonitor_")
+		var block storage.Block
+		mbr.BlockRef.MustReadBlock(&block)
+		if err = block.UnmarshalData(); err != nil {
+			return errors.New("invalid history block")
+		}
+		timestamps, values = block.AppendRowsWithTimeRangeFilter(timestamps[:0], values[:0], tr)
+		seen += len(timestamps)
+		if seen > 32000000 {
+			return errors.New("history sample limit exceeded")
+		}
+		for i, at := range timestamps {
+			if math.IsNaN(values[i]) || math.IsInf(values[i], 0) {
+				return errors.New("invalid history value")
+			}
+			if err = visit(field, at, values[i]); err != nil {
+				return err
+			}
+		}
+	}
+	return search.Error()
+}
+
+type average struct {
+	value float64
+	n     int
+}
+
+func (a *average) add(v float64) {
+	a.n++
+	if a.n == 1 {
+		a.value = v
+	} else {
+		a.value = a.value*(float64(a.n-1)/float64(a.n)) + v/float64(a.n)
+	}
+}
 func (s *Store) History(ctx context.Context, node string, from, to time.Time, step time.Duration) (HistoryResult, error) {
 	from, to, step, err := queryRange(node, from, to, step)
 	if err != nil {
@@ -670,106 +520,64 @@ func (s *Store) History(ctx context.Context, node string, from, to time.Time, st
 	}
 	result := HistoryResult{StepSeconds: int64(step / time.Second), Points: []Point{}}
 	count := int((to.Sub(from) + step - 1) / step)
-	buckets := make([]bucket, count)
-	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
-	rows, err := s.db.QueryContext(ctx, "SELECT at,data FROM metrics_1m WHERE node=? AND at>=? AND at<? ORDER BY at", node, from.Unix(), to.Unix())
-	if err != nil {
-		return result, s.queryError(err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var at int64
-		var raw string
-		var b bucket
-		if err = rows.Scan(&at, &raw); err != nil {
-			break
-		}
-		if len(raw) > 65536 {
-			err = errors.New("aggregate too large")
-			break
-		}
-		if err = decodeAggregate(raw, &b); err != nil {
-			break
-		}
-		idx := int((at - from.Unix()) / int64(step/time.Second))
-		out := &buckets[idx]
-		out.Samples += b.Samples
-		out.Coverage += b.Coverage
-		if out.Fields == nil {
-			out.Fields = map[string]sum{}
-		}
-		for name, v := range b.Fields {
-			out.Fields[name] = mergeSum(out.Fields[name], v, step.Seconds())
-		}
-	}
-	if err == nil {
-		err = rows.Err()
-	}
-	if err != nil {
-		return result, s.queryError(err)
-	}
-	for i, b := range buckets {
-		p := Point{At: from.Add(time.Duration(i) * step), Samples: b.Samples, CoverageSeconds: math.Min(step.Seconds(), b.Coverage), Fields: map[string]Field{}}
+	means := make([]map[string]*average, count)
+	for i := 0; i < count; i++ {
+		p := Point{At: from.Add(time.Duration(i) * step), Fields: map[string]Field{}}
 		for _, name := range fieldNames {
-			a := b.Fields[name]
-			f := Field{Samples: a.N, CoverageSeconds: math.Min(step.Seconds(), a.Coverage)}
-			if a.N > 0 {
-				var value string
-				if a.Integer {
-					x, ok := new(big.Int).SetString(a.Sum, 10)
-					if !ok {
-						return result, s.queryError(errors.New("invalid aggregate"))
-					}
-					value = x.Quo(x, big.NewInt(int64(a.N))).String()
-				} else {
-					x, ok := new(big.Rat).SetString(a.Sum)
-					if !ok {
-						return result, s.queryError(errors.New("invalid decimal aggregate"))
-					}
-					x.Quo(x, new(big.Rat).SetInt64(int64(a.N)))
-					v, _ := x.Float64()
-					value = strconv.FormatFloat(v, 'g', -1, 64)
-				}
-				f.Value = &value
-			}
-			p.Fields[name] = f
+			p.Fields[name] = Field{}
 		}
 		result.Points = append(result.Points, p)
+		means[i] = map[string]*average{}
 	}
-	return result, nil
-}
-func (s *Store) Traffic(ctx context.Context, node string, at time.Time) (TrafficResult, error) {
-	result := TrafficResult{Day: at.UTC().Format("2006-01-02")}
-	if !validID(node) || !validAt(at) {
-		return result, errors.New("invalid traffic query")
-	}
-	day := time.Date(at.UTC().Year(), at.UTC().Month(), at.UTC().Day(), 0, 0, 0, 0, time.UTC).Unix()
-	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
-	var raw string
-	err := s.db.QueryRowContext(ctx, "SELECT data FROM traffic_daily WHERE node=? AND at=?", node, day).Scan(&raw)
-	if errors.Is(err, sql.ErrNoRows) {
-		return result, nil
-	}
+	err = s.scan(ctx, node, "", from, to, func(name string, at int64, v float64) error {
+		idx := int((at - from.UnixMilli()) / step.Milliseconds())
+		p := &result.Points[idx]
+		if name == "reports" {
+			p.Samples++
+			p.CoverageSeconds = math.Min(step.Seconds(), p.CoverageSeconds+v)
+			return nil
+		}
+		if strings.HasSuffix(name, "_coverage") {
+			key := strings.TrimSuffix(name, "_coverage")
+			f, ok := p.Fields[key]
+			if !ok {
+				return errors.New("unknown history field")
+			}
+			f.CoverageSeconds = math.Min(step.Seconds(), f.CoverageSeconds+v)
+			p.Fields[key] = f
+			return nil
+		}
+		if _, ok := p.Fields[name]; !ok {
+			return errors.New("unknown history field")
+		}
+		a := means[idx][name]
+		if a == nil {
+			a = &average{}
+			means[idx][name] = a
+		}
+		a.add(v)
+		return nil
+	})
 	if err != nil {
-		return result, s.queryError(err)
+		return HistoryResult{}, err
 	}
-	var d daily
-	if err = decodeAggregate(raw, &d); err != nil {
-		return result, s.queryError(err)
+	for i := range result.Points {
+		for name, a := range means[i] {
+			f := result.Points[i].Fields[name]
+			f.Samples = a.n
+			v := strconv.FormatFloat(a.value, 'g', -1, 64)
+			if name != "cpu" && !strings.HasPrefix(name, "load") {
+				v = strconv.FormatFloat(math.Floor(a.value), 'f', 0, 64)
+			}
+			f.Value = &v
+			result.Points[i].Fields[name] = f
+		}
 	}
-	if d.Pairs > 0 {
-		result.RXBytes = &d.RX
-		result.TXBytes = &d.TX
-	}
-	result.CoverageSeconds = d.Coverage
-	result.Resets = d.Resets
 	return result, nil
 }
 func (s *Store) ProbeHistory(ctx context.Context, node, task string, from, to time.Time, step time.Duration) (ProbeHistoryResult, error) {
 	result := ProbeHistoryResult{Points: []ProbePoint{}}
-	if !validID(task) {
+	if !validTask(task) {
 		return result, errors.New("invalid task")
 	}
 	from, to, step, err := queryRange(node, from, to, step)
@@ -778,142 +586,43 @@ func (s *Store) ProbeHistory(ctx context.Context, node, task string, from, to ti
 	}
 	result.StepSeconds = int64(step / time.Second)
 	count := int((to.Sub(from) + step - 1) / step)
-	buckets := make([]probe, count)
-	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
-	rows, err := s.db.QueryContext(ctx, "SELECT at,data FROM probes_1m WHERE node=? AND task=? AND at>=? AND at<? ORDER BY at", node, task, from.Unix(), to.Unix())
-	if err != nil {
-		return result, s.queryError(err)
+	means := make([]average, count)
+	for i := 0; i < count; i++ {
+		result.Points = append(result.Points, ProbePoint{At: from.Add(time.Duration(i) * step)})
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var at int64
-		var raw string
-		var p probe
-		if err = rows.Scan(&at, &raw); err != nil {
-			break
+	err = s.scan(ctx, node, task, from, to, func(_ string, at int64, v float64) error {
+		if v < -1 || v > 900 {
+			return errors.New("invalid probe value")
 		}
-		if len(raw) > 65536 {
-			err = errors.New("aggregate too large")
-			break
+		idx := int((at - from.UnixMilli()) / step.Milliseconds())
+		p := &result.Points[idx]
+		p.Samples++
+		result.Samples++
+		if v < 0 {
+			p.Failures++
+			result.Failures++
+		} else {
+			means[idx].add(v)
 		}
-		if err = decodeAggregate(raw, &p); err != nil {
-			break
-		}
-		idx := int((at - from.Unix()) / int64(step/time.Second))
-		out := &buckets[idx]
-		out.Samples += p.Samples
-		out.Failures += p.Failures
-		out.Total += p.Total
-		if p.LastAt > out.LastAt {
-			out.LastAt = p.LastAt
-			out.LastLatency = p.LastLatency
-		}
-		if result.LatestAt == nil || p.LastAt > result.LatestAt.UnixNano() {
-			t := time.Unix(0, p.LastAt).UTC()
+		if result.LatestAt == nil || at >= result.LatestAt.UnixMilli() {
+			t := time.UnixMilli(at).UTC()
 			result.LatestAt = &t
-			v := p.LastLatency
-			result.LatencyMS = &v
+			value := v
+			result.LatencyMS = &value
 		}
-	}
-	if err == nil {
-		err = rows.Err()
-	}
+		return nil
+	})
 	if err != nil {
-		return result, s.queryError(err)
+		return ProbeHistoryResult{}, err
 	}
-	for i, p := range buckets {
-		out := ProbePoint{At: from.Add(time.Duration(i) * step), Samples: p.Samples, Failures: p.Failures}
-		if good := p.Samples - p.Failures; good > 0 {
-			v := p.Total / float64(good)
-			out.LatencyMS = &v
+	for i, a := range means {
+		if a.n > 0 {
+			v := a.value
+			result.Points[i].LatencyMS = &v
 		}
-		result.Samples += p.Samples
-		result.Failures += p.Failures
-		result.Points = append(result.Points, out)
 	}
 	return result, nil
 }
-
-// String deliberately does not disclose the database path.
 func (s *Store) String() string {
-	return fmt.Sprintf("history store (retention=%dd)", s.cfg.RetentionDays)
-}
-
-// Validate persisted payloads before arithmetic: a damaged database produces a
-// degraded query/write result, never a process panic or an invented zero.
-func decodeAggregate(raw string, dst any) error {
-	if len(raw) > 65536 {
-		return errors.New("aggregate too large")
-	}
-	if err := json.Unmarshal([]byte(raw), dst); err != nil {
-		return err
-	}
-	validCount := func(n int) bool { return n >= 0 && n <= 1000000 }
-	validCoverage := func(n float64, cap float64) bool { return !math.IsNaN(n) && !math.IsInf(n, 0) && n >= 0 && n <= cap }
-	validUint := func(v string) bool {
-		if len(v) == 0 || len(v) > 128 {
-			return false
-		}
-		for _, r := range v {
-			if r < '0' || r > '9' {
-				return false
-			}
-		}
-		return true
-	}
-	switch v := dst.(type) {
-	case *bucket:
-		if !validCount(v.Samples) || !validCoverage(v.Coverage, 60) || len(v.Fields) > len(fieldNames) {
-			return errors.New("invalid metric aggregate")
-		}
-		for name, a := range v.Fields {
-			known := false
-			for _, n := range fieldNames {
-				if name == n {
-					known = true
-					break
-				}
-			}
-			isInt := name != "cpu" && !strings.HasPrefix(name, "load")
-			if !known || a.Integer != isInt || !validCount(a.N) || a.N > v.Samples || !validCoverage(a.Coverage, 60) {
-				return errors.New("invalid field aggregate")
-			}
-			if a.Integer {
-				if !validUint(a.Sum) {
-					return errors.New("invalid integer aggregate")
-				}
-			} else {
-				x, ok := new(big.Rat).SetString(a.Sum)
-				if len(a.Sum) > 2048 || !ok || x.Sign() < 0 {
-					return errors.New("invalid decimal aggregate")
-				}
-			}
-		}
-	case *probe:
-		if !validCount(v.Samples) || !validCount(v.Failures) || v.Failures > v.Samples || !validCoverage(v.Total, 900*float64(v.Samples)) || v.LastLatency < -1 || v.LastLatency > 900 || math.IsNaN(v.LastLatency) || math.IsInf(v.LastLatency, 0) {
-			return errors.New("invalid probe aggregate")
-		}
-	case *daily:
-		if !validUint(v.RX) || !validUint(v.TX) || !validCoverage(v.Coverage, 86400) || !validCount(v.Pairs) || !validCount(v.Resets) {
-			return errors.New("invalid traffic aggregate")
-		}
-	}
-	return nil
-}
-
-// Coverage measures observed time, capped at one expected interval per sample.
-// Fast/replayed reports cannot turn one second of reception into a full minute.
-func (s *Store) coverage(node, name string, at time.Time) float64 {
-	times := s.lastObserved[node]
-	now := at.UnixNano()
-	old, exists := times[name]
-	if exists && now <= old {
-		return 0
-	}
-	times[name] = now
-	if !exists {
-		return math.Min(60, s.cfg.ReportInterval.Seconds())
-	}
-	return math.Min(s.cfg.ReportInterval.Seconds(), float64(now-old)/1e9)
+	return fmt.Sprintf("VictoriaMetrics history (retention=%dd)", s.cfg.RetentionDays)
 }

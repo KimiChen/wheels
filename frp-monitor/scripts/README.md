@@ -1,7 +1,8 @@
 # 构建入口
 
 `scripts/frp.py` 是 Python 3.11+ 标准库 CLI；运行平台为 macOS/Linux，需要 Git、
-本机 Go、Node.js 与 npm。当前输出为 **P3 监控、管理与隧道对账**：原生 frpc/frps 功能和
+本机 Go 1.26.6+、Node.js 与 npm。当前输出为 **P4 简化存储、可选 TSDB 与 GitHub 管理登录**，
+已通过本地测试与二进制 smoke，尚未部署。原生 frpc/frps 功能和
 Dashboard 保留；通过 `[telemetry]` / `[monitor]` 显式启用独立采集、探测、存储与网页。
 
 从 `frp-monitor/` 运行：
@@ -11,8 +12,7 @@ python3 scripts/frp.py prepare
 python3 scripts/frp.py test
 python3 scripts/frp.py build --native
 python3 tests/smoke.py --agent dist/darwin-arm64/frp-monitor-agent --server dist/darwin-arm64/frp-monitor-server
-python3 tests/p1_smoke.py --agent dist/darwin-arm64/frp-monitor-agent --server dist/darwin-arm64/frp-monitor-server
-python3 tests/p2_smoke.py --agent dist/darwin-arm64/frp-monitor-agent --server dist/darwin-arm64/frp-monitor-server
+python3 tests/p4_smoke.py --agent dist/darwin-arm64/frp-monitor-agent --server dist/darwin-arm64/frp-monitor-server
 python3 scripts/frp.py build
 python3 scripts/frp.py package
 ```
@@ -80,7 +80,7 @@ dist/<本机OS>-<本机架构>/         --native 产物
 - Go 使用本机工具链，显式 `GOTOOLCHAIN=local`、`GOENV=off`、`GOWORK=off`、
   `CGO_ENABLED=0`、`-mod=readonly`、`-trimpath`、`-buildvcs=false` 和空 build ID。
   清除影响架构、实验功能及默认调试行为的 Go 环境选项，不自动下载 Go 工具链。
-  工具链必须满足上游 `go.mod`；`BUILD.json` 记录本次 Go/Node/npm 版本、上游身份、
+  工具链必须满足补丁后的 `go.mod`，内嵌 VictoriaMetrics 要求 Go 1.26.6+；`BUILD.json` 记录本次 Go/Node/npm 版本、上游身份、
   构建脚本/补丁/扩展摘要、原生网页资源摘要以及二进制摘要。
 - 重现构建要求相同源码、依赖、操作系统、Go/Node/npm 工具链及构建条件；不承诺
   不同工具链版本逐字节相同。tar.gz 文件排序、权限、所有者和时间戳固定。
@@ -89,7 +89,8 @@ dist/<本机OS>-<本机架构>/         --native 产物
   不将失败后残留目录当作本轮成功产物。
 
 发布包只包含两个二进制、`BUILD.json`、`LICENSE`、`LICENSE.monitor-probe`、`THIRD_PARTY_NOTICES.md`、
-`upstream.lock`、SQLite 依赖许可证 `licenses/`、`scripts/ops.py`、`scripts/local.py`、
+`upstream.lock`、SQLite/TSDB 依赖许可证 `licenses/`、`scripts/ops.py`、`scripts/local.py`、
+`monitor/control/schema.sql`、
 `packaging/README.md`、`.env.example`、说明及包内 `SHA256SUMS`。许可证使用
 文件名白名单并保留来源目录；不会打包 `.env`、本地运行数据、
 上游临时树、npm 依赖目录或源码。`package` 失败时同样不能沿用残留发布包。
@@ -107,26 +108,41 @@ FRP 实际转发与重连验收另见 `tests/README.md`。
 
 ## 本地演示
 
-`python3 scripts/local.py init` 读取 `.env` 中的 `FRP_MONITOR_PORT`（17401）、
-`FRP_SERVER_PORT`（17000）、`FRP_MONITOR_INTERVAL_SECONDS`（1）、
-`FRP_MONITOR_RETENTION_DAYS`（7，允许 1–31）、
-`FRP_AGENT_NAME`（本地演示节点）和 `FRP_AGENT_IFACE`（空），进程环境变量优先。
-端口须不同，采样间隔 1–3600 秒；其它 `.env` 键不会传入运行进程。
+`python3 scripts/local.py init` 读取以下 `.env` 配置，进程环境变量优先：
 
-工具在 `data/local/` 生成随机安装 ID、独立的 FRP 与监控 Token、摘要凭据表、
-TOML 配置及带回环 SAN 的 30 天自签证书。目录 0700，文件 0600；不覆盖已有目录。
-`--directory data/another-demo` 可创建另一安装，`--http` 显式选择回环明文演示。
-默认将数据库设为同目录的 `history.sqlite`，任务文件为 `probes.json` 的空列表。
-`init --probes` 显式生成并启用本机 FRP 端口探测，同时允许该 agent 访问私网/回环。
-后续修改任务须递增版本；目标和 Token 不进入公开网页。
-证书不加入系统信任；不使用跳过 TLS 验证。
+| 配置 | 默认值 / 用途 |
+|---|---|
+| `FRP_MONITOR_PORT` / `FRP_SERVER_PORT` | 17401 / 17000，两个端口必须不同 |
+| `FRP_MONITOR_INTERVAL_SECONDS` | 1，范围 1–3600 |
+| `FRP_MONITOR_HISTORY_DATA_PATH` | 空为关闭；目录非空启用，相对路径按本次运行数据目录解析 |
+| `FRP_MONITOR_RETENTION_DAYS` | 7，范围 1–365 |
+| `FRP_AGENT_NAME` / `FRP_AGENT_IFACE` | 本地演示节点 / 空接口筛选 |
+| `FRP_GITHUB_CLIENT_ID` | GitHub OAuth App 的客户端 ID |
+| `FRP_GITHUB_CLIENT_SECRET_FILE` | 外部私有密钥文件路径 |
+| `FRP_GITHUB_CALLBACK_URL` | 管理入口 HTTPS callback |
+| `FRP_GITHUB_ADMIN_USERS` | 逗号分隔的 GitHub 个人账号用户名允许列表 |
 
-`python3 scripts/local.py run` 先用 native `verify` 校验配置，再启动当前平台
-`dist/<OS>-<ARCH>/` 下的两个程序；若设置自定义构建输出目录，请直接使用相应二进制。
-Ctrl-C/TERM 清理两个子进程，日志留在私有目录。已有安装不随 `.env` 自动更新；
-TOML变化需要重启，凭据和探测配置支持热加载。初始化还生成独立管理员token/hash和
-本地可信FRP绑定；`/admin/` 使用 `admin.token` 登录。
+OAuth 四项一起配置；全部留空时管理登录不可用，公开监控和节点上报仍可运行。
+工具只按 UTF-8 读取字面量，不执行 shell 或展开凭据。其他 `.env` 键不传入运行进程。
 
-`ops.py` 提供生产 server/agent 私有配置初始化、SQLite在线备份、验证恢复和systemd模板输出。
-它复用相同 `.env` 默认值，不安装服务、不执行远程命令。完整命令和权限见
+初始化在 `data/local/` 创建 `control.sqlite`，预置自增数字 ID 的本地节点、节点令牌
+摘要和可信 FRP 绑定；生成独立 FRP/节点 Token、TOML 与带回环 SAN 的 30 天自签证书。
+目录 0700，文件 0600；不覆盖已有目录，不导入旧结构。可用
+`--directory data/another-demo` 新建安装；`--http` 显式选择回环明文开发。
+证书不加入系统信任，也不跳过 TLS 验证。
+
+历史默认关闭；初始化配置将非空历史目录写到 `monitor.historyDataPath`，不再生成单独开关。
+目录不是 SQLite 文件，不需要独立服务。
+`init --probes` 在 `settings.probe_json` 中生成本机 FRP 端口探测，同时明确授权该 agent
+访问私网/回环。后续探测修改由管理 API 写入控制库；目标和 Token 不进入公开网页。
+管理员访问 `/admin/` 后跳转 GitHub 登录，初始化不生成管理员登录令牌。
+
+`python3 scripts/local.py run` 先使用 native `verify` 校验配置，再启动当前平台
+`dist/<OS>-<ARCH>/` 的两个程序。自定义构建输出目录需直接使用相应二进制。
+Ctrl-C/TERM 清理子进程，日志留在私有目录。已有安装不会随 `.env` 自动更新；
+TOML、OAuth 允许列表与启动密钥修改后重启，节点与探测业务通过管理界面即时更新。
+
+`ops.py` 提供 server/agent 私有配置初始化、控制库在线备份、恢复验证和 systemd 模板。
+控制库快照覆盖当前配置及账本；可选 TSDB 历史的备份范围单独说明，不将活动历史目录
+当作普通文件直接打包。工具不安装服务、不执行远程命令，完整命令见
 [发布与恢复](../packaging/README.md)。

@@ -12,18 +12,18 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/big"
 	"net"
 	"net/http"
-	"os"
 	"regexp"
-	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode/utf8"
 
+	"github.com/fatedier/frp/extension/frpmonitor/monitor/control"
 	"github.com/fatedier/frp/extension/frpmonitor/monitor/store"
 	"github.com/fatedier/frp/extension/frpmonitor/shared"
 	"github.com/fatedier/frp/extension/frpmonitor/web"
@@ -73,6 +73,8 @@ type Service struct {
 	rateAt          time.Time
 	public          atomic.Pointer[PublicSnapshot]
 	publishMu       sync.Mutex
+	control         *control.Store
+	configs         atomic.Pointer[nodeConfigs]
 	store           *store.Store
 	storeFailed     bool
 	tasks           atomic.Pointer[probeBook]
@@ -92,24 +94,33 @@ func Start(ctx context.Context, cfg shared.MonitorConfig, providers ...shared.Se
 	if err := cfg.Validate(); err != nil {
 		return nil, errors.New("invalid monitor configuration")
 	}
-	creds, err := readCredentials(cfg.CredentialsFile)
+	db, err := control.Open(control.Config{Path: cfg.DatabaseFile, ReportInterval: time.Duration(cfg.ReportIntervalSeconds) * time.Second})
 	if err != nil {
-		return nil, err
+		return nil, errors.New("control database unavailable")
 	}
+	started := false
+	defer func() {
+		if !started {
+			db.Close()
+		}
+	}()
+
 	child, cancel := context.WithCancel(ctx)
-	s := &Service{cfg: cfg, ctx: child, cancel: cancel, nodes: map[string]*node{}, credentials: creds, connections: map[*websocket.Conn]credential{}, handshakes: make(chan struct{}, 32), streams: make(chan struct{}, 128), done: make(chan struct{}), rateTokens: 40, rateAt: time.Now()}
+	s := &Service{cfg: cfg, ctx: child, cancel: cancel, nodes: map[string]*node{}, control: db, connections: map[*websocket.Conn]credential{}, handshakes: make(chan struct{}, 32), streams: make(chan struct{}, 128), done: make(chan struct{}), rateTokens: 40, rateAt: time.Now()}
 	if len(providers) > 0 {
 		s.serverProvider = providers[0]
 	}
-	if cfg.AdminCredentialsFile != "" {
-		s.admin, err = newAdmin(cfg.AdminCredentialsFile)
-		if err != nil {
-			cancel()
-			return nil, err
-		}
+	s.admin, err = newAdmin(cfg)
+	if err != nil {
+		cancel()
+		return nil, err
 	}
-	for _, c := range creds {
-		s.nodes[c.AgentID] = &node{credential: c}
+	initialCtx, initialCancel := context.WithTimeout(child, 3*time.Second)
+	err = s.refreshNodes(initialCtx)
+	initialCancel()
+	if err != nil {
+		cancel()
+		return nil, err
 	}
 	s.queries = make(chan struct{}, 8)
 	s.tasks.Store(&probeBook{Nodes: map[string][]configuredProbe{}})
@@ -139,8 +150,8 @@ func Start(ctx context.Context, cfg shared.MonitorConfig, providers ...shared.Se
 		}
 		s.server.TLSConfig = tlsCfg
 	}
-	if cfg.DatabaseFile != "" {
-		s.store, err = store.Open(store.Config{Path: cfg.DatabaseFile, RetentionDays: cfg.RetentionDays, ReportInterval: time.Duration(cfg.ReportIntervalSeconds) * time.Second})
+	if cfg.HistoryDataPath != "" {
+		s.store, err = store.Open(store.Config{Path: cfg.HistoryDataPath, RetentionDays: cfg.RetentionDays, ReportInterval: time.Duration(cfg.ReportIntervalSeconds) * time.Second})
 		s.storeFailed = err != nil
 	}
 	s.publishSnapshot(time.Now())
@@ -171,6 +182,7 @@ func Start(ctx context.Context, cfg shared.MonitorConfig, providers ...shared.Se
 	}()
 	go func() { s.wg.Wait(); close(s.done) }()
 	go func() { <-child.Done(); s.Close() }()
+	started = true
 	return s, nil
 }
 
@@ -187,6 +199,9 @@ func (s *Service) Close() {
 			_ = c.Close()
 		}
 		s.mu.Unlock()
+		if s.control != nil {
+			_ = s.control.Close()
+		}
 		if s.store != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 			defer cancel()
@@ -199,46 +214,14 @@ func (s *Service) Close() {
 	}
 }
 
-var idPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{8,128}$`)
+var idPattern = regexp.MustCompile(`^[1-9][0-9]{0,18}$`)
 var digestPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
-func readCredentials(path string) ([]credential, error) {
-	lst, err := os.Lstat(path)
-	if err != nil || !lst.Mode().IsRegular() {
-		return nil, errors.New("monitor credentials require a regular 0600 file")
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, errors.New("monitor credentials unavailable")
-	}
-	defer f.Close()
-	st, err := f.Stat()
-	if err != nil || !st.Mode().IsRegular() || !os.SameFile(lst, st) || st.Size() > 1024*1024 || (runtime.GOOS != "windows" && st.Mode().Perm() != 0600) {
-		return nil, errors.New("monitor credentials require a regular 0600 file")
-	}
-	data, err := io.ReadAll(io.LimitReader(f, 1024*1024+1))
-	if err != nil || len(data) > 1024*1024 || !utf8.Valid(data) {
-		return nil, errors.New("invalid monitor credentials")
-	}
-	var creds []credential
-	if strictJSON(data, &creds) != nil || creds == nil || len(creds) > maxNodes {
-		return nil, errors.New("invalid monitor credentials")
-	}
-	ids, hashes := map[string]bool{}, map[string]bool{}
-	for _, c := range creds {
-		if !idPattern.MatchString(c.AgentID) || len(c.Name) > 128 || strings.TrimSpace(c.Name) == "" || strings.ContainsAny(c.Name, "\x00\r\n") || !digestPattern.MatchString(c.TokenSHA256) || ids[c.AgentID] || hashes[c.TokenSHA256] {
-			return nil, errors.New("invalid monitor credentials")
-		}
-		if c.FRPBinding != nil && c.FRPBinding.Validate() != nil {
-			return nil, errors.New("invalid monitor binding")
-		}
-		ids[c.AgentID] = true
-		hashes[c.TokenSHA256] = true
-	}
-	return creds, nil
-}
 func (s *Service) authenticate(r *http.Request) string { return s.authenticateCredential(r).AgentID }
 func (s *Service) authenticateCredential(r *http.Request) credential {
+	if s.credentialError.Load() {
+		return credential{}
+	}
 	value := r.Header.Get("Authorization")
 	if !strings.HasPrefix(value, "Bearer ") || len(value) > 512 {
 		return credential{}
@@ -490,6 +473,9 @@ func (s *Service) handleWS(w http.ResponseWriter, r *http.Request) {
 		if report.Metrics != nil {
 			n.metrics = report.Metrics
 			n.metricsAt = now
+			if s.control != nil {
+				s.control.Accept(id, now, *report.Metrics)
+			}
 			if s.store != nil {
 				s.store.Accept(id, now, *report.Metrics)
 			}
@@ -554,12 +540,15 @@ type PublicMetrics struct {
 	Procs      shared.Field[string]    `json:"procs"`
 }
 type PublicFRP struct {
-	Reconciliation string `json:"reconciliation"`
-	ServerOnline   *bool  `json:"server_online"`
-	Registered     int    `json:"registered"`
-	ControlState   string `json:"control_state"`
-	ProxyTotal     int    `json:"proxy_total"`
-	ProxyRunning   int    `json:"proxy_running"`
+	Reconciliation string  `json:"reconciliation"`
+	ServerOnline   *bool   `json:"server_online"`
+	Registered     int     `json:"registered"`
+	ControlState   string  `json:"control_state"`
+	ProxyTotal     int     `json:"proxy_total"`
+	ProxyRunning   int     `json:"proxy_running"`
+	TodayRXBytes   *string `json:"today_rx_bytes"`
+	TodayTXBytes   *string `json:"today_tx_bytes"`
+	TrafficScope   string  `json:"traffic_scope"`
 }
 type PublicNode struct {
 	ID              string          `json:"id"`
@@ -572,18 +561,50 @@ type PublicNode struct {
 	FRP             PublicFRP       `json:"frp"`
 	Hardware        *PublicHardware `json:"hardware"`
 	Metrics         *PublicMetrics  `json:"metrics"`
+	PublicNote      string          `json:"public_note"`
+	Billing         *nodeBilling    `json:"billing,omitempty"`
+	TrafficToday    *nodeToday      `json:"traffic_today"`
+	TrafficPlan     *nodePlan       `json:"traffic_plan,omitempty"`
+	AccountingState string          `json:"accounting_state"`
 }
 type PublicSnapshot struct {
 	Nodes       []PublicNode `json:"nodes"`
 	GeneratedAt time.Time    `json:"generated_at"`
 }
 
-func (s *Service) snapshot(now time.Time) PublicSnapshot {
+func (s *Service) snapshot(now time.Time) PublicSnapshot { return s.snapshotFor(now, false) }
+func (s *Service) snapshotFor(now time.Time, private bool) PublicSnapshot {
+	configs := s.configs.Load()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := PublicSnapshot{Nodes: make([]PublicNode, 0, len(s.nodes)), GeneratedAt: now.UTC()}
 	for _, n := range s.nodes {
+		var config *control.Node
+		if configs != nil {
+			config = (*configs)[n.credential.AgentID]
+		}
+		if config == nil {
+			continue
+		}
 		p := PublicNode{ID: n.credential.AgentID, Name: n.credential.Name, Session: "waiting", Freshness: "waiting", IntervalSeconds: s.cfg.ReportIntervalSeconds, FRP: PublicFRP{ControlState: "unknown"}}
+		p.AccountingState = "ready"
+		if s.control != nil && !s.control.Healthy() {
+			p.AccountingState = "degraded"
+		}
+		p.PublicNote = config.PublicNote
+		p.TrafficToday = todayDTO(config, now)
+		if private || config.PublishBilling {
+			p.Billing = billingDTO(config)
+		}
+		if private || config.PublishTrafficPlan {
+			p.TrafficPlan = planDTO(config)
+		}
+		if p.AccountingState == "degraded" {
+			p.TrafficToday.Partial = true
+			if p.TrafficPlan != nil {
+				p.TrafficPlan.Partial = true
+			}
+		}
 		if n.facts != nil {
 			p.Hardware = &PublicHardware{
 				OS: n.facts.OS, Arch: n.facts.Arch, Virt: n.facts.Virt,
@@ -655,8 +676,52 @@ func (s *Service) snapshot(now time.Time) PublicSnapshot {
 		n.FRP.Reconciliation = state.State
 		n.FRP.ServerOnline = state.ServerOnline
 		n.FRP.Registered = registered[n.ID]
+		n.FRP.TrafficScope = reconciled.TrafficScope
+		if state.State == "matched" && reconciled.TrafficScope == "server_local_day" {
+			rx, tx := new(big.Int), new(big.Int)
+			valid := true
+			for _, proxy := range reconciled.Proxies {
+				if proxy.AgentID == nil || *proxy.AgentID != n.ID {
+					continue
+				}
+				if proxy.TodayRXBytes == nil || proxy.TodayTXBytes == nil {
+					valid = false
+					break
+				}
+				prx, ok := new(big.Int).SetString(*proxy.TodayRXBytes, 10)
+				if !ok || prx.Sign() < 0 {
+					valid = false
+					break
+				}
+				ptx, ok := new(big.Int).SetString(*proxy.TodayTXBytes, 10)
+				if !ok || ptx.Sign() < 0 {
+					valid = false
+					break
+				}
+				rx.Add(rx, prx)
+				tx.Add(tx, ptx)
+			}
+			if valid {
+				a, b := rx.String(), tx.String()
+				n.FRP.TodayRXBytes = &a
+				n.FRP.TodayTXBytes = &b
+			}
+		}
 	}
-	sort.Slice(out.Nodes, func(i, j int) bool { return out.Nodes[i].ID < out.Nodes[j].ID })
+	if !private {
+		visible := make([]PublicNode, 0, len(out.Nodes))
+		for _, p := range out.Nodes {
+			if (*configs)[p.ID].IsPublic {
+				visible = append(visible, p)
+			}
+		}
+		out.Nodes = visible
+	}
+	sort.Slice(out.Nodes, func(i, j int) bool {
+		a, _ := strconv.ParseInt(out.Nodes[i].ID, 10, 64)
+		b, _ := strconv.ParseInt(out.Nodes[j].ID, 10, 64)
+		return a < b
+	})
 	return out
 }
 func publicHeaders(w http.ResponseWriter) {

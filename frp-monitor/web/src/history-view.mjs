@@ -1,5 +1,5 @@
 import {UNKNOWN, bytes} from "./format.mjs";
-import {windows, cumulative, finite, count, dateText, coverage, failureRate, chart, resourceCharts} from "./history-data.mjs";
+import {windows, finite, count, dateText, coverage, failureRate, chart, resourceCharts} from "./history-data.mjs";
 import {connectHistory} from "./history-transport.mjs";
 
 const svgNS = "http://www.w3.org/2000/svg";
@@ -105,15 +105,13 @@ export function createHistoryPanel(card, nodeID, options = {}) {
   } else toolbar.append(windowLabel, refresh);
   const status = el("p", "fm-history-status", detail ? "正在准备历史记录…" : "展开后获取历史记录"); status.setAttribute("role", "status");
   const storage = el("p", "fm-history-storage"), content = el("div", "fm-history-content"); content.hidden = true;
-  const trafficHeader = el("div", "fm-history-heading"), trafficTitle = el("h4", "", "今日主机流量"), day = el("span", "fm-history-note"); trafficHeader.append(trafficTitle, day);
-  const traffic = el("dl", "fm-traffic"), rx = metric("累计接收"), tx = metric("累计发送"); traffic.append(rx.node, tx.node);
-  const trafficNote = el("p", "fm-history-note"), chartsTitle = el("h4", "", "资源趋势"), chartNote = el("p", "fm-history-note");
+  const chartsTitle = el("h4", "", "资源趋势"), chartNote = el("p", "fm-history-note");
   const charts = el("div", "fm-history-charts"), graphs = resourceCharts.map(createChart); charts.append(...graphs.map(g => g.element));
   const probeTitle = el("h4", "", "TCP 探测"), probeNote = el("p", "fm-history-note", "失败率是所选范围内 TCP 建连失败次数占比，不表示 IP 丢包率。耗时曲线仅汇总成功建连；全部失败的时间段留白。"), probeState = el("p", "fm-history-storage"), probeEmpty = el("p", "fm-history-empty", "暂无 TCP 探测记录。"), probeList = el("div", "fm-probe-list");
   const probes = new Map(), resources = el("div", "fm-resource-history"), probeGroup = el("div", "fm-network-history");
   resources.id = `${identifier}-resources`; probeGroup.id = `${identifier}-network`;
   sectionButtons.get("resources")?.setAttribute("aria-controls", resources.id); sectionButtons.get("network")?.setAttribute("aria-controls", probeGroup.id);
-  if (!detail) resources.append(trafficHeader, traffic, trafficNote, chartsTitle);
+  if (!detail) resources.append(chartsTitle);
   resources.append(chartNote, charts); probeGroup.append(probeTitle, probeState, probeNote, probeEmpty, probeList);
   content.append(resources, probeGroup); body.append(toolbar, status, storage, content);
   function applySection() {
@@ -133,15 +131,8 @@ export function createHistoryPanel(card, nodeID, options = {}) {
     last = data;
     const state = data.storage.state, dropped = count(data.storage.dropped) ? data.storage.dropped : null;
     storage.dataset.state = state;
-    write(storage, state === "disabled" ? "历史存储未启用，趋势与今日累计流量暂不可用。" : state === "degraded" ? `历史存储降级，记录可能不完整${dropped ? `；已丢弃 ${dropped} 条记录` : ""}。缺失数据不会补成 0。` : "历史按分钟归档，最新记录可能延迟约 1 分钟；图表缺口表示没有有效采样。");
+    write(storage, state === "disabled" ? "指标历史未启用，暂无历史曲线；今日与套餐流量正常累计。" : state === "degraded" ? `指标历史暂不可用，曲线记录可能不完整${dropped ? `；已丢弃 ${dropped} 条记录` : ""}。缺失数据不会补成 0。` : "历史按分钟归档，最新记录可能延迟约 1 分钟；图表缺口表示没有有效采样。");
     content.hidden = false; applySection();
-    const flow = data.traffic ?? {};
-    write(day, /^\d{4}-\d{2}-\d{2}$/.test(flow.day) ? `${flow.day} · UTC` : "UTC 日期未知");
-    const receive = cumulative(flow.rx_bytes), send = cumulative(flow.tx_bytes);
-    write(rx.value, bytes(receive)); write(tx.value, bytes(send));
-    if (receive !== null) rx.value.title = `${receive} bytes`; else rx.value.removeAttribute("title");
-    if (send !== null) tx.value.title = `${send} bytes`; else tx.value.removeAttribute("title");
-    write(trafficNote, `基于 UTC 当日收到的有效网卡计数器差分 · 覆盖 ${coverage(flow.coverage_seconds)}${count(flow.resets) ? ` · ${flow.resets} 次计数重置` : ""}。覆盖时间只计有效观察；同一计数范围可补回断线增量，跨日按接收日归属可能有误差。不等于上方系统计数器累计量、FRP 隧道流量或流量账单。`);
     write(chartNote, `${windows[data.window]} · 每个时间段 ${coverage(data.step_seconds)}。数值仅汇总有效采样；缺失时段留白。`);
     for (const graph of graphs) graph.update(data.points, data);
     probeState.dataset.state = data.probes_state;

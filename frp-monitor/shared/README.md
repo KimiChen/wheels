@@ -4,15 +4,35 @@
 在 Overlay 中映射为 `github.com/fatedier/frp/extension/frpmonitor/shared`，共享
 固定上游 Go module，不单独创建 `go.mod`。
 
-P1/P2 运行时已在 agent/service、agent/probe、monitor 与 monitor/store 中实现
-握手凭据、hello 响应、会话所有权、重连、接收时间、采样、探测和历史事务。验证器不做 DNS、
+运行时由 agent/service、agent/probe、monitor、monitor/control 和 monitor/store 分别负责
+握手凭据、会话所有权、重连、采样、探测、SQLite 当前业务与可选 TSDB 历史。验证器不做 DNS、
 网络请求或节点身份绑定，也不等于完成资源配额、限速、目标授权与会话防重放。
+
+## 启动配置与存储身份
+
+`MonitorConfig` 对应 frps 的 `[monitor]`，启用后必须设置 SQLite `databaseFile`。
+节点主键是 SQLite 自增整数，API 中使用十进制字符串；它与 JSON-RPC 的请求 id、
+每次连接随机生成的 session_id 是不同概念。认证只认数据库中当前节点令牌摘要。
+节点费用、套餐、今日统计及计数器基线保存到同一节点行，探测文档保存到 settings 单行。
+实时 Facts/Metrics 与在线状态不进入业务表。
+
+`historyDataPath` 默认空，即关闭；填入目录即启用。保留期 `retentionDays`
+默认 7 天，范围 1–365。历史后端内嵌主控进程，使用 VictoriaMetrics 保存曲线，
+不参与 SQLite 精确流量记账。今日日期按主控系统时区划分，套餐有独立重置时区。
+时间戳均使用 UTC 毫秒或 API 规定的 RFC3339 格式。
+
+管理员只通过 github.com OAuth 登录。`githubClientID`、`githubClientSecretFile`、
+`githubCallbackURL`、`githubAdminUsers` 必须成组配置；允许列表最多 32 个用户名。
+密钥由外部 0600 文件提供，不写入业务表。未配置时不开放管理功能；部分配置或非法
+callback 会被配置校验拒绝。callback 路径固定为 `/api/admin/v1/auth/github/callback`，
+要求 HTTPS，字面量 loopback 的 HTTP 仅用于本机开发。具体 API 见
+[monitor/README.md](../monitor/README.md)。
 
 ## 帧与会话
 
 独立 WSS 路径 `/agent/v1/ws`，节点凭据通过 Authorization 握手交付，禁止写入正文。
 `DecodeFrame` 只解码下表中的 JSON-RPC 2.0 **方法帧**，不解码响应帧。批量请求、
-数字 id、未知方法和未知字段不属于 v1 profile。`hello` 必须有非空字符串 `id`；
+数字 JSON-RPC 请求 id、未知方法和未知字段不属于 v1 profile。`hello` 必须有非空字符串 `id`；
 其余三个方法都是通知，不能出现 `id`（包括 `null`）。
 
 | 方法 | 方向 | params | 行为 |
@@ -31,7 +51,7 @@ P1/P2 运行时已在 agent/service、agent/probe、monitor 与 monitor/store �
   采集或任务生成时间。客户端时钟不决定在线、新鲜度、累计日期或认证有效期；服务端
   另记接收时间。差分 CPU/网速使用采集器本地单调时间。
 - 每帧校验只检查字段范围。当前会话替换、旧会话迟到、序号倒退/重复、旧连接退出
-  不能覆盖新连接，均由 P1 接收器保证；不能因为 `DecodeFrame` 返回成功就覆盖节点。
+  不能覆盖新连接，均由接收器保证；不能因为 `DecodeFrame` 返回成功就覆盖节点。
 - 不提供可由正文指定的 `agent_id`。服务端凭据映射出的节点才是权威身份；
   `session_id`、FRP 关联和主机名都不是认证依据。
 
@@ -46,7 +66,7 @@ hello 的 capabilities 为不重复字符串列表，例如 `metrics.v1`、`frp.
 `report_interval` 为 1–3600 秒。`HelloResult.Validate` 验证结果字段，调用方负责保证
 id 对应请求、会话和能力子集匹配。协商拒绝时返回 JSON-RPC error，不发送成功响应。
 建议不支持 schema 使用应用错误 `-32001`；`ErrUnsupportedSchema` 可供接收器映射。
-鉴权失败发生于握手阶段。响应编码、协商流程和错误到断线的处理由 P1 实现。
+鉴权失败发生于握手阶段。响应编码、协商流程和错误到断线的处理由接收器实现。
 
 ## 字段、单位和质量
 
@@ -86,10 +106,10 @@ Facts 和 Metrics 都要求 `scope`，取 `host`、`namespace` 或 `unknown`。
 | Metrics | `uptime` | uint64，秒 |
 | Metrics | `tcp, udp, procs` | uint64，socket 汇总/进程数；TCP 包括 TIME_WAIT，不是 established 数 |
 
-参考 boot_id 的网卡集合摘要使用 FNV-1a；具体确定性集合构造由 P1 采集器按固定
+参考 boot_id 的网卡集合摘要使用 FNV-1a；具体确定性集合构造由采集器按固定
 参考源码实现。boot_id 的变化包含主机重启/所计集合改变，不能据此判定 agent 进程
 或监控会话是否重启。有效 lifetime 计数器必须同时有有效 boot_id 和 iface；缺失读数
-不得用 0 改写流量基线。相同范围的差分、计数器回退、同事务累计由 P2 store 实现。
+不得用 0 改写流量基线。相同范围的差分、计数器回退、同事务累计由 monitor/control 实现。
 
 本目录只验证表示与范围，不实现 CPU、内存、磁盘、网卡算法。算法与覆盖范围以
 根 README 及 `tests/fixtures/collect/` 为准。
@@ -103,7 +123,7 @@ Facts 和 Metrics 都要求 `scope`，取 `host`、`namespace` 或 `unknown`。
 - `version` 为独立 FRP 版本；`control_state` 为 `unknown/connecting/connected/disconnected/error`。
 - `proxies` 为完整数组（允许 `[]`），每项含 `name/type/local_target/enabled/status`。
   `local_target:null` 表示不可用；状态为 `unknown/disabled/starting/running/error/closed`，
-  由 P1/P3 适配器归一化原生状态。类型支持 tcp/udp/http/https/tcpmux/stcp/sudp/xtcp。
+  由运行时适配器归一化原生状态。类型支持 tcp/udp/http/https/tcpmux/stcp/sudp/xtcp。
 
 关联用于对账，不能自行重新绑定凭据节点；monitor 根据自己的 Registry/Stats 添加
 注册状态、连接数和隧道流量，agent 不能在此伪报服务端数据。冲突由后续接入器显式报告。
@@ -138,11 +158,12 @@ Facts 和 Metrics 都要求 `scope`，取 `host`、`namespace` 或 `unknown`。
 agent ↔ monitor 的 uint64 使用 JSON 整数，由 Go 精确解析；浏览器不得直接消费这些
 原始帧。`Facts.Browser()` / `Metrics.Browser()` 验证后把**所有 uint64 读数**转成
 十进制 JSON 字符串（仍保留质量和 null），包括容量、速率、计数器、uptime 和 socket/
-进程数。uint32 CPU 核数、CPU/load 等有限浮点仍为 JSON number。未来 API/SSE 中
-sequence、任务 version 等其他 uint64 也必须使用十进制字符串，不能绕过这个边界。
+进程数。uint32 CPU 核数、CPU/load 等有限浮点仍为 JSON number。对其他 uint64（如任务 version），
+前端解析和提交必须保持整数精度，不能先经过 JavaScript Number。控制库中的字节数、
+API 流量与价格最小单位同样使用十进制字符串；TSDB 曲线样本的浮点精度不等于业务账本精度。
 
 **BrowserFacts/BrowserMetrics 只解决整数精度，不是公开视图 DTO。** 它们仍含 IP、
-主机名、内核、范围标识等私有内容，不能直接挂公开路由；公开裁剪与管理鉴权由 P3
+主机名、内核、范围标识等私有内容，不能直接挂公开路由；公开裁剪与管理鉴权由 monitor
 在服务端完成。FRP 本地目标和节点/FRP/Dashboard 凭据不进入公开 DTO。
 
 ## 测试与 fixture

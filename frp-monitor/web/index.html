@@ -67,9 +67,14 @@
       <div class="fm-resource"><div><span data-value="cpu-label">CPU</span><strong data-value="cpu">—</strong></div><progress max="100" data-meter="cpu" aria-label="CPU 使用率" hidden></progress><p data-value="card-cpu-note" title="CPU 质量或 1 / 5 / 15 分钟负载">—</p></div>
       <div class="fm-resource"><div><span>内存</span><strong data-value="mem">—</strong></div><progress max="100" data-meter="mem" aria-label="内存使用率" hidden></progress><p data-value="mem-note">暂无采样</p></div>
       <div class="fm-resource"><div><span>硬盘</span><strong data-value="disk">—</strong></div><progress max="100" data-meter="disk" aria-label="硬盘使用率" hidden></progress><p data-value="disk-note">暂无采样</p></div>
-      <div class="fm-resource"><div><span>流量</span><strong data-value="traffic-total">—</strong></div><span class="fm-resource-rule" aria-hidden="true"></span><p title="系统网卡接收与发送计数器之和，不是账单用量或今日流量">系统累计 · 未设额度</p></div>
+      <div class="fm-resource"><div><span>流量</span><strong data-value="traffic-total">—</strong></div><span class="fm-resource-rule" aria-hidden="true"></span><p title="系统网卡接收与发送计数器之和，不是账单用量或今日流量">系统累计</p></div>
     </div>
     <div class="fm-network"><div><span><svg aria-hidden="true"><use href="#arrow-down"/></svg>接收</span><strong data-value="rx">—</strong><small data-value="rx-total">累计 —</small></div><div><span><svg aria-hidden="true"><use href="#arrow-up"/></svg>发送</span><strong data-value="tx">—</strong><small data-value="tx-total">累计 —</small></div></div>
+    <div class="fm-card-business">
+      <div><span>今日流量</span><b data-value="today-flow">—</b></div>
+      <div data-section="plan"><span>套餐已用 / 额度</span><b data-value="plan-flow">—</b></div>
+      <p data-value="today-note"></p><p data-section="billing" data-value="billing"></p><p data-section="public-note" data-value="public-note"></p>
+    </div>
     <footer class="fm-card-footer"><span class="fm-data-state" data-value="freshness"></span><span>FRP <b data-value="frp"></b></span><a class="fm-node-link fm-open-node">详情 →</a></footer>
   </article></template>
   <template id="row-template"><tr class="fm-table-row">

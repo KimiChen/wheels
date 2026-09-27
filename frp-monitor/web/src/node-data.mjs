@@ -1,11 +1,11 @@
 import {UNKNOWN, value} from "./format.mjs";
 
-const nodePattern = /^[A-Za-z0-9_-]{8,128}$/;
-export function nodeURL(id) { return typeof id === "string" && nodePattern.test(id) ? `/node/${encodeURIComponent(id)}` : null; }
+export function validNodeID(id) { return typeof id === "string" && /^[1-9][0-9]{0,18}$/.test(id) && BigInt(id) <= 9223372036854775807n; }
+export function nodeURL(id) { return validNodeID(id) ? `/node/${id}` : null; }
 export function nodeID(pathname) {
   const match = /^\/node\/([^/]+)\/?$/.exec(pathname);
   if (!match) return null;
-  try { const id = decodeURIComponent(match[1]); return nodePattern.test(id) ? id : null; } catch { return null; }
+  try { const id = decodeURIComponent(match[1]); return validNodeID(id) ? id : null; } catch { return null; }
 }
 export function hardwareValue(field) {
   const raw = value(field);

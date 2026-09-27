@@ -34,7 +34,7 @@ class OpsTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def test_backup_recovers_committed_wal_and_remaps_private_paths(self):
-        database = self.runtime / 'history.sqlite'
+        database = self.runtime / 'control.sqlite'
         connection = sqlite3.connect(database)
         database.chmod(0o600)
         try:
@@ -50,15 +50,17 @@ class OpsTests(unittest.TestCase):
             (self.runtime / 'server.log').write_text('not backed up')
             destination = self.root / '恢复目录'
             ops.restore(archive, destination)
-            restored = sqlite3.connect(destination / 'history.sqlite')
+            restored = sqlite3.connect(destination / 'control.sqlite')
             try:
                 self.assertEqual(restored.execute('select value from samples').fetchall(), [('18446744073709551616',)])
                 self.assertEqual(restored.execute('pragma integrity_check').fetchone(), ('ok',))
             finally:
                 restored.close()
             config = tomllib.loads((destination / 'server.toml').read_text())
-            self.assertEqual(config['monitor']['databaseFile'], str(destination / 'history.sqlite'))
-            self.assertEqual(config['monitor']['adminCredentialsFile'], str(destination / 'admin.json'))
+            self.assertEqual(config['monitor']['databaseFile'], str(destination / 'control.sqlite'))
+            self.assertEqual(config['monitor']['historyDataPath'], '')
+            self.assertNotIn('adminCredentialsFile', config['monitor'])
+            self.assertEqual(json.loads((destination / 'installation.json').read_text())['format'], 2)
             self.assertFalse((destination / 'server.log').exists())
             self.assertEqual(archive.stat().st_mode & 0o777, 0o600)
             for path in destination.iterdir():
@@ -109,7 +111,7 @@ class OpsTests(unittest.TestCase):
                 if kind == 'duplicate':
                     out.addfile(member, io.BytesIO(data))
                 if kind == 'hash':
-                    data = json.dumps({'format': 1, 'original_directory': '/old', 'sha256': {'installation.json': '0' * 64}}).encode()
+                    data = json.dumps({'format': 2, 'original_directory': '/old', 'sha256': {'installation.json': '0' * 64}}).encode()
                     member = tarfile.TarInfo('BACKUP.json')
                     member.size = len(data)
                     out.addfile(member, io.BytesIO(data))
@@ -130,6 +132,36 @@ class OpsTests(unittest.TestCase):
         for path in ('/tmp/%n', '/tmp/$HOME', '/tmp/a\nExecStart=/bin/sh', '/tmp/a b', '/tmp/../escape'):
             with self.subTest(path=path), self.assertRaises(ValueError):
                 ops.systemd_unit('server', path, '/opt/frp-monitor')
+
+    def test_server_init_uses_empty_control_store_and_github_secret_file(self):
+        # Reuse a generated local certificate to test exact installation bytes.
+        certificate_source = self.root / 'tls-source'
+        local.initialize(certificate_source, config=local.settings(self.root, {}))
+        secret = self.root / 'github-input'
+        local.private(secret, 'example-oauth-secret\n')
+        config = local.settings(self.root, {'FRP_GITHUB_CLIENT_ID': 'example-id', 'FRP_GITHUB_CLIENT_SECRET_FILE': str(secret),
+            'FRP_GITHUB_CALLBACK_URL': 'https://monitor.example.invalid/api/admin/v1/auth/github/callback', 'FRP_GITHUB_ADMIN_USERS': 'ExampleAdmin'})
+        args = argparse.Namespace(directory=str(self.root / 'server'), server_id='primary', bind='127.0.0.1',
+            tls_cert=str(certificate_source / 'local.crt'), tls_key=str(certificate_source / 'local.key'))
+        with mock.patch.object(ops, 'settings', return_value=config):
+            folder = ops.server_init(args)
+        text = (folder / 'server.toml').read_text()
+        monitor = tomllib.loads(text)['monitor']
+        self.assertEqual(monitor['databaseFile'], str(folder / 'control.sqlite'))
+        self.assertEqual(monitor['historyDataPath'], '')
+        self.assertNotIn('historyEnabled', monitor)
+        self.assertEqual(monitor['githubAdminUsers'], ['exampleadmin'])
+        self.assertEqual(monitor['githubClientSecretFile'], str(folder / 'github.secret'))
+        self.assertNotIn('example-oauth-secret', text)
+        self.assertFalse((folder / 'admin.token').exists())
+        connection = sqlite3.connect(folder / 'control.sqlite')
+        self.assertEqual(connection.execute('SELECT count(*) FROM nodes').fetchone(), (0,))
+        connection.close()
+        archive = ops.backup(folder, self.backups / 'github.tar.gz')
+        restored = ops.restore(archive, self.root / 'github-restored')
+        self.assertEqual((restored / 'github.secret').read_text(), 'example-oauth-secret\n')
+        restored_config = tomllib.loads((restored / 'server.toml').read_text())['monitor']
+        self.assertEqual(restored_config['githubClientSecretFile'], str(restored / 'github.secret'))
 
     def test_agent_init_private_config_and_no_plaintext_tokens_in_toml(self):
         args = argparse.Namespace(directory=str(self.root / 'agent'), monitor_url='wss://monitor.example.invalid:7401/agent/v1/ws',
@@ -169,7 +201,7 @@ class OpsTests(unittest.TestCase):
             ops.remap_paths(text, '/old', self.root / 'new')
 
     def test_database_budget_uses_actual_sqlite_page_size(self):
-        source, target = self.runtime / 'history.sqlite', self.backups / 'snapshot.sqlite'
+        source, target = self.runtime / 'large-pages.sqlite', self.backups / 'snapshot.sqlite'
         connection = sqlite3.connect(source)
         source.chmod(0o600)
         try:
@@ -207,6 +239,37 @@ class OpsTests(unittest.TestCase):
             self.assertFalse(blocked, 'regular-file validation blocked on FIFO open')
             self.assertEqual(len(errors), 1)
             self.assertIsInstance(errors[0], ValueError)
+
+    def test_backup_excludes_tsdb_but_restores_control_configuration_and_counters(self):
+        history = self.runtime / 'metrics'
+        config = self.runtime / 'server.toml'
+        config.write_text(config.read_text().replace('historyDataPath = ""', 'historyDataPath = ' + json.dumps(str(history))))
+        history.mkdir(mode=0o700)
+        (history / 'tsdb-sample').write_text('not included')
+        db = sqlite3.connect(self.runtime / 'control.sqlite')
+        with db:
+            db.execute("UPDATE nodes SET traffic_period_rx_bytes='9007199254740993',traffic_adjustment_bytes='-3',private_note='private'")
+        db.close()
+        archive = ops.backup(self.runtime, self.backups / 'control.tar.gz')
+        restored = self.root / 'control-restored'
+        ops.restore(archive, restored)
+        self.assertFalse((restored / 'metrics').exists())
+        config = tomllib.loads((restored / 'server.toml').read_text())
+        self.assertEqual(config['monitor']['historyDataPath'], str(restored / 'metrics'))
+        db = sqlite3.connect(restored / 'control.sqlite')
+        self.assertEqual(db.execute('SELECT traffic_period_rx_bytes,traffic_adjustment_bytes,private_note FROM nodes').fetchone(), ('9007199254740993', '-3', 'private'))
+        db.close()
+
+    def test_old_installation_format_and_missing_control_database_are_rejected(self):
+        metadata = self.runtime / 'installation.json'
+        original = metadata.read_text()
+        metadata.write_text('{"format":1,"roles":["server"]}')
+        with self.assertRaises(ValueError):
+            ops.backup(self.runtime, self.backups / 'old.tar.gz')
+        metadata.write_text(original)
+        (self.runtime / 'control.sqlite').unlink()
+        with self.assertRaises(ValueError):
+            ops.backup(self.runtime, self.backups / 'missing.tar.gz')
 
     def test_bad_installation_metadata_is_rejected_cleanly(self):
         (self.runtime / 'installation.json').write_text('[]')

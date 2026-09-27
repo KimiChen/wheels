@@ -236,7 +236,7 @@ class PipelineTests(unittest.TestCase):
 
     def test_packages_are_deterministic_allowlisted_and_checksummed(self):
         pipeline = self.pipeline()
-        for name in ("scripts/ops.py", "scripts/local.py", "packaging/README.md", ".env.example"):
+        for name in ("scripts/ops.py", "scripts/local.py", "packaging/README.md", ".env.example", "monitor/control/schema.sql"):
             path = self.root / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("public operations fixture\n")
@@ -247,6 +247,11 @@ class PipelineTests(unittest.TestCase):
         sqlite_license.parent.mkdir(parents=True)
         sqlite_license.write_text("fixture BSD license\n")
         (sqlite_license.parent / "private.env").write_text("do-not-package")
+        vm_license = self.root / "monitor/store/licenses/VictoriaMetrics/LICENSE"
+        vm_license.parent.mkdir(parents=True)
+        vm_license.write_text("fixture Apache license\n")
+        for name in ("NOTICE", "LICENSE.txt", "LICENSE.libyaml", "TSDB-SOURCES.md"):
+            (vm_license.parent / name).write_text("fixture extra notice\n")
         (self.root / ".env").write_text("PRIVATE_KEY=do-not-package\n")
         pipeline.output.mkdir()
         dirs = []
@@ -269,8 +274,12 @@ class PipelineTests(unittest.TestCase):
             self.assertNotIn(".env", members)
             self.assertIn("scripts/ops.py", members)
             self.assertIn("packaging/README.md", members)
+            self.assertEqual(members["monitor/control/schema.sql"], b"public operations fixture\n")
             self.assertEqual(members["LICENSE.monitor-probe"], b"fixture MIT license\n")
             self.assertEqual(members["licenses/sqlite/LICENSE"], b"fixture BSD license\n")
+            self.assertEqual(members["licenses/VictoriaMetrics/LICENSE"], b"fixture Apache license\n")
+            for name in ("NOTICE", "LICENSE.txt", "LICENSE.libyaml", "TSDB-SOURCES.md"):
+                self.assertEqual(members["licenses/VictoriaMetrics/" + name], b"fixture extra notice\n")
             self.assertNotIn(b"do-not-package", b"".join(members.values()))
             for line in members["SHA256SUMS"].decode().splitlines():
                 checksum, name = line.split("  ", 1)
