@@ -1,0 +1,181 @@
+package monitor
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"io"
+	"os"
+	"reflect"
+	"strings"
+	"time"
+	"unicode/utf8"
+
+	"github.com/fatedier/frp/extension/frpmonitor/shared"
+	"github.com/gorilla/websocket"
+)
+
+// This is local operator configuration. Only the explicit name is public;
+// targets and the file path never enter a browser response.
+type configuredProbe struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Target   string `json:"target"`
+	Interval uint32 `json:"interval"`
+}
+type probeBook struct {
+	Version uint64
+	Nodes   map[string][]configuredProbe
+}
+type probeFile struct {
+	Version uint64 `json:"version"`
+	Nodes   []struct {
+		AgentID string            `json:"agent_id"`
+		Tasks   []configuredProbe `json:"tasks"`
+	} `json:"nodes"`
+}
+
+func (s *Service) reloadTasks() {
+	if s.cfg.ProbeTasksFile == "" {
+		s.tasks.Store(&probeBook{Version: 1, Nodes: map[string][]configuredProbe{}})
+		return
+	}
+	next, err := s.readTasks()
+	if err != nil {
+		s.taskError.Store(true)
+		return
+	}
+	previous := s.tasks.Load()
+	if next.Version < previous.Version || (next.Version == previous.Version && !reflect.DeepEqual(next.Nodes, previous.Nodes)) {
+		s.taskError.Store(true)
+		return
+	}
+	if next.Version > previous.Version {
+		s.tasks.Store(next)
+	}
+	s.taskError.Store(false)
+}
+
+func (s *Service) readTasks() (*probeBook, error) {
+	invalid := errors.New("invalid local probe task configuration")
+	info, err := os.Lstat(s.cfg.ProbeTasksFile)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || info.Size() > 1024*1024 {
+		return nil, invalid
+	}
+	f, err := os.Open(s.cfg.ProbeTasksFile)
+	if err != nil {
+		return nil, invalid
+	}
+	defer f.Close()
+	actual, err := f.Stat()
+	if err != nil || !actual.Mode().IsRegular() || actual.Mode().Perm() != 0600 {
+		return nil, invalid
+	}
+	data, err := io.ReadAll(io.LimitReader(f, 1024*1024+1))
+	if err != nil || len(data) > 1024*1024 || !utf8.Valid(data) {
+		return nil, invalid
+	}
+	d := json.NewDecoder(bytes.NewReader(data))
+	d.DisallowUnknownFields()
+	var cfg probeFile
+	if d.Decode(&cfg) != nil || d.Decode(new(any)) != io.EOF || cfg.Version == 0 || cfg.Nodes == nil || len(cfg.Nodes) > maxNodes {
+		return nil, invalid
+	}
+	book := &probeBook{Version: cfg.Version, Nodes: make(map[string][]configuredProbe)}
+	for _, n := range cfg.Nodes {
+		if _, known := s.nodes[n.AgentID]; !known {
+			return nil, invalid
+		}
+		if _, duplicate := book.Nodes[n.AgentID]; duplicate || n.Tasks == nil {
+			return nil, invalid
+		}
+		params := shared.PingTasks{Meta: shared.Meta{Schema: shared.SchemaVersion, SessionID: "local-validation", Sequence: 1, CollectedAt: time.Now().UTC().Format(time.RFC3339Nano)}, Version: cfg.Version, Tasks: make([]shared.PingTask, 0, len(n.Tasks))}
+		for _, task := range n.Tasks {
+			if strings.TrimSpace(task.Name) == "" || len(task.Name) > 128 || strings.ContainsAny(task.Name, "\x00\r\n") {
+				return nil, invalid
+			}
+			params.Tasks = append(params.Tasks, shared.PingTask{ID: task.ID, Target: task.Target, Interval: task.Interval})
+		}
+		if params.Validate() != nil {
+			return nil, invalid
+		}
+		book.Nodes[n.AgentID] = n.Tasks
+	}
+	return book, nil
+}
+func (s *Service) taskLoop() {
+	defer s.wg.Done()
+	defer func() {
+		if recover() != nil {
+			s.taskError.Store(true)
+		}
+	}()
+	if s.cfg.ProbeTasksFile == "" {
+		return
+	}
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-ticker.C:
+			s.reloadTasks()
+		}
+	}
+}
+func hasCapability(values []string, name string) bool {
+	for _, value := range values {
+		if value == name {
+			return true
+		}
+	}
+	return false
+}
+func sendTasks(c *websocket.Conn, book *probeBook, id, session string, sequence uint64) error {
+	params := shared.PingTasks{Meta: shared.Meta{Schema: shared.SchemaVersion, SessionID: session, Sequence: sequence, CollectedAt: time.Now().UTC().Format(time.RFC3339Nano)}, Version: book.Version, Tasks: []shared.PingTask{}}
+	for _, t := range book.Nodes[id] {
+		params.Tasks = append(params.Tasks, shared.PingTask{ID: t.ID, Target: t.Target, Interval: t.Interval})
+	}
+	_ = c.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	return c.WriteJSON(struct {
+		JSONRPC string           `json:"jsonrpc"`
+		Method  string           `json:"method"`
+		Params  shared.PingTasks `json:"params"`
+	}{"2.0", "ping.tasks", params})
+}
+func probeKey(task configuredProbe) string {
+	// A changed target cannot silently inherit another target's history. The
+	// digest itself remains internal; public task IDs and names come from config.
+	h := sha256.Sum256([]byte(task.ID + "\x00" + task.Target))
+	return hex.EncodeToString(h[:])
+}
+func (s *Service) acceptProbe(id string, c *websocket.Conn, now time.Time, result shared.PingResult) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := s.nodes[id]
+	if n.conn != c || result.SessionID != n.sessionID || result.Sequence <= n.sequence {
+		return false
+	}
+	book := s.tasks.Load()
+	if result.TaskVersion > book.Version {
+		return false
+	}
+	n.sequence = result.Sequence
+	n.lastSeen = now
+	// Results already in flight during a full-list replacement are discarded.
+	if result.TaskVersion < book.Version {
+		return true
+	}
+	for _, task := range book.Nodes[id] {
+		if task.ID == result.TaskID {
+			if s.store != nil {
+				s.store.AcceptProbe(id, probeKey(task), now, result.LatencyMS)
+			}
+			return true
+		}
+	}
+	return false
+}

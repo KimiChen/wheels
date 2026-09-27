@@ -1,8 +1,8 @@
 # 构建入口
 
 `scripts/frp.py` 是 Python 3.11+ 标准库 CLI；运行平台为 macOS/Linux，需要 Git、
-本机 Go、Node.js 与 npm。当前输出为 **P1 实时监控**：原生 frpc/frps 功能和
-Dashboard 保留；通过 `[telemetry]` / `[monitor]` 显式启用独立采集、上报与网页。
+本机 Go、Node.js 与 npm。当前输出为 **P2 监控与历史**：原生 frpc/frps 功能和
+Dashboard 保留；通过 `[telemetry]` / `[monitor]` 显式启用独立采集、探测、存储与网页。
 
 从 `frp-monitor/` 运行：
 
@@ -12,6 +12,7 @@ python3 scripts/frp.py test
 python3 scripts/frp.py build --native
 python3 tests/smoke.py --agent dist/darwin-arm64/frp-monitor-agent --server dist/darwin-arm64/frp-monitor-server
 python3 tests/p1_smoke.py --agent dist/darwin-arm64/frp-monitor-agent --server dist/darwin-arm64/frp-monitor-server
+python3 tests/p2_smoke.py --agent dist/darwin-arm64/frp-monitor-agent --server dist/darwin-arm64/frp-monitor-server
 python3 scripts/frp.py build
 python3 scripts/frp.py package
 ```
@@ -23,7 +24,7 @@ python3 scripts/frp.py package
 | 命令 | 行为 |
 | --- | --- |
 | `prepare` | 严格校验锁文件，获取并核验上游 annotated tag 和 Commit，在临时目录应用补丁和映射扩展，成功后发布源码树 |
-| `test` | 重新 prepare，运行 `pkg/config/...`、`pkg/msg/...`、`pkg/util/...`、`pkg/metrics/...`、`client` 和所有 `extension/frpmonitor/...` 本机 Go 测试；不运行 Docker/e2e |
+| `test` | 重新 prepare，运行 `pkg/config/...`、`pkg/msg/...`、`pkg/util/...`、`pkg/metrics/...`、`client`、`server` 和所有 `extension/frpmonitor/...` 本机 Go 测试；不运行 Docker/e2e |
 | `build` | 重新 prepare，构建原生 frpc/frps Dashboard，再构建 Linux amd64 和 arm64 两套二进制 |
 | `build --native` | 使用本机 OS/架构，供本地 smoke；支持 macOS/Linux amd64/arm64 |
 | `build --target linux/amd64` | 只构建指定目标；可重复 `--target`，不能与 `--native` 同用 |
@@ -88,7 +89,8 @@ dist/<本机OS>-<本机架构>/         --native 产物
   不将失败后残留目录当作本轮成功产物。
 
 发布包只包含两个二进制、`BUILD.json`、`LICENSE`、`LICENSE.monitor-probe`、`THIRD_PARTY_NOTICES.md`、
-`upstream.lock`、说明及包内 `SHA256SUMS`。不会打包 `.env`、本地运行数据、
+`upstream.lock`、SQLite 依赖许可证 `licenses/`、说明及包内 `SHA256SUMS`。许可证使用
+文件名白名单并保留来源目录；不会打包 `.env`、本地运行数据、
 上游临时树、npm 依赖目录或源码。`package` 失败时同样不能沿用残留发布包。
 
 ## 离线脚本测试
@@ -106,12 +108,16 @@ FRP 实际转发与重连验收另见 `tests/README.md`。
 
 `python3 scripts/local.py init` 读取 `.env` 中的 `FRP_MONITOR_PORT`（17401）、
 `FRP_SERVER_PORT`（17000）、`FRP_MONITOR_INTERVAL_SECONDS`（1）、
+`FRP_MONITOR_RETENTION_DAYS`（7，允许 1–31）、
 `FRP_AGENT_NAME`（本地演示节点）和 `FRP_AGENT_IFACE`（空），进程环境变量优先。
 端口须不同，采样间隔 1–3600 秒；其它 `.env` 键不会传入运行进程。
 
 工具在 `data/local/` 生成随机安装 ID、独立的 FRP 与监控 Token、摘要凭据表、
 TOML 配置及带回环 SAN 的 30 天自签证书。目录 0700，文件 0600；不覆盖已有目录。
 `--directory data/another-demo` 可创建另一安装，`--http` 显式选择回环明文演示。
+P2 默认将数据库设为同目录的 `history.sqlite`，任务文件为 `probes.json` 的空列表。
+`init --probes` 显式生成并启用本机 FRP 端口探测，同时允许该 agent 访问私网/回环。
+后续修改任务须递增版本；目标和 Token 不进入公开网页。
 证书不加入系统信任；不使用跳过 TLS 验证。
 
 `python3 scripts/local.py run` 先用 native `verify` 校验配置，再启动当前平台

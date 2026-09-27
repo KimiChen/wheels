@@ -22,9 +22,9 @@ ROOT = Path(__file__).resolve().parents[1]
 OFFICIAL_REPOSITORY = "https://github.com/fatedier/frp.git"
 OVERLAYS = ("agent", "monitor", "shared", "web")
 CONFIG_KEYS = {"FRP_MONITOR_CACHE_DIR", "FRP_MONITOR_OUTPUT_DIR", "FRP_MONITOR_UPSTREAM_MIRROR"}
-BASELINE = "P1 realtime monitoring; TCP probes, history and administration are not implemented"
+BASELINE = "P2 realtime monitoring, opt-in TCP probes, SQLite history and host traffic; administration awaits P3"
 LOCK_KEYS = {"schema_version", "repository", "tag", "tag_object", "commit", "license"}
-NATIVE_TESTS = ("./pkg/config/...", "./pkg/msg/...", "./pkg/util/...", "./pkg/metrics/...", "./client", "./extension/frpmonitor/...")
+NATIVE_TESTS = ("./pkg/config/...", "./pkg/msg/...", "./pkg/util/...", "./pkg/metrics/...", "./client", "./server", "./extension/frpmonitor/...")
 
 
 class PipelineError(Exception):
@@ -441,7 +441,7 @@ class Pipeline:
             try:
                 target_env = {**env, "GOOS": goos, "GOARCH": goarch, "SOURCE_DATE_EPOCH": str(prepared["source_date_epoch"])}
                 for name, command in (("frp-monitor-agent", "frpc"), ("frp-monitor-server", "frps")):
-                    print(f"Building {name} ({target}, P1 monitoring)...", file=sys.stderr, flush=True)
+                    print(f"Building {name} ({target}, P2 monitoring)...", file=sys.stderr, flush=True)
                     run(["go", "build", "-mod=readonly", "-trimpath", "-buildvcs=false", "-ldflags=-buildid=",
                          "-tags", command, "-o", str(staging / name), "./cmd/" + command], cwd=self.source, env=target_env, capture=False)
                 manifest = {key: value for key, value in prepared.items() if key != "source_dir"}
@@ -466,9 +466,15 @@ class Pipeline:
             payload = {name: read_regular(source / name) for name in ("frp-monitor-agent", "frp-monitor-server", "BUILD.json")}
             payload.update({name: read_regular(self.root / name) for name in ("LICENSE", "THIRD_PARTY_NOTICES.md", "upstream.lock")})
             payload["LICENSE.monitor-probe"] = read_regular(self.root / "agent/collect/LICENSE.monitor-probe")
-            payload["README.txt"] = ("frp-monitor P1: " + BASELINE + ".\nThese executables retain native frpc/frps CLI and configuration.\n"
+            license_dir = self.root / "monitor/store/licenses"
+            license_names = {"LICENSE", "LICENSE-SQLITE", "LICENSE-SQLITE_VEC", "LICENSE-3RD-PARTY.md", "AUTHORS", "PATENTS", "SOURCES.md"}
+            for license_path in sorted(license_dir.rglob("*")):
+                if license_path.name in license_names:
+                    payload["licenses/" + license_path.relative_to(license_dir).as_posix()] = read_regular(license_path)
+            payload["README.txt"] = ("frp-monitor P2: " + BASELINE + ".\nThese executables retain native frpc/frps CLI and configuration.\n"
                                       "Monitoring is opt-in via [telemetry]/[monitor]; use private credentials and verified TLS.\n"
-                                      "P1 is a controlled demonstration; production deployment and administration await P3.\n"
+                                      "History requires a private database directory. TCP probes are disabled until explicitly configured.\n"
+                                      "Production deployment and administration await P3.\n"
                                       "Build provenance and exact Go version: BUILD.json.\n").encode("utf-8")
             payload["SHA256SUMS"] = "".join(f"{digest(data)}  {name}\n" for name, data in sorted(payload.items())).encode("utf-8")
             basename = f"frp-monitor-{self.lock['tag']}-{manifest['target'].replace('/', '-')}"

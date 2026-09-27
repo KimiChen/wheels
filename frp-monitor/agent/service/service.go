@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/fatedier/frp/extension/frpmonitor/agent/collect"
+	"github.com/fatedier/frp/extension/frpmonitor/agent/probe"
 	"github.com/fatedier/frp/extension/frpmonitor/shared"
 	"github.com/gorilla/websocket"
 )
@@ -296,6 +297,9 @@ func (s *Service) connect() (bool, bool) {
 	session := hex.EncodeToString(nonce[:])
 	current := s.current()
 	hello := shared.Hello{Meta: shared.Meta{Schema: shared.SchemaVersion, SessionID: session, Sequence: 1, CollectedAt: current.at.Format(time.RFC3339Nano)}, Capabilities: []string{"metrics.v1", "frp.v1"}, Facts: current.facts, Extensions: extension(current.frp)}
+	if s.cfg.ProbeEnabled {
+		hello.Capabilities = append(hello.Capabilities, "ping.v1")
+	}
 	if hello.Validate() != nil {
 		return false, false
 	}
@@ -314,7 +318,7 @@ func (s *Service) connect() (bool, bool) {
 	}
 	decoder := json.NewDecoder(strings.NewReader(string(data)))
 	decoder.DisallowUnknownFields()
-	if decoder.Decode(&answer) != nil || decoder.Decode(new(any)) != io.EOF || answer.JSONRPC != "2.0" || answer.ID != "hello" || answer.Result.Validate() != nil || answer.Result.SessionID != session || !capabilities(answer.Result.Capabilities) {
+	if decoder.Decode(&answer) != nil || decoder.Decode(new(any)) != io.EOF || answer.JSONRPC != "2.0" || answer.ID != "hello" || answer.Result.Validate() != nil || answer.Result.SessionID != session || !capabilities(answer.Result.Capabilities, s.cfg.ProbeEnabled) {
 		return false, false
 	}
 	negotiated := int64(answer.Result.ReportInterval)
@@ -326,18 +330,45 @@ func (s *Service) connect() (bool, bool) {
 	}
 	_ = c.SetReadDeadline(time.Now().Add(15 * time.Second))
 	c.SetPongHandler(func(string) error { return c.SetReadDeadline(time.Now().Add(15 * time.Second)) })
+	var probes *probe.Engine
+	var results <-chan probe.Result
+	for _, capability := range answer.Result.Capabilities {
+		if capability == "ping.v1" {
+			probes = probe.New(s.ctx, probe.Config{AllowPrivate: s.cfg.ProbeAllowPrivate})
+			results = probes.Results()
+			defer probes.Close()
+		}
+	}
 	readDone := make(chan struct{})
 	go func() {
 		defer close(readDone)
+		defer c.Close()
+		var taskSequence uint64
+		taskBudget, replenished := float64(4), time.Now()
 		for {
-			kind, _, err := c.ReadMessage()
+			kind, data, err := c.ReadMessage()
 			if err != nil {
 				return
 			}
-			if kind == websocket.TextMessage || kind == websocket.BinaryMessage {
-				c.Close()
+			if kind != websocket.TextMessage || probes == nil {
 				return
 			}
+			now := time.Now()
+			taskBudget += now.Sub(replenished).Seconds()
+			if taskBudget > 4 {
+				taskBudget = 4
+			}
+			replenished = now
+			if taskBudget < 1 {
+				return
+			}
+			taskBudget--
+			frame, err := shared.DecodeFrame(data)
+			if err != nil || frame.PingTasks == nil || frame.PingTasks.SessionID != session || frame.PingTasks.Sequence <= taskSequence || probes.Replace(*frame.PingTasks) != nil {
+				return
+			}
+			taskSequence = frame.PingTasks.Sequence
+			_ = c.SetReadDeadline(now.Add(15 * time.Second))
 		}
 	}()
 	defer func() { c.Close(); <-readDone }()
@@ -377,15 +408,24 @@ func (s *Service) connect() (bool, bool) {
 			if !send() {
 				return true, false
 			}
+		case result := <-results:
+			if !probes.Current(result.TaskVersion, result.TaskID) {
+				continue
+			}
+			sequence++
+			payload := shared.PingResult{Meta: shared.Meta{Schema: shared.SchemaVersion, SessionID: session, Sequence: sequence, CollectedAt: result.CollectedAt.Format(time.RFC3339Nano)}, TaskVersion: result.TaskVersion, TaskID: result.TaskID, LatencyMS: result.LatencyMS}
+			if payload.Validate() != nil || writeFrame(c, "ping.result", "", payload) != nil {
+				return true, false
+			}
 		}
 	}
 }
-func capabilities(c []string) bool {
+func capabilities(c []string, probeEnabled bool) bool {
 	metrics := false
 	for _, v := range c {
 		if v == "metrics.v1" {
 			metrics = true
-		} else if v != "frp.v1" {
+		} else if v != "frp.v1" && (v != "ping.v1" || !probeEnabled) {
 			return false
 		}
 	}

@@ -41,3 +41,21 @@ func TestMonitorConfigurationBoundary(t *testing.T) {
 		t.Fatal("partial TLS config accepted")
 	}
 }
+
+func TestHistoryConfiguration(t *testing.T) {
+	c := MonitorConfig{Enabled: true, CredentialsFile: "credentials.json", DatabaseFile: "history.sqlite"}
+	if err := c.Complete(); err != nil || c.RetentionDays != 7 {
+		t.Fatalf("history defaults: %v", err)
+	}
+	for _, days := range []int{-1, 0, 32} {
+		c.RetentionDays = days
+		if c.Validate() == nil {
+			t.Fatalf("accepted retention %d", days)
+		}
+	}
+	c.RetentionDays = 7
+	c.ProbeTasksFile = "invalid\x00path"
+	if c.Validate() == nil {
+		t.Fatal("accepted invalid probe path")
+	}
+}

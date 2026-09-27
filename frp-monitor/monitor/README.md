@@ -1,6 +1,7 @@
 # Monitor
 
-P1 实现独立 Listener、节点凭据握手、当前会话与内存最新状态，以及公开 JSON/SSE。
+P2 实现独立 Listener、节点凭据握手、当前会话与内存最新状态、公开 JSON/SSE，
+以及本地探测任务、SQLite 历史和当日主机流量。
 由构建工具映射到固定 FRP 源码的 `extension/frpmonitor/monitor`，不依赖上游
 `server` 根包，也不改 FRP 转发协议。入口为 `Start(ctx, shared.MonitorConfig)`、
 `Service.Address()`、`Service.Close()`；初始化失败由上游生命周期适配器降级。
@@ -35,7 +36,34 @@ loopback 前放置 HTTPS/WSS 反向代理。Web 与上报共用独立监控 List
 客户端通过 `/agent/v1/ws`，在握手时传 `Authorization: Bearer <token>`。
 服务端从摘要确定节点归属，正文不能注册节点或改变归属；拒绝浏览器 Origin。
 先接收 `hello`，返回接受的会话、能力与 `report_interval`，再接收 `report`。
-P1 只接受 `metrics.v1` / `frp.v1`，不宣称或执行 `ping.v1` TCP 探测能力。
+接受 `metrics.v1` / `frp.v1`；显式启用探测的 agent 还协商 `ping.v1`。
+没有协商探测的连接不会收到任务，也不能提交探测结果。
+
+## 历史与探测配置
+
+`[monitor] databaseFile` 为 SQLite 文件路径，直接父目录必须私有（0700），路径中不能有
+符号链接，现有数据库与 WAL/SHM 必须为私有常规文件。`retentionDays` 默认 7，范围 1–31。
+不配置数据库为 disabled；打开/查询/写盘错误为 degraded，监控 Listener 与原生 FRP
+继续运行。内部队列/桶有限，丢样数量公开；状态与历史不伪装成完整覆盖。
+
+`probeTasksFile` 是 0600 的 UTF-8 本地配置（最多 1 MiB），只允许凭据表中已知节点：
+
+```json
+{
+  "version": 1,
+  "nodes": [{
+    "agent_id": "example-node-0001",
+    "tasks": [{"id": "public-service", "name": "服务连通性", "target": "probe.example.invalid:443", "interval": 5}]
+  }]
+}
+```
+
+示例目标不可直接运行。每节点最多 64 项，间隔 5–3600 秒，名称是独立公开标签。
+每 2 秒重新读取；增加 `version` 后以完整列表替换，`tasks: []` 清空该节点，省略节点
+同样清空。格式错误、版本回退或同版本改内容保留上一有效列表并标记 degraded。
+重连重新发送当前完整列表；旧版本在途结果丢弃，未知任务/未来版本/重复序号拒绝。
+目标变化后以内部目标摘要隔离历史，不将前一个目标的数据拼接到新目标。
+agent 的本地目标策略始终再次校验解析后的 IP，操作员文件不能绕过客户端的显式授权。
 
 ## 状态、边界与恢复
 
@@ -46,8 +74,9 @@ P1 只接受 `metrics.v1` / `frp.v1`，不宣称或执行 `ping.v1` TCP 探测�
 - 首次无数据为 `waiting`。新鲜度使用服务端指标接收时间，超过
   `max(10 秒, 3 × reportIntervalSeconds)` 为 `stale`。监控会话与指标新鲜度、
   FRP 控制连接状态及运行隧道数分别显示。
-- 上报握手全局限速 20 次/秒、突发 40；同时最多 32 个未完成握手，节点每秒
-  2 个应用帧、突发 8。SSE 同时最多 128 个连接，写入超过 5 秒关闭慢消费者。
+- 上报握手全局限速 20 次/秒、突发 40；同时最多 32 个未完成握手，普通节点每秒
+  2 个应用帧、突发 8；探测连接每秒 40 帧、突发 80。SSE 同时最多 128 个连接，
+  写入超过 5 秒关闭慢消费者。历史查询同时最多 8 个，每请求数据库预算 2 秒。
 - 关闭先取消请求与连接，最多等待 2 秒回收监控 worker；监控失败不会等待网络恢复。
   同进程不保证 OOM 或所有第三方未恢复 panic 时的数据面存活。
 
@@ -67,8 +96,17 @@ API/SSE 均 `Cache-Control: no-store`，页面静态资源由 `web.Handler()` �
 `metrics` 未接收时为 null；收到后包括 `scope`、CPU 百分比、三项 load、内存/
 交换/磁盘总量与用量、网络 byte/s 与原始累计 bytes、uptime 秒、TCP/UDP/进程数。
 每个观测值保留 `{value, quality, reason?}`；所有 uint64 值使用十进制字符串，
-避免浏览器精度损失。P1 网络累计只是当前采集口径的原始计数；重启跨会话累计、
-SQLite 历史、分钟聚合和趋势由 P2 实现。
+避免浏览器精度损失。实时快照的网络累计只是当前采集口径的原始计数；
+P2 另外提供可跨会话续算、基于有效计数器差分的 UTC 当日统计，与原始累计值分开显示。
+
+`GET /api/public/v1/nodes/{id}/history?window=1h` 提供分钟聚合；window 只允许
+`1h` / `6h` / `24h` / `7d`，分别以 1/1/5/30 分钟步长返回，最多 500 点。
+返回 storage 状态、每桶样本数/估计覆盖秒数、逐字段有效样本平均、当日 traffic，
+以及任务公开标签、成功延迟均值、最新结果和 `0–100` 百分比 TCP 探测失败率。
+没有有效样本为 null；uint 字段平均向下取整后仍用十进制字符串，不经 float64。
+公开投影不含目标、主机标识、路径或凭据；不能从浏览器修改任务或数据库。
+历史最多延迟约一分钟，正常 TERM/INT 退出刷新尾批；强制终止可能丢未提交窗口。
+持久化数据不恢复在线状态，重启后必须重新握手。具体存储保证见 [store/README.md](store/README.md)。
 
 ## 验证
 

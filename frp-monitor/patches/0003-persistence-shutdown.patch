@@ -1,0 +1,86 @@
+diff --git a/cmd/frps/root.go b/cmd/frps/root.go
+--- a/cmd/frps/root.go
++++ b/cmd/frps/root.go
+@@ -18,7 +18,9 @@
+ 	"context"
+ 	"fmt"
+ 	"os"
++	"os/signal"
+ 	"strings"
++	"syscall"
+ 
+ 	"github.com/spf13/cobra"
+ 
+@@ -129,6 +131,12 @@
+ 		return err
+ 	}
+ 	log.Infof("frps started successfully")
+-	svr.Run(context.Background())
++	ctx := context.Background()
++	if cfg.Monitor.Enabled {
++		var stop context.CancelFunc
++		ctx, stop = signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
++		defer stop()
++	}
++	svr.Run(ctx)
+ 	return
+ }
+diff --git a/server/service.go b/server/service.go
+--- a/server/service.go
++++ b/server/service.go
+@@ -426,7 +426,12 @@
+ 		go svr.sshTunnelGateway.Run()
+ 	}
+ 
+-	svr.HandleListener(svr.listener, false)
++	if svr.cfg.Monitor.Enabled {
++		// Cancellation must reach the normal close path so pending history can flush.
++		go svr.HandleListener(svr.listener, false)
++	} else {
++		svr.HandleListener(svr.listener, false)
++	}
+ 
+ 	<-svr.ctx.Done()
+ 	// service context may not be canceled by svr.Close(), we should call it here to release resources
+diff --git a/server/monitor_shutdown_test.go b/server/monitor_shutdown_test.go
+new file mode 100644
+--- /dev/null
++++ b/server/monitor_shutdown_test.go
+@@ -0,0 +1,37 @@
++package server
++
++import (
++	"context"
++	v1 "github.com/fatedier/frp/pkg/config/v1"
++	"testing"
++	"time"
++)
++
++func TestMonitorContextCancellationStopsNativeListener(t *testing.T) {
++	cfg := &v1.ServerConfig{}
++	if err := cfg.Complete(); err != nil {
++		t.Fatal(err)
++	}
++	cfg.BindAddr = "127.0.0.1"
++	cfg.BindPort = 0
++	cfg.ProxyBindAddr = "127.0.0.1"
++	// Invalid runtime credential I/O also must not own the server lifecycle.
++	cfg.Monitor.Enabled = true
++	cfg.Monitor.BindAddr = "127.0.0.1"
++	cfg.Monitor.ServerID = "test"
++	cfg.Monitor.ReportIntervalSeconds = 1
++	cfg.Monitor.CredentialsFile = "missing-test-credentials"
++	service, err := NewService(cfg)
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx, cancel := context.WithCancel(context.Background())
++	done := make(chan struct{})
++	go func() { service.Run(ctx); close(done) }()
++	cancel()
++	select {
++	case <-done:
++	case <-time.After(3 * time.Second):
++		t.Fatal("monitor server shutdown blocked")
++	}
++}

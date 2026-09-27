@@ -29,6 +29,9 @@ class LocalTests(unittest.TestCase):
             self.assertEqual(agent["telemetry"]["tokenFile"], str(folder / "agent.token"))
             self.assertEqual(server["monitor"]["credentialsFile"], str(folder / "credentials.json"))
             self.assertTrue(agent["telemetry"]["allowInsecureLoopback"])
+            self.assertFalse(agent["telemetry"]["probeEnabled"])
+            self.assertEqual(server["monitor"]["retentionDays"], 7)
+            self.assertEqual(server["monitor"]["databaseFile"], str(folder / "history.sqlite"))
             self.assertNotIn(token, (folder / "agent.toml").read_text())
             self.assertNotEqual(token, (folder / "frp.token").read_text().strip())
             self.assertEqual(folder.stat().st_mode & 0o777, 0o700)
@@ -48,6 +51,17 @@ class LocalTests(unittest.TestCase):
             self.assertNotIn("PRIVATE_KEY", config)
             with self.assertRaises(ValueError):
                 local.settings(root, {"FRP_AGENT_NAME": "$(not-executed)"})
+
+    def test_probe_initialization_requires_explicit_opt_in(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            folder = root / "demo"
+            local.initialize(folder, plain_http=True, probes=True, config=local.settings(root, {}))
+            config = tomllib.loads((folder / "agent.toml").read_text())
+            self.assertTrue(config["telemetry"]["probeEnabled"])
+            self.assertTrue(config["telemetry"]["probeAllowPrivate"])
+            tasks = json.loads((folder / "probes.json").read_text())["nodes"][0]["tasks"]
+            self.assertEqual(tasks[0]["target"], "127.0.0.1:17000")
 
     def test_paths_stay_in_private_data_and_symlinks_rejected(self):
         with tempfile.TemporaryDirectory() as root, mock.patch.object(local, "ROOT", Path(root)):

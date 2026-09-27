@@ -111,10 +111,12 @@ func TestAuthenticationAndCapabilityRejection(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.Close()
-	send(t, c, "hello", "probe", fixture(t, "hello").Hello)
+	hello := fixture(t, "hello").Hello
+	hello.Capabilities = append(hello.Capabilities, "future-unsupported.v1")
+	send(t, c, "hello", "probe", hello)
 	c.SetReadDeadline(time.Now().Add(time.Second))
 	if _, _, err = c.ReadMessage(); err == nil {
-		t.Fatal("unsupported probe capability accepted")
+		t.Fatal("unsupported capability accepted")
 	}
 }
 func TestSessionOwnershipSequenceAndRedaction(t *testing.T) {

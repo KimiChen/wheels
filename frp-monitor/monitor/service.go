@@ -25,6 +25,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/fatedier/frp/extension/frpmonitor/monitor/store"
 	"github.com/fatedier/frp/extension/frpmonitor/shared"
 	"github.com/fatedier/frp/extension/frpmonitor/web"
 	"github.com/gorilla/websocket"
@@ -49,6 +50,7 @@ type node struct {
 	facts               *shared.Facts
 	metrics             *shared.Metrics
 	frp                 *shared.FRP
+	probeEnabled        bool
 }
 
 type Service struct {
@@ -70,6 +72,11 @@ type Service struct {
 	rateTokens  float64
 	rateAt      time.Time
 	public      atomic.Pointer[PublicSnapshot]
+	store       *store.Store
+	storeFailed bool
+	tasks       atomic.Pointer[probeBook]
+	taskError   atomic.Bool
+	queries     chan struct{}
 }
 
 func Start(ctx context.Context, cfg shared.MonitorConfig) (*Service, error) {
@@ -88,9 +95,13 @@ func Start(ctx context.Context, cfg shared.MonitorConfig) (*Service, error) {
 	for _, c := range creds {
 		s.nodes[c.AgentID] = &node{credential: c}
 	}
+	s.queries = make(chan struct{}, 8)
+	s.tasks.Store(&probeBook{Nodes: map[string][]configuredProbe{}})
+	s.reloadTasks()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/agent/v1/ws", s.handleWS)
 	mux.HandleFunc("/api/public/v1/nodes", s.handleNodes)
+	mux.HandleFunc("/api/public/v1/nodes/", s.handleHistory)
 	mux.HandleFunc("/events/public", s.handleEvents)
 	mux.Handle("/", web.Handler())
 	s.server = &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 * 1024, ErrorLog: log.New(io.Discard, "", 0), BaseContext: func(net.Listener) context.Context { return child }}
@@ -110,9 +121,14 @@ func Start(ctx context.Context, cfg shared.MonitorConfig) (*Service, error) {
 		}
 		s.server.TLSConfig = tlsCfg
 	}
+	if cfg.DatabaseFile != "" {
+		s.store, err = store.Open(store.Config{Path: cfg.DatabaseFile, RetentionDays: cfg.RetentionDays, ReportInterval: time.Duration(cfg.ReportIntervalSeconds) * time.Second})
+		s.storeFailed = err != nil
+	}
 	initial := s.snapshot(time.Now())
 	s.public.Store(&initial)
-	s.wg.Add(2)
+	s.wg.Add(3)
+	go s.taskLoop()
 	go func() {
 		defer s.wg.Done()
 		ticker := time.NewTicker(time.Second)
@@ -154,6 +170,11 @@ func (s *Service) Close() {
 			_ = c.Close()
 		}
 		s.mu.Unlock()
+		if s.store != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+			defer cancel()
+			_ = s.store.Close(ctx)
+		}
 	})
 	select {
 	case <-s.done:
@@ -306,6 +327,7 @@ func (s *Service) handleWS(w http.ResponseWriter, r *http.Request) {
 	n.seen = true
 	n.lastSeen = time.Now()
 	n.facts = &hello.Facts
+	n.probeEnabled = hasCapability(hello.Capabilities, "ping.v1")
 	n.frp = nil
 	if hello.Extensions != nil {
 		n.frp = hello.Extensions.FRP
@@ -336,14 +358,49 @@ func (s *Service) handleWS(w http.ResponseWriter, r *http.Request) {
 	done := make(chan struct{})
 	defer close(done)
 	go func() {
+		defer func() {
+			if recover() != nil {
+				c.Close()
+			}
+		}()
 		ticker := time.NewTicker(heartbeat)
 		defer ticker.Stop()
+		updates := time.NewTicker(time.Second)
+		defer updates.Stop()
+		var version, sequence uint64
+		pushTasks := func() bool {
+			if !hasCapability(hello.Capabilities, "ping.v1") {
+				return true
+			}
+			book := s.tasks.Load()
+			if book.Version == 0 || book.Version == version {
+				return true
+			}
+			if sequence == ^uint64(0) {
+				return false
+			}
+			sequence++
+			if sendTasks(c, book, id, hello.SessionID, sequence) != nil {
+				return false
+			}
+			version = book.Version
+			return true
+		}
+		if !pushTasks() {
+			c.Close()
+			return
+		}
 		for {
 			select {
 			case <-done:
 				return
 			case <-s.ctx.Done():
 				return
+			case <-updates.C:
+				if !pushTasks() {
+					c.Close()
+					return
+				}
 			case <-ticker.C:
 				if c.WriteControl(websocket.PingMessage, nil, time.Now().Add(3*time.Second)) != nil {
 					c.Close()
@@ -353,6 +410,10 @@ func (s *Service) handleWS(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 	tokens, last := float64(8), time.Now()
+	rate, burst := float64(2), float64(8)
+	if hasCapability(hello.Capabilities, "ping.v1") {
+		rate, burst, tokens = 40, 80, 80
+	}
 	for {
 		kind, data, err = c.ReadMessage()
 		if err != nil {
@@ -363,10 +424,10 @@ func (s *Service) handleWS(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		now := time.Now()
-		tokens += now.Sub(last).Seconds() * 2
+		tokens += now.Sub(last).Seconds() * rate
 		last = now
-		if tokens > 8 {
-			tokens = 8
+		if tokens > burst {
+			tokens = burst
 		}
 		if tokens < 1 {
 			closeProtocol(c)
@@ -374,9 +435,16 @@ func (s *Service) handleWS(w http.ResponseWriter, r *http.Request) {
 		}
 		tokens--
 		frame, err = shared.DecodeFrame(data)
-		if err != nil || frame.Report == nil {
+		if err != nil || (frame.Report == nil && frame.PingResult == nil) {
 			closeProtocol(c)
 			return
+		}
+		if frame.PingResult != nil {
+			if !hasCapability(hello.Capabilities, "ping.v1") || !s.acceptProbe(id, c, now, *frame.PingResult) {
+				closeProtocol(c)
+				return
+			}
+			continue
 		}
 		report := frame.Report
 		s.mu.Lock()
@@ -390,6 +458,9 @@ func (s *Service) handleWS(w http.ResponseWriter, r *http.Request) {
 		if report.Metrics != nil {
 			n.metrics = report.Metrics
 			n.metricsAt = now
+			if s.store != nil {
+				s.store.Accept(id, now, *report.Metrics)
+			}
 		}
 		if report.Facts != nil {
 			n.facts = report.Facts
@@ -407,7 +478,7 @@ func allowedCapabilities(c []string) bool {
 		switch v {
 		case "metrics.v1":
 			metrics = true
-		case "frp.v1":
+		case "frp.v1", "ping.v1":
 		default:
 			return false
 		}

@@ -1,6 +1,7 @@
 import {UNKNOWN, bytes, capacity, decimal, percent, percentage, ratio, quality, loadText, uptime, timeText, sessionLabels, freshnessLabels, frpLabel} from "./format.mjs";
 import {select, overview} from "./store.mjs";
 import {connect} from "./transport.mjs";
+import {createHistoryPanel} from "./history-view.mjs";
 
 const byID = id => document.getElementById(id);
 const write = (element, text) => { const next = String(text ?? UNKNOWN); if (element.textContent !== next) element.textContent = next; };
@@ -9,17 +10,18 @@ const list = byID("node-list"), cards = new Map();
 const search = byID("node-search"), filter = byID("node-filter"), sort = byID("node-sort");
 let current = null;
 
-function createCard() {
+function createCard(node) {
   const element = byID("node-template").content.firstElementChild.cloneNode(true);
   const labels = Object.fromEntries([...element.querySelectorAll("[data-value]")].map(el => [el.dataset.value, el]));
   const meters = Object.fromEntries([...element.querySelectorAll("[data-meter]")].map(el => [el.dataset.meter, el]));
-  return {element, labels, meters};
+  return {element, labels, meters, history: createHistoryPanel(element, node.id)};
 }
 function patchCard(card, node) {
   const text = (key, next) => write(card.labels[key], next);
   const metric = node.metrics ?? {};
   const meter = (key, n) => { card.meters[key].hidden = n === null; if (n !== null && card.meters[key].value !== n) card.meters[key].value = n; };
   text("name", node.name);
+  card.history.setName(node.name);
   text("scope", ({host: "主机采集", namespace: "容器 / 命名空间采集", unknown: "采集范围未知"})[metric.scope] ?? "等待资源报告");
   text("session", sessionLabels[node.session]); card.labels.session.dataset.state = node.session;
   text("freshness", freshnessLabels[node.freshness]); card.labels.freshness.dataset.state = node.freshness;
@@ -31,7 +33,7 @@ function patchCard(card, node) {
   text("mem-note", capacity(metric.mem_used, metric.mem_total));
   text("disk-note", capacity(metric.disk_used, metric.disk_total));
   text("rx", bytes(decimal(metric.net_rx), true)); text("tx", bytes(decimal(metric.net_tx), true));
-  text("rx-total", `累计 ${bytes(decimal(metric.net_rx_total))}`); text("tx-total", `累计 ${bytes(decimal(metric.net_tx_total))}`);
+  text("rx-total", `系统计数器累计 ${bytes(decimal(metric.net_rx_total))}`); text("tx-total", `系统计数器累计 ${bytes(decimal(metric.net_tx_total))}`);
   text("load", loadText(metric.load)); text("uptime", uptime(metric.uptime));
   const frp = node.frp;
   text("proxies", frp?.control_state && frp.control_state !== "unknown" && Number.isSafeInteger(frp.proxy_running) && Number.isSafeInteger(frp.proxy_total) ? `${frp.proxy_running} / ${frp.proxy_total}` : UNKNOWN);
@@ -52,13 +54,13 @@ function render() {
   put("node-count", summary.total);
 
   const existing = new Set(nodes.map(n => n.id));
-  for (const [id, card] of cards) if (!existing.has(id)) { card.element.remove(); cards.delete(id); }
+  for (const [id, card] of cards) if (!existing.has(id)) { card.history.stop(); card.element.remove(); cards.delete(id); }
   for (const node of nodes) {
-    if (!cards.has(node.id)) cards.set(node.id, createCard());
+    if (!cards.has(node.id)) cards.set(node.id, createCard(node));
     patchCard(cards.get(node.id), node);
   }
   const shown = select(nodes, search.value, filter.value, sort.value), visible = new Set(shown.map(n => n.id));
-  for (const [id, card] of cards) card.element.hidden = !visible.has(id);
+  for (const [id, card] of cards) { card.element.hidden = !visible.has(id); card.history.setVisible(visible.has(id)); }
   // Keep existing DOM nodes, focus, form state and scroll; move only changed order.
   const ordered = [...shown, ...nodes.filter(n => !visible.has(n.id))];
   ordered.forEach((node, index) => {
@@ -84,5 +86,5 @@ filter.addEventListener("change", render);
 sort.addEventListener("change", render);
 const connection = connect({onSnapshot(data) { current = data; render(); }, onState});
 byID("retry").addEventListener("click", () => connection.refresh());
-window.addEventListener("pagehide", () => connection.stop());
+window.addEventListener("pagehide", () => { connection.stop(); for (const card of cards.values()) card.history.stop(); });
 window.addEventListener("pageshow", event => { if (event.persisted) window.location.reload(); });

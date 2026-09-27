@@ -25,7 +25,8 @@ P1 实质修改位于 `patches/0001-monitor-lifecycle.patch` 与映射到上游
 - 内存 metrics collector 可在监控启用时单次注册，增加注册与调用的并发保护；
 - 嵌入基于 web-standard-kit 的节点网页，保留原生 Dashboard 和 wire protocol。
 
-TCP 探测、数据库历史、累计流量及认证管理接口尚未实现。
+P2 追加 TCP 探测、SQLite 历史与主机当日流量，监控模式下接收 TERM/INT 以刷新尾批。
+依赖与退出变更分别记录在 0002/0003 补丁；认证管理接口与生产部署留在 P3。
 
 ## monitor-probe 设计参考
 
@@ -40,6 +41,8 @@ TCP 探测、数据库历史、累计流量及认证管理接口尚未实现。
 独立 Go 实现移植 agent 的 `collect.rs` 算法与过滤/拓扑规则，保守按算法移植保留
 完整 MIT 许可于 `agent/collect/LICENSE.monitor-probe`，二进制发布包同样附带。
 未复制 monitor 的服务端实现。各采集文件保留来源说明。
+P2 的 Go TCP 探测独立实现，按同一固定 agent `src/main.rs` 对齐 DNS/拨号限时及
+成功/失败/缺样口径；持久化与流量事务为本项目实现，没有复制 monitor 数据库源码。
 `tests/fixtures/collect/cases.json` 的样本输入为本项目自行构造；参考函数、
 预期值单位与有意的质量语义差异见同目录 README。
 
@@ -48,4 +51,12 @@ TCP 探测、数据库历史、累计流量及认证管理接口尚未实现。
 网页复用本仓库 `web-standard-kit/`，参考快照为
 `6d41d588b3537b2d2460d73f999d958fd37eb00d` 中的该目录。
 原始 `style.css`、`script.js` 复制至 `web/assets/`，业务样式与代码单独维护。
-文件清单、源路径和摘要见 `web/README.md`，资源不在运行时跨项目读取。
+文件清单、源路径和校验命令见 `web/README.md`，资源不在运行时跨项目读取。
+
+## SQLite 与新增依赖
+
+P2 使用 `modernc.org/sqlite v1.59.0`，锁定其要求的 `modernc.org/libc v1.75.7`，
+保持 CGO 关闭的 Linux amd64/arm64 构建。依赖补丁只更新该依赖链必需的版本。
+完整模块版本、来源、许可原文与第三方许可保存在
+`monitor/store/licenses/SOURCES.md` 及相邻目录，发布包保留为 `licenses/`。
+SQLite 核心的公开领域声明与 Go 封装/依赖的许可证分别保留，不将整个依赖链视作公开领域。

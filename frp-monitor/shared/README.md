@@ -4,8 +4,8 @@
 在 Overlay 中映射为 `github.com/fatedier/frp/extension/frpmonitor/shared`，共享
 固定上游 Go module，不单独创建 `go.mod`。
 
-这不是已运行的采集/WSS/认证服务。P1 仍需实现握手凭据、hello 响应、会话所有权、
-重连、接收时间、采样和调度；P2 实现探测执行、历史和流量事务。验证器不做 DNS、
+P1/P2 运行时已在 agent/service、agent/probe、monitor 与 monitor/store 中实现
+握手凭据、hello 响应、会话所有权、重连、接收时间、采样、探测和历史事务。验证器不做 DNS、
 网络请求或节点身份绑定，也不等于完成资源配额、限速、目标授权与会话防重放。
 
 ## 帧与会话
@@ -89,7 +89,7 @@ Facts 和 Metrics 都要求 `scope`，取 `host`、`namespace` 或 `unknown`。
 参考 boot_id 的网卡集合摘要使用 FNV-1a；具体确定性集合构造由 P1 采集器按固定
 参考源码实现。boot_id 的变化包含主机重启/所计集合改变，不能据此判定 agent 进程
 或监控会话是否重启。有效 lifetime 计数器必须同时有有效 boot_id 和 iface；缺失读数
-不得用 0 改写流量基线。相同范围的差分、计数器回退、同事务累计仍属于 P2。
+不得用 0 改写流量基线。相同范围的差分、计数器回退、同事务累计由 P2 store 实现。
 
 本目录只验证表示与范围，不实现 CPU、内存、磁盘、网卡算法。算法与覆盖范围以
 根 README 及 `tests/fixtures/collect/` 为准。

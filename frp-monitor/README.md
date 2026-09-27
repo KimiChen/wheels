@@ -3,15 +3,15 @@
 基于 FRP 的主机与隧道监控项目：`agent` 复用 frpc，`monitor` 复用 frps，
 `web` 基于本仓库的 `web-standard-kit`。三个模块均位于本子项目目录。
 
-> 状态：P1 实时闭环，2026-09-27 更新。已实现 Linux 采集、独立 WSS 上报、
-> 节点凭据、FRP 连接/Proxy 状态适配、内存快照、公开 API/SSE 和实时节点页面。
-> 当前用于受控演示；TCP 探测、历史数据库、累计流量、管理与生产部署属于后续阶段。
+> 状态：P2 采集体验，2026-09-27 更新。已实现 Linux 采集、独立 WSS 上报、
+> 节点凭据、FRP 状态、公开 API/SSE、受限 TCP 探测、SQLite 分钟历史、
+> UTC 当日主机流量和节点趋势。管理、服务端隧道对账及生产部署留在 P3。
 
 当前需求将原来的“60 秒上报、最新内存快照、公开 HTML”调整为对齐
 `monitor-probe/agent` 的监控方案。本 README 为当前规划入口；
 `docs/frpc.md`、`docs/frps.md` 保留为历史设计，冲突时以本文为准。
 
-P1 本地入口（在本子项目根目录执行，要求 Python 3.11+、Git、Go、Node.js/npm 和 OpenSSL）：
+P2 本地入口（在本子项目根目录执行，要求 Python 3.11+、Git、Go、Node.js/npm 和 OpenSSL）：
 
 ```bash
 python3 scripts/frp.py prepare
@@ -28,6 +28,10 @@ python3 scripts/local.py run
 `python3 scripts/local.py init --http`，页面为 `http://127.0.0.1:17401/`。
 两种方式均仅监听回环，不修改系统信任。Ctrl-C 同时停止两个进程；配置、凭据和日志
 保留在 ignored 的 `data/local/`。macOS 可验证连接和页面，Linux 专属指标显示“—”。
+P2 初始化默认开启 SQLite 历史，TCP 探测默认关闭。首次初始化加 `--probes` 可显式
+启用对本机 FRP 端口的 TCP 建连探测；已有 P1 目录不会覆盖，可用
+`--directory data/p2-demo` 创建新安装，并在 `run` 时指定同一目录。
+展开节点的“趋势与探测”查看历史，首次分钟写入前显示缺样，通常等待不超过一分钟。
 
 本地验证与打包：
 
@@ -35,6 +39,7 @@ python3 scripts/local.py run
 # macOS arm64 本机的回归示例；其他宿主使用实际 GOOS-GOARCH 路径。
 python3 tests/smoke.py --agent dist/darwin-arm64/frp-monitor-agent --server dist/darwin-arm64/frp-monitor-server
 python3 tests/p1_smoke.py --agent dist/darwin-arm64/frp-monitor-agent --server dist/darwin-arm64/frp-monitor-server
+python3 tests/p2_smoke.py --agent dist/darwin-arm64/frp-monitor-agent --server dist/darwin-arm64/frp-monitor-server
 node --test web/tests/*.test.mjs
 python3 scripts/frp.py package
 ```
@@ -49,6 +54,8 @@ Linux 采集参考向量位于 `tests/fixtures/collect/`，全部 17 组已接�
 开发验证使用 macOS arm64、Go 1.26.5、Node 26.5.0 和 npm 11.17.0。
 P1 协议/采集/接收器/上报器测试与 race 检查覆盖凭据、TLS、重连、旧会话、序号、
 过期、公开字段裁剪、慢采集退出与采样周期协商。具体已执行范围见测试文档。
+P2 增加真实 TCP 探测、任务替换、分钟平均、整数精度、事务回滚、WAL 崩溃恢复、
+重启后历史保留且节点等待接入，以及数据库故障隔离的验证。
 Linux 实机 `free`/`df` 对照、两架构部署和 100/500 节点容量验收尚未执行。
 
 P0 已完成的基线验证：
@@ -57,6 +64,19 @@ P0 已完成的基线验证：
 Linux amd64/arm64 已交叉构建并打包，尚未在两种 Linux 实机部署验收。
 同一环境重复构建 Linux amd64，两份二进制的 SHA256 均一致；发布包白名单及
 包内/包外校验和已验证。生成物和依赖只保留在 ignored 的 `.cache/`、`dist/`。
+
+P2 运行配置：`[monitor]` 的 `databaseFile` 指向独立私有目录中的 SQLite 文件，
+`retentionDays` 默认 7、范围 1–31；不设置数据库时仍可使用 P1 实时页面。
+`probeTasksFile` 指向 0600 的本地任务文件，按节点指定公开标签与私有目标，版本递增
+即可热更新；agent 还须显式设置 `[telemetry] probeEnabled = true`。
+目标策略默认仅允许公网单播，私网/回环需要额外 `probeAllowPrivate = true`。
+任务示例和边界见 [monitor/README.md](monitor/README.md)、
+[agent/probe/README.md](agent/probe/README.md)，事务与覆盖语义见
+[monitor/store/README.md](monitor/store/README.md)。
+
+历史按分钟批量写盘，正常 TERM/INT 退出刷新尾批；强制终止可能丢失尚未提交的一分钟。
+存储失败时公开接口显示 degraded，实时上报和原生 FRP 继续工作。主机流量仅统计
+同一计数范围内已接收的增量，按 UTC 接收日归属；不能当作运营商账单或隧道流量。
 
 ## 1. 推荐架构
 
@@ -310,9 +330,9 @@ HTML + CSS + 原生 ES Modules，保持 `wsk-` 组件、128 个令牌、`@layer 
 
 ## 8. 目标目录与构建
 
-以下为完整目标目录。P1 已实现 `agent/collect`、`agent/service`、`monitor/*.go`、
-`shared` 和 `web`；probe、数据库、admin 和安装文件仍按后续阶段引入。
-P1 的接收/API 代码集中在 monitor 包内，后续随职责增加再拆分子包：
+以下为完整目标目录。P2 已实现 `agent/collect`、`agent/service`、`agent/probe`、
+`monitor/*.go`、`monitor/store`、`shared` 和 `web`；admin 和生产安装文件在 P3 引入。
+接收/API 代码集中在 monitor 包内，后续随职责增加再拆分子包：
 
 ```text
 frp-monitor/
@@ -368,12 +388,12 @@ frpc/frps 本身不会自动读取它。建议使用 `FRP_MONITOR_*`、`FRP_AGEN
 |---|---|---|
 | P0：契约与构建（已完成） | 目录迁移、字段/协议契约、Overlay 构建、参考 fixture | 固定源码可重复构建；关闭扩展时原生 FRP 基线通过 |
 | P1：实时闭环（已实现，本机联调） | Go 采集、WSS、节点凭据、最小 FRP 连接适配器、最新状态与节点页面 | fixture、协议与本机闭环；Linux 实机采样对照待验收 |
-| P2：完整采集体验 | TCP 探测、SQLite 历史、累计流量、趋势与恢复 | 探测语义、会话/重启/网卡变化、流量事务与聚合测试通过 |
+| P2：完整采集体验（已实现，本机联调） | TCP 探测、SQLite 历史、主机当日流量、趋势与恢复 | 探测语义、会话/重启/网卡变化、流量事务与聚合测试；实机容量待验收 |
 | P3：FRP 与发布完善 | 隧道对账、公开/管理视图、接入配置、备份与 systemd 发布 | 两架构部署；权限/字段裁剪、故障恢复、UI 与 FRP 回归通过 |
 
-P1 是本地受控演示闭环，P2 才覆盖参考 agent 的全部采集类别；
+P1/P2 当前完成本地受控闭环，P2 覆盖参考 agent 的全部采集类别；
 公开上线须完成 P3 权限、字段裁剪、备份和部署验收。
-P1 节点凭据在监控服务启动时加载，增删/轮换后需重启 server，旧连接随之关闭；
+节点凭据在监控服务启动时加载，增删/轮换后需重启 server，旧连接随之关闭；
 没有管理接口或热轮换。Telemetry 配置更改需重启 agent；原生 Proxy 配置 reload
 和 ProxyStore 的后续变更会进入只读快照。`--config_dir` 模式每进程至多启用一个
 采集实例，应只在一个 frpc 配置中启用 telemetry。
@@ -399,5 +419,6 @@ P1 节点凭据在监控服务启动时加载，增删/轮换后需重启 server
 `THIRD_PARTY_NOTICES.md`。协议、构建脚本与合成向量为本项目实现；P1 的 Go
 采集算法参考固定 monitor-probe 版本移植，保留 `agent/collect/LICENSE.monitor-probe`，
 发布包同时附带该 MIT 许可证。网页复制锁定的 web-standard-kit 资源并记录来源。
+P2 使用锁定的纯 Go SQLite，新增依赖许可证保存于 `monitor/store/licenses/` 并随包发布。
 FRP 源码仅获取到 ignored 临时目录用于构建，二进制随包保留适用许可证与第三方声明。
 FRP 完整固定来源记录在 `upstream.lock` 与 `THIRD_PARTY_NOTICES.md`。

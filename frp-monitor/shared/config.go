@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-const Version = "0.1.0-p1"
+const Version = "0.2.0-p2"
 
 // AgentConfig is embedded in the native frpc configuration as [telemetry].
 // Runtime secrets are loaded from private files, never from these public types.
@@ -21,6 +21,8 @@ type AgentConfig struct {
 	Iface                 string `json:"iface,omitempty"`
 	IntervalSeconds       int    `json:"intervalSeconds,omitempty"`
 	AllowInsecureLoopback bool   `json:"allowInsecureLoopback,omitempty"`
+	ProbeEnabled          bool   `json:"probeEnabled,omitempty"`
+	ProbeAllowPrivate     bool   `json:"probeAllowPrivate,omitempty"`
 }
 
 func (c *AgentConfig) Complete() error {
@@ -81,6 +83,9 @@ type MonitorConfig struct {
 	KeyFile               string `json:"keyFile,omitempty"`
 	CredentialsFile       string `json:"credentialsFile,omitempty"`
 	ReportIntervalSeconds int    `json:"reportIntervalSeconds,omitempty"`
+	DatabaseFile          string `json:"databaseFile,omitempty"`
+	RetentionDays         int    `json:"retentionDays,omitempty"`
+	ProbeTasksFile        string `json:"probeTasksFile,omitempty"`
 }
 
 func (c *MonitorConfig) Complete() error {
@@ -99,6 +104,9 @@ func (c *MonitorConfig) Complete() error {
 	if c.ReportIntervalSeconds == 0 {
 		c.ReportIntervalSeconds = 1
 	}
+	if c.RetentionDays == 0 {
+		c.RetentionDays = 7
+	}
 	return c.Validate()
 }
 
@@ -115,6 +123,12 @@ func (c MonitorConfig) Validate() error {
 	}
 	if !configPath(c.CredentialsFile, true) || !configPath(c.CertFile, false) || !configPath(c.KeyFile, false) {
 		return errors.New("invalid monitor credential or TLS file path")
+	}
+	if !configPath(c.DatabaseFile, false) || !configPath(c.ProbeTasksFile, false) {
+		return errors.New("invalid monitor database or probe tasks path")
+	}
+	if c.DatabaseFile != "" && (c.RetentionDays < 1 || c.RetentionDays > 31) {
+		return errors.New("monitor retentionDays must be 1..31")
 	}
 	if (c.CertFile == "") != (c.KeyFile == "") {
 		return errors.New("monitor certFile and keyFile must be specified together")

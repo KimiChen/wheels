@@ -9,7 +9,7 @@ import (
 
 func TestStaticAllowlist(t *testing.T) {
 	h := Handler()
-	for _, path := range []string{"/", "/index.html", "/assets/style.css", "/src/app.mjs"} {
+	for _, path := range []string{"/", "/index.html", "/assets/style.css", "/src/app.mjs", "/src/history-data.mjs", "/src/history-transport.mjs", "/src/history-view.mjs"} {
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
 		if w.Code != http.StatusOK {

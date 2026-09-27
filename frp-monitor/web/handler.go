@@ -14,17 +14,20 @@ var content embed.FS
 // This list is intentionally explicit: adding documentation, tests, or Go source
 // beside an asset must never make that file publicly accessible.
 var publicFiles = map[string]string{
-	"/":                   "index.html",
-	"/index.html":         "index.html",
-	"/assets/style.css":   "assets/style.css",
-	"/assets/script.js":   "assets/script.js",
-	"/assets/app.css":     "assets/app.css",
-	"/assets/theme.js":    "assets/theme.js",
-	"/assets/favicon.svg": "assets/favicon.svg",
-	"/src/app.mjs":        "src/app.mjs",
-	"/src/format.mjs":     "src/format.mjs",
-	"/src/store.mjs":      "src/store.mjs",
-	"/src/transport.mjs":  "src/transport.mjs",
+	"/":                          "index.html",
+	"/index.html":                "index.html",
+	"/assets/style.css":          "assets/style.css",
+	"/assets/script.js":          "assets/script.js",
+	"/assets/app.css":            "assets/app.css",
+	"/assets/theme.js":           "assets/theme.js",
+	"/assets/favicon.svg":        "assets/favicon.svg",
+	"/src/app.mjs":               "src/app.mjs",
+	"/src/format.mjs":            "src/format.mjs",
+	"/src/store.mjs":             "src/store.mjs",
+	"/src/transport.mjs":         "src/transport.mjs",
+	"/src/history-data.mjs":      "src/history-data.mjs",
+	"/src/history-transport.mjs": "src/history-transport.mjs",
+	"/src/history-view.mjs":      "src/history-view.mjs",
 }
 
 // Handler provides the static application only. The monitor owns API/SSE routes.

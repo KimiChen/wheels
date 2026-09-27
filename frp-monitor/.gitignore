@@ -10,3 +10,9 @@ __pycache__/
 *.py[cod]
 *.test
 *.out
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.db
+*.db-wal
+*.db-shm

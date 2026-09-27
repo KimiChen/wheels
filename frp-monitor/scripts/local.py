@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Initialize and run an opt-in, loopback-only P1 demonstration."""
+"""Initialize and run a loopback P2 demonstration with private SQLite history."""
 from __future__ import annotations
 
 import argparse
@@ -18,13 +18,13 @@ import time
 import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
-KEYS = {"FRP_MONITOR_PORT", "FRP_SERVER_PORT", "FRP_MONITOR_INTERVAL_SECONDS", "FRP_AGENT_NAME", "FRP_AGENT_IFACE"}
+KEYS = {"FRP_MONITOR_PORT", "FRP_SERVER_PORT", "FRP_MONITOR_INTERVAL_SECONDS", "FRP_MONITOR_RETENTION_DAYS", "FRP_AGENT_NAME", "FRP_AGENT_IFACE"}
 
 
 def settings(root=ROOT, environment=None):
     env = os.environ if environment is None else environment
     values = {"FRP_MONITOR_PORT": "17401", "FRP_SERVER_PORT": "17000", "FRP_MONITOR_INTERVAL_SECONDS": "1",
-              "FRP_AGENT_NAME": "本地演示节点", "FRP_AGENT_IFACE": ""}
+              "FRP_MONITOR_RETENTION_DAYS": "7", "FRP_AGENT_NAME": "本地演示节点", "FRP_AGENT_IFACE": ""}
     path = root / ".env"
     if path.exists():
         if path.is_symlink() or not path.is_file():
@@ -49,9 +49,9 @@ def settings(root=ROOT, environment=None):
     values.update({key: env[key] for key in KEYS if key in env})
     if any("$" in v or "`" in v or any(ord(c) < 32 for c in v) for v in values.values()):
         raise ValueError("configuration must use literal values without control characters")
-    for key in ("FRP_MONITOR_PORT", "FRP_SERVER_PORT", "FRP_MONITOR_INTERVAL_SECONDS"):
+    for key in ("FRP_MONITOR_PORT", "FRP_SERVER_PORT", "FRP_MONITOR_INTERVAL_SECONDS", "FRP_MONITOR_RETENTION_DAYS"):
         values[key] = int(values[key])
-        maximum = 3600 if key.endswith("SECONDS") else 65535
+        maximum = 31 if key.endswith("DAYS") else 3600 if key.endswith("SECONDS") else 65535
         if not 1 <= values[key] <= maximum:
             raise ValueError("port or reporting interval out of range")
     if values["FRP_MONITOR_PORT"] == values["FRP_SERVER_PORT"]:
@@ -84,7 +84,7 @@ def private(path: Path, text: str):
         stream.write(text)
 
 
-def initialize(destination: Path, *, plain_http=False, config=None):
+def initialize(destination: Path, *, plain_http=False, probes=False, config=None):
     c = settings() if config is None else config
     if destination.exists():
         raise ValueError("demo directory exists; use it or select another --directory")
@@ -98,6 +98,8 @@ def initialize(destination: Path, *, plain_http=False, config=None):
         private(staging / "frp.token", secrets.token_hex(32) + "\n")
         private(staging / "credentials.json", json.dumps([{"agent_id": node_id, "name": c["FRP_AGENT_NAME"],
                 "token_sha256": hashlib.sha256(token.encode()).hexdigest()}], ensure_ascii=False, indent=2) + "\n")
+        tasks = [{"id": "local-frp", "name": "本机 FRP 入口", "target": f'127.0.0.1:{c["FRP_SERVER_PORT"]}', "interval": 5}] if probes else []
+        private(staging / "probes.json", json.dumps({"version": 1, "nodes": [{"agent_id": node_id, "tasks": tasks}]}, ensure_ascii=False, indent=2) + "\n")
         # Paths in generated configuration refer to the final private directory.
         q = lambda name: json.dumps(str(destination / name), ensure_ascii=False)
         tls_monitor = tls_agent = ""
@@ -118,11 +120,13 @@ def initialize(destination: Path, *, plain_http=False, config=None):
         private(staging / "server.toml", f'bindAddr = "127.0.0.1"\nbindPort = {c["FRP_SERVER_PORT"]}\nproxyBindAddr = "127.0.0.1"\n'
             + auth + f'\n[monitor]\nenabled = true\nbindAddr = "127.0.0.1"\nbindPort = {c["FRP_MONITOR_PORT"]}\nserverID = "local"\n'
             + f'credentialsFile = {q("credentials.json")}\nreportIntervalSeconds = {c["FRP_MONITOR_INTERVAL_SECONDS"]}\n' + tls_monitor)
+        with (staging / "server.toml").open("a", encoding="utf-8") as server_config:
+            server_config.write(f'databaseFile = {q("history.sqlite")}\nretentionDays = {c["FRP_MONITOR_RETENTION_DAYS"]}\nprobeTasksFile = {q("probes.json")}\n')
         scheme = "ws" if plain_http else "wss"
         private(staging / "agent.toml", f'serverAddr = "127.0.0.1"\nserverPort = {c["FRP_SERVER_PORT"]}\nclientID = "{node_id}"\nloginFailExit = false\n'
             + auth + f'\n[telemetry]\nenabled = true\nserverID = "local"\nendpoint = "{scheme}://127.0.0.1:{c["FRP_MONITOR_PORT"]}/agent/v1/ws"\n'
             + f'tokenFile = {q("agent.token")}\nintervalSeconds = {c["FRP_MONITOR_INTERVAL_SECONDS"]}\niface = {json.dumps(c["FRP_AGENT_IFACE"])}\n'
-            + f'allowInsecureLoopback = {str(plain_http).lower()}\n' + tls_agent)
+            + f'allowInsecureLoopback = {str(plain_http).lower()}\nprobeEnabled = {str(probes).lower()}\nprobeAllowPrivate = {str(probes).lower()}\n' + tls_agent)
         private(staging / "local.json", json.dumps({"url": f'{"http" if plain_http else "https"}://127.0.0.1:{c["FRP_MONITOR_PORT"]}/', "id": node_id}) + "\n")
         os.rename(staging, destination)
     finally:
@@ -186,14 +190,15 @@ def main():
     parser.add_argument("action", choices=("init", "run"))
     parser.add_argument("--directory", default="data/local")
     parser.add_argument("--http", action="store_true", help="init only: explicit plaintext loopback demonstration")
+    parser.add_argument("--probes", action="store_true", help="init only: enable a TCP probe to this demonstration's loopback FRP port")
     args = parser.parse_args()
     path = directory(args.directory)
     if args.action == "init":
-        initialize(path, plain_http=args.http)
+        initialize(path, plain_http=args.http, probes=args.probes)
         print(f"Initialized private local configuration: {path}")
     else:
-        if args.http:
-            parser.error("--http applies only to init")
+        if args.http or args.probes:
+            parser.error("--http and --probes apply only to init")
         run_demo(path)
 
 

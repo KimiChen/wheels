@@ -1,6 +1,6 @@
 # Agent
 
-P1 由 `collect/` 采样、`service/` 独立上报，上游补丁提供只读 FRP 适配器。
+P2 由 `collect/` 采样、`service/` 独立上报、`probe/` 执行获准 TCP 任务，上游补丁提供只读 FRP 适配器。
 原生 frpc 的 `[telemetry]` 默认为关闭；在现有 TOML 中可加入：
 
 ```toml
@@ -12,6 +12,8 @@ tokenFile = "/path/to/private/agent.token"
 intervalSeconds = 1
 # caFile = "/path/to/private/monitor-ca.pem"
 iface = ""
+# probeEnabled = true
+# probeAllowPrivate = false
 ```
 
 占位地址与路径须替换；本机可直接用根 README 的 `scripts/local.py` 生成有效配置。
@@ -19,6 +21,8 @@ iface = ""
 只有显式 `allowInsecureLoopback = true` 才允许指向 IP 字面量回环地址的 `ws://`。
 Token 是至少 32 随机字节的无填充 base64url 编码，文件为常规文件、权限恰为 0600，
 与 FRP token 分离；服务端保存编码文本的 SHA256 摘要，格式见 monitor README。
+探测默认关闭，显式启用才协商 `ping.v1`；私网额外授权与 DNS/拨号/队列限额见
+[probe/README.md](probe/README.md)。只有配置的目标会被测量，不执行远程命令。
 
 本地 `intervalSeconds` 为初始 1–3600 秒周期，握手后以服务端下发周期为准并立即调整。
 只保留最新样本，不积累离线队列；心跳与采样独立。监控在首次 FRP 登录前异步启动，

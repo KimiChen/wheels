@@ -17,3 +17,8 @@
 客户端源快照保持上游“先各源排除 disabled，再合并启用项”的优先级，并补充仅有
 disabled 配置的名称供展示；新增方法不改变原生 Load。补丁附带回归测试。
 每次准备源码都从已验证的固定版本重新组装，不能在上一次已打补丁的目录上重复应用。
+
+P2 追加 `0002-sqlite-dependency.patch`，锁定纯 Go SQLite 及所需最小依赖版本；
+`0003-persistence-shutdown.patch` 仅在 monitor 启用时接收 TERM/INT、取消服务 context，
+让原生关闭路径与监控尾批刷新完成。附有 context 取消测试，并由 P2 smoke 验证真实
+二进制 TERM 后的数据库恢复。关闭 monitor 时保留原生信号处理行为。
