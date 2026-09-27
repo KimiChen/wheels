@@ -3,23 +3,39 @@
 基于 FRP 的主机与隧道监控项目：`agent` 复用 frpc，`monitor` 复用 frps，
 `web` 基于本仓库的 `web-standard-kit`。三个模块均位于本子项目目录。
 
-> 状态：P0 契约与构建，2026-09-27 更新。已提供固定源码准备、Overlay 映射、
-> 协议校验与测试、基础二进制构建和打包入口。尚无采集器、监控 Listener、数据库或
-> 网页；目前二进制运行原生 FRP，不能当作已完成的监控产品部署。
+> 状态：P1 实时闭环，2026-09-27 更新。已实现 Linux 采集、独立 WSS 上报、
+> 节点凭据、FRP 连接/Proxy 状态适配、内存快照、公开 API/SSE 和实时节点页面。
+> 当前用于受控演示；TCP 探测、历史数据库、累计流量、管理与生产部署属于后续阶段。
 
 当前需求将原来的“60 秒上报、最新内存快照、公开 HTML”调整为对齐
 `monitor-probe/agent` 的监控方案。本 README 为当前规划入口；
 `docs/frpc.md`、`docs/frps.md` 保留为历史设计，冲突时以本文为准。
 
-P0 本地入口（在本子项目根目录执行，要求 Python 3.11+、Git、Go 及 Node.js/npm）：
+P1 本地入口（在本子项目根目录执行，要求 Python 3.11+、Git、Go、Node.js/npm 和 OpenSSL）：
 
 ```bash
 python3 scripts/frp.py prepare
 python3 -m unittest discover -s tests -p '*test*.py'
 python3 scripts/frp.py test
 python3 scripts/frp.py build --native
+# 生成 0700 私有目录、0600 凭据与回环 TLS 配置；已有目录不会覆盖。
+python3 scripts/local.py init
+python3 scripts/local.py run
+```
+
+默认页面为 `https://127.0.0.1:17401/`，本地生成证书有效期 30 天，agent 显式信任
+该证书；浏览器需由使用者自行信任。若只需本机明文演示，可在首次初始化时使用
+`python3 scripts/local.py init --http`，页面为 `http://127.0.0.1:17401/`。
+两种方式均仅监听回环，不修改系统信任。Ctrl-C 同时停止两个进程；配置、凭据和日志
+保留在 ignored 的 `data/local/`。macOS 可验证连接和页面，Linux 专属指标显示“—”。
+
+本地验证与打包：
+
+```bash
 # macOS arm64 本机的回归示例；其他宿主使用实际 GOOS-GOARCH 路径。
 python3 tests/smoke.py --agent dist/darwin-arm64/frp-monitor-agent --server dist/darwin-arm64/frp-monitor-server
+python3 tests/p1_smoke.py --agent dist/darwin-arm64/frp-monitor-agent --server dist/darwin-arm64/frp-monitor-server
+node --test web/tests/*.test.mjs
 python3 scripts/frp.py package
 ```
 
@@ -28,9 +44,14 @@ python3 scripts/frp.py package
 Node 服务。完整参数与工具链规则见 [scripts/README.md](scripts/README.md)，
 协议 v1、字段和质量约束见 [shared/README.md](shared/README.md)，
 测试覆盖与尚未实现的验收见 [tests/README.md](tests/README.md)。
-Linux 采集参考向量位于 `tests/fixtures/collect/`，P1 将接入真实采集代码对照。
+Linux 采集参考向量位于 `tests/fixtures/collect/`，全部 17 组已接入真实 Go 采集函数。
 
-2026-09-27 的 P0 验证使用 macOS arm64、Go 1.26.5、Node 26.5.0 和 npm 11.17.0：
+开发验证使用 macOS arm64、Go 1.26.5、Node 26.5.0 和 npm 11.17.0。
+P1 协议/采集/接收器/上报器测试与 race 检查覆盖凭据、TLS、重连、旧会话、序号、
+过期、公开字段裁剪、慢采集退出与采样周期协商。具体已执行范围见测试文档。
+Linux 实机 `free`/`df` 对照、两架构部署和 100/500 节点容量验收尚未执行。
+
+P0 已完成的基线验证：
 构建脚本/协议测试、shared race/vet 和短时模糊测试通过；本机原生 FRP 的 wire v1/v2
 配置校验、无 Proxy 登录、TCP 转发、服务端重启后重连及 Dashboard 认证/资源访问通过。
 Linux amd64/arm64 已交叉构建并打包，尚未在两种 Linux 实机部署验收。
@@ -80,6 +101,8 @@ flowchart LR
 监控使用独立 HTTPS/WSS，不经自身 FRP 隧道，不修改 FRP wire protocol。
 FRP 登录失败时仍可查看主机及故障状态；监控失联时隧道继续转发。
 两条连接均由 agent 主动发起，不要求节点开放入站端口。
+格式错误的监控配置在原生 `verify` / 加载阶段直接报错；故障隔离保证适用于
+配置通过校验后的监控初始化、网络中断和运行故障。
 
 监控挂在进程生命周期，不实现为普通 frpc Proxy 插件：后者面向单个 Proxy 连接，
 不适合“无 Proxy 也采集、每进程仅一个实例”。FRP 原生监控可提供连接与隧道线索，
@@ -287,8 +310,9 @@ HTML + CSS + 原生 ES Modules，保持 `wsk-` 组件、128 个令牌、`@layer 
 
 ## 8. 目标目录与构建
 
-以下为目标目录。P0 已迁移 agent/monitor/web 的目录说明，实际 Go 实现在 shared；
-agent/monitor 子目录、页面、服务与安装配置将在对应阶段有实现时创建：
+以下为完整目标目录。P1 已实现 `agent/collect`、`agent/service`、`monitor/*.go`、
+`shared` 和 `web`；probe、数据库、admin 和安装文件仍按后续阶段引入。
+P1 的接收/API 代码集中在 monitor 包内，后续随职责增加再拆分子包：
 
 ```text
 frp-monitor/
@@ -342,13 +366,17 @@ frpc/frps 本身不会自动读取它。建议使用 `FRP_MONITOR_*`、`FRP_AGEN
 
 | 阶段 | 交付 | 验收门槛 |
 |---|---|---|
-| P0：契约与构建 | 目录迁移、字段/协议契约、Overlay 构建、参考 fixture | 固定源码可重复构建；关闭扩展时原生 FRP 基线通过 |
-| P1：实时闭环 | Go 采集、WSS、节点凭据、最小 FRP 连接适配器、最新状态与节点页面 | Facts/Metrics 对齐；无 Proxy、FRP 断连、监控断连状态准确 |
+| P0：契约与构建（已完成） | 目录迁移、字段/协议契约、Overlay 构建、参考 fixture | 固定源码可重复构建；关闭扩展时原生 FRP 基线通过 |
+| P1：实时闭环（已实现，本机联调） | Go 采集、WSS、节点凭据、最小 FRP 连接适配器、最新状态与节点页面 | fixture、协议与本机闭环；Linux 实机采样对照待验收 |
 | P2：完整采集体验 | TCP 探测、SQLite 历史、累计流量、趋势与恢复 | 探测语义、会话/重启/网卡变化、流量事务与聚合测试通过 |
 | P3：FRP 与发布完善 | 隧道对账、公开/管理视图、接入配置、备份与 systemd 发布 | 两架构部署；权限/字段裁剪、故障恢复、UI 与 FRP 回归通过 |
 
 P1 是本地受控演示闭环，P2 才覆盖参考 agent 的全部采集类别；
 公开上线须完成 P3 权限、字段裁剪、备份和部署验收。
+P1 节点凭据在监控服务启动时加载，增删/轮换后需重启 server，旧连接随之关闭；
+没有管理接口或热轮换。Telemetry 配置更改需重启 agent；原生 Proxy 配置 reload
+和 ProxyStore 的后续变更会进入只读快照。`--config_dir` 模式每进程至多启用一个
+采集实例，应只在一个 frpc 配置中启用 telemetry。
 告警、价格/到期管理、主题市场、远程 Proxy/Visitor CRUD、Shell、自动升级
 不纳入采集同等目标，可后续单独规划。
 
@@ -368,7 +396,8 @@ P1 是本地受控演示闭环，P2 才覆盖参考 agent 的全部采集类别�
 
 本子项目与 FRP 使用 Apache-2.0；参考的 monitor-probe/agent 和 monitor 为 MIT。
 移植代码、测试或其他受版权保护材料时，保留版权及 MIT 许可并更新
-`THIRD_PARTY_NOTICES.md`。P0 的协议、构建脚本与合成向量为本项目实现，
-未复制 monitor-probe 实现或测试；FRP 源码仅获取到 ignored 临时目录用于构建，
-原生二进制随包保留其适用许可证与第三方声明。
+`THIRD_PARTY_NOTICES.md`。协议、构建脚本与合成向量为本项目实现；P1 的 Go
+采集算法参考固定 monitor-probe 版本移植，保留 `agent/collect/LICENSE.monitor-probe`，
+发布包同时附带该 MIT 许可证。网页复制锁定的 web-standard-kit 资源并记录来源。
+FRP 源码仅获取到 ignored 临时目录用于构建，二进制随包保留适用许可证与第三方声明。
 FRP 完整固定来源记录在 `upstream.lock` 与 `THIRD_PARTY_NOTICES.md`。

@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>FRP Monitor · 节点总览</title>
+  <script src="/assets/theme.js"></script>
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/style.css">
+  <link rel="stylesheet" href="/assets/app.css">
+  <script defer src="/assets/script.js"></script>
+  <script type="module" src="/src/app.mjs"></script>
+</head>
+<body>
+  <a class="wsk-skip-link" href="#main">跳到主要内容</a>
+  <svg class="fm-symbols" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><defs>
+    <symbol id="pulse" viewBox="0 0 24 24"><path d="M2 13h5l3-9 4 16 3-7h5"/></symbol>
+    <symbol id="grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></symbol>
+    <symbol id="server" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="7" rx="2"/><path d="M7 6.5h.01M7 17.5h.01M12 6.5h5M12 17.5h5"/></symbol>
+    <symbol id="theme" viewBox="0 0 24 24"><path d="M20.7 13.5A9 9 0 0 1 10.5 3.3 9 9 0 1 0 20.7 13.5Z"/></symbol>
+    <symbol id="search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></symbol>
+    <symbol id="refresh" viewBox="0 0 24 24"><path d="M20 8a8 8 0 1 0 1 7M20 3v5h-5"/></symbol>
+    <symbol id="arrow-up" viewBox="0 0 24 24"><path d="M12 20V4m-6 6 6-6 6 6"/></symbol>
+    <symbol id="arrow-down" viewBox="0 0 24 24"><path d="M12 4v16m-6-6 6 6 6-6"/></symbol>
+  </defs></svg>
+
+  <aside class="fm-sidebar">
+    <a class="fm-brand" href="/" aria-label="FRP Monitor 首页"><span class="fm-brand-mark"><svg><use href="#pulse"/></svg></span><span>FRP <b>Monitor</b><small>基础设施监控</small></span></a>
+    <div class="fm-nav-label">工作空间</div>
+    <nav aria-label="主要导航"><a class="fm-nav-link" href="#overview" aria-current="page"><svg><use href="#grid"/></svg>节点总览<span>01</span></a><a class="fm-nav-link" href="#nodes"><svg><use href="#server"/></svg>节点资源</a></nav>
+    <div class="fm-sidebar-bottom"><span class="fm-readonly">公开 · 只读</span><p>每个节点的状态<br>都清晰可见。</p><small>FRP Monitor / P1</small></div>
+  </aside>
+
+  <div class="fm-workspace">
+    <header class="fm-topbar"><div class="fm-breadcrumb">监控工作空间<span>/</span><b>节点总览</b></div><div class="fm-top-actions"><span class="fm-stream" data-state="loading" id="stream-status" role="status"><i></i><span id="stream-label">正在连接</span></span><button class="wsk-button fm-theme" data-theme-toggle data-js-only type="button" aria-label="切换主题"><svg><use href="#theme"/></svg></button></div></header>
+    <main id="main" tabindex="-1">
+      <section id="overview" aria-labelledby="overview-title">
+        <div class="fm-page-heading"><div><div class="fm-eyebrow">INFRASTRUCTURE / LIVE OVERVIEW</div><h1 id="overview-title">节点总览<span class="fm-title-dot"></span></h1><p>从资源用量到连接状态，掌握每个节点的此刻。</p></div><div class="fm-update"><span>最近快照</span><time id="snapshot-at">—</time></div></div>
+        <div id="connection-notice" class="fm-notice" role="status">正在获取监控快照…</div>
+        <noscript><div class="fm-notice">此页面需要 JavaScript 获取监控数据。当前未显示实时状态。</div></noscript>
+        <div class="fm-overview-grid">
+          <article class="wsk-metric fm-overview"><div class="fm-stat-label"><span>监控在线</span><svg><use href="#server"/></svg></div><div class="fm-stat-value"><strong id="stat-online">—</strong><span>/ <span id="stat-total">—</span> 节点</span></div><p id="stat-online-note">等待节点状态</p></article>
+          <article class="wsk-metric fm-overview"><div class="fm-stat-label"><span>数据新鲜</span><span class="fm-mini-dot"></span></div><div class="fm-stat-value"><strong id="stat-fresh">—</strong><span>节点</span></div><p id="stat-fresh-note">等待资源报告</p></article>
+          <article class="wsk-metric fm-overview"><div class="fm-stat-label"><span>FRP 运行隧道</span><svg><use href="#pulse"/></svg></div><div class="fm-stat-value"><strong id="stat-proxies">—</strong><span>/ <span id="stat-proxies-total">—</span> 个</span></div><p id="stat-proxy-note">来自节点最近报告</p></article>
+          <article class="wsk-metric fm-overview"><div class="fm-stat-label"><span>节点接收 / 发送</span><svg><use href="#arrow-down"/></svg></div><div class="fm-stat-value fm-network-total"><strong id="stat-rx">—</strong><span>/</span><strong id="stat-tx">—</strong></div><p id="stat-network-note">仅汇总在线且新鲜的有效采样</p></article>
+        </div>
+      </section>
+
+      <section id="nodes" class="fm-nodes" aria-labelledby="nodes-title">
+        <div class="fm-section-heading"><div><span class="fm-section-index">01</span><h2 id="nodes-title">节点资源</h2><span id="node-count" class="fm-count">—</span></div><p>监控会话、数据新鲜度与 FRP 分别显示</p></div>
+        <div class="fm-toolbar" data-js-only><label class="fm-search"><svg><use href="#search"/></svg><input id="node-search" type="search" placeholder="搜索节点名称…" aria-label="搜索节点名称" autocomplete="off"></label><label class="fm-select"><span>状态</span><select id="node-filter" aria-label="按监控会话筛选"><option value="all">全部节点</option><option value="online">监控在线</option><option value="offline">监控离线</option><option value="waiting">等待接入</option></select></label><label class="fm-select"><span>排序</span><select id="node-sort" aria-label="节点排序"><option value="name">名称 A–Z</option><option value="status">监控状态</option><option value="cpu">CPU 从高到低</option></select></label><button id="retry" class="wsk-button fm-refresh" type="button"><svg><use href="#refresh"/></svg>刷新</button></div>
+        <div id="node-list" class="fm-node-grid"></div>
+        <div id="empty-state" class="wsk-empty-state fm-empty"><span class="fm-empty-icon"><svg><use href="#server"/></svg></span><h3 id="empty-title">正在读取节点</h3><p id="empty-copy">获取服务端快照后，将在这里显示节点资源。</p></div>
+        <div class="fm-list-footer"><span id="list-summary">等待数据</span><span>— 表示暂无有效采样</span></div>
+      </section>
+      <footer class="fm-footer"><span>FRP Monitor<span class="fm-footer-separator">/</span>实时基础设施观察</span><span>公开摘要 · 无主机与网络标识</span></footer>
+    </main>
+  </div>
+
+  <template id="node-template"><article class="fm-node-card">
+    <header class="fm-card-header"><div class="fm-node-identity"><span class="fm-node-icon"><svg><use href="#server"/></svg></span><div><h3 data-value="name"></h3><p data-value="scope">采集范围未知</p></div></div><span class="fm-badge" data-value="session"></span></header>
+    <div class="fm-state-row"><span>数据 <b class="fm-data-state" data-value="freshness"></b></span><span>FRP <b data-value="frp"></b></span></div>
+    <div class="fm-resource-grid">
+      <div class="fm-resource"><div><span>CPU</span><strong data-value="cpu">—</strong></div><progress max="100" data-meter="cpu" aria-label="CPU 使用率" hidden></progress><p data-value="cpu-note">暂无采样</p></div>
+      <div class="fm-resource"><div><span>内存</span><strong data-value="mem">—</strong></div><progress max="100" data-meter="mem" aria-label="内存使用率" hidden></progress><p data-value="mem-note">暂无采样</p></div>
+      <div class="fm-resource"><div><span>磁盘</span><strong data-value="disk">—</strong></div><progress max="100" data-meter="disk" aria-label="磁盘使用率" hidden></progress><p data-value="disk-note">暂无采样</p></div>
+    </div>
+    <div class="fm-network"><div><span><svg><use href="#arrow-down"/></svg>节点接收</span><strong data-value="rx">—</strong><small data-value="rx-total">累计 —</small></div><div><span><svg><use href="#arrow-up"/></svg>节点发送</span><strong data-value="tx">—</strong><small data-value="tx-total">累计 —</small></div></div>
+    <dl class="fm-details"><div><dt>负载 <small>1 / 5 / 15 分钟</small></dt><dd data-value="load">—</dd></div><div><dt>运行隧道</dt><dd data-value="proxies">—</dd></div><div><dt>系统运行时间</dt><dd data-value="uptime">—</dd></div></dl>
+    <footer class="fm-card-footer"><span data-value="sample-time">尚未收到资源报告</span><span data-value="interval">—</span></footer>
+  </article></template>
+</body>
+</html>

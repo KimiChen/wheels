@@ -1,2 +1,2 @@
-# P0: no lifecycle patches. Binaries retain native FRP behavior.
-# Add one relative patch filename per line, in application order.
+# Apply to the exact commit in upstream.lock.
+0001-monitor-lifecycle.patch

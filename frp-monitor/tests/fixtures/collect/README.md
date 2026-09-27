@@ -1,7 +1,8 @@
 # Linux 采集参考向量
 
 `cases.json` 为自行构造的脱敏输入和预期值，没有读取当前机器的 `/proc`、地址或挂载。
-数据用于 P1 Go 采集器验收，P0 只交付参考向量，尚不表示采集器或实机对照已通过。
+P1 的 `agent/collect` 测试已通过生产采集和解析函数消费全部 17 个向量；
+这不等于 Linux 实机 `free/df` 对照已通过。
 
 参考为 [monitor-probe/agent collect.rs](https://github.com/monitor-probe/agent/blob/cebc5383abb5963abeb722877a2d82c1a7aea5c6/src/collect.rs)
 固定提交中的 `parse_cpu_jiffies/busy_percent`、`mem_used/swap_used`、`disk_usage`、
@@ -21,4 +22,6 @@
   新旧接口交集计算速率的差异在向量中写明。P1 不得把质量差异称为逐字节协议兼容。
 
 消费 fixture 时应实际调用生产采集函数；不能另写一份同样公式仅验证 JSON 自洽。
-后续需继续增加完整 `/sys` 拓扑、Facts、地址优先级、读取错误恢复及 TCP 探测用例。
+`agent/collect` 已另有 `/sys` 拓扑、Facts、地址优先级、读取错误恢复和并发用例。
+TCP 探测在 P2 验证。本文件是唯一向量数据源，Overlay 测试通过
+`FRP_MONITOR_COLLECT_FIXTURES` 指定 `cases.json` 的绝对路径。

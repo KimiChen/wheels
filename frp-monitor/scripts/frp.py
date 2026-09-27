@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare and build the pinned FRP baseline without evaluating local configuration."""
+"""Prepare, test and build the pinned FRP monitor overlay."""
 from __future__ import annotations
 
 import argparse
@@ -22,9 +22,9 @@ ROOT = Path(__file__).resolve().parents[1]
 OFFICIAL_REPOSITORY = "https://github.com/fatedier/frp.git"
 OVERLAYS = ("agent", "monitor", "shared", "web")
 CONFIG_KEYS = {"FRP_MONITOR_CACHE_DIR", "FRP_MONITOR_OUTPUT_DIR", "FRP_MONITOR_UPSTREAM_MIRROR"}
-BASELINE = "FRP baseline; telemetry lifecycle is not integrated"
+BASELINE = "P1 realtime monitoring; TCP probes, history and administration are not implemented"
 LOCK_KEYS = {"schema_version", "repository", "tag", "tag_object", "commit", "license"}
-NATIVE_TESTS = ("./pkg/config/...", "./pkg/msg/...", "./pkg/util/...", "./extension/frpmonitor/shared/...")
+NATIVE_TESTS = ("./pkg/config/...", "./pkg/msg/...", "./pkg/util/...", "./pkg/metrics/...", "./client", "./extension/frpmonitor/...")
 
 
 class PipelineError(Exception):
@@ -340,7 +340,8 @@ class Pipeline:
                      "GOEXPERIMENT", "GOFIPS140", "GODEBUG", "GOFLAGS", "GOWORK", "GOENV", "GOTOOLCHAIN"):
             env.pop(name, None)
         env.update({"CGO_ENABLED": "0", "GOTOOLCHAIN": "local", "GOWORK": "off", "GOENV": "off", "GOFLAGS": "",
-                    "GOCACHE": str(self.cache / "go-build"), "GOMODCACHE": str(self.cache / "go-mod")})
+                    "GOCACHE": str(self.cache / "go-build"), "GOMODCACHE": str(self.cache / "go-mod"),
+                    "FRP_MONITOR_COLLECT_FIXTURES": str(self.root / "tests/fixtures/collect/cases.json")})
         return env
 
     def test(self) -> dict:
@@ -440,7 +441,7 @@ class Pipeline:
             try:
                 target_env = {**env, "GOOS": goos, "GOARCH": goarch, "SOURCE_DATE_EPOCH": str(prepared["source_date_epoch"])}
                 for name, command in (("frp-monitor-agent", "frpc"), ("frp-monitor-server", "frps")):
-                    print(f"Building {name} ({target}, FRP baseline)...", file=sys.stderr, flush=True)
+                    print(f"Building {name} ({target}, P1 monitoring)...", file=sys.stderr, flush=True)
                     run(["go", "build", "-mod=readonly", "-trimpath", "-buildvcs=false", "-ldflags=-buildid=",
                          "-tags", command, "-o", str(staging / name), "./cmd/" + command], cwd=self.source, env=target_env, capture=False)
                 manifest = {key: value for key, value in prepared.items() if key != "source_dir"}
@@ -464,8 +465,10 @@ class Pipeline:
             manifest = json.loads(read_regular(source / "BUILD.json"))
             payload = {name: read_regular(source / name) for name in ("frp-monitor-agent", "frp-monitor-server", "BUILD.json")}
             payload.update({name: read_regular(self.root / name) for name in ("LICENSE", "THIRD_PARTY_NOTICES.md", "upstream.lock")})
-            payload["README.txt"] = ("frp-monitor P0: " + BASELINE + ".\nThese executables retain native frpc/frps CLI and configuration.\n"
-                                      "No telemetry, web UI, node enrollment or production deployment is implemented.\n"
+            payload["LICENSE.monitor-probe"] = read_regular(self.root / "agent/collect/LICENSE.monitor-probe")
+            payload["README.txt"] = ("frp-monitor P1: " + BASELINE + ".\nThese executables retain native frpc/frps CLI and configuration.\n"
+                                      "Monitoring is opt-in via [telemetry]/[monitor]; use private credentials and verified TLS.\n"
+                                      "P1 is a controlled demonstration; production deployment and administration await P3.\n"
                                       "Build provenance and exact Go version: BUILD.json.\n").encode("utf-8")
             payload["SHA256SUMS"] = "".join(f"{digest(data)}  {name}\n" for name, data in sorted(payload.items())).encode("utf-8")
             basename = f"frp-monitor-{self.lock['tag']}-{manifest['target'].replace('/', '-')}"

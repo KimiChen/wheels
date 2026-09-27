@@ -1,0 +1,2 @@
+# Unified diff context prefixes contain intentional spaces before tabs/blank lines.
+patches/*.patch -whitespace

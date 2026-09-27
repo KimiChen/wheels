@@ -236,6 +236,9 @@ class PipelineTests(unittest.TestCase):
 
     def test_packages_are_deterministic_allowlisted_and_checksummed(self):
         pipeline = self.pipeline()
+        license_path = self.root / "agent/collect/LICENSE.monitor-probe"
+        license_path.parent.mkdir(parents=True, exist_ok=True)
+        license_path.write_text("fixture MIT license\n")
         (self.root / ".env").write_text("PRIVATE_KEY=do-not-package\n")
         pipeline.output.mkdir()
         dirs = []
@@ -256,6 +259,7 @@ class PipelineTests(unittest.TestCase):
             with tarfile.open(package, "r:gz") as archive:
                 members = {Path(member.name).name: archive.extractfile(member).read() for member in archive.getmembers()}
             self.assertNotIn(".env", members)
+            self.assertEqual(members["LICENSE.monitor-probe"], b"fixture MIT license\n")
             self.assertNotIn(b"do-not-package", b"".join(members.values()))
             for line in members["SHA256SUMS"].decode().splitlines():
                 checksum, name = line.split("  ", 1)

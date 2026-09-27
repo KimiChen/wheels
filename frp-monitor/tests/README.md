@@ -1,7 +1,7 @@
 # Tests
 
-本目录保存 P0 原生 FRP 基线回归和脱敏参考数据。阶段范围以根目录
-[README.md](../README.md) 为准；P0 通过不代表采集、WSS、存储或网页已实现。
+本目录保存原生 FRP 基线回归、P1 闭环验收和脱敏参考数据。阶段范围以根目录
+[README.md](../README.md) 为准；数据库、TCP 探测和生产部署仍未实现。
 
 ## P0 原生基线
 
@@ -65,17 +65,43 @@ python3 scripts/frp.py test
 `python3 -m unittest discover -s tests -p '*test*.py' -v` 会同时运行它和
 smoke 工具自测，无需把测试文件名约定限定为 `test_` 前缀。
 
-[`fixtures/collect/`](fixtures/collect/README.md) 目前包含 17 个自行构造的 Linux
-采集输入/预期向量，供 P1 的真实采集函数消费。它们覆盖 CPU 差分、内存、磁盘、
-网络计数器等边界；输入没有读取当前机器状态。**P0 尚无采集器消费这些向量，
-因此不能声称采集算法或与参考实现的比对已经通过。**
+[`fixtures/collect/`](fixtures/collect/README.md) 包含 17 个自行构造的 Linux
+采集输入/预期向量，现全部由 P1 的真实采集函数消费。覆盖 CPU 差分、内存、磁盘、
+网络计数器等边界；输入不读取当前机器状态。测试入口自动设置
+`FRP_MONITOR_COLLECT_FIXTURES`，直接运行 Go 测试时需将该变量设为 cases.json 的绝对路径。
+
+## P1 实时闭环
+
+```sh
+python3 tests/p1_smoke.py \
+  --agent dist/darwin-arm64/frp-monitor-agent \
+  --server dist/darwin-arm64/frp-monitor-server
+node --test web/tests/*.test.mjs
+```
+
+P1 smoke 使用动态回环端口、临时独立凭据和真实 TLS 证书，运行完整二进制。
+分别用两条 TCP 字节桥中断 FRP 和 WSS，观察原进程恢复，不依赖外部 VPS：
+
+- 验证受信 TLS 成功、不受信证书与缺失/错误节点 token 拒绝。
+- 初次 FRP 登录失败时监控依然 online/fresh；无 Proxy 也正常监控。
+- TCP 二进制载荷一致，FRP 断连与恢复时监控持续在线。
+- 监控断连后 offline/stale，原生 TCP 仍能转发；恢复后新会话继续最新样本。
+- 公开 API/SSE 不含主机名、IP、关联、代理名称/本地目标和凭据，uint64 使用字符串。
+- 静态 allowlist、CSP、无管理路由、正常退出清理。
+
+Go 测试另覆盖 17 个采集向量、质量与基线恢复、线程安全、首报、TLS 信任、会话替换、
+序号/乱序/过大帧、独立心跳与指标过期、SSE 容量、慢采集有限退出和 3600→1 秒周期协商。
+监控、上报和采集模块已运行 race/vet；原生集成补丁覆盖 reload 快照与 collector 单次注册。
+`local_test.py` 检查本地凭据初始化、权限、路径限制和配置一致性。
+
+网页测试覆盖大整数、质量状态、排序/搜索、API/SSE 切换及无消息超时。
+人工浏览器检查覆盖浅/深色、390px 窄屏、无横向溢出和实时更新中的焦点/筛选/滚动。
+开发宿主为 macOS arm64，Linux 指标在该宿主正确显示 unsupported；Linux amd64/arm64
+交叉构建不等同于 Linux 实机 `free`/`df` 对照或部署验收。
 
 ## 后续验收（尚未实现）
 
-- **P1 实时闭环**：默认每 1 秒报告与 1–3600 秒配置范围；首样本质量、Facts/Metrics
-  字段及采集算法；WSS 认证、重连退避、无 Proxy/首次登录失败仍能监控；
-  `agent_id`、`session_id + sequence` 和 FRP 关联键隔离；旧会话、重复和迟到报告；
-  心跳与指标过期分别判断；报告长度、频率、畸形 JSON 和非有限值约束。
+- **P1 实机补验**：Linux 同步采样并对照 `free` / `df`，明确采样时间与挂载筛选差异。
 - **P2 完整采集体验**：TCP 成功/拒绝/超时、DNS 缺样、多地址回退、任务替换和限额；
   网卡过滤、集合变化、计数器回退、进程/主机重启；SQLite 恢复、流量事务与分钟聚合；
   丢样保持缺口，监控重启不将持久化节点直接标在线。

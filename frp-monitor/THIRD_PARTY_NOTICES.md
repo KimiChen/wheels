@@ -15,38 +15,37 @@
 然后在临时工作树中应用 `patches/`，并映射本项目扩展源码。当前目录迁移与构建方案
 以根目录 `README.md` 为准。
 
-P0 实际变更：新增本项目的 JSON-RPC 协议包并映射到上游 module 的
-`extension/frpmonitor/shared`，通过独立测试验证；`patches/series` 尚无补丁，
-命令与 Service 生命周期保持原生行为。构建包内的两个可执行文件由固定 FRP
-源码生成，尚不含运行时监控能力。完整上游文件只存在于 ignored 临时树。
+P1 实质修改位于 `patches/0001-monitor-lifecycle.patch` 与映射到上游
+`extension/frpmonitor/{agent,monitor,shared,web}` 的扩展源码：
 
-后续计划中的实质修改包括：
+- 增加 Telemetry/Monitor 配置和独立版本输出，异步挂接两端 Service 生命周期；
+- frpc 增加 Linux 采集、只读 FRP/Proxy 状态、独立 WSS 上报和重连；
+- 增加只读配置快照，保留原生启用项合并语义并展示未启用项；
+- frps 增加节点凭据认证、内存最新状态和独立 Listener 的公开 API/SSE；
+- 内存 metrics collector 可在监控启用时单次注册，增加注册与调用的并发保护；
+- 嵌入基于 web-standard-kit 的节点网页，保留原生 Dashboard 和 wire protocol。
 
-- 在 frpc 进程级生命周期中增加 Linux Telemetry、TCP 探测和独立 WSS 上报；
-- 采集主机资源、网络、连接总览和本地 Proxy 状态；
-- 在 frps 中增加与原 Dashboard/API 分离的接收、聚合、存储与查询模块；
-- 在独立 Listener 提供基于 web-standard-kit 的网页、公开摘要和认证管理接口；
-- 保持 frp wire protocol、数据转发路径以及原有管理功能不变。
-
-实际引入代码后，应在每个补丁或 Overlay package 中保留适用的上游版权、许可证和
-来源说明，并同步更新本文件中的“实质修改”列表。
+TCP 探测、数据库历史、累计流量及认证管理接口尚未实现。
 
 ## monitor-probe 设计参考
 
-以下 MIT 项目用作设计和算法参考，P0 未复制其实现代码或测试：
+以下 MIT 项目用作设计和算法参考：
 
 - https://github.com/monitor-probe/agent
   - Commit: `cebc5383abb5963abeb722877a2d82c1a7aea5c6`
 - https://github.com/monitor-probe/monitor
   - Commit: `fb4c4a4ce0b3a665ab7a4bd491d2dd447a78e6bc`
 
-上述源码的版权声明为 `Copyright (c) 2026 stqfdyr`。后续如移植源码、测试或其他
-受版权保护材料，须随材料保留原版权声明与 MIT 许可证全文，并更新本文件。
+上述源码的版权声明为 `Copyright (c) 2026 stqfdyr`。P1 的 `agent/collect` 使用
+独立 Go 实现移植 agent 的 `collect.rs` 算法与过滤/拓扑规则，保守按算法移植保留
+完整 MIT 许可于 `agent/collect/LICENSE.monitor-probe`，二进制发布包同样附带。
+未复制 monitor 的服务端实现。各采集文件保留来源说明。
 `tests/fixtures/collect/cases.json` 的样本输入为本项目自行构造；参考函数、
 预期值单位与有意的质量语义差异见同目录 README。
 
 ## web-standard-kit
 
-网页计划复用本仓库 `web-standard-kit/`，参考快照为
+网页复用本仓库 `web-standard-kit/`，参考快照为
 `6d41d588b3537b2d2460d73f999d958fd37eb00d` 中的该目录。
-本轮未复制网页资源；实际引入时记录所用文件与版本，并保留适用的来源和许可说明。
+原始 `style.css`、`script.js` 复制至 `web/assets/`，业务样式与代码单独维护。
+文件清单、源路径和摘要见 `web/README.md`，资源不在运行时跨项目读取。

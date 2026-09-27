@@ -1,0 +1,666 @@
+diff --git a/pkg/config/v1/client.go b/pkg/config/v1/client.go
+--- a/pkg/config/v1/client.go
++++ b/pkg/config/v1/client.go
+@@ -19,6 +19,8 @@
+ 
+ 	"github.com/samber/lo"
+ 
++	"github.com/fatedier/frp/extension/frpmonitor/shared"
++
+ 	"github.com/fatedier/frp/pkg/util/util"
+ )
+ 
+@@ -30,6 +32,7 @@
+ }
+ 
+ type ClientCommonConfig struct {
++	Telemetry shared.AgentConfig `json:"telemetry,omitempty"`
+ 	APIMetadata
+ 
+ 	Auth AuthClientConfig `json:"auth,omitempty"`
+@@ -83,6 +86,9 @@
+ }
+ 
+ func (c *ClientCommonConfig) Complete() error {
++	if err := c.Telemetry.Complete(); err != nil {
++		return err
++	}
+ 	c.ServerAddr = util.EmptyOr(c.ServerAddr, "0.0.0.0")
+ 	c.ServerPort = util.EmptyOr(c.ServerPort, 7000)
+ 	c.LoginFailExit = util.EmptyOr(c.LoginFailExit, lo.ToPtr(true))
+diff --git a/pkg/config/v1/server.go b/pkg/config/v1/server.go
+--- a/pkg/config/v1/server.go
++++ b/pkg/config/v1/server.go
+@@ -17,11 +17,14 @@
+ import (
+ 	"github.com/samber/lo"
+ 
++	"github.com/fatedier/frp/extension/frpmonitor/shared"
++
+ 	"github.com/fatedier/frp/pkg/config/types"
+ 	"github.com/fatedier/frp/pkg/util/util"
+ )
+ 
+ type ServerConfig struct {
++	Monitor shared.MonitorConfig `json:"monitor,omitempty"`
+ 	APIMetadata
+ 
+ 	Auth AuthServerConfig `json:"auth,omitempty"`
+@@ -99,6 +102,9 @@
+ }
+ 
+ func (c *ServerConfig) Complete() error {
++	if err := c.Monitor.Complete(); err != nil {
++		return err
++	}
+ 	if err := c.Auth.Complete(); err != nil {
+ 		return err
+ 	}
+diff --git a/client/service.go b/client/service.go
+--- a/client/service.go
++++ b/client/service.go
+@@ -21,6 +21,7 @@
+ 	"net"
+ 	"net/http"
+ 	"os"
++	"strconv"
+ 	"sync"
+ 	"sync/atomic"
+ 	"time"
+@@ -29,6 +30,8 @@
+ 	"github.com/samber/lo"
+ 
+ 	"github.com/fatedier/frp/client/proxy"
++	agentmonitor "github.com/fatedier/frp/extension/frpmonitor/agent/service"
++	"github.com/fatedier/frp/extension/frpmonitor/shared"
+ 	"github.com/fatedier/frp/pkg/auth"
+ 	"github.com/fatedier/frp/pkg/config"
+ 	"github.com/fatedier/frp/pkg/config/source"
+@@ -39,6 +42,7 @@
+ 	httppkg "github.com/fatedier/frp/pkg/util/http"
+ 	"github.com/fatedier/frp/pkg/util/log"
+ 	netpkg "github.com/fatedier/frp/pkg/util/net"
++	"github.com/fatedier/frp/pkg/util/version"
+ 	"github.com/fatedier/frp/pkg/util/wait"
+ 	"github.com/fatedier/frp/pkg/util/xlog"
+ 	"github.com/fatedier/frp/pkg/vnet"
+@@ -53,6 +57,9 @@
+ 		os.Setenv("QUIC_GO_DISABLE_ECN", "true")
+ 	}
+ }
++
++// A native config-directory run can host several Services; monitor only one.
++var telemetryInUse atomic.Bool
+ 
+ type cancelErr struct {
+ 	Err error
+@@ -228,6 +235,38 @@
+ 	svr.ctx = xlog.NewContext(ctx, xlog.FromContextSafe(ctx))
+ 	svr.cancel = cancel
+ 
++	// Monitoring starts before the first FRP login, and never owns the tunnel lifecycle.
++	if svr.common.Telemetry.Enabled {
++		if telemetryInUse.CompareAndSwap(false, true) {
++			done := make(chan struct{})
++			go func() {
++				defer close(done)
++				defer telemetryInUse.Store(false)
++				defer func() {
++					if recover() != nil {
++						log.Warnf("frp-monitor telemetry stopped after an internal failure")
++					}
++				}()
++				telemetry, err := agentmonitor.Start(svr.ctx, svr.common.Telemetry, svr.monitorSnapshot)
++				if err != nil {
++					log.Warnf("frp-monitor telemetry initialization failed: %v", err)
++					return
++				}
++				<-svr.ctx.Done()
++				telemetry.Close()
++			}()
++			defer func() {
++				cancel(nil)
++				select {
++				case <-done:
++				case <-time.After(2 * time.Second):
++				}
++			}()
++		} else {
++			log.Warnf("frp-monitor telemetry already belongs to another service in this process")
++		}
++	}
++
+ 	// set custom DNSServer
+ 	if svr.common.DNSServer != "" {
+ 		netpkg.SetDefaultDNSAddress(svr.common.DNSServer)
+@@ -390,6 +429,9 @@
+ 	svr.reloadMu.Lock()
+ 	defer svr.reloadMu.Unlock()
+ 
++	if common != nil && svr.common != nil && common.Telemetry != svr.common.Telemetry {
++		return errors.New("telemetry configuration changes require a process restart")
++	}
+ 	cfgSource := svr.configSource
+ 	if cfgSource == nil {
+ 		return fmt.Errorf("config source is not available")
+@@ -525,3 +567,88 @@
+ 	}
+ 	return nil
+ }
++
++// monitorSnapshot is the only adapter from native client internals to monitoring.
++// No config secrets, plugin options, remote endpoints or error messages cross it.
++func (svr *Service) monitorSnapshot() shared.FRP {
++	out := shared.FRP{
++		Association: shared.FRPAssociation{ServerID: svr.common.Telemetry.ServerID, User: svr.common.User},
++		Version:     version.Full(), ControlState: "connecting", Proxies: []shared.Proxy{},
++	}
++	if id := svr.common.ClientID; id != "" {
++		out.Association.RawClientID = &id
++	}
++	svr.ctlMu.RLock()
++	ctl := svr.ctl
++	svr.ctlMu.RUnlock()
++	connected := false
++	if ctl != nil {
++		select {
++		case <-ctl.Done():
++			out.ControlState = "disconnected"
++		default:
++			out.ControlState = "connected"
++			connected = true
++		}
++	}
++	svr.reloadMu.Lock()
++	aggregator := svr.aggregator
++	svr.cfgMu.RLock()
++	common := svr.reloadCommon
++	svr.cfgMu.RUnlock()
++	svr.reloadMu.Unlock()
++	if aggregator == nil {
++		return out
++	}
++	configs, err := aggregator.MonitorProxies()
++	if err != nil {
++		out.ControlState = "unknown"
++		return out
++	}
++	// One extra item makes the shared validator reject an oversized FRP section.
++	// The reporter can still send host metrics; never silently claim a partial list is complete.
++	if len(configs) > shared.MaxProxies+1 {
++		configs = configs[:shared.MaxProxies+1]
++	}
++	for _, cfg := range configs {
++		base := cfg.GetBaseConfig()
++		enabled := base.Enabled == nil || *base.Enabled
++		if len(common.Start) > 0 {
++			selected := false
++			for _, name := range common.Start {
++				if name == base.Name {
++					selected = true
++					break
++				}
++			}
++			enabled = enabled && selected
++		}
++		p := shared.Proxy{Name: base.Name, Type: base.Type, Enabled: enabled, Status: "unknown"}
++		if base.Plugin.ClientPluginOptions == nil && base.LocalPort > 0 {
++			ip := base.LocalIP
++			if ip == "" {
++				ip = "127.0.0.1"
++			}
++			target := net.JoinHostPort(ip, strconv.Itoa(base.LocalPort))
++			p.LocalTarget = &target
++		}
++		if !enabled {
++			p.Status = "disabled"
++		} else if connected {
++			if status, ok := ctl.pm.GetProxyStatus(base.Name); ok {
++				switch status.Phase {
++				case proxy.ProxyPhaseRunning:
++					p.Status = "running"
++				case proxy.ProxyPhaseNew, proxy.ProxyPhaseWaitStart:
++					p.Status = "starting"
++				case proxy.ProxyPhaseStartErr, proxy.ProxyPhaseCheckFailed:
++					p.Status = "error"
++				case proxy.ProxyPhaseClosed:
++					p.Status = "closed"
++				}
++			}
++		}
++		out.Proxies = append(out.Proxies, p)
++	}
++	return out
++}
+diff --git a/server/service.go b/server/service.go
+--- a/server/service.go
++++ b/server/service.go
+@@ -33,6 +33,7 @@
+ 	quic "github.com/quic-go/quic-go"
+ 	"github.com/samber/lo"
+ 
++	frpmonitor "github.com/fatedier/frp/extension/frpmonitor/monitor"
+ 	"github.com/fatedier/frp/pkg/auth"
+ 	v1 "github.com/fatedier/frp/pkg/config/v1"
+ 	"github.com/fatedier/frp/pkg/config/v1/validation"
+@@ -153,10 +154,13 @@
+ 		}
+ 		webServer = ws
+ 
+-		modelmetrics.EnableMem()
+ 		if cfg.EnablePrometheus {
+ 			modelmetrics.EnablePrometheus()
+ 		}
++	}
++
++	if cfg.WebServer.Port > 0 || cfg.Monitor.Enabled {
++		modelmetrics.EnableMem()
+ 	}
+ 
+ 	authRuntime, err := auth.BuildServerAuth(&cfg.Auth)
+@@ -367,6 +371,31 @@
+ 	ctx, cancel := context.WithCancel(ctx)
+ 	svr.ctx = ctx
+ 	svr.cancel = cancel
++	if svr.cfg.Monitor.Enabled {
++		done := make(chan struct{})
++		go func() {
++			defer close(done)
++			defer func() {
++				if recover() != nil {
++					log.Warnf("frp-monitor listener stopped after an internal failure")
++				}
++			}()
++			monitor, err := frpmonitor.Start(ctx, svr.cfg.Monitor)
++			if err != nil {
++				log.Warnf("frp-monitor listener initialization failed: %v", err)
++				return
++			}
++			<-ctx.Done()
++			monitor.Close()
++		}()
++		defer func() {
++			cancel()
++			select {
++			case <-done:
++			case <-time.After(2 * time.Second):
++			}
++		}()
++	}
+ 
+ 	// run dashboard web server.
+ 	if svr.webServer != nil {
+diff --git a/pkg/metrics/aggregate/server.go b/pkg/metrics/aggregate/server.go
+--- a/pkg/metrics/aggregate/server.go
++++ b/pkg/metrics/aggregate/server.go
+@@ -18,11 +18,14 @@
+ 	"github.com/fatedier/frp/pkg/metrics/mem"
+ 	"github.com/fatedier/frp/pkg/metrics/prometheus"
+ 	"github.com/fatedier/frp/server/metrics"
++	"sync"
+ )
+ 
+ // EnableMem start to mark metrics to memory monitor system.
++var memOnce sync.Once
++
+ func EnableMem() {
+-	sm.Add(mem.ServerMetrics)
++	memOnce.Do(func() { sm.Add(mem.ServerMetrics) })
+ }
+ 
+ // EnablePrometheus start to mark metrics to prometheus.
+@@ -37,56 +40,75 @@
+ }
+ 
+ type serverMetrics struct {
++	mu sync.RWMutex
+ 	ms []metrics.ServerMetrics
+ }
+ 
+ func (m *serverMetrics) Add(sm metrics.ServerMetrics) {
++	m.mu.Lock()
++	defer m.mu.Unlock()
+ 	m.ms = append(m.ms, sm)
+ }
+ 
+ func (m *serverMetrics) NewClient() {
++	m.mu.RLock()
++	defer m.mu.RUnlock()
+ 	for _, v := range m.ms {
+ 		v.NewClient()
+ 	}
+ }
+ 
+ func (m *serverMetrics) CloseClient() {
++	m.mu.RLock()
++	defer m.mu.RUnlock()
+ 	for _, v := range m.ms {
+ 		v.CloseClient()
+ 	}
+ }
+ 
+ func (m *serverMetrics) NewProxy(name string, proxyType string, user string, clientID string) {
++	m.mu.RLock()
++	defer m.mu.RUnlock()
+ 	for _, v := range m.ms {
+ 		v.NewProxy(name, proxyType, user, clientID)
+ 	}
+ }
+ 
+ func (m *serverMetrics) CloseProxy(name string, proxyType string) {
++	m.mu.RLock()
++	defer m.mu.RUnlock()
+ 	for _, v := range m.ms {
+ 		v.CloseProxy(name, proxyType)
+ 	}
+ }
+ 
+ func (m *serverMetrics) OpenConnection(name string, proxyType string) {
++	m.mu.RLock()
++	defer m.mu.RUnlock()
+ 	for _, v := range m.ms {
+ 		v.OpenConnection(name, proxyType)
+ 	}
+ }
+ 
+ func (m *serverMetrics) CloseConnection(name string, proxyType string) {
++	m.mu.RLock()
++	defer m.mu.RUnlock()
+ 	for _, v := range m.ms {
+ 		v.CloseConnection(name, proxyType)
+ 	}
+ }
+ 
+ func (m *serverMetrics) AddTrafficIn(name string, proxyType string, trafficBytes int64) {
++	m.mu.RLock()
++	defer m.mu.RUnlock()
+ 	for _, v := range m.ms {
+ 		v.AddTrafficIn(name, proxyType, trafficBytes)
+ 	}
+ }
+ 
+ func (m *serverMetrics) AddTrafficOut(name string, proxyType string, trafficBytes int64) {
++	m.mu.RLock()
++	defer m.mu.RUnlock()
+ 	for _, v := range m.ms {
+ 		v.AddTrafficOut(name, proxyType, trafficBytes)
+ 	}
+diff --git a/cmd/frpc/sub/root.go b/cmd/frpc/sub/root.go
+--- a/cmd/frpc/sub/root.go
++++ b/cmd/frpc/sub/root.go
+@@ -29,6 +29,7 @@
+ 	"github.com/spf13/cobra"
+ 
+ 	"github.com/fatedier/frp/client"
++	"github.com/fatedier/frp/extension/frpmonitor/shared"
+ 	"github.com/fatedier/frp/pkg/config"
+ 	"github.com/fatedier/frp/pkg/config/source"
+ 	v1 "github.com/fatedier/frp/pkg/config/v1"
+@@ -39,14 +40,16 @@
+ )
+ 
+ var (
+-	cfgFile          string
+-	cfgDir           string
+-	showVersion      bool
+-	strictConfigMode bool
+-	allowUnsafe      []string
++	cfgFile            string
++	cfgDir             string
++	showVersion        bool
++	showMonitorVersion bool
++	strictConfigMode   bool
++	allowUnsafe        []string
+ )
+ 
+ func init() {
++	rootCmd.PersistentFlags().BoolVar(&showMonitorVersion, "monitor-version", false, "version of frp-monitor and its FRP baseline")
+ 	rootCmd.PersistentFlags().StringVarP(&cfgFile, "config", "c", "./frpc.ini", "config file of frpc")
+ 	rootCmd.PersistentFlags().StringVarP(&cfgDir, "config_dir", "", "", "config directory, run one frpc service for each file in config directory")
+ 	rootCmd.PersistentFlags().BoolVarP(&showVersion, "version", "v", false, "version of frpc")
+@@ -60,6 +63,10 @@
+ 	Use:   "frpc",
+ 	Short: "frpc is the client of frp (https://github.com/fatedier/frp)",
+ 	RunE: func(cmd *cobra.Command, args []string) error {
++		if showMonitorVersion {
++			fmt.Printf("frp-monitor-agent %s (frp %s)\n", shared.Version, version.Full())
++			return nil
++		}
+ 		if showVersion {
+ 			fmt.Println(version.Full())
+ 			return nil
+diff --git a/cmd/frps/root.go b/cmd/frps/root.go
+--- a/cmd/frps/root.go
++++ b/cmd/frps/root.go
+@@ -22,6 +22,7 @@
+ 
+ 	"github.com/spf13/cobra"
+ 
++	"github.com/fatedier/frp/extension/frpmonitor/shared"
+ 	"github.com/fatedier/frp/pkg/config"
+ 	v1 "github.com/fatedier/frp/pkg/config/v1"
+ 	"github.com/fatedier/frp/pkg/config/v1/validation"
+@@ -32,15 +33,17 @@
+ )
+ 
+ var (
+-	cfgFile          string
+-	showVersion      bool
+-	strictConfigMode bool
+-	allowUnsafe      []string
++	cfgFile            string
++	showVersion        bool
++	showMonitorVersion bool
++	strictConfigMode   bool
++	allowUnsafe        []string
+ 
+ 	serverCfg v1.ServerConfig
+ )
+ 
+ func init() {
++	rootCmd.PersistentFlags().BoolVar(&showMonitorVersion, "monitor-version", false, "version of frp-monitor and its FRP baseline")
+ 	rootCmd.PersistentFlags().StringVarP(&cfgFile, "config", "c", "", "config file of frps")
+ 	rootCmd.PersistentFlags().BoolVarP(&showVersion, "version", "v", false, "version of frps")
+ 	rootCmd.PersistentFlags().BoolVarP(&strictConfigMode, "strict_config", "", true, "strict config parsing mode, unknown fields will cause errors")
+@@ -54,6 +57,10 @@
+ 	Use:   "frps",
+ 	Short: "frps is the server of frp (https://github.com/fatedier/frp)",
+ 	RunE: func(cmd *cobra.Command, args []string) error {
++		if showMonitorVersion {
++			fmt.Printf("frp-monitor-server %s (frp %s)\n", shared.Version, version.Full())
++			return nil
++		}
+ 		if showVersion {
+ 			fmt.Println(version.Full())
+ 			return nil
+diff --git a/client/monitor_snapshot_test.go b/client/monitor_snapshot_test.go
+new file mode 100644
+--- /dev/null
++++ b/client/monitor_snapshot_test.go
+@@ -0,0 +1,41 @@
++package client
++
++import (
++	"github.com/fatedier/frp/extension/frpmonitor/shared"
++	"github.com/fatedier/frp/pkg/config/source"
++	v1 "github.com/fatedier/frp/pkg/config/v1"
++	"testing"
++)
++
++func TestMonitorSnapshotIncludesDisabledAndReloadedProxies(t *testing.T) {
++	disabled := false
++	p := &v1.TCPProxyConfig{ProxyBaseConfig: v1.ProxyBaseConfig{Name: "disabled", Type: "tcp", Enabled: &disabled, ProxyBackend: v1.ProxyBackend{LocalIP: "127.0.0.1", LocalPort: 8000}}}
++	src := source.NewConfigSource()
++	if err := src.ReplaceAll([]v1.ProxyConfigurer{p}, nil); err != nil {
++		t.Fatal(err)
++	}
++	common := &v1.ClientCommonConfig{ClientID: "stable-test-client", User: "test-user"}
++	svc, err := NewService(ServiceOptions{Common: common, ConfigSourceAggregator: source.NewAggregator(src)})
++	if err != nil {
++		t.Fatal(err)
++	}
++	svc.common.Telemetry.ServerID = "test-server"
++	snap := svc.monitorSnapshot()
++	if snap.ControlState != "connecting" || len(snap.Proxies) != 1 || snap.Proxies[0].Enabled || snap.Proxies[0].Status != "disabled" {
++		t.Fatalf("unexpected snapshot: %+v", snap)
++	}
++	if err := (&shared.Extensions{FRP: &snap}).Validate(); err != nil {
++		t.Fatal(err)
++	}
++	p.Enabled = nil
++	if err := svc.UpdateConfigSource(common, []v1.ProxyConfigurer{p}, nil); err != nil {
++		t.Fatal(err)
++	}
++	next := svc.monitorSnapshot()
++	if !next.Proxies[0].Enabled || next.Proxies[0].Status != "unknown" {
++		t.Fatal("reload did not refresh effective snapshot")
++	}
++	if next.Association.User != "test-user" || *next.Association.RawClientID != "stable-test-client" {
++		t.Fatal("association changed")
++	}
++}
+diff --git a/pkg/config/source/monitor.go b/pkg/config/source/monitor.go
+new file mode 100644
+--- /dev/null
++++ b/pkg/config/source/monitor.go
+@@ -0,0 +1,52 @@
++package source
++
++import v1 "github.com/fatedier/frp/pkg/config/v1"
++
++// monitorAllProxies includes disabled entries and returns defensive copies.
++func (s *baseSource) monitorAllProxies() ([]v1.ProxyConfigurer, error) {
++	s.mu.RLock()
++	defer s.mu.RUnlock()
++	proxies := make([]v1.ProxyConfigurer, 0, len(s.proxies))
++	for _, p := range s.proxies {
++		proxies = append(proxies, p)
++	}
++	cloned, _, err := cloneConfigurers(proxies, nil)
++	return cloned, err
++}
++
++// MonitorProxies keeps native enabled-entry precedence and adds disabled-only names.
++// It does not change Load or any forwarding configuration.
++func (a *Aggregator) MonitorProxies() ([]v1.ProxyConfigurer, error) {
++	a.mu.RLock()
++	defer a.mu.RUnlock()
++	active := make(map[string]v1.ProxyConfigurer)
++	disabled := make(map[string]v1.ProxyConfigurer)
++	for _, src := range a.getSourcesLocked() {
++		var all []v1.ProxyConfigurer
++		var err error
++		switch s := src.(type) {
++		case *ConfigSource:
++			all, err = s.monitorAllProxies()
++		case *StoreSource:
++			all, err = s.monitorAllProxies()
++		}
++		if err != nil {
++			return nil, err
++		}
++		for _, p := range all {
++			b := p.GetBaseConfig()
++			if b.Enabled != nil && !*b.Enabled {
++				disabled[b.Name] = p
++			} else {
++				active[b.Name] = p
++			}
++		}
++	}
++	for name, p := range disabled {
++		if _, ok := active[name]; !ok {
++			active[name] = p
++		}
++	}
++	proxies, _ := a.mapsToSortedSlices(active, nil)
++	return proxies, nil
++}
+diff --git a/pkg/config/source/monitor_test.go b/pkg/config/source/monitor_test.go
+new file mode 100644
+--- /dev/null
++++ b/pkg/config/source/monitor_test.go
+@@ -0,0 +1,51 @@
++package source
++
++import (
++	v1 "github.com/fatedier/frp/pkg/config/v1"
++	"path/filepath"
++	"testing"
++)
++
++func TestMonitorProxiesPreservesEnabledPrecedenceAndClones(t *testing.T) {
++	disabled := false
++	entry := func(name string, port int, enabled *bool) v1.ProxyConfigurer {
++		return &v1.TCPProxyConfig{ProxyBaseConfig: v1.ProxyBaseConfig{Name: name, Type: "tcp", Enabled: enabled, ProxyBackend: v1.ProxyBackend{LocalPort: port}}}
++	}
++	cfg := NewConfigSource()
++	if err := cfg.ReplaceAll([]v1.ProxyConfigurer{entry("shared", 1001, nil), entry("disabled-only", 1002, &disabled)}, nil); err != nil {
++		t.Fatal(err)
++	}
++	store, err := NewStoreSource(StoreSourceConfig{Path: filepath.Join(t.TempDir(), "proxies.json")})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := store.AddProxy(entry("shared", 2001, &disabled)); err != nil {
++		t.Fatal(err)
++	}
++	a := NewAggregator(cfg)
++	a.SetStoreSource(store)
++	check := func(want int) {
++		t.Helper()
++		p, err := a.MonitorProxies()
++		if err != nil {
++			t.Fatal(err)
++		}
++		if len(p) != 2 || p[0].GetBaseConfig().Name != "disabled-only" || *p[0].GetBaseConfig().Enabled || p[1].GetBaseConfig().LocalPort != want {
++			t.Fatalf("bad merged snapshot: %+v", p)
++		}
++		p[1].GetBaseConfig().LocalPort = 9999
++	}
++	check(1001)
++	check(1001)
++	if err := store.UpdateProxy(entry("shared", 2001, nil)); err != nil {
++		t.Fatal(err)
++	}
++	check(2001)
++	native, _, err := a.Load()
++	if err != nil {
++		t.Fatal(err)
++	}
++	if len(native) != 1 || native[0].GetBaseConfig().LocalPort != 2001 {
++		t.Fatal("monitoring changed native load")
++	}
++}
+diff --git a/pkg/metrics/aggregate/monitor_test.go b/pkg/metrics/aggregate/monitor_test.go
+new file mode 100644
+--- /dev/null
++++ b/pkg/metrics/aggregate/monitor_test.go
+@@ -0,0 +1,27 @@
++package aggregate
++
++import (
++	"github.com/fatedier/frp/pkg/metrics/mem"
++	"sync"
++	"testing"
++)
++
++func TestMonitorMemoryCollectorRegistersOnce(t *testing.T) {
++	var wg sync.WaitGroup
++	for i := 0; i < 20; i++ {
++		wg.Add(1)
++		go func() { defer wg.Done(); EnableMem(); sm.NewClient(); sm.CloseClient() }()
++	}
++	wg.Wait()
++	sm.mu.RLock()
++	defer sm.mu.RUnlock()
++	count := 0
++	for _, m := range sm.ms {
++		if m == mem.ServerMetrics {
++			count++
++		}
++	}
++	if count != 1 {
++		t.Fatalf("memory collector registered %d times", count)
++	}
++}
