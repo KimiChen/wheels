@@ -84,7 +84,10 @@ main { max-width: 1500px; margin: 0 auto; padding: var(--space-24) var(--space-3
 .fm-card-heading, .fm-card-summary { display: flex; justify-content: space-between; gap: var(--space-12); }
 .fm-card-heading { align-items: center; }
 .fm-card-heading h2 { min-width: 0; margin: 0; }
-.fm-card-heading > .fm-badge { flex-shrink: 0; max-width: 45%; }
+.fm-uptime-badge { display: inline-flex; align-items: center; flex-shrink: 0; gap: 6px; padding: 2px 8px; border: 1px solid var(--border); border-radius: var(--radius-pill); background: transparent; color: var(--text); font-size: 12px; font-weight: 400; line-height: 16px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.fm-uptime-badge::before { content: ""; width: 6px; height: 6px; flex-shrink: 0; border-radius: 50%; background: var(--muted-soft); }
+.fm-uptime-badge[data-state="online"]::before { background: var(--success); }
+.fm-uptime-badge[data-state="offline"]::before { background: var(--danger); }
 .fm-card-summary { align-items: baseline; margin-top: var(--space-6); }
 .fm-card-summary > p { min-width: 0; }
 .fm-card-summary > small { flex-shrink: 0; color: var(--muted-soft); font-size: var(--type-2xs); white-space: nowrap; font-variant-numeric: tabular-nums; }
