@@ -53,7 +53,8 @@ export function uptime(field) {
 export function onlineUptime(field, session) {
   const seconds = decimal(field);
   if (seconds === null) return UNKNOWN;
-  return `${session === "online" ? "在线" : "运行"} ${seconds / 86400n} 天 ${seconds % 86400n / 3600n} 小时`;
+  const days = seconds >= 86400n ? `${seconds / 86400n} 天 ` : "";
+  return `${session === "online" ? "在线" : "运行"} ${days}${seconds % 86400n / 3600n} 小时`;
 }
 export function timeText(raw) {
   if (typeof raw !== "string") return UNKNOWN;

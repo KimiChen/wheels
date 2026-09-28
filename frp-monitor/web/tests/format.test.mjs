@@ -93,8 +93,10 @@ test("public reconciliation separates registration from agent-reported control s
 
 test("online uptime labels follow node status and preserve missing samples", () => {
   assert.equal(onlineUptime(ok("90061"), "online"), "在线 1 天 1 小时");
-  assert.equal(onlineUptime(ok("3660"), "online"), "在线 0 天 1 小时");
-  assert.equal(onlineUptime(ok("0"), "online"), "在线 0 天 0 小时");
+  assert.equal(onlineUptime(ok("86399"), "online"), "在线 23 小时");
+  assert.equal(onlineUptime(ok("86400"), "online"), "在线 1 天 0 小时");
+  assert.equal(onlineUptime(ok("3660"), "online"), "在线 1 小时");
+  assert.equal(onlineUptime(ok("0"), "online"), "在线 0 小时");
   assert.equal(onlineUptime(ok("90061"), "offline"), "运行 1 天 1 小时");
   assert.equal(onlineUptime(undefined, "waiting"), "—");
   assert.equal(onlineUptime({quality: "unavailable", value: "90061"}, "online"), "—");
