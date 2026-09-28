@@ -264,91 +264,108 @@ func legacyDatabase(t *testing.T) (string, *sql.DB) {
 	if !found {
 		t.Fatal("v4 schema boundary missing")
 	}
-	if _, err := db.Exec(schema + "PRAGMA application_id=1179798836; PRAGMA user_version=4;"); err != nil {
+	if _, err := db.Exec(strings.Replace(schema, " counter_interface TEXT,", " counter_interface TEXT,\n counter_scope TEXT,", 1) + "PRAGMA application_id=1179798836; PRAGMA user_version=4;"); err != nil {
 		t.Fatal(err)
 	}
 	return path, db
 }
 
-func TestVersion4MigrationPreservesNodeDataAndSequences(t *testing.T) {
-	path, db := legacyDatabase(t)
-	at := utc("2026-09-28T12:00:00Z")
-	n := &Node{ID: "7", NodeConfig: DefaultNodeConfig("existing"), TokenSHA256: strings.Repeat("a", 64),
-		Binding:              &shared.FRPBinding{ServerID: "server", User: "tenant", RawClientID: "stable"},
-		TrafficPeriodRXBytes: "184467440737095516160", TrafficPeriodTXBytes: "9007199254740993", TrafficAdjustmentBytes: "-123",
-		TrafficTodayRXBytes: "9007199254740994", TrafficTodayTXBytes: "9007199254740995", ConfigRevision: 17, CreatedAtMS: 123, UpdatedAtMS: 456,
-		CounterBootID: ptr("boot"), CounterInterface: ptr("eth0"), CounterScope: ptr("host"), CounterRXBytes: ptr("18446744073709551615"),
-		CounterTXBytes: ptr("123456"), CounterReceivedAtMS: ptr(at.UnixMilli())}
-	n.PrivateNote, n.PriceMinor, n.Currency = "private note", ptr("1200"), ptr("USD")
-	(&Store{cfg: Config{Location: time.UTC}}).refresh(n, at)
-	// refresh initializes boundaries; restore the existing accumulated values.
-	n.TrafficPeriodRXBytes, n.TrafficPeriodTXBytes, n.TrafficAdjustmentBytes = "184467440737095516160", "9007199254740993", "-123"
-	n.TrafficTodayRXBytes, n.TrafficTodayTXBytes = "9007199254740994", "9007199254740995"
-	args := nodeArgs(n)
-	if _, err := db.Exec("INSERT INTO nodes ("+columns+") VALUES ("+strings.TrimSuffix(strings.Repeat("?,", len(args)), ",")+")", args...); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec("INSERT INTO nodes(id,name,token_sha256,created_at_ms,updated_at_ms) VALUES(29,'deleted',?,0,0); DELETE FROM nodes WHERE id=29", strings.Repeat("b", 64)); err != nil {
-		t.Fatal(err)
-	}
-	probes := `{"version":23,"nodes":[{"agent_id":"7","tasks":[]}]}`
-	if _, err := db.Exec("UPDATE settings SET probe_json=?", probes); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-	cfg := Config{Path: path, Location: time.UTC, Now: func() time.Time { return at }}
-	s, err := Open(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { s.Close() })
-	actual, err := s.Get(context.Background(), n.ID)
-	if err != nil || !reflect.DeepEqual(actual, n) {
-		t.Fatal("migration changed node data", actual, n, err)
-	}
-	if data, err := s.ReadProbes(context.Background()); err != nil || string(data) != probes {
-		t.Fatal("migration changed probe settings", string(data), err)
-	}
-	if len(groupList(t, s)) != 0 {
-		t.Fatal("migration invented groups")
-	}
-	created, err := s.CreateNode(context.Background(), DefaultNodeConfig("next"), strings.Repeat("c", 64), nil)
-	if err != nil || created.ID != "30" {
-		t.Fatal("migration changed node autoincrement sequence", created, err)
-	}
-	if _, err := s.CreateNode(context.Background(), DefaultNodeConfig("duplicate binding"), strings.Repeat("d", 64), n.Binding); !errors.Is(err, ErrConflict) {
-		t.Fatal("migration removed binding uniqueness", err)
-	}
-	newGroup(t, s, "migrated", n.ID, created.ID)
-	if err := s.Close(); err != nil {
-		t.Fatal(err)
-	}
-	reopened, err := Open(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	s = reopened
-	if len(groupList(t, s)) != 1 {
-		t.Fatal("upgraded database did not reopen", err)
-	}
-	if err := s.call(context.Background(), func(tx *sql.Tx) error {
-		var version int
-		if err := tx.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
-			return err
-		}
-		if version != 5 {
-			return fmt.Errorf("unexpected migration version %d", version)
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
+func TestLegacyMigrationPreservesNodeDataAndSequences(t *testing.T) {
+	for _, version := range []int{4, 5} {
+		t.Run(fmt.Sprint(version), func(t *testing.T) {
+			path, db := legacyDatabase(t)
+			if version == 5 {
+				_, groups, _ := strings.Cut(Schema, groupSchemaMarker)
+				if _, err := db.Exec(groups + "PRAGMA user_version=5;"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			at := utc("2026-09-28T12:00:00Z")
+			n := &Node{ID: "7", NodeConfig: DefaultNodeConfig("existing"), TokenSHA256: strings.Repeat("a", 64),
+				Binding:              &shared.FRPBinding{ServerID: "server", User: "tenant", RawClientID: "stable"},
+				TrafficPeriodRXBytes: "184467440737095516160", TrafficPeriodTXBytes: "9007199254740993", TrafficAdjustmentBytes: "-123",
+				TrafficTodayRXBytes: "9007199254740994", TrafficTodayTXBytes: "9007199254740995", ConfigRevision: 17, CreatedAtMS: 123, UpdatedAtMS: 456,
+				CounterBootID: ptr("boot"), CounterInterface: ptr("eth0"), CounterRXBytes: ptr("18446744073709551615"),
+				CounterTXBytes: ptr("123456"), CounterReceivedAtMS: ptr(at.UnixMilli())}
+			n.PrivateNote, n.PriceMinor, n.Currency = "private note", ptr("1200"), ptr("USD")
+			(&Store{cfg: Config{Location: time.UTC}}).refresh(n, at)
+			// refresh initializes boundaries; restore the existing accumulated values.
+			n.TrafficPeriodRXBytes, n.TrafficPeriodTXBytes, n.TrafficAdjustmentBytes = "184467440737095516160", "9007199254740993", "-123"
+			n.TrafficTodayRXBytes, n.TrafficTodayTXBytes = "9007199254740994", "9007199254740995"
+			args := nodeArgs(n)
+			if _, err := db.Exec("INSERT INTO nodes ("+columns+") VALUES ("+strings.TrimSuffix(strings.Repeat("?,", len(args)), ",")+")", args...); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec("INSERT INTO nodes(id,name,token_sha256,created_at_ms,updated_at_ms) VALUES(29,'deleted',?,0,0); DELETE FROM nodes WHERE id=29", strings.Repeat("b", 64)); err != nil {
+				t.Fatal(err)
+			}
+			probes := `{"version":23,"nodes":[{"agent_id":"7","tasks":[]}]}`
+			if _, err := db.Exec("UPDATE settings SET probe_json=?", probes); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec("UPDATE nodes SET counter_scope='unknown'"); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			cfg := Config{Path: path, Location: time.UTC, Now: func() time.Time { return at }}
+			s, err := Open(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { s.Close() })
+			var removed int
+			if err := s.db.QueryRow("SELECT count(*) FROM pragma_table_info('nodes') WHERE name='counter_scope'").Scan(&removed); err != nil || removed != 0 {
+				t.Fatal("legacy baseline column remains", removed, err)
+			}
+			actual, err := s.Get(context.Background(), n.ID)
+			if err != nil || !reflect.DeepEqual(actual, n) {
+				t.Fatal("migration changed node data", actual, n, err)
+			}
+			if data, err := s.ReadProbes(context.Background()); err != nil || string(data) != probes {
+				t.Fatal("migration changed probe settings", string(data), err)
+			}
+			if len(groupList(t, s)) != 0 {
+				t.Fatal("migration invented groups")
+			}
+			created, err := s.CreateNode(context.Background(), DefaultNodeConfig("next"), strings.Repeat("c", 64), nil)
+			if err != nil || created.ID != "30" {
+				t.Fatal("migration changed node autoincrement sequence", created, err)
+			}
+			if _, err := s.CreateNode(context.Background(), DefaultNodeConfig("duplicate binding"), strings.Repeat("d", 64), n.Binding); !errors.Is(err, ErrConflict) {
+				t.Fatal("migration removed binding uniqueness", err)
+			}
+			newGroup(t, s, "migrated", n.ID, created.ID)
+			if err := s.Close(); err != nil {
+				t.Fatal(err)
+			}
+			reopened, err := Open(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			s = reopened
+			if len(groupList(t, s)) != 1 {
+				t.Fatal("upgraded database did not reopen", err)
+			}
+			if err := s.call(context.Background(), func(tx *sql.Tx) error {
+				var version int
+				if err := tx.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+					return err
+				}
+				if version != 6 {
+					return fmt.Errorf("unexpected migration version %d", version)
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 
 func TestMigrationRejectsUnknownIdentityAndRollsBackDDL(t *testing.T) {
-	for _, tt := range []struct{ version, application int }{{3, 1179798836}, {6, 1179798836}, {4, 123}, {5, 123}} {
+	for _, tt := range []struct{ version, application int }{{3, 1179798836}, {7, 1179798836}, {4, 123}, {5, 123}} {
 		t.Run(fmt.Sprint(tt), func(t *testing.T) {
 			path, db := legacyDatabase(t)
 			if _, err := db.Exec(fmt.Sprintf("PRAGMA user_version=%d; PRAGMA application_id=%d", tt.version, tt.application)); err != nil {

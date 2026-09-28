@@ -21,7 +21,7 @@ price_minor,currency,billing_cycle,expires_at_ms,renewal_note,traffic_quota_byte
 traffic_reset_mode,traffic_reset_day,traffic_reset_timezone,traffic_period_start_at_ms,
 traffic_period_end_at_ms,traffic_period_rx_bytes,traffic_period_tx_bytes,traffic_adjustment_bytes,
 traffic_period_partial,traffic_day,traffic_today_rx_bytes,traffic_today_tx_bytes,traffic_today_partial,
-counter_boot_id,counter_interface,counter_scope,counter_rx_bytes,counter_tx_bytes,counter_received_at_ms,
+counter_boot_id,counter_interface,counter_rx_bytes,counter_tx_bytes,counter_received_at_ms,
 config_revision,created_at_ms,updated_at_ms,token_sha256,frp_binding`
 
 type scanner interface{ Scan(...any) error }
@@ -34,7 +34,7 @@ func scanNode(row scanner) (*Node, error) {
 		&n.TrafficResetMode, &n.TrafficResetDay, &n.TrafficResetTimezone, &n.TrafficPeriodStartAtMS,
 		&n.TrafficPeriodEndAtMS, &n.TrafficPeriodRXBytes, &n.TrafficPeriodTXBytes, &n.TrafficAdjustmentBytes,
 		&n.TrafficPeriodPartial, &n.TrafficDay, &n.TrafficTodayRXBytes, &n.TrafficTodayTXBytes, &n.TrafficTodayPartial,
-		&n.CounterBootID, &n.CounterInterface, &n.CounterScope, &n.CounterRXBytes, &n.CounterTXBytes, &n.CounterReceivedAtMS,
+		&n.CounterBootID, &n.CounterInterface, &n.CounterRXBytes, &n.CounterTXBytes, &n.CounterReceivedAtMS,
 		&n.ConfigRevision, &n.CreatedAtMS, &n.UpdatedAtMS, &n.TokenSHA256, &binding)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -68,7 +68,7 @@ func nodeArgs(n *Node) []any {
 		n.TrafficResetMode, n.TrafficResetDay, n.TrafficResetTimezone, n.TrafficPeriodStartAtMS,
 		n.TrafficPeriodEndAtMS, n.TrafficPeriodRXBytes, n.TrafficPeriodTXBytes, n.TrafficAdjustmentBytes,
 		n.TrafficPeriodPartial, n.TrafficDay, n.TrafficTodayRXBytes, n.TrafficTodayTXBytes, n.TrafficTodayPartial,
-		n.CounterBootID, n.CounterInterface, n.CounterScope, n.CounterRXBytes, n.CounterTXBytes, n.CounterReceivedAtMS,
+		n.CounterBootID, n.CounterInterface, n.CounterRXBytes, n.CounterTXBytes, n.CounterReceivedAtMS,
 		n.ConfigRevision, n.CreatedAtMS, n.UpdatedAtMS, n.TokenSHA256, binding}
 }
 

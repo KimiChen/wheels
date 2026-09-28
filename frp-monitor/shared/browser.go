@@ -5,7 +5,6 @@ import "strconv"
 // BrowserFacts and BrowserMetrics are precision-safe transport shapes. They are
 // NOT public-view DTOs: the monitor must still authorize and redact private fields.
 type BrowserFacts struct {
-	Scope        Scope         `json:"scope"`
 	Hostname     Field[string] `json:"hostname"`
 	OS           Field[string] `json:"os"`
 	Kernel       Field[string] `json:"kernel"`
@@ -22,7 +21,6 @@ type BrowserFacts struct {
 }
 
 type BrowserMetrics struct {
-	Scope      Scope            `json:"scope"`
 	CPU        Field[float64]   `json:"cpu"`
 	Load       Field[[]float64] `json:"load"`
 	MemTotal   Field[string]    `json:"mem_total"`
@@ -58,7 +56,7 @@ func (f Facts) Browser() (BrowserFacts, error) {
 		return BrowserFacts{}, err
 	}
 	return BrowserFacts{
-		Scope: f.Scope, Hostname: f.Hostname, OS: f.OS, Kernel: f.Kernel, Arch: f.Arch, Virt: f.Virt,
+		Hostname: f.Hostname, OS: f.OS, Kernel: f.Kernel, Arch: f.Arch, Virt: f.Virt,
 		CPUName: f.CPUName, CPUCores: f.CPUCores, AgentVersion: f.AgentVersion, IPv4: f.IPv4, IPv6: f.IPv6,
 		MemTotal: decimal(f.MemTotal), SwapTotal: decimal(f.SwapTotal), DiskTotal: decimal(f.DiskTotal),
 	}, nil
@@ -68,7 +66,7 @@ func (m Metrics) Browser() (BrowserMetrics, error) {
 		return BrowserMetrics{}, err
 	}
 	return BrowserMetrics{
-		Scope: m.Scope, CPU: m.CPU, Load: m.Load, MemTotal: decimal(m.MemTotal), MemUsed: decimal(m.MemUsed),
+		CPU: m.CPU, Load: m.Load, MemTotal: decimal(m.MemTotal), MemUsed: decimal(m.MemUsed),
 		SwapTotal: decimal(m.SwapTotal), SwapUsed: decimal(m.SwapUsed), DiskTotal: decimal(m.DiskTotal), DiskUsed: decimal(m.DiskUsed),
 		NetRX: decimal(m.NetRX), NetTX: decimal(m.NetTX), NetRXTotal: decimal(m.NetRXTotal), NetTXTotal: decimal(m.NetTXTotal),
 		BootID: m.BootID, Iface: m.Iface, Uptime: decimal(m.Uptime), TCP: decimal(m.TCP), UDP: decimal(m.UDP), Procs: decimal(m.Procs),

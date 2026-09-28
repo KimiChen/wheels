@@ -59,7 +59,7 @@ func (f *fixture) create(cfg NodeConfig) *Node {
 }
 
 func metrics(rx, tx uint64) shared.Metrics {
-	return shared.Metrics{Scope: shared.ScopeHost,
+	return shared.Metrics{
 		BootID:     shared.Field[string]{Value: ptr("boot-a"), Quality: shared.QualityOK},
 		Iface:      shared.Field[string]{Value: ptr("eth0"), Quality: shared.QualityOK},
 		NetRXTotal: shared.Field[uint64]{Value: &rx, Quality: shared.QualityOK},
@@ -331,7 +331,7 @@ func TestCounterResetInvalidReportsAndRestart(t *testing.T) {
 		t.Fatal("baseline leaked as live state")
 	}
 	m := metrics(10000, 10000)
-	m.Scope = shared.ScopeNamespace
+	m.BootID.Value = ptr("new-boot")
 	f.clock.Store(at.Add(3 * time.Second).UnixMilli())
 	if !f.s.Accept(n.ID, at.Add(3*time.Second), m) {
 		t.Fatal("rejected")

@@ -206,7 +206,7 @@ def assert_redacted(payload: dict, secrets_to_hide: tuple[str, ...]) -> None:
     for node in payload.get("nodes", []):
         metrics = node.get("metrics") or {}
         for name, field in metrics.items():
-            if name in ("scope", "cpu", "load"):
+            if name in ("cpu", "load"):
                 continue
             value = field.get("value")
             if value is not None and (not isinstance(value, str) or not value.isascii() or not value.isdecimal()):

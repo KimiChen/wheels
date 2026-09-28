@@ -73,7 +73,6 @@ function patchCard(card, node) {
   const hardware = hardwareText(node.hardware);
   for (const label of card.labels.get("hardware")) label.title = hardware;
   card.element.dataset.state = node.session;
-  text("scope", ({host: "主机采集", namespace: "容器 / 命名空间采集", unknown: "采集范围未知"})[metric.scope] ?? "等待资源报告");
   text("session", sessionLabels[node.session]); state("session", node.session);
   text("freshness", freshnessLabels[node.freshness]); state("freshness", node.freshness);
   const cpu = percent(metric.cpu), mem = ratio(metric.mem_used, metric.mem_total), disk = ratio(metric.disk_used, metric.disk_total);

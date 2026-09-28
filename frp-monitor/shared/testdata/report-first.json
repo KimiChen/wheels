@@ -7,7 +7,6 @@
     "sequence": 2,
     "collected_at": "2026-09-27T00:00:00Z",
     "metrics": {
-      "scope": "host",
       "load": {
         "value": [
           0.1,

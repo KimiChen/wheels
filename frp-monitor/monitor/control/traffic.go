@@ -9,10 +9,10 @@ import (
 )
 
 type sample struct {
-	id                 string
-	at                 int64
-	boot, iface, scope string
-	rx, tx             uint64
+	id          string
+	at          int64
+	boot, iface string
+	rx, tx      uint64
 }
 
 func observation(id string, at time.Time, m shared.Metrics) *sample {
@@ -22,13 +22,10 @@ func observation(id string, at time.Time, m shared.Metrics) *sample {
 		m.NetTXTotal.Quality != shared.QualityOK || m.NetTXTotal.Value == nil {
 		return nil
 	}
-	if m.Scope != shared.ScopeHost && m.Scope != shared.ScopeNamespace && m.Scope != shared.ScopeUnknown {
-		return nil
-	}
 	// An empty iface is the collector's valid automatic interface selection.
 	// BootID includes the selected-interface-set hash, so topology changes still
 	// invalidate the baseline without inventing a non-empty interface label.
-	return &sample{id: id, at: at.UnixMilli(), boot: *m.BootID.Value, iface: *m.Iface.Value, scope: string(m.Scope), rx: *m.NetRXTotal.Value, tx: *m.NetTXTotal.Value}
+	return &sample{id: id, at: at.UnixMilli(), boot: *m.BootID.Value, iface: *m.Iface.Value, rx: *m.NetRXTotal.Value, tx: *m.NetTXTotal.Value}
 }
 
 func ptr[T any](v T) *T { return &v }
@@ -136,13 +133,13 @@ func (s *Store) observe(n *Node, next sample) bool {
 	dayStart, _ := time.Parse("2006-01-02", *n.TrafficDay)
 	dayBoundary := midnight(dayStart.Year(), dayStart.Month(), dayStart.Day(), s.cfg.Location).UnixMilli()
 	periodBoundary := *n.TrafficPeriodStartAtMS
-	valid := n.CounterReceivedAtMS != nil && n.CounterBootID != nil && n.CounterInterface != nil && n.CounterScope != nil && n.CounterRXBytes != nil && n.CounterTXBytes != nil
+	valid := n.CounterReceivedAtMS != nil && n.CounterBootID != nil && n.CounterInterface != nil && n.CounterRXBytes != nil && n.CounterTXBytes != nil
 	var oldRX, oldTX uint64
 	if valid {
 		var e1, e2 error
 		oldRX, e1 = strconv.ParseUint(*n.CounterRXBytes, 10, 64)
 		oldTX, e2 = strconv.ParseUint(*n.CounterTXBytes, 10, 64)
-		valid = e1 == nil && e2 == nil && *n.CounterBootID == next.boot && *n.CounterInterface == next.iface && *n.CounterScope == next.scope && oldRX <= next.rx && oldTX <= next.tx
+		valid = e1 == nil && e2 == nil && *n.CounterBootID == next.boot && *n.CounterInterface == next.iface && oldRX <= next.rx && oldTX <= next.tx
 	}
 	if valid {
 		from := *n.CounterReceivedAtMS
@@ -168,7 +165,7 @@ func (s *Store) observe(n *Node, next sample) bool {
 	if next.at == periodBoundary {
 		n.TrafficPeriodPartial = false
 	}
-	n.CounterBootID, n.CounterInterface, n.CounterScope = ptr(next.boot), ptr(next.iface), ptr(next.scope)
+	n.CounterBootID, n.CounterInterface = ptr(next.boot), ptr(next.iface)
 	n.CounterRXBytes, n.CounterTXBytes = ptr(strconv.FormatUint(next.rx, 10)), ptr(strconv.FormatUint(next.tx, 10))
 	n.CounterReceivedAtMS = ptr(next.at)
 	return true

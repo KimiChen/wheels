@@ -199,27 +199,6 @@ func nativeAddresses() ([]interfaceAddress, error) {
 	return out, nil
 }
 
-// scope is intentionally conservative. Namespace equality with PID 1 does not
-// prove that PID 1 belongs to the host, so absence of container markers is unknown.
-func (c *Collector) scope() shared.Scope {
-	for _, path := range []string{"/.dockerenv", "/run/.containerenv", "/proc/vz"} {
-		if found, _ := c.deps.exists(path); found {
-			return shared.ScopeNamespace
-		}
-	}
-	if value, err := c.deps.read("/run/systemd/container"); err == nil && strings.TrimSpace(value) != "" {
-		return shared.ScopeNamespace
-	}
-	if value, err := c.deps.read("/proc/1/cgroup"); err == nil {
-		for _, marker := range []string{"docker", "kubepods", "lxc", "libpod", "containerd"} {
-			if strings.Contains(value, marker) {
-				return shared.ScopeNamespace
-			}
-		}
-	}
-	return shared.ScopeUnknown
-}
-
 func (c *Collector) Metrics() shared.Metrics {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -227,7 +206,6 @@ func (c *Collector) Metrics() shared.Metrics {
 	if !c.deps.supported {
 		return m
 	}
-	m.Scope = c.scope()
 	m.CPU = c.cpuMetric()
 	mem, err := c.deps.read("/proc/meminfo")
 	m.MemTotal, m.MemUsed, m.SwapTotal, m.SwapUsed = memoryMetrics(mem, err)
@@ -243,7 +221,7 @@ func (c *Collector) Metrics() shared.Metrics {
 }
 func emptyMetrics() shared.Metrics {
 	u := unsupported[uint64]()
-	return shared.Metrics{Scope: shared.ScopeUnknown, CPU: unsupported[float64](), Load: unsupported[[]float64](), MemTotal: u, MemUsed: u, SwapTotal: u, SwapUsed: u, DiskTotal: u, DiskUsed: u, NetRX: u, NetTX: u, NetRXTotal: u, NetTXTotal: u, BootID: unsupported[string](), Iface: unsupported[string](), Uptime: u, TCP: u, UDP: u, Procs: u}
+	return shared.Metrics{CPU: unsupported[float64](), Load: unsupported[[]float64](), MemTotal: u, MemUsed: u, SwapTotal: u, SwapUsed: u, DiskTotal: u, DiskUsed: u, NetRX: u, NetTX: u, NetRXTotal: u, NetTXTotal: u, BootID: unsupported[string](), Iface: unsupported[string](), Uptime: u, TCP: u, UDP: u, Procs: u}
 }
 func (c *Collector) cpuMetric() shared.Field[float64] {
 	text, err := c.deps.read("/proc/stat")

@@ -298,7 +298,7 @@ class OpsTests(unittest.TestCase):
         archive = ops.backup(self.runtime, self.backups / 'groups.tar.gz')
         restored = ops.restore(archive, self.root / 'restored-groups')
         with closing(sqlite3.connect(restored / 'control.sqlite')) as database:
-            self.assertEqual(database.execute('PRAGMA user_version').fetchone(), (5,))
+            self.assertEqual(database.execute('PRAGMA user_version').fetchone(), (6,))
             self.assertEqual(database.execute('SELECT * FROM nodes').fetchall(), expected_node)
             self.assertEqual(database.execute('SELECT id,name,config_revision FROM node_groups ORDER BY id').fetchall(),
                              [(7, '生产🛰', 9), (8, 'empty', 2)])
@@ -319,7 +319,7 @@ class OpsTests(unittest.TestCase):
             self.assertEqual(database.execute('SELECT * FROM nodes').fetchall(), expected_node)
             self.assertEqual(database.execute('SELECT * FROM settings').fetchall(), expected_settings)
             self.assertEqual(database.execute("SELECT count(*) FROM sqlite_master WHERE name='node_groups'").fetchone(), (0,))
-        for version, application in ((3, 1179798836), (6, 1179798836), (4, 123), (5, 123)):
+        for version, application in ((3, 1179798836), (7, 1179798836), (4, 123), (5, 123)):
             with self.subTest(version=version, application=application):
                 with closing(sqlite3.connect(self.runtime / 'control.sqlite')) as database:
                     database.executescript(f'PRAGMA user_version={version}; PRAGMA application_id={application};')

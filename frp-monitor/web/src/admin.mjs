@@ -156,7 +156,7 @@ function renderDetail() {
   box.append(el("h3", "主机资源"));
   if (node.metrics) box.append(rowList([["CPU 使用率", percentage(percent(node.metrics.cpu))], ["内存用量", capacity(node.metrics.mem_used, node.metrics.mem_total)], ["硬盘用量", capacity(node.metrics.disk_used, node.metrics.disk_total)], ["主机接收速率", bytes(decimal(node.metrics.net_rx), true)], ["主机发送速率", bytes(decimal(node.metrics.net_tx), true)]]));
   else box.append(el("p", "尚未收到主机资源报告。", "fa-muted"));
-  if (node.facts) box.append(rowList([["采集范围", node.facts.scope], ["主机名", fieldText(node.facts.hostname)], ["系统 / 架构", `${fieldText(node.facts.os)} / ${fieldText(node.facts.arch)}`], ["内核", fieldText(node.facts.kernel)], ["CPU", fieldText(node.facts.cpu_name)], ["核心数", fieldText(node.facts.cpu_cores)], ["IPv4", fieldText(node.facts.ipv4)], ["IPv6", fieldText(node.facts.ipv6)], ["虚拟化", fieldText(node.facts.virt)], ["Agent 版本", fieldText(node.facts.agent_version)]]));
+  if (node.facts) box.append(rowList([["主机名", fieldText(node.facts.hostname)], ["系统 / 架构", `${fieldText(node.facts.os)} / ${fieldText(node.facts.arch)}`], ["内核", fieldText(node.facts.kernel)], ["CPU", fieldText(node.facts.cpu_name)], ["核心数", fieldText(node.facts.cpu_cores)], ["IPv4", fieldText(node.facts.ipv4)], ["IPv6", fieldText(node.facts.ipv6)], ["虚拟化", fieldText(node.facts.virt)], ["Agent 版本", fieldText(node.facts.agent_version)]]));
   else box.append(el("p", "主机详情将在节点首次报告后显示。", "fa-muted"));
   const section = el("section", undefined, "fa-section"); section.append(el("h3", "FRP 隧道对账"));
   const rec = snapshot.frp?.nodes?.find(item => item.id === node.id);

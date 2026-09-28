@@ -199,7 +199,7 @@ func (c *Collector) networkMetrics(m *shared.Metrics) {
 	if previous == nil {
 		reason = "no_baseline"
 	} else if previous.epoch != current.epoch {
-		reason = "scope_changed"
+		reason = "counter_reset"
 	}
 	if reason == "" {
 		for name, value := range values {

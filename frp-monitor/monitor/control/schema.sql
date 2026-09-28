@@ -1,4 +1,4 @@
--- Current control database. Existing v4 databases add only the group tables.
+-- Current control database. Schema v6 removes the collection scope baseline.
 CREATE TABLE nodes (
  id INTEGER PRIMARY KEY AUTOINCREMENT,
  name TEXT NOT NULL,
@@ -29,7 +29,6 @@ CREATE TABLE nodes (
  traffic_today_partial INTEGER NOT NULL DEFAULT 1 CHECK (traffic_today_partial IN (0,1)),
  counter_boot_id TEXT,
  counter_interface TEXT,
- counter_scope TEXT,
  counter_rx_bytes TEXT,
  counter_tx_bytes TEXT,
  counter_received_at_ms INTEGER,
@@ -64,4 +63,4 @@ CREATE INDEX node_group_members_node_id ON node_group_members(node_id);
 -- Database identity; must match the restore check in scripts/ops.py
 -- and the startup check in monitor/control/store.go.
 PRAGMA application_id=1179798836;
-PRAGMA user_version=5;
+PRAGMA user_version=6;

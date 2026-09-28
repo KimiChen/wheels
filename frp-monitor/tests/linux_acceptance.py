@@ -21,7 +21,7 @@ import urllib.request
 SKIP_FS = set("tmpfs devtmpfs proc sysfs cgroup cgroup2 devpts mqueue hugetlbfs debugfs tracefs securityfs pstore bpf configfs fusectl binfmt_misc autofs squashfs ramfs efivarfs nsfs overlay ecryptfs fuse rpc_pipefs nfs nfs4 cifs smb3 ceph glusterfs 9p".split())
 SKIP_IFACE = tuple("lo docker veth br- virbr tap tun wg tailscale cni flannel podman fwbr fwpr fwln ifb gretap erspan kube cali nerdctl lxc cilium zt".split())
 UINT_FIELDS = "mem_total mem_used swap_total swap_used disk_total disk_used net_rx net_tx net_rx_total net_tx_total uptime tcp udp procs".split()
-METRIC_FIELDS = set(UINT_FIELDS + ["scope", "cpu", "load"])
+METRIC_FIELDS = set(UINT_FIELDS + ["cpu", "load"])
 PUBLIC_FIELDS = set("id name groups session freshness last_seen metrics_at interval_seconds frp hardware metrics public_note traffic_today accounting_state".split())
 PUBLIC_OPTIONAL_FIELDS = {"billing", "traffic_plan"}
 MAX_U64 = 2**64 - 1
@@ -255,9 +255,9 @@ def validate_public_node(node):
 
 
 def compare(metrics, refs, results):
-    if not isinstance(metrics, dict) or set(metrics) != METRIC_FIELDS or metrics["scope"] not in {"host", "namespace", "unknown"}:
+    if not isinstance(metrics, dict) or set(metrics) != METRIC_FIELDS:
         raise AcceptanceError("invalid_public_metric_fields")
-    parsed = {name: metric_value(name, metrics[name]) for name in METRIC_FIELDS - {"scope"}}
+    parsed = {name: metric_value(name, metrics[name]) for name in METRIC_FIELDS}
     for resource in ("mem", "swap", "disk"):
         used, total = parsed[resource + "_used"], parsed[resource + "_total"]
         if used is not None and total is not None and used > total:
@@ -300,7 +300,7 @@ def run(args):
     fetch = api_client(args.url, args.ca)
     initial = reference(args.iface)
     checks = utility_checks(initial)
-    refs, results, seen, scopes = [initial], {}, set(), set()
+    refs, results, seen = [initial], {}, set()
     first, deadline = time.monotonic(), time.monotonic() + args.seconds
     interval = None
     while time.monotonic() < deadline:
@@ -333,7 +333,6 @@ def run(args):
             after = reference(args.iface, sample)
             refs.append(after)
             compare(node["metrics"], refs, results)
-            scopes.add(node["metrics"]["scope"])
             seen.add(stamp)
         time.sleep(min(0.5, max(0, deadline - time.monotonic())))
     if len(seen) < 3:
@@ -343,7 +342,6 @@ def run(args):
     return {"schema": 1, "passed": all(checks.values()) and all(value["state"] == "pass" for value in results.values()),
             "platform": "linux", "architecture": platform.machine(), "seconds": args.seconds,
             "distinct_api_samples": len(seen), "report_interval_seconds": interval,
-            "observed_scopes": sorted(scopes),
             "reference_window_seconds": 3 * interval + 2,
             "references": checks, "metrics": dict(sorted(results.items())),
             "notes": ["same_host_and_same_namespace_required", "unknown_scope_is_conservative_not_a_collection_failure",

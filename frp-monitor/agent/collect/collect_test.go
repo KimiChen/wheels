@@ -45,7 +45,7 @@ func TestReadFailuresPreserveRateBaselines(t *testing.T) {
 		t.Fatalf("CPU must span valid samples: %+v", recovered.CPU)
 	}
 }
-func TestNetworkResetScopeAndClock(t *testing.T) {
+func TestNetworkResetAndClock(t *testing.T) {
 	fake := newFake()
 	c := fake.collector(t, "")
 	first := c.Metrics()
@@ -61,7 +61,7 @@ func TestNetworkResetScopeAndClock(t *testing.T) {
 	fake.now = fake.now.Add(time.Second)
 	fake.files["/proc/sys/kernel/random/boot_id"] = "second-boot"
 	reboot := c.Metrics()
-	if reboot.NetRX.Reason != "scope_changed" || *reboot.BootID.Value == *first.BootID.Value {
+	if reboot.NetRX.Reason != "counter_reset" || *reboot.BootID.Value == *first.BootID.Value {
 		t.Fatal("boot change reused network baseline")
 	}
 	fake.files["/proc/net/dev"] = netText(map[string][2]uint64{"eth0": {210, 420}})
@@ -165,7 +165,7 @@ func TestEpochCanonicalSet(t *testing.T) {
 		t.Fatal("epoch must identify the set, independently of counters/order")
 	}
 }
-func TestFactsAddressAndScope(t *testing.T) {
+func TestFactsAddressAndVirtualization(t *testing.T) {
 	fake := newFake()
 	fake.ips = []interfaceAddress{
 		{"docker0", true, net.ParseIP("1.1.1.1")}, {"eth0", false, net.ParseIP("8.8.8.8")},
@@ -184,14 +184,8 @@ func TestFactsAddressAndScope(t *testing.T) {
 	expectValue(t, f.CPUName, "Test CPU")
 	expectValue(t, f.Arch, "x86_64")
 	expectValue(t, f.OS, "Test Linux")
-	if f.Scope != shared.ScopeUnknown {
-		t.Fatal("absence of container markers does not prove host scope")
-	}
 	fake.paths["/.dockerenv"] = true
 	f = c.Facts()
-	if f.Scope != shared.ScopeNamespace || c.Metrics().Scope != shared.ScopeNamespace {
-		t.Fatal("container must be labeled namespace")
-	}
 	expectValue(t, f.Virt, "docker")
 }
 func TestFactsDoNotAdvanceBaselinesAndMissingFacts(t *testing.T) {

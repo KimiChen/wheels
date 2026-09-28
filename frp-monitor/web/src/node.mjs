@@ -36,7 +36,6 @@ function patchNode(node) {
   const environment = [hardwareValue(hardware?.arch), hardwareValue(hardware?.virt)].filter(value => value !== UNKNOWN);
   put("environment", environment.length ? environment.join(" · ") : UNKNOWN);
   for (const [key, field] of [["processes", "procs"], ["tcp", "tcp"], ["udp", "udp"]]) put(key, decimal(metrics[field]));
-  put("scope", ({host: "主机采集", namespace: "容器 / 命名空间采集", unknown: "采集范围未知"})[metrics.scope] ?? "等待资源报告");
   const today = todayText(node.traffic_today), plan = planText(node.traffic_plan);
   put("traffic-rx", today.rx); put("traffic-tx", today.tx);
   put("system-rx", bytes(decimal(metrics.net_rx_total))); put("system-tx", bytes(decimal(metrics.net_tx_total)));

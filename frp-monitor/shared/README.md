@@ -82,12 +82,11 @@ id 对应请求、会话和能力子集匹配。协商拒绝时返回 JSON-RPC e
 | quality | 含义 | 允许 reason |
 |---|---|---|
 | `ok` | 有效读数 | 无 |
-| `warming_up` | 尚无可用差分基线 | 可省略，或 `no_baseline` / `counter_reset` / `scope_changed` |
+| `warming_up` | 尚无可用差分基线 | 可省略，或 `no_baseline` / `counter_reset` |
 | `unavailable` | 本次读取缺失/失败 | 可省略，或 `read_error` |
 | `unsupported` | 当前平台/范围不支持 | 无 |
 
-Facts 和 Metrics 都要求 `scope`，取 `host`、`namespace` 或 `unknown`。
-受限环境不能无依据地声明 `host`。每次完整 Facts/Metrics 对象都包含全部规定字段；
+每次完整 Facts/Metrics 对象都包含全部规定字段；
 局部读取失败用质量表示，不通过遗漏字段或沿用旧值伪装成新读数。
 
 | 对象 | 字段 | Go 值与单位 |

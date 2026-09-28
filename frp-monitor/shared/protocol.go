@@ -46,14 +46,6 @@ type Field[T any] struct {
 	Reason  string  `json:"reason,omitempty"`
 }
 
-type Scope string
-
-const (
-	ScopeHost      Scope = "host"
-	ScopeNamespace Scope = "namespace"
-	ScopeUnknown   Scope = "unknown"
-)
-
 // Meta identifies an observation, not an authenticated node. The receiver must
 // derive node identity from the authenticated handshake and enforce session ownership.
 type Meta struct {
@@ -64,7 +56,6 @@ type Meta struct {
 }
 
 type Facts struct {
-	Scope        Scope         `json:"scope"`
 	Hostname     Field[string] `json:"hostname"`
 	OS           Field[string] `json:"os"`
 	Kernel       Field[string] `json:"kernel"`
@@ -81,7 +72,6 @@ type Facts struct {
 }
 
 type Metrics struct {
-	Scope      Scope            `json:"scope"`
 	CPU        Field[float64]   `json:"cpu"`
 	Load       Field[[]float64] `json:"load"`
 	MemTotal   Field[uint64]    `json:"mem_total"`
@@ -345,10 +335,9 @@ func validObjectKey(key string) bool {
 func bounded(s string, max int, empty bool) bool {
 	return (empty || strings.TrimSpace(s) != "") && len(s) <= max && utf8.ValidString(s) && !strings.ContainsAny(s, "\x00\r\n")
 }
-func validScope(s Scope) bool { return s == ScopeHost || s == ScopeNamespace || s == ScopeUnknown }
 func validateField[T any](name string, f Field[T], check func(T) bool) error {
 	switch f.Reason {
-	case "", "no_baseline", "read_error", "counter_reset", "scope_changed":
+	case "", "no_baseline", "read_error", "counter_reset":
 	default:
 		return fmt.Errorf("%s: invalid reason", name)
 	}
@@ -358,7 +347,7 @@ func validateField[T any](name string, f Field[T], check func(T) bool) error {
 			return fmt.Errorf("%s: reason incompatible with quality", name)
 		}
 	case QualityWarmingUp:
-		if f.Reason != "" && f.Reason != "no_baseline" && f.Reason != "counter_reset" && f.Reason != "scope_changed" {
+		if f.Reason != "" && f.Reason != "no_baseline" && f.Reason != "counter_reset" {
 			return fmt.Errorf("%s: reason incompatible with quality", name)
 		}
 	case QualityUnavailable:
@@ -396,9 +385,6 @@ func (m Meta) Validate() error {
 	return nil
 }
 func (f Facts) Validate() error {
-	if !validScope(f.Scope) {
-		return errors.New("invalid facts scope")
-	}
 	for _, item := range []struct {
 		name  string
 		value Field[string]
@@ -429,9 +415,6 @@ func (f Facts) Validate() error {
 	return nil
 }
 func (m Metrics) Validate() error {
-	if !validScope(m.Scope) {
-		return errors.New("invalid metrics scope")
-	}
 	if err := validateField("cpu", m.CPU, func(n float64) bool { return nonnegative(n) && n <= 100 }); err != nil {
 		return err
 	}

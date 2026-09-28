@@ -120,8 +120,7 @@ func TestValidation(t *testing.T) {
 		{"unknown_reason", func(r *Report) { r.Metrics.CPU.Reason = "exception" }},
 		{"contradictory_reason", func(r *Report) { r.Metrics.CPU.Reason = "read_error" }},
 		{"used_exceeds_total", func(r *Report) { r.Metrics.MemUsed = ok(uint64(math.MaxUint64)) }},
-		{"scope_missing", func(r *Report) { r.Metrics.Scope = "" }},
-		{"counter_scope_missing", func(r *Report) { r.Metrics.BootID = missing[string](QualityUnavailable, "read_error") }},
+		{"boot_id_missing", func(r *Report) { r.Metrics.BootID = missing[string](QualityUnavailable, "read_error") }},
 		{"empty_report", func(r *Report) { r.Metrics = nil }},
 	}
 	for _, tt := range tests {

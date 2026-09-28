@@ -59,7 +59,7 @@ git show 6d41d588b3537b2d2460d73f999d958fd37eb00d:web-standard-kit/script.js
   id, name, groups: [{id, name}], public_note, session, freshness, last_seen, metrics_at,
   interval_seconds, accounting_state,
   hardware: null | {os, arch, virt, cpu_name, cpu_cores, agent_version},
-  metrics: null | {scope, cpu, load, mem_total, mem_used, swap_total, swap_used,
+  metrics: null | {cpu, load, mem_total, mem_used, swap_total, swap_used,
     disk_total, disk_used, net_rx, net_tx, net_rx_total, net_tx_total,
     uptime, tcp, udp, procs},
   frp: {control_state, proxy_total, proxy_running, reconciliation,
@@ -73,7 +73,7 @@ git show 6d41d588b3537b2d2460d73f999d958fd37eb00d:web-standard-kit/script.js
 
 `id` 是 SQLite 自增正整数，以十进制字符串传输，范围不超过有符号 64 位整数。
 节点路由拒绝 0、前导零、负数、溢出值和额外路径片段。
-`name` 是管理员保存的名称；`metrics.scope` 是采集范围字符串。
+`name` 是管理员保存的名称。
 `accounting_state` 由服务端随快照下发（`ready` / `degraded`），当前页面不直接读取：
 记账降级时服务端已把 `traffic_today` 与 `traffic_plan` 的 `partial` 置真；
 管理页仍可查看完整性提示，公开首页和节点详情不显示「统计不完整」。保留该字段供诊断使用。
@@ -98,7 +98,7 @@ SSE 断开或 10 秒未收到快照时提示浏览器连接异常，并保留最
 
 | 统计项目 | 数据来源 | 时间边界 |
 |---|---|---|
-| 系统累计 | 最新有效 Metrics 的网卡 RX/TX 累计值 | 可随主机重启、接口或采集范围变化归零 |
+| 系统累计 | 最新有效 Metrics 的网卡 RX/TX 累计值 | 可随主机重启、接口变化归零 |
 | 今日流量 | SQLite 保存的有效系统计数器增量，随实时快照下发 | 主控机器系统时区当天零点至次日零点 |
 | 套餐用量 | SQLite 当前周期 RX/TX 与管理员校准差额 | 套餐重置方式、日期和时区 |
 | FRP 隧道流量（仅管理页展示） | 原生 FRP 服务端的可信节点观测 | FRP 服务端本地日及进程重启口径 |

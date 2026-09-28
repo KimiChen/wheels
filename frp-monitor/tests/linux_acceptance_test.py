@@ -100,7 +100,6 @@ class LinuxAcceptanceTests(unittest.TestCase):
         values = {key: 100 for key in acceptance.UINT_FIELDS}
         values.update(cpu=12.0, load=[0.1, 0.2, 0.3])
         metrics = {key: {"quality": "ok", "value": str(value) if key in acceptance.UINT_FIELDS else value} for key, value in values.items()}
-        metrics["scope"] = "unknown"
         refs = [{"values": dict(values)}, {"values": dict(values, net_rx_total=120)}]
         metrics["net_rx_total"]["value"] = "121"
         metrics["mem_total"]["value"] = "101"

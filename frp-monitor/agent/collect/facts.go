@@ -15,11 +15,10 @@ func (c *Collector) Facts() shared.Facts {
 	defer c.mu.Unlock()
 	s := unsupported[string]()
 	u := unsupported[uint64]()
-	f := shared.Facts{Scope: shared.ScopeUnknown, Hostname: s, OS: s, Kernel: s, Arch: s, Virt: s, CPUName: s, CPUCores: unsupported[uint32](), AgentVersion: good(c.config.Version), IPv4: s, IPv6: s, MemTotal: u, SwapTotal: u, DiskTotal: u}
+	f := shared.Facts{Hostname: s, OS: s, Kernel: s, Arch: s, Virt: s, CPUName: s, CPUCores: unsupported[uint32](), AgentVersion: good(c.config.Version), IPv4: s, IPv6: s, MemTotal: u, SwapTotal: u, DiskTotal: u}
 	if !c.deps.supported {
 		return f
 	}
-	f.Scope = c.scope()
 	f.Hostname = textField(c.deps.read("/proc/sys/kernel/hostname"))
 	f.Kernel = textField(c.deps.read("/proc/sys/kernel/osrelease"))
 	arch := c.deps.arch

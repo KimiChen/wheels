@@ -565,7 +565,6 @@ type PublicHardware struct {
 
 // PublicMetrics deliberately omits boot ID, network interface and FRP associations.
 type PublicMetrics struct {
-	Scope      shared.Scope            `json:"scope"`
 	CPU        shared.Field[float64]   `json:"cpu"`
 	Load       shared.Field[[]float64] `json:"load"`
 	MemTotal   shared.Field[string]    `json:"mem_total"`
@@ -672,7 +671,7 @@ func (s *Service) snapshotFor(now time.Time, private bool) PublicSnapshot {
 		}
 		if n.metrics != nil {
 			m, _ := n.metrics.Browser()
-			p.Metrics = &PublicMetrics{m.Scope, m.CPU, m.Load, m.MemTotal, m.MemUsed, m.SwapTotal, m.SwapUsed, m.DiskTotal, m.DiskUsed, m.NetRX, m.NetTX, m.NetRXTotal, m.NetTXTotal, m.Uptime, m.TCP, m.UDP, m.Procs}
+			p.Metrics = &PublicMetrics{m.CPU, m.Load, m.MemTotal, m.MemUsed, m.SwapTotal, m.SwapUsed, m.DiskTotal, m.DiskUsed, m.NetRX, m.NetTX, m.NetRXTotal, m.NetTXTotal, m.Uptime, m.TCP, m.UDP, m.Procs}
 			v := n.metricsAt.UTC()
 			p.MetricsAt = &v
 			p.Freshness = "fresh"

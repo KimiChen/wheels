@@ -103,7 +103,7 @@ func Open(cfg Config) (*Store, error) {
 			return fail(errors.New("control database must be a new empty database"))
 		}
 		schemaChange = Schema
-	} else if application != 1179798836 || (version != 4 && version != 5) {
+	} else if application != 1179798836 || (version != 4 && version != 5 && version != 6) {
 		return fail(errors.New("unsupported control database"))
 	} else if version == 4 {
 		// Reuse the fresh schema's group DDL. Migration only adds tables and
@@ -113,6 +113,9 @@ func Open(cfg Config) (*Store, error) {
 		if !found {
 			return fail(errors.New("missing control group schema"))
 		}
+	}
+	if version == 4 || version == 5 {
+		schemaChange += "ALTER TABLE nodes DROP COLUMN counter_scope; PRAGMA user_version=6;"
 	}
 	if schemaChange != "" {
 		tx, e := db.BeginTx(ctx, nil)

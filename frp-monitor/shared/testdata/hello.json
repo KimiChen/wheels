@@ -13,7 +13,6 @@
       "ping.v1"
     ],
     "facts": {
-      "scope": "host",
       "hostname": {
         "value": "example-node",
         "quality": "ok"

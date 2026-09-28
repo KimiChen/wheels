@@ -76,7 +76,6 @@ type Node struct {
 	TrafficTodayPartial    bool               `json:"traffic_today_partial"`
 	CounterBootID          *string            `json:"-"`
 	CounterInterface       *string            `json:"-"`
-	CounterScope           *string            `json:"-"`
 	CounterRXBytes         *string            `json:"-"`
 	CounterTXBytes         *string            `json:"-"`
 	CounterReceivedAtMS    *int64             `json:"-"`
