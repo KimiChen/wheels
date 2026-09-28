@@ -42,8 +42,7 @@ function patchNode(node) {
   put("system-rx", bytes(decimal(metrics.net_rx_total))); put("system-tx", bytes(decimal(metrics.net_tx_total)));
   for (const field of document.querySelectorAll("[data-plan-field]")) field.hidden = !node.traffic_plan;
   put("plan-usage", `${plan.used} / ${plan.quota}`);
-  put("plan-percent", plan.percent);
-  put("plan-period", `${(trafficModes[node.traffic_plan?.mode] ?? UNKNOWN).toUpperCase()} ${dateOnly(node.traffic_plan?.period_start_at_ms)} - ${dateOnly(node.traffic_plan?.period_end_at_ms)}`);
+  put("plan-period", `${(trafficModes[node.traffic_plan?.mode] ?? UNKNOWN).toUpperCase()} · ${plan.percent} · ${dateOnly(node.traffic_plan?.period_start_at_ms)} - ${dateOnly(node.traffic_plan?.period_end_at_ms)}`);
   byID("node-billing").hidden = !node.billing; put("billing", billingText(node.billing)); put("renewal-note", node.billing?.renewal_note || "未填写续费说明");
   byID("node-public-note").hidden = !node.public_note; write(byID("node-public-note"), node.public_note);
   put("sample-time", node.metrics_at ? `资源采样 ${timeText(node.metrics_at)}${node.freshness === "stale" ? " · 已过期" : ""}` : "尚未收到资源报告");
