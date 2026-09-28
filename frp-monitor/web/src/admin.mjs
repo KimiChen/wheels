@@ -59,10 +59,14 @@ function rowList(items) {
 }
 function table(headers, rows) {
   if (!rows.length) return el("p", "暂无登记记录。", "fa-muted");
-  const wrap = el("div", undefined, "fa-table-wrap"), table = el("table", undefined, "fa-table"), thead = el("thead"), head = el("tr"), body = el("tbody");
+  const wrap = el("div", undefined, "wsk-table-wrap fa-table-wrap"), table = el("table", undefined, "wsk-table fa-table"), thead = el("thead"), head = el("tr"), body = el("tbody");
   for (const title of headers) { const th = el("th", title); th.scope = "col"; head.append(th); }
   thead.append(head);
-  for (const cells of rows) { const row = el("tr"); for (const cell of cells) row.append(el("td", safe(cell))); body.append(row); }
+  for (const cells of rows) {
+    const row = el("tr");
+    cells.forEach((cell, index) => { const item = el(index === 0 ? "th" : "td", safe(cell)); if (index === 0) item.scope = "row"; row.append(item); });
+    body.append(row);
+  }
   table.append(thead, body); wrap.append(table); return wrap;
 }
 function renderNodes() {
@@ -117,13 +121,18 @@ function selectNode(id, pane = "settings") {
 }
 function showEditorPane(pane) {
   for (const panel of document.querySelectorAll("[data-editor-panel]")) panel.hidden = panel.dataset.editorPanel !== pane;
-  for (const button of document.querySelectorAll("[data-editor-pane]")) button.setAttribute("aria-pressed", String(button.dataset.editorPane === pane));
+  for (const button of document.querySelectorAll("[data-editor-pane]")) {
+    const selected = button.dataset.editorPane === pane;
+    button.setAttribute("aria-pressed", String(selected)); button.classList.toggle("wsk-is-active", selected);
+  }
 }
 function showView() {
   const key = ["nodes", "probes", "frp"].includes(location.hash.slice(1)) ? location.hash.slice(1) : "nodes";
   for (const panel of document.querySelectorAll("[data-admin-panel]")) panel.hidden = panel.dataset.adminPanel !== key;
   for (const link of document.querySelectorAll("[data-admin-view]")) {
-    if (link.dataset.adminView === key) link.setAttribute("aria-current", "page"); else link.removeAttribute("aria-current");
+    const selected = link.dataset.adminView === key;
+    if (selected) link.setAttribute("aria-current", "page"); else link.removeAttribute("aria-current");
+    link.classList.toggle("wsk-active", selected);
   }
 }
 function renderDetail() {
@@ -187,8 +196,11 @@ async function loadProbes() {
   }
 }
 function addProbe(task = {}) {
-  const row = el("div", undefined, "fa-probe-row");
-  const field = (title, control) => { const label = el("label", title); label.append(control); row.append(label); return control; };
+  const row = el("div", undefined, "wsk-panel fa-probe-row");
+  const field = (title, control) => {
+    const label = el("label", undefined, "wsk-field"); control.classList.add("wsk-control");
+    label.append(el("span", title, "wsk-label"), control); row.append(label); return control;
+  };
   const node = el("select"); node.name = "agent_id"; node.required = true;
   const empty = el("option", "选择节点"); empty.value = ""; node.append(empty);
   for (const item of snapshot?.nodes ?? []) { const option = el("option", item.name); option.value = item.id; node.append(option); }
@@ -200,7 +212,7 @@ function addProbe(task = {}) {
     if (key === "interval") { input.type = "number"; input.min = "5"; input.max = "3600"; input.step = "1"; }
     field(label, input);
   }
-  const remove = el("button", "移除", "wsk-button"); remove.type = "button"; remove.addEventListener("click", () => { row.remove(); $("probe-add").focus(); }); row.append(remove); $("probe-rows").append(row); return row;
+  const remove = el("button", "移除", "wsk-button wsk-secondary"); remove.type = "button"; remove.addEventListener("click", () => { row.remove(); $("probe-add").focus(); }); row.append(remove); $("probe-rows").append(row); return row;
 }
 function requestConfirmation(kind) {
   const node = snapshot?.nodes.find(item => item.id === selectedID); if (!node) return;

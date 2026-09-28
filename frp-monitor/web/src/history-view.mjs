@@ -20,7 +20,7 @@ function metric(label, className = "") {
   node.append(title, value); return {node, value};
 }
 function createChart(spec) {
-  const element = el("figure", "fm-history-chart"), heading = el("figcaption", "fm-chart-heading");
+  const element = el("figure", "wsk-panel fm-history-chart"), heading = el("figcaption", "fm-chart-heading");
   if (spec.key) element.dataset.metric = spec.key;
   const current = el("strong", "fm-chart-current", UNKNOWN), liveNote = el("p", "fm-chart-live-note", "等待实时采样");
   current.hidden = !spec.key; liveNote.hidden = !spec.key;
@@ -40,7 +40,7 @@ function createChart(spec) {
     drawing.append(group); return group;
   });
   plot.append(drawing);
-  const empty = el("p", "fm-chart-empty", "暂无有效采样"), labels = el("div", "fm-chart-times");
+  const empty = el("p", "wsk-empty-state fm-chart-empty", "暂无有效采样"), labels = el("div", "fm-chart-times");
   const from = el("time"), to = el("time"); labels.append(from, to);
   const summaries = el("ul", "fm-chart-summary"), summaryRows = spec.series.map((_, index) => el("li", `fm-series-label-${index}`));
   summaries.append(...summaryRows);
@@ -87,8 +87,9 @@ function createProbe(probe) {
 export function createHistoryPanel(body, nodeID) {
   const identifier = body.id;
   const toolbar = el("div", "fm-history-toolbar");
-  const refresh = el("button", "wsk-button fm-refresh", "刷新历史"); refresh.type = "button";
-  const sectionSwitch = el("div", "fm-history-sections"), rangeSwitch = el("div", "fm-history-ranges");
+  const refresh = el("button", "wsk-button wsk-secondary fm-refresh", "刷新历史"); refresh.type = "button";
+  const sections = el("div", "fm-history-sections"), sectionSwitch = el("div", "wsk-view-switch"), rangeSwitch = el("div", "wsk-view-switch fm-history-ranges");
+  sections.append(sectionSwitch);
   sectionSwitch.setAttribute("role", "group"); sectionSwitch.setAttribute("aria-label", "历史图表内容");
   rangeSwitch.setAttribute("role", "group"); rangeSwitch.setAttribute("aria-label", "历史时间范围");
   let section = "resources", selected = "1h", last = null, stopped = false;
@@ -100,19 +101,20 @@ export function createHistoryPanel(body, nodeID) {
   }
   for (const [key, name] of Object.entries(windows)) {
     const button = el("button", "fm-history-range", {"1h": "1 小时", "6h": "6 小时", "24h": "1 天", "7d": "7 天"}[key]); button.type = "button";
-    button.setAttribute("aria-label", name); button.setAttribute("aria-pressed", String(selected === key)); rangeSwitch.append(button); rangeButtons.set(key, button);
+    button.setAttribute("aria-label", name); button.setAttribute("aria-pressed", String(selected === key)); button.classList.toggle("wsk-is-active", selected === key); rangeSwitch.append(button); rangeButtons.set(key, button);
     button.addEventListener("click", () => {
-      selected = key; for (const [value, item] of rangeButtons) item.setAttribute("aria-pressed", String(value === selected));
+      selected = key;
+      for (const [value, item] of rangeButtons) { item.setAttribute("aria-pressed", String(value === selected)); item.classList.toggle("wsk-is-active", value === selected); }
       connection.select(key);
     });
   }
   const controls = el("div", "fm-history-controls"); controls.append(rangeSwitch, refresh);
-  toolbar.append(sectionSwitch, controls);
+  toolbar.append(sections, controls);
   const status = el("p", "fm-history-status", "正在准备历史记录…"); status.setAttribute("role", "status");
-  const storage = el("p", "fm-history-storage"), content = el("div", "fm-history-content"); storage.hidden = true;
+  const storage = el("p", "wsk-alert wsk-info fm-history-storage"), content = el("div", "fm-history-content"); storage.hidden = true;
   const chartNote = el("p", "fm-history-note");
   const charts = el("div", "fm-history-charts"), graphs = resourceCharts.map(createChart); charts.append(...graphs.map(g => g.element));
-  const probeTitle = el("h4", "", "TCP 探测"), probeNote = el("p", "fm-history-note", "失败率是所选范围内 TCP 建连失败次数占比，不表示 IP 丢包率。耗时曲线仅汇总成功建连；全部失败的时间段留白。"), probeState = el("p", "fm-history-storage"), probeEmpty = el("p", "fm-history-empty", "暂无 TCP 探测记录。"), probeList = el("div", "fm-probe-list");
+  const probeTitle = el("h4", "", "TCP 探测"), probeNote = el("p", "fm-history-note", "失败率是所选范围内 TCP 建连失败次数占比，不表示 IP 丢包率。耗时曲线仅汇总成功建连；全部失败的时间段留白。"), probeState = el("p", "wsk-alert wsk-info fm-history-storage"), probeEmpty = el("p", "wsk-empty-state fm-history-empty", "暂无 TCP 探测记录。"), probeList = el("div", "fm-probe-list");
   const probes = new Map(), resources = el("div", "fm-resource-history"), probeGroup = el("div", "fm-network-history");
   resources.id = `${identifier}-resources`; probeGroup.id = `${identifier}-network`;
   sectionButtons.get("resources")?.setAttribute("aria-controls", resources.id); sectionButtons.get("network")?.setAttribute("aria-controls", probeGroup.id);
@@ -121,7 +123,7 @@ export function createHistoryPanel(body, nodeID) {
   function applySection() {
     resources.hidden = section !== "resources";
     probeGroup.hidden = section !== "network";
-    for (const [key, button] of sectionButtons) button.setAttribute("aria-pressed", String(section === key));
+    for (const [key, button] of sectionButtons) { button.setAttribute("aria-pressed", String(section === key)); button.classList.toggle("wsk-is-active", section === key); }
   }
   applySection();
   function onState(state) {

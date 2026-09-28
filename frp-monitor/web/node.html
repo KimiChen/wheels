@@ -15,7 +15,7 @@
 </head>
 <body class="fm-node-page">
   <a class="wsk-skip-link" href="#main">跳到主要内容</a>
-  <svg class="fm-symbols" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><defs>
+  <svg class="wsk-icon-sprite fm-symbols" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><defs>
     <symbol id="pulse" viewBox="0 0 24 24"><path d="M2 13h5l3-9 4 16 3-7h5"/></symbol>
     <symbol id="server" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="7" rx="2"/><path d="M7 6.5h.01M7 17.5h.01M12 6.5h5M12 17.5h5"/></symbol>
     <symbol id="theme" viewBox="0 0 24 24"><path d="M20.7 13.5A9 9 0 0 1 10.5 3.3 9 9 0 1 0 20.7 13.5Z"/></symbol>
@@ -23,18 +23,18 @@
     <symbol id="arrow-left" viewBox="0 0 24 24"><path d="M20 12H4m6-6-6 6 6 6"/></symbol>
     <symbol id="refresh" viewBox="0 0 24 24"><path d="M20 8a8 8 0 1 0 1 7M20 3v5h-5"/></symbol>
   </defs></svg>
-  <header class="fm-topbar"><div class="fm-topbar-inner">
-    <a class="fm-brand" href="/" aria-label="FRP Monitor 首页"><span class="fm-brand-mark"><svg aria-hidden="true"><use href="#pulse"/></svg></span><span>FRP <b>Monitor</b></span></a>
-    <div class="fm-top-actions"><a href="/" class="fm-back" aria-label="返回节点列表"><svg aria-hidden="true"><use href="#arrow-left"/></svg><span>返回节点列表</span></a><button class="wsk-button fm-theme" data-theme-toggle data-js-only type="button" aria-label="切换主题"><svg aria-hidden="true"><use href="#theme"/></svg></button><a class="fm-admin" href="/admin/" aria-label="管理工作台" title="管理工作台"><svg aria-hidden="true"><use href="#settings"/></svg><span>管理</span></a></div>
+  <header class="wsk-topbar fm-topbar"><div class="fm-topbar-inner">
+    <a class="wsk-brand fm-brand" href="/" aria-label="FRP Monitor 首页"><span class="wsk-brand-mark fm-brand-mark"><svg class="wsk-icon" aria-hidden="true"><use href="#pulse"/></svg></span><span>FRP <b>Monitor</b></span></a>
+    <div class="fm-top-actions"><a href="/" class="fm-back" aria-label="返回节点列表"><svg class="wsk-icon" aria-hidden="true"><use href="#arrow-left"/></svg><span>返回节点列表</span></a><button class="wsk-icon-button fm-theme" data-theme-toggle data-js-only type="button" aria-label="切换主题"><svg class="wsk-icon" aria-hidden="true"><use href="#theme"/></svg></button><a class="wsk-button wsk-secondary fm-admin" href="/admin/" aria-label="管理工作台" title="管理工作台"><svg class="wsk-icon" aria-hidden="true"><use href="#settings"/></svg><span>管理</span></a></div>
   </div></header>
   <main id="main" tabindex="-1">
-    <div id="connection-notice" class="fm-notice" role="status">正在获取节点快照…</div>
-    <noscript><div class="fm-notice">此页面需要 JavaScript 获取节点状态和历史趋势。</div></noscript>
-    <section id="node-empty" class="fm-empty" aria-labelledby="empty-title"><span class="fm-empty-icon"><svg aria-hidden="true"><use href="#server"/></svg></span><h1 id="empty-title">正在读取节点</h1><p id="empty-copy">同步当前节点的资源、系统信息与历史记录。</p><button id="retry-empty" class="wsk-button fm-refresh" type="button" data-js-only>重新同步</button></section>
+    <div id="connection-notice" class="wsk-alert wsk-warning fm-notice" role="status">正在获取节点快照…</div>
+    <noscript><div class="wsk-alert wsk-warning fm-notice">此页面需要 JavaScript 获取节点状态和历史趋势。</div></noscript>
+    <section id="node-empty" class="wsk-empty-state fm-empty" aria-labelledby="empty-title"><span class="wsk-empty-icon fm-empty-icon"><svg class="wsk-icon" aria-hidden="true"><use href="#server"/></svg></span><h1 id="empty-title">正在读取节点</h1><p id="empty-copy">同步当前节点的资源、系统信息与历史记录。</p><button id="retry-empty" class="wsk-secondary wsk-button fm-refresh" type="button" data-js-only>重新同步</button></section>
     <article id="node-detail" hidden>
-      <header class="fm-node-heading"><div class="fm-node-title"><a class="fm-node-back" href="/" aria-label="返回节点列表"><svg aria-hidden="true"><use href="#arrow-left"/></svg></a><h1 data-value="name">—</h1></div><button id="retry" class="wsk-button fm-refresh" type="button" data-js-only><svg aria-hidden="true"><use href="#refresh"/></svg>刷新</button></header>
+      <header class="fm-node-heading"><div class="fm-node-title"><a class="wsk-icon-button fm-node-back" href="/" aria-label="返回节点列表"><svg class="wsk-icon" aria-hidden="true"><use href="#arrow-left"/></svg></a><h1 data-value="name">—</h1></div><button id="retry" class="wsk-secondary wsk-button fm-refresh" type="button" data-js-only><svg class="wsk-icon" aria-hidden="true"><use href="#refresh"/></svg>刷新</button></header>
       <dl class="fm-node-facts">
-        <div><dt>状态</dt><dd><span class="fm-badge" data-value="session"></span></dd></div>
+        <div><dt>状态</dt><dd><span class="wsk-badge fm-badge" data-value="session"></span></dd></div>
         <div><dt>运行时间</dt><dd data-value="uptime">—</dd></div>
         <div><dt>系统环境</dt><dd data-value="environment">—</dd></div>
         <div><dt>内存</dt><dd data-value="memory-total">—</dd></div>
@@ -57,10 +57,10 @@
       <p id="node-public-note" class="fm-node-public-note" hidden></p>
       <section class="fm-node-history" aria-label="节点资源与网络趋势"><div id="node-history"></div></section>
       <details class="fm-node-accounting"><summary>流量、套餐与 FRP 明细</summary><dl class="fm-node-overview">
-        <div class="fm-node-info"><dt>今日流量</dt><dd class="fm-capacities"><span><small>↓ 接收</small><b data-value="traffic-rx">—</b></span><span><small>↑ 发送</small><b data-value="traffic-tx">—</b></span></dd><dd class="fm-node-info-note" id="traffic-note">等待今日统计</dd></div>
-        <div class="fm-node-info" id="node-plan"><dt>套餐已用 / 额度</dt><dd data-value="plan-usage">—</dd><dd class="fm-node-info-note" data-value="plan-remaining">—</dd><dd class="fm-node-info-note" data-value="plan-note">—</dd><dd class="fm-node-info-note" data-value="plan-period">—</dd></div>
-        <div class="fm-node-info" id="node-billing"><dt>费用与到期</dt><dd data-value="billing">—</dd><dd class="fm-node-info-note" data-value="renewal-note">—</dd></div>
-        <div class="fm-node-info"><dt>FRP 隧道</dt><dd><b data-value="proxies">—</b><small> 运行 / 已配置</small></dd><dd class="fm-node-info-note" data-value="frp-reconciliation">等待核对</dd><dd class="fm-node-info-note" data-value="frp-traffic">—</dd><dd class="fm-node-info-note">FRP 服务端本地日 · 独立于主机流量</dd></div>
+        <div class="wsk-panel fm-node-info"><dt>今日流量</dt><dd class="fm-capacities"><span><small>↓ 接收</small><b data-value="traffic-rx">—</b></span><span><small>↑ 发送</small><b data-value="traffic-tx">—</b></span></dd><dd class="fm-node-info-note" id="traffic-note">等待今日统计</dd></div>
+        <div class="wsk-panel fm-node-info" id="node-plan"><dt>套餐已用 / 额度</dt><dd data-value="plan-usage">—</dd><dd class="fm-node-info-note" data-value="plan-remaining">—</dd><dd class="fm-node-info-note" data-value="plan-note">—</dd><dd class="fm-node-info-note" data-value="plan-period">—</dd></div>
+        <div class="wsk-panel fm-node-info" id="node-billing"><dt>费用与到期</dt><dd data-value="billing">—</dd><dd class="fm-node-info-note" data-value="renewal-note">—</dd></div>
+        <div class="wsk-panel fm-node-info"><dt>FRP 隧道</dt><dd><b data-value="proxies">—</b><small> 运行 / 已配置</small></dd><dd class="fm-node-info-note" data-value="frp-reconciliation">等待核对</dd><dd class="fm-node-info-note" data-value="frp-traffic">—</dd><dd class="fm-node-info-note">FRP 服务端本地日 · 独立于主机流量</dd></div>
       </dl></details>
     </article>
   </main>

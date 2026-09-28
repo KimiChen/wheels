@@ -14,7 +14,10 @@ try { if (localStorage.getItem("frp-monitor-view") === "table") view = "table"; 
 function syncView() {
   list.hidden = view !== "cards";
   table.hidden = view !== "table" || !current?.nodes.length;
-  for (const button of viewButtons) button.setAttribute("aria-pressed", String(button.dataset.fmView === view));
+  for (const button of viewButtons) {
+    const selected = button.dataset.fmView === view;
+    button.setAttribute("aria-pressed", String(selected)); button.classList.toggle("wsk-is-active", selected);
+  }
 }
 function createCard(node) {
   const element = byID("node-template").content.firstElementChild.cloneNode(true);
