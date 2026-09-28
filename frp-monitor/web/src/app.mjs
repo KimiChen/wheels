@@ -138,6 +138,7 @@ function patchCard(card, node) {
   text("sample-time", node.metrics_at ? `采样于 ${timeText(node.metrics_at)}${node.freshness === "stale" ? " · 已过期" : ""}` : "尚未收到资源报告");
   text("interval", Number.isFinite(node.interval_seconds) && node.interval_seconds > 0 ? `${node.interval_seconds} 秒 / 次` : UNKNOWN);
   for (const el of card.labels.get("freshness")) el.title = node.metrics_at ? `资源采样于 ${timeText(node.metrics_at)}` : "尚未收到资源报告";
+  card.element.querySelector("[data-value=uptime]").dataset.state = node.session;
   card.element.querySelector("[data-value=uptime]").title = "系统运行时间，不代表监控连续在线时长";
 }
 function render() {
