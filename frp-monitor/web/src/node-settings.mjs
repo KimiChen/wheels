@@ -9,6 +9,11 @@ export function dateTime(raw) {
   const date = new Date(raw);
   return Number.isNaN(date.getTime()) ? UNKNOWN : date.toLocaleString("zh-CN", {hour12: false});
 }
+export function dateOnly(raw) {
+  if (!Number.isSafeInteger(raw)) return UNKNOWN;
+  const date = new Date(raw);
+  return Number.isNaN(date.getTime()) ? UNKNOWN : `${date.getFullYear()}/${date.getMonth() + 1}/${date.getDate()}`;
+}
 export function localDateInput(raw) {
   if (!Number.isSafeInteger(raw)) return "";
   const date = new Date(raw), pad = value => String(value).padStart(2, "0");

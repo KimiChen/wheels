@@ -85,7 +85,7 @@ function patchCard(card, node) {
   text("rx", bytes(decimal(metric.net_rx), true)); text("tx", bytes(decimal(metric.net_tx), true));
   const plan = planText(node.traffic_plan);
   text("traffic-label", `流量 ${plan.quota}`); text("traffic", plan.percent); meter("traffic", plan.meter);
-  card.element.querySelector('[data-value="traffic"]').title = node.traffic_plan?.partial ? "周期流量统计不完整" : "周期流量使用率";
+  card.element.querySelector('[data-value="traffic"]').title = "周期流量使用率";
   text("load", loadText(metric.load)); text("uptime", uptime(metric.uptime));
   text("sample-time", node.metrics_at ? `采样于 ${timeText(node.metrics_at)}${node.freshness === "stale" ? " · 已过期" : ""}` : "尚未收到资源报告");
   text("interval", Number.isFinite(node.interval_seconds) && node.interval_seconds > 0 ? `${node.interval_seconds} 秒 / 次` : UNKNOWN);

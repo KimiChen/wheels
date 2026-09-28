@@ -1,6 +1,6 @@
 import {UNKNOWN, bytes, decimal, percent, percentage, loadText, uptime, timeText, sessionLabels, freshnessLabels} from "./format.mjs";
 import {nodeID, hardwareValue, cpuModel, groupText} from "./node-data.mjs";
-import {billingText, todayText, planText, dateTime} from "./node-settings.mjs";
+import {billingText, todayText, planText, trafficModes, dateOnly} from "./node-settings.mjs";
 import {connect} from "./transport.mjs";
 import {createHistoryPanel} from "./history-view.mjs";
 
@@ -19,7 +19,7 @@ function clearNode() {
   panel?.stop(); panel = null; historyHost.replaceChildren();
   for (const element of labels.values()) { write(element, UNKNOWN); element.removeAttribute("data-state"); element.removeAttribute("title"); }
   byID("node-public-note").hidden = true; write(byID("node-public-note"), "");
-  write(byID("traffic-note"), "等待今日统计"); write(byID("footer-sample"), "无可显示的节点数据");
+  write(byID("footer-sample"), "无可显示的节点数据");
   document.title = "FRP Monitor · 节点详情";
 }
 function patchNode(node) {
@@ -37,11 +37,11 @@ function patchNode(node) {
   for (const [key, field] of [["processes", "procs"], ["tcp", "tcp"], ["udp", "udp"]]) put(key, decimal(metrics[field]));
   put("scope", ({host: "主机采集", namespace: "容器 / 命名空间采集", unknown: "采集范围未知"})[metrics.scope] ?? "等待资源报告");
   const today = todayText(node.traffic_today), plan = planText(node.traffic_plan);
-  put("traffic-rx", today.rx); put("traffic-tx", today.tx); write(byID("traffic-note"), today.note);
+  put("traffic-rx", today.rx); put("traffic-tx", today.tx);
   put("system-rx", bytes(decimal(metrics.net_rx_total))); put("system-tx", bytes(decimal(metrics.net_tx_total)));
   byID("node-plan").hidden = !node.traffic_plan; put("plan-usage", `${plan.used} / ${plan.quota}`);
-  put("plan-remaining", `${plan.remaining} · ${plan.percent}`); put("plan-note", plan.note);
-  put("plan-period", `${dateTime(node.traffic_plan?.period_start_at_ms)} 起 · ${node.traffic_plan?.period_end_at_ms == null ? "等待手动重置" : `${dateTime(node.traffic_plan.period_end_at_ms)} 重置`}`);
+  put("plan-percent", plan.percent); put("plan-note", trafficModes[node.traffic_plan?.mode] ?? UNKNOWN);
+  put("plan-period", `${dateOnly(node.traffic_plan?.period_start_at_ms)} - ${dateOnly(node.traffic_plan?.period_end_at_ms)}`);
   byID("node-billing").hidden = !node.billing; put("billing", billingText(node.billing)); put("renewal-note", node.billing?.renewal_note || "未填写续费说明");
   byID("node-public-note").hidden = !node.public_note; write(byID("node-public-note"), node.public_note);
   put("sample-time", node.metrics_at ? `资源采样 ${timeText(node.metrics_at)}${node.freshness === "stale" ? " · 已过期" : ""}` : "尚未收到资源报告");

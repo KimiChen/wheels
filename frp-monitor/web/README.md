@@ -75,8 +75,8 @@ git show 6d41d588b3537b2d2460d73f999d958fd37eb00d:web-standard-kit/script.js
 节点路由拒绝 0、前导零、负数、溢出值和额外路径片段。
 `name` 是管理员保存的名称；`metrics.scope` 是采集范围字符串。
 `accounting_state` 由服务端随快照下发（`ready` / `degraded`），当前页面不直接读取：
-记账降级时服务端已把 `traffic_today` 与 `traffic_plan` 的 `partial` 置真，页面经
-`partial` 标注「统计不完整」。保留该字段供诊断与未来客户端展示使用。
+记账降级时服务端已把 `traffic_today` 与 `traffic_plan` 的 `partial` 置真；
+管理页仍可查看完整性提示，公开首页和节点详情不显示「统计不完整」。保留该字段供诊断使用。
 硬件与其他实时指标使用 `{value, quality, reason?}`：CPU、load 和逻辑核心数为
 number，硬件文本为 string，uint64 指标为十进制 string。容量和流量单位为 bytes，
 网速为 bytes/s，运行时间为秒。浏览器使用 `BigInt` 处理字节值，避免超过 `2^53`
@@ -259,3 +259,5 @@ GitHub OAuth 流程和管理员权限由服务端模拟测试覆盖；部署环�
 登录及节点表格、编辑窗口的只读验收。Linux 主控发布后已验证 HTTPS 静态资源、
 实时 JSON/SSE、全部接入节点在线，以及保留 90 天的 TSDB 历史持续写入。
 服务器地址、发布版本、备份和回滚信息只记录在被忽略的 `.env.serverlist` 中。
+
+节点流量信息不展示统计口径；套餐规则仅显示类型（Max、total、rx、tx），使用率只显示百分比，套餐周期采用 `2026/9/1 - 2026/10/1` 日期范围，未设置的日期显示 `—`。
