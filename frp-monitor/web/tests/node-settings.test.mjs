@@ -9,7 +9,7 @@ const form = {name: "测试节点", public_note: "公开", private_note: "私有
 test("current traffic uses the snapshot independently of optional history", () => {
   const today = todayText({day: "2026-09-28", timezone: "Asia/Shanghai", rx_bytes: "0", tx_bytes: "1073741824", partial: true});
   assert.equal(today.rx, "0 B"); assert.equal(today.tx, "1.0 GiB");
-  assert.match(today.note, /主控时区 Asia\/Shanghai/); assert.match(today.note, /不完整/);
+  assert.equal(today.note, "2026-09-28 · 统计不完整");
   assert.equal(todayText(null).rx, "—");
   assert.equal(todayText({rx_bytes: 1}).rx, "—");
 });

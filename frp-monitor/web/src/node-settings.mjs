@@ -53,7 +53,7 @@ export function billingText(billing) {
 }
 export function todayText(today) {
   return {rx: bytes(cumulative(today?.rx_bytes)), tx: bytes(cumulative(today?.tx_bytes)),
-    note: today ? `${today.day || "日期未知"} · 主控时区 ${today.timezone || "未知"}${today.partial ? " · 统计不完整" : ""}` : "等待今日统计"};
+    note: today ? `${today.day || "日期未知"}${today.partial ? " · 统计不完整" : ""}` : "等待今日统计"};
 }
 export function planText(plan) {
   const used = cumulative(plan?.used_bytes), quota = cumulative(plan?.quota_bytes);
