@@ -22,7 +22,7 @@ SKIP_FS = set("tmpfs devtmpfs proc sysfs cgroup cgroup2 devpts mqueue hugetlbfs 
 SKIP_IFACE = tuple("lo docker veth br- virbr tap tun wg tailscale cni flannel podman fwbr fwpr fwln ifb gretap erspan kube cali nerdctl lxc cilium zt".split())
 UINT_FIELDS = "mem_total mem_used swap_total swap_used disk_total disk_used net_rx net_tx net_rx_total net_tx_total uptime tcp udp procs".split()
 METRIC_FIELDS = set(UINT_FIELDS + ["scope", "cpu", "load"])
-PUBLIC_FIELDS = set("id name session freshness last_seen metrics_at interval_seconds frp hardware metrics public_note traffic_today accounting_state".split())
+PUBLIC_FIELDS = set("id name groups session freshness last_seen metrics_at interval_seconds frp hardware metrics public_note traffic_today accounting_state".split())
 PUBLIC_OPTIONAL_FIELDS = {"billing", "traffic_plan"}
 MAX_U64 = 2**64 - 1
 
@@ -238,6 +238,20 @@ def metric_value(name, field):
 def validate_public_node(node):
     if not isinstance(node, dict) or not PUBLIC_FIELDS <= node.keys() or node.keys() - PUBLIC_FIELDS - PUBLIC_OPTIONAL_FIELDS:
         raise AcceptanceError("invalid_public_node_fields")
+    groups = node["groups"]
+    if not isinstance(groups, list) or len(groups) > 128:
+        raise AcceptanceError("invalid_public_node_groups")
+    seen = set()
+    for group in groups:
+        if not isinstance(group, dict) or set(group) != {"id", "name"}:
+            raise AcceptanceError("invalid_public_node_groups")
+        identity, name = group["id"], group["name"]
+        if (not isinstance(identity, str) or not re.fullmatch(r"[1-9][0-9]{0,18}", identity)
+                or int(identity) > 2**63 - 1 or identity in seen
+                or not isinstance(name, str) or not name or name != name.strip()
+                or len(name.encode("utf-8")) > 128 or any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in name)):
+            raise AcceptanceError("invalid_public_node_groups")
+        seen.add(identity)
 
 
 def compare(metrics, refs, results):

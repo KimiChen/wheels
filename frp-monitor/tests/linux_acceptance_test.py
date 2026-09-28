@@ -14,7 +14,7 @@ SPEC.loader.exec_module(acceptance)
 
 class LinuxAcceptanceTests(unittest.TestCase):
     def public_node(self):
-        return {"id": "1", "name": "example", "session": "waiting", "freshness": "waiting",
+        return {"id": "1", "name": "example", "groups": [], "session": "waiting", "freshness": "waiting",
                 "last_seen": None, "metrics_at": None, "interval_seconds": 1,
                 "frp": {"reconciliation": "", "server_online": None, "registered": 0,
                         "control_state": "unknown", "proxy_total": 0, "proxy_running": 0,
@@ -36,7 +36,7 @@ class LinuxAcceptanceTests(unittest.TestCase):
                 acceptance.validate_public_node(dict(self.public_node(), **optional))
 
     def test_public_node_requires_fields_and_rejects_private_or_unknown_fields(self):
-        for field in ("hardware", "public_note", "traffic_today", "accounting_state"):
+        for field in ("groups", "hardware", "public_note", "traffic_today", "accounting_state"):
             node = self.public_node()
             del node[field]
             with self.subTest(missing=field), self.assertRaisesRegex(acceptance.AcceptanceError, "^invalid_public_node_fields$"):
@@ -46,15 +46,34 @@ class LinuxAcceptanceTests(unittest.TestCase):
                 acceptance.validate_public_node(dict(self.public_node(), **{field: "private value"}))
 
     def test_invalid_public_fields_report_is_sanitized(self):
-        output = io.StringIO()
-        node = dict(self.public_node(), private_note="private path and credentials")
-        with mock.patch("sys.argv", ["linux_acceptance.py", "--url", "https://private.invalid"]), \
-                mock.patch.object(acceptance, "run", side_effect=lambda args: acceptance.validate_public_node(node)), \
-                contextlib.redirect_stdout(output):
-            self.assertEqual(acceptance.main(), 1)
-        self.assertEqual(json.loads(output.getvalue()),
-                         {"schema": 1, "passed": False, "error": "invalid_public_node_fields"})
-        self.assertNotIn("private", output.getvalue())
+        for fields, error in (({"private_note": "private path and credentials"}, "invalid_public_node_fields"),
+                              ({"groups": [{"id": "1", "name": "example", "node_ids": ["private"]}]}, "invalid_public_node_groups")):
+            with self.subTest(error=error):
+                output = io.StringIO()
+                node = dict(self.public_node(), **fields)
+                with mock.patch("sys.argv", ["linux_acceptance.py", "--url", "https://private.invalid"]), \
+                        mock.patch.object(acceptance, "run", side_effect=lambda args: acceptance.validate_public_node(node)), \
+                        contextlib.redirect_stdout(output):
+                    self.assertEqual(acceptance.main(), 1)
+                self.assertEqual(json.loads(output.getvalue()), {"schema": 1, "passed": False, "error": error})
+                self.assertNotIn("private", output.getvalue())
+
+    def test_public_groups_accepts_empty_and_multiple_public_references(self):
+        for groups in ([], [{"id": "1", "name": "亚洲"}, {"id": str(2**63 - 1), "name": "实验 🛰"}]):
+            with self.subTest(groups=groups):
+                acceptance.validate_public_node(dict(self.public_node(), groups=groups))
+
+    def test_public_groups_rejects_bad_shape_ids_names_and_private_fields(self):
+        valid = {"id": "1", "name": "example"}
+        invalid = [None, {}, "example", [None], [{}], [{"id": "1"}], [{"name": "example"}],
+                   [dict(valid, node_ids=["2"])], [dict(valid, config_revision=1)], [dict(valid, unknown="value")],
+                   [valid, dict(valid)], [dict(valid, id=str(index + 1)) for index in range(129)]]
+        invalid += [[dict(valid, id=value)] for value in (None, True, 1, "", "0", "01", "-1", "1.0", str(2**63))]
+        invalid += [[dict(valid, name=value)] for value in (None, True, 1, "", " ", " example", "example ",
+                                                           "a\nb", "a\x7fb", "a\x85b", "a" * 129, "亚" * 43)]
+        for groups in invalid:
+            with self.subTest(groups=groups), self.assertRaisesRegex(acceptance.AcceptanceError, "^invalid_public_node_groups$"):
+                acceptance.validate_public_node(dict(self.public_node(), groups=groups))
 
     def test_memory_zero_available_and_missing_fallback(self):
         text = "MemTotal: 100 kB\nMemAvailable: 0 kB\nMemFree: 10 kB\nBuffers: 5 kB\nCached: 15 kB\nSwapTotal: 20 kB\nSwapFree: 8 kB\n"
