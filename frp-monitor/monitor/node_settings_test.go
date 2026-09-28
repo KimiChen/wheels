@@ -161,8 +161,9 @@ func TestAmbiguousCommittedWriteFailsClosed(t *testing.T) {
 			}
 			response := httptest.NewRecorder()
 			request := httptest.NewRequest(http.MethodDelete, "/api/admin/v1/nodes/1", nil)
-			s.controlWriteError(response, request, writeErr)
+			s.controlWriteError(writeErr)
 			s.configMu.Unlock()
+			controlError(response, request, writeErr)
 			if response.Code != 503 || !s.credentialError.Load() || len(s.public.Load().Nodes) != 0 {
 				t.Fatal("ambiguous commit retained public authorization", response.Code)
 			}
@@ -189,8 +190,9 @@ func TestInvalidWriteDoesNotRevokeUnchangedCredentials(t *testing.T) {
 	response := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPatch, "/api/admin/v1/nodes/1/settings", nil)
 	s.configMu.Lock()
-	s.controlWriteError(response, request, control.ErrInvalid)
+	s.controlWriteError(control.ErrInvalid)
 	s.configMu.Unlock()
+	controlError(response, request, control.ErrInvalid)
 	request.Header.Set("Authorization", "Bearer "+agent)
 	if response.Code != 400 || s.credentialError.Load() || s.authenticateCredential(request).AgentID != "1" {
 		t.Fatal("invalid input revoked valid credentials")
@@ -288,5 +290,43 @@ func TestBillingPublicAllowlistAndPreciseAmount(t *testing.T) {
 	data, _ := json.Marshal(s.snapshot(time.Now()))
 	if !strings.Contains(string(data), `"price_minor":"9007199254740993"`) || strings.Contains(string(data), "never-public") || strings.Contains(string(data), "token_sha256") {
 		t.Fatalf("billing projection invalid: %s", data)
+	}
+}
+
+func TestSettingsResponsesStayOutsideConfigLock(t *testing.T) {
+	for _, action := range []string{"save", "reset", "conflict", "missing", "storage error"} {
+		t.Run(action, func(t *testing.T) {
+			s, _, _ := testAdmin(t)
+			n, err := s.control.Get(context.Background(), "1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg := nodeSettings{n.NodeConfig, n.ConfigRevision}
+			cfg.PublicNote = strings.Repeat("<", 4096)
+			method, id, reset, want := http.MethodPatch, "1", false, 200
+			if action == "conflict" {
+				cfg.ConfigRevision++
+				want = 409
+			}
+			if action == "missing" {
+				id, want = "999", 404
+			}
+			body, _ := json.Marshal(cfg)
+			if action == "reset" {
+				method, reset = http.MethodPost, true
+				body = []byte(`{"config_revision":` + jsonNumber(n.ConfigRevision) + `}`)
+			}
+			if action == "storage error" {
+				s.control.Close()
+				want = 503
+			}
+			r := httptest.NewRequest(method, "/api/admin/v1/nodes/"+id+"/settings", strings.NewReader(string(body)))
+			r.Header.Set("Content-Type", "application/json")
+			w := &configUnlockedRecorder{httptest.NewRecorder(), t, s}
+			s.updateSettings(w, r, id, reset)
+			if w.Code != want {
+				t.Fatalf("status %d, want %d", w.Code, want)
+			}
+		})
 	}
 }

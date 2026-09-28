@@ -77,6 +77,9 @@ type Service struct {
 	public          atomic.Pointer[PublicSnapshot]
 	publicJSON      atomic.Pointer[[]byte]
 	publishMu       sync.Mutex
+	adminPublishMu  sync.Mutex
+	adminGeneration atomic.Uint64
+	adminJSON       atomic.Pointer[adminEncodedSnapshot]
 	control         *control.Store
 	configs         atomic.Pointer[nodeConfigs]
 	store           *store.Store
@@ -161,6 +164,7 @@ func Start(ctx context.Context, cfg shared.MonitorConfig, providers ...shared.Se
 		s.storeFailed = err != nil
 	}
 	s.publishSnapshot(time.Now())
+	s.publishAdminSnapshot()
 	s.wg.Add(4)
 	go s.serverLoop()
 	go s.taskLoop()
@@ -174,6 +178,7 @@ func Start(ctx context.Context, cfg shared.MonitorConfig, providers ...shared.Se
 				return
 			case <-ticker.C:
 				s.publishSnapshot(time.Now())
+				s.publishAdminSnapshot()
 			}
 		}
 	}()
@@ -286,7 +291,7 @@ func (s *Service) admit() bool {
 }
 func (s *Service) handleWS(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		w.WriteHeader(http.StatusMethodNotAllowed)
+		methodNotAllowed(w, http.MethodGet)
 		return
 	}
 	// Authentication is a cheap in-memory digest lookup and runs before the
@@ -765,7 +770,7 @@ func publicHeaders(w http.ResponseWriter) {
 func (s *Service) handleNodes(w http.ResponseWriter, r *http.Request) {
 	publicHeaders(w)
 	if r.Method != http.MethodGet {
-		w.WriteHeader(http.StatusMethodNotAllowed)
+		methodNotAllowed(w, http.MethodGet)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -780,7 +785,7 @@ func (s *Service) handleNodes(w http.ResponseWriter, r *http.Request) {
 func (s *Service) handleEvents(w http.ResponseWriter, r *http.Request) {
 	publicHeaders(w)
 	if r.Method != http.MethodGet {
-		w.WriteHeader(http.StatusMethodNotAllowed)
+		methodNotAllowed(w, http.MethodGet)
 		return
 	}
 	select {
@@ -809,7 +814,9 @@ func (s *Service) handleEvents(w http.ResponseWriter, r *http.Request) {
 	if !send() {
 		return
 	}
-	tick := time.NewTicker(time.Second)
+	// Public dashboards tolerate a two-second refresh; cap repeated full-snapshot
+	// bandwidth independently of the one-second in-memory publication cadence.
+	tick := time.NewTicker(2 * time.Second)
 	defer tick.Stop()
 	for {
 		select {

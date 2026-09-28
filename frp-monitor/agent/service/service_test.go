@@ -21,6 +21,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -317,6 +318,103 @@ func TestTokenPermissionsAndCloseDuringOutage(t *testing.T) {
 	s.Close()
 	if time.Since(start) > time.Second {
 		t.Fatal("outage blocked shutdown")
+	}
+}
+
+func TestStartCompletesDefaults(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Endpoint = "ws://127.0.0.1:1/agent/v1/ws"
+	cfg.IntervalSeconds, cfg.ServerID = 0, ""
+	s, err := Start(context.Background(), cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if s.cfg.IntervalSeconds != 1 || s.cfg.ServerID != "default" {
+		t.Fatalf("missing defaults: %+v", s.cfg)
+	}
+}
+
+func TestReadRegularBoundsAndPermissions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "credential")
+	if err := os.WriteFile(path, []byte("12345678"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := readRegular(path, 8, true); err != nil || string(got) != "12345678" {
+		t.Fatalf("read at limit: %q, %v", got, err)
+	}
+	if _, err := readRegular(path, 7, true); err == nil {
+		t.Fatal("accepted a file over the byte limit")
+	}
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(path, 0644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := readRegular(path, 8, true); err == nil {
+			t.Fatal("accepted public token permissions")
+		}
+		if _, err := readRegular(path, 8, false); err != nil {
+			t.Fatalf("rejected public CA permissions: %v", err)
+		}
+	}
+	if _, err := readRegular(filepath.Dir(path), 4096, false); err == nil {
+		t.Fatal("accepted a directory")
+	}
+}
+
+func TestOpenRegularRejectsChanges(t *testing.T) {
+	for _, replacement := range []string{"regular", "symlink", "growth", "permissions"} {
+		t.Run(replacement, func(t *testing.T) {
+			if replacement == "permissions" && runtime.GOOS == "windows" {
+				t.Skip("Unix permissions are not enforced on Windows")
+			}
+			path := filepath.Join(t.TempDir(), "credential")
+			if err := os.WriteFile(path, []byte("old"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.Lstat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Windows resolves FileInfo identity lazily; capture it while the
+			// original path still exists, before simulating the replacement.
+			if !os.SameFile(before, before) {
+				t.Fatal("cannot capture original file identity")
+			}
+			if replacement == "regular" || replacement == "symlink" {
+				if err := os.Rename(path, path+".old"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			switch replacement {
+			case "symlink":
+				if err := os.Symlink(path+".old", path); err != nil {
+					if runtime.GOOS == "windows" {
+						t.Skipf("creating symlinks unavailable: %v", err)
+					}
+					t.Fatal(err)
+				}
+			case "regular":
+				if err := os.WriteFile(path, []byte("new"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			case "growth":
+				if err := os.WriteFile(path, []byte(strings.Repeat("x", 513)), 0600); err != nil {
+					t.Fatal(err)
+				}
+			case "permissions":
+				if err := os.Chmod(path, 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			f, err := openRegular(path, before, 512, true)
+			if f != nil {
+				f.Close()
+			}
+			if err == nil {
+				t.Fatal("accepted an unsafe change after Lstat")
+			}
+		})
 	}
 }
 

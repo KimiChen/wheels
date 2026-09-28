@@ -152,6 +152,7 @@ func (s *Service) applyCredentials(creds []credential) {
 	s.nodes = next
 	s.mu.Unlock()
 	s.credentialError.Store(false)
+	s.invalidateAdminSnapshot()
 	// Remove stale cached public rows immediately when authorization is revoked.
 	s.publishSnapshot(time.Now())
 }
@@ -160,5 +161,6 @@ func (s *Service) reloadCredentials() {
 	defer cancel()
 	if s.refreshNodes(ctx) != nil {
 		s.credentialError.Store(true)
+		s.invalidateAdminSnapshot()
 	}
 }

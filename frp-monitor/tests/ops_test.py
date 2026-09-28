@@ -96,6 +96,23 @@ class OpsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ops.backup(self.runtime, self.backups / 'bad.tar.gz')
 
+    def test_backup_rejects_all_nested_runtime_destinations(self):
+        child = self.runtime / 'backups'
+        child.mkdir(mode=0o700)
+        nested = child / 'deeper'
+        nested.mkdir(mode=0o700)
+        for parent in (self.runtime, child, nested):
+            output = parent / 'snapshot.tar.gz'
+            with self.subTest(parent=parent), self.assertRaisesRegex(ValueError, 'outside the runtime'):
+                ops.backup(self.runtime, output)
+            self.assertFalse(output.exists())
+            self.assertEqual(list(parent.glob('.frp-backup-*')), [])
+        # A sibling sharing the runtime's name prefix is still outside it.
+        sibling = self.root / (self.runtime.name + '-backups')
+        sibling.mkdir(mode=0o700)
+        output = sibling / 'snapshot.tar.gz'
+        self.assertEqual(ops.backup(self.runtime, output), output)
+
     def test_restore_rejects_links_traversal_duplicate_and_corrupt_hash(self):
         for kind in ('link', 'traversal', 'duplicate', 'hash'):
             archive = self.backups / (kind + '.tar.gz')

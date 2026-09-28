@@ -90,6 +90,10 @@ func adminJSON(w http.ResponseWriter, status int, value any) {
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
 }
+func methodNotAllowed(w http.ResponseWriter, methods ...string) {
+	w.Header().Set("Allow", strings.Join(methods, ", "))
+	w.WriteHeader(http.StatusMethodNotAllowed)
+}
 func decodeAdmin(w http.ResponseWriter, r *http.Request, target any) bool {
 	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || !strings.EqualFold(mediaType, "application/json") {
@@ -111,7 +115,7 @@ func (s *Service) handleAdmin(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/admin/v1/")
 	if path == "auth" {
 		if r.Method != http.MethodGet {
-			w.WriteHeader(405)
+			methodNotAllowed(w, http.MethodGet)
 			return
 		}
 		adminJSON(w, 200, map[string]any{"provider": "github", "enabled": s.admin != nil})
@@ -145,13 +149,13 @@ func (s *Service) handleAdmin(w http.ResponseWriter, r *http.Request) {
 	switch path {
 	case "session":
 		if r.Method != http.MethodGet {
-			w.WriteHeader(405)
+			methodNotAllowed(w, http.MethodGet)
 			return
 		}
 		adminJSON(w, 200, session)
 	case "logout":
 		if r.Method != http.MethodPost {
-			w.WriteHeader(405)
+			methodNotAllowed(w, http.MethodPost)
 			return
 		}
 		s.admin.mu.Lock()
@@ -161,14 +165,20 @@ func (s *Service) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(204)
 	case "nodes":
 		if r.Method == http.MethodGet {
-			adminJSON(w, 200, s.adminSnapshot())
+			data := s.adminSnapshotBytes()
+			if data == nil {
+				http.Error(w, "snapshot unavailable", 503)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			_, _ = w.Write(data)
 			return
 		}
 		if r.Method == http.MethodPost {
 			s.createNode(w, r)
 			return
 		}
-		w.WriteHeader(405)
+		methodNotAllowed(w, http.MethodGet, http.MethodPost)
 	case "probes":
 		s.handleAdminProbes(w, r)
 	default:
@@ -206,11 +216,63 @@ type adminSnapshot struct {
 	FRP              Reconciliation `json:"frp"`
 }
 
+type adminEncodedSnapshot struct {
+	generation uint64
+	data       []byte
+}
+
+// Configuration mutations invalidate without acquiring the publishing lock.
+// Readers must match generations even if a previous encoder finishes late.
+func (s *Service) invalidateAdminSnapshot() { s.adminGeneration.Add(1) }
+
+func (s *Service) publishAdminSnapshot() { s.encodeAdminSnapshot(true) }
+
+func (s *Service) encodeAdminSnapshot(force bool) {
+	if s.admin == nil {
+		return
+	}
+	// Lock order: adminPublishMu -> configMu -> mu. Mutations never acquire
+	// adminPublishMu while holding configMu; they only advance the generation.
+	s.adminPublishMu.Lock()
+	defer s.adminPublishMu.Unlock()
+	if cached := s.adminJSON.Load(); !force && cached != nil && cached.generation == s.adminGeneration.Load() {
+		return
+	}
+	s.configMu.Lock()
+	generation := s.adminGeneration.Load()
+	next := s.adminSnapshotLocked()
+	s.configMu.Unlock()
+	data, err := json.Marshal(next)
+	if err == nil && generation == s.adminGeneration.Load() {
+		s.adminJSON.Store(&adminEncodedSnapshot{generation: generation, data: data})
+	}
+}
+
+func (s *Service) adminSnapshotBytes() []byte {
+	// Retry a concurrent invalidation once. Continuous mutations must not leave
+	// a request generating snapshots forever or make it serve stale private data.
+	for attempt := 0; attempt < 2; attempt++ {
+		if cached := s.adminJSON.Load(); cached != nil && cached.generation == s.adminGeneration.Load() {
+			return cached.data
+		}
+		s.encodeAdminSnapshot(false)
+	}
+	if cached := s.adminJSON.Load(); cached != nil && cached.generation == s.adminGeneration.Load() {
+		return cached.data
+	}
+	return nil
+}
+
 func (s *Service) adminSnapshot() adminSnapshot {
 	// Settings/revision and billing/usage must describe the same configuration.
 	// Otherwise an editor could submit old calibrated usage with a newer revision.
 	s.configMu.Lock()
 	defer s.configMu.Unlock()
+	return s.adminSnapshotLocked()
+}
+
+// Caller holds configMu so settings/revisions and derived usage agree.
+func (s *Service) adminSnapshotLocked() adminSnapshot {
 	now := time.Now()
 	public := s.snapshotFor(now, true)
 	out := adminSnapshot{GeneratedAt: now.UTC(), Nodes: []adminNode{}, CredentialsState: "ready", ProbesState: "ready"}
@@ -267,16 +329,23 @@ func (s *Service) createNode(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unavailable", 503)
 		return
 	}
-	s.configMu.Lock()
-	defer s.configMu.Unlock()
-	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
-	defer cancel()
-	created, err := s.control.CreateNode(ctx, control.DefaultNodeConfig(input.Name), tokenHash(token), input.FRPBinding)
+	created, err := func() (*control.Node, error) {
+		s.configMu.Lock()
+		defer s.configMu.Unlock()
+		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+		defer cancel()
+		created, err := s.control.CreateNode(ctx, control.DefaultNodeConfig(input.Name), tokenHash(token), input.FRPBinding)
+		if err != nil {
+			s.controlWriteError(err)
+			return nil, err
+		}
+		s.refreshCommitted(ctx)
+		return created, nil
+	}()
 	if err != nil {
-		s.controlWriteError(w, r, err)
+		controlError(w, r, err)
 		return
 	}
-	s.refreshCommitted(ctx)
 	adminJSON(w, 201, map[string]string{"id": created.ID, "name": created.Name, "token": token})
 
 }
@@ -295,8 +364,20 @@ func (s *Service) mutateNode(w http.ResponseWriter, r *http.Request, path string
 		s.updateSettings(w, r, id, action == "reset-traffic")
 		return
 	}
+	var methods []string
+	switch action {
+	case "":
+		methods = []string{http.MethodDelete}
+	case "rotate":
+		methods = []string{http.MethodPost}
+	case "binding":
+		methods = []string{http.MethodPut, http.MethodDelete}
+	default:
+		http.NotFound(w, r)
+		return
+	}
 	if !(action == "" && r.Method == http.MethodDelete || action == "rotate" && r.Method == http.MethodPost || action == "binding" && (r.Method == http.MethodPut || r.Method == http.MethodDelete)) {
-		w.WriteHeader(405)
+		methodNotAllowed(w, methods...)
 		return
 	}
 	var binding *shared.FRPBinding
@@ -319,32 +400,38 @@ func (s *Service) mutateNode(w http.ResponseWriter, r *http.Request, path string
 			return
 		}
 	}
-	s.configMu.Lock()
-	defer s.configMu.Unlock()
-	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
-	defer cancel()
-	switch action {
-	case "":
-		err = s.control.DeleteNode(ctx, id)
-	case "rotate":
-		err = s.control.RotateToken(ctx, id, tokenHash(token))
-	case "binding":
-		// Only the binding change needs the current revision for optimistic
-		// concurrency; delete and rotate carry no preconditions.
-		current, gerr := s.control.Get(ctx, id)
-		if gerr != nil {
-			controlError(w, r, gerr)
-			return
+	err = func() error {
+		s.configMu.Lock()
+		defer s.configMu.Unlock()
+		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+		defer cancel()
+		switch action {
+		case "":
+			err = s.control.DeleteNode(ctx, id)
+		case "rotate":
+			err = s.control.RotateToken(ctx, id, tokenHash(token))
+		case "binding":
+			// Only the binding change needs the current revision for optimistic
+			// concurrency; delete and rotate carry no preconditions.
+			current, gerr := s.control.Get(ctx, id)
+			if gerr != nil {
+				return gerr
+			}
+			err = s.control.SetBinding(ctx, id, binding, current.ConfigRevision)
 		}
-		err = s.control.SetBinding(ctx, id, binding, current.ConfigRevision)
-	}
+		if err != nil {
+			s.controlWriteError(err)
+			return err
+		}
+		s.refreshCommitted(ctx)
+		if action == "" {
+			s.reloadTasks()
+		}
+		return nil
+	}()
 	if err != nil {
-		s.controlWriteError(w, r, err)
+		controlError(w, r, err)
 		return
-	}
-	s.refreshCommitted(ctx)
-	if action == "" {
-		s.reloadTasks()
 	}
 	if action == "rotate" {
 		adminJSON(w, 200, map[string]string{"id": id, "token": token})
@@ -355,42 +442,50 @@ func (s *Service) mutateNode(w http.ResponseWriter, r *http.Request, path string
 
 func (s *Service) handleAdminProbes(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodPut {
-		w.WriteHeader(405)
+		methodNotAllowed(w, http.MethodGet, http.MethodPut)
 		return
 	}
-	s.configMu.Lock()
-	defer s.configMu.Unlock()
-	if r.Method == http.MethodPut {
-		var input probeFile
-		if !decodeAdmin(w, r, &input) {
-			return
-		}
-		next, err := s.validateTasks(input)
-		if err != nil {
-			http.Error(w, "invalid probes", 400)
-			return
-		}
-		if next.Version <= s.tasks.Load().Version {
-			http.Error(w, "increase version", 409)
-			return
-		}
-		data, err := json.Marshal(input)
-		if err != nil {
-			http.Error(w, "probe configuration unavailable", 503)
-			return
-		}
-		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
-		defer cancel()
-		if err := s.control.WriteProbes(ctx, data); err != nil {
-			s.controlWriteError(w, r, err)
-			return
-		}
-		s.tasks.Store(next)
-		s.taskError.Store(false)
+	if r.Method == http.MethodGet {
+		// Published probe books are immutable; copying one needs no config lock.
+		adminJSON(w, 200, probeDocument(s.tasks.Load()))
+		return
 	}
-	book := s.tasks.Load()
-	cfg := probeDocument(book)
-	adminJSON(w, 200, cfg)
+	var input probeFile
+	if !decodeAdmin(w, r, &input) {
+		return
+	}
+	data, err := json.Marshal(input)
+	if err != nil {
+		http.Error(w, "probe configuration unavailable", 503)
+		return
+	}
+	// Hold the lock only for validation against the current nodes/version,
+	// durable mutation and publication; slow request/response bodies stay outside.
+	s.configMu.Lock()
+	next, err := s.validateTasks(input)
+	if err != nil {
+		s.configMu.Unlock()
+		http.Error(w, "invalid probes", 400)
+		return
+	}
+	if next.Version <= s.tasks.Load().Version {
+		s.configMu.Unlock()
+		http.Error(w, "increase version", 409)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+	if err := s.control.WriteProbes(ctx, data); err != nil {
+		s.controlWriteError(err)
+		s.configMu.Unlock()
+		controlError(w, r, err)
+		return
+	}
+	s.tasks.Store(next)
+	s.taskError.Store(false)
+	s.invalidateAdminSnapshot()
+	s.configMu.Unlock()
+	adminJSON(w, 200, probeDocument(next))
 }
 func (s *Service) handleAdminEvents(w http.ResponseWriter, r *http.Request) {
 	publicHeaders(w)
@@ -399,7 +494,7 @@ func (s *Service) handleAdminEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method != http.MethodGet {
-		w.WriteHeader(405)
+		methodNotAllowed(w, http.MethodGet)
 		return
 	}
 	if !s.adminSameOrigin(r) {
@@ -424,14 +519,14 @@ func (s *Service) handleAdminEvents(w http.ResponseWriter, r *http.Request) {
 		if _, _, ok := s.session(r); !ok {
 			return false
 		}
-		data, err := json.Marshal(s.adminSnapshot())
-		if err != nil {
+		data := s.adminSnapshotBytes()
+		if data == nil {
 			return false
 		}
 		if controller.SetWriteDeadline(time.Now().Add(5*time.Second)) != nil {
 			return false
 		}
-		if _, err = fmt.Fprintf(w, "event: snapshot\ndata: %s\n\n", data); err != nil {
+		if _, err := fmt.Fprintf(w, "event: snapshot\ndata: %s\n\n", data); err != nil {
 			return false
 		}
 		return controller.Flush() == nil

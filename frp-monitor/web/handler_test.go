@@ -1,11 +1,36 @@
 package web
 
 import (
+	"mime"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+func TestStaticMIMEIgnoresHostMappings(t *testing.T) {
+	cases := []struct{ extension, path, contentType string }{
+		{".html", "/", "text/html; charset=utf-8"},
+		{".css", "/assets/style.css", "text/css; charset=utf-8"},
+		{".js", "/assets/theme.js", "text/javascript; charset=utf-8"},
+		{".mjs", "/src/app.mjs", "text/javascript; charset=utf-8"},
+		{".svg", "/assets/favicon.svg", "image/svg+xml"},
+	}
+	for _, test := range cases {
+		saved := mime.TypeByExtension(test.extension)
+		if err := mime.AddExtensionType(test.extension, "application/octet-stream"); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = mime.AddExtensionType(test.extension, saved) })
+		for _, method := range []string{http.MethodGet, http.MethodHead} {
+			w := httptest.NewRecorder()
+			Handler().ServeHTTP(w, httptest.NewRequest(method, test.path, nil))
+			if w.Code != http.StatusOK || w.Header().Get("Content-Type") != test.contentType {
+				t.Errorf("%s %s: status=%d, type=%q", method, test.path, w.Code, w.Header().Get("Content-Type"))
+			}
+		}
+	}
+}
 
 func TestStaticAllowlist(t *testing.T) {
 	h := Handler()

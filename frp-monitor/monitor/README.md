@@ -156,10 +156,18 @@ agent 仍会校验解析后的 IP；主控任务配置不能绕过 agent 的目�
 
 ## 实时与历史 API
 
-`GET /api/public/v1/nodes` 返回 `{nodes, generated_at}`；`GET /events/public` 立即及每秒
+`GET /api/public/v1/nodes` 返回 `{nodes, generated_at}`；`GET /events/public` 立即及每两秒
 发送同结构 `event: snapshot`。两者复用发布点编码好的同一字节串，不逐请求重新编码。
 API/SSE 使用 `Cache-Control: no-store`。公开 SSE 最多 128 并发，管理 SSE 独立最多 64 并发，
-互不挤占；管理 SSE 每秒重验会话。隐藏节点不进入公开列表或公开历史接口。
+互不挤占；管理 SSE 每秒重验会话。管理快照每秒统一投影和编码，GET/SSE 共享缓存；
+配置修改使旧缓存立即失效，JSON 编码及网络读写不占用配置锁。后台配置刷新在锁外读取
+数据库，提交期间发生配置修改时丢弃旧读结果，避免恢复已撤销的凭据或旧探测任务。
+隐藏节点不进入公开列表或公开历史接口。
+
+公网部署的来源限额由 nginx 执行，见 [反代模板](../packaging/nginx.conf.example) 与
+[部署说明](../packaging/README.md#nginx-反代与来源限流)。程序不信任转发头，不增加另一套
+代理配置；保留全局 OAuth 发起容量和 SSE 总并发限制。模板未安装时，程序总量限制不能
+防止单一来源占满名额；多来源请求仍受全站容量上限约束。
 
 公开节点包括会话/新鲜度、硬件摘要、实时指标、`public_note`、`traffic_today` 和按公开
 策略裁剪的 `billing` / `traffic_plan`。费用默认不公开，套餐默认公开。`traffic_today`
@@ -190,6 +198,7 @@ GitHub access token 只用于本次身份查询，不持久化，也不发送给
 会话 Cookie 为 `frp_monitor_admin`，Path=/、HttpOnly、SameSite=Strict；OAuth 临时
 Cookie 为 SameSite=Lax，便于回调。写请求检查同源和 `X-CSRF-Token`，JSON 最大 1 MiB，
 拒绝重复、未知、大小写别名字段和非法 null。所有管理响应禁止缓存，不开放 CORS。
+同源检查将 HTTPS 443、HTTP 80 与省略默认端口视为相同来源，仍校验协议、Host 和实际端口。
 
 | 方法与路径 | 请求 / 结果 |
 |---|---|

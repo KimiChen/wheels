@@ -45,6 +45,35 @@ python3 scripts/ops.py server-init \
 维护费用及套餐、设置可信 `server_id + user + raw_client_id` 绑定，安全保存只显示一次的 agent token。
 节点 ID 为自增数字，详情地址为 `/node/1`。节点令牌与 GitHub 登录凭据独立。
 
+## nginx 反代与来源限流
+
+使用包内 [nginx.conf.example](nginx.conf.example) 时，将其包含在 nginx 的 `http {}` 中，
+替换域名、证书路径及上游端口。模板以 HTTPS 443 对外提供网页、SSE 与 WSS，监控上游
+为 `127.0.0.1:17401`。主控 `monitor.bindAddr` 应为 `127.0.0.1`，使用回环 HTTP 时清空
+`monitor.certFile/keyFile`；FRP 的监听和 TLS 配置保持独立。代理保留外部 Host（含端口），
+GitHub callback 使用公开 HTTPS 地址，节点使用 `wss://monitor.example.invalid/agent/v1/ws`。
+
+模板以连接来源 `$binary_remote_addr` 计数，返回 429 表示触发限制：
+
+| 入口 | 来源限额 |
+|---|---|
+| OAuth 发起 | 每 IP 每分钟 6 次，允许 1 次突发；回调不占此额度 |
+| 公开 SSE | 每 IP 4 路、全站 96 路；新连接每 IP 每秒 1 次，允许 4 次突发 |
+| 管理 SSE | 每 IP 8 路，独立于公开 SSE 配额 |
+| 公开 API | 每 IP 每秒 10 次，允许 20 次突发 |
+
+程序仍保留 OAuth 全局请求容量和公开/管理 SSE 的 128/64 路上限；公开 SSE 每两秒推送。
+这些限制控制请求与连接数，不是固定的每秒字节带宽保证。共享 NAT 的访客共用来源额度，
+部署者可按实际访问量调整。nginx 之前另有 CDN/代理时，只通过 `set_real_ip_from` 信任其
+明确的地址段，再配置 `real_ip_header`；禁止信任所有地址或直接按客户端传来的 XFF 限流。
+后端仅回环监听，避免绕过 nginx。详见 nginx 官方的
+[请求限流](https://nginx.org/en/docs/http/ngx_http_limit_req_module.html) 和
+[连接限额](https://nginx.org/en/docs/http/ngx_http_limit_conn_module.html)说明。
+
+合并到现有站点后执行 `nginx -t`，成功后再 reload。源码测试
+`python3 -m unittest discover -s tests -p nginx_test.py -v` 使用隔离 nginx 和临时证书，
+验证来源限额、回调、伪造 XFF 和 WSS 升级；不会修改正在运行的 nginx。
+
 ## Agent 接入
 
 安全传递独立的agent token和FRP token文件到目标机器，权限0600。不要把token放入URL、
@@ -94,6 +123,7 @@ Agent 将两处 `server` 改为 `agent`。生成器只输出unit，安装/启用
 
 工具只支持 `local.py` / `ops.py` 创建的 format 2 安装；开发期不兼容旧配置和备份。运行文件必须在同一私有目录，不支持外部includes。
 先创建0700备份目录。输出是包含凭据和私钥的0600归档，应和运行目录一样限制访问。
+输出必须位于运行目录之外，运行目录的任意层级子目录均被拒绝。
 
 ```sh
 python3 scripts/ops.py backup --directory /var/lib/frp-monitor \

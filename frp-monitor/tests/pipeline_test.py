@@ -9,6 +9,7 @@ import subprocess
 import tarfile
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from unittest import mock
 
 SPEC = importlib.util.spec_from_file_location("frp_pipeline", Path(__file__).resolve().parents[1] / "scripts" / "frp.py")
@@ -107,6 +108,46 @@ class PipelineTests(unittest.TestCase):
         (self.root / ".env").write_text("FRP_MONITOR_CACHE_DIR=$(touch should-not-exist)\n")
         with self.assertRaises(frp.PipelineError):
             frp.read_config(self.root, {})
+
+    @unittest.skipUnless(hasattr(os, 'mkfifo'), 'requires Unix FIFO')
+    def test_regular_reader_rechecks_opened_file_after_fifo_replacement(self):
+        path = self.root / 'input'
+        path.write_bytes(b'regular input')
+        self.assertEqual(frp.read_regular(path), b'regular input')
+        original_open = os.open
+
+        def replace_before_open(value, flags, *args, **kwargs):
+            self.assertTrue(flags & os.O_NONBLOCK, 'FIFO replacement must not block')
+            self.assertTrue(flags & os.O_NOFOLLOW)
+            path.unlink()
+            os.mkfifo(path, 0o600)
+            return original_open(value, flags, *args, **kwargs)
+
+        with mock.patch.object(frp.os, 'open', side_effect=replace_before_open), self.assertRaises(frp.PipelineError):
+            frp.read_regular(path)
+
+    def test_regular_reader_rejects_link_replacement_after_path_check(self):
+        path, target = self.root / 'input', self.root / 'outside'
+        path.write_bytes(b'original')
+        target.write_bytes(b'private target')
+        original_open = os.open
+
+        def replace_before_open(value, flags, *args, **kwargs):
+            path.unlink()
+            path.symlink_to(target)
+            return original_open(value, flags, *args, **kwargs)
+
+        with mock.patch.object(frp.os, 'open', side_effect=replace_before_open), self.assertRaises(OSError):
+            frp.read_regular(path)
+        self.assertEqual(target.read_bytes(), b'private target')
+
+    def test_cli_reports_corrupt_tar_without_a_traceback(self):
+        errors = io.StringIO()
+        with mock.patch.object(frp, 'Pipeline') as constructor, redirect_stderr(errors):
+            constructor.return_value.prepare.side_effect = tarfile.ReadError('corrupt fixture archive')
+            self.assertEqual(frp.main(['prepare']), 1)
+        self.assertIn('frp-monitor: corrupt fixture archive', errors.getvalue())
+        self.assertNotIn('Traceback', errors.getvalue())
 
     def test_empty_optional_mirror_uses_official_repository(self):
         (self.root / ".env").write_text("FRP_MONITOR_UPSTREAM_MIRROR=\n")
@@ -249,7 +290,7 @@ class PipelineTests(unittest.TestCase):
         license_path = self.root / "agent/collect/LICENSE.monitor-probe"
         license_path.parent.mkdir(parents=True, exist_ok=True)
         license_path.write_text("fixture MIT license\n")
-        for name in ("scripts/ops.py", "scripts/local.py", "packaging/README.md", ".env.example", "monitor/control/schema.sql"):
+        for name in ("scripts/ops.py", "scripts/local.py", "packaging/README.md", "packaging/nginx.conf.example", ".env.example", "monitor/control/schema.sql"):
             path = self.root / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("public operations fixture\n")
@@ -266,7 +307,7 @@ class PipelineTests(unittest.TestCase):
 
     def test_packages_are_deterministic_allowlisted_and_checksummed(self):
         pipeline = self.pipeline()
-        for name in ("scripts/ops.py", "scripts/local.py", "packaging/README.md", ".env.example", "monitor/control/schema.sql"):
+        for name in ("scripts/ops.py", "scripts/local.py", "packaging/README.md", "packaging/nginx.conf.example", ".env.example", "monitor/control/schema.sql"):
             path = self.root / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("public operations fixture\n")
@@ -304,6 +345,7 @@ class PipelineTests(unittest.TestCase):
             self.assertNotIn(".env", members)
             self.assertIn("scripts/ops.py", members)
             self.assertIn("packaging/README.md", members)
+            self.assertEqual(members["packaging/nginx.conf.example"], b"public operations fixture\n")
             self.assertEqual(members["monitor/control/schema.sql"], b"public operations fixture\n")
             self.assertEqual(members["LICENSE.monitor-probe"], b"fixture MIT license\n")
             self.assertEqual(members["licenses/sqlite/LICENSE"], b"fixture BSD license\n")

@@ -67,6 +67,12 @@ func (s *Service) refreshNodes(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	s.applyNodes(nodes)
+	return nil
+}
+
+// Caller holds configMu after validating that this database snapshot is current.
+func (s *Service) applyNodes(nodes []*control.Node) {
 	configs := make(nodeConfigs, len(nodes))
 	creds := make([]credential, 0, len(nodes))
 	for _, n := range nodes {
@@ -75,7 +81,6 @@ func (s *Service) refreshNodes(ctx context.Context) error {
 	}
 	s.configs.Store(&configs)
 	s.applyCredentials(creds)
-	return nil
 }
 func controlError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
@@ -96,11 +101,10 @@ func controlError(w http.ResponseWriter, r *http.Request, err error) {
 // Do not leave the previous authorization snapshot active while its outcome is
 // uncertain; the periodic database refresh restores the committed state.
 // Caller holds configMu, just like the successful write/refresh path.
-func (s *Service) controlWriteError(w http.ResponseWriter, r *http.Request, err error) {
+func (s *Service) controlWriteError(err error) {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		s.invalidateCredentials()
 	}
-	controlError(w, r, err)
 }
 func (s *Service) updateSettings(w http.ResponseWriter, r *http.Request, id string, reset bool) {
 	var input struct {
@@ -110,7 +114,7 @@ func (s *Service) updateSettings(w http.ResponseWriter, r *http.Request, id stri
 	}
 	if reset {
 		if r.Method != http.MethodPost {
-			w.WriteHeader(405)
+			methodNotAllowed(w, http.MethodPost)
 			return
 		}
 		var body struct {
@@ -122,7 +126,7 @@ func (s *Service) updateSettings(w http.ResponseWriter, r *http.Request, id stri
 		input.ConfigRevision = body.ConfigRevision
 	} else {
 		if r.Method != http.MethodPatch {
-			w.WriteHeader(405)
+			methodNotAllowed(w, http.MethodPatch)
 			return
 		}
 		if !decodeAdmin(w, r, &input) {
@@ -133,24 +137,30 @@ func (s *Service) updateSettings(w http.ResponseWriter, r *http.Request, id stri
 		http.Error(w, "config_revision required", 400)
 		return
 	}
-	s.configMu.Lock()
-	defer s.configMu.Unlock()
-	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
-	defer cancel()
-	if reset {
-		n, err := s.control.Get(ctx, id)
-		if err != nil {
-			controlError(w, r, err)
-			return
+	n, err := func() (*control.Node, error) {
+		s.configMu.Lock()
+		defer s.configMu.Unlock()
+		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+		defer cancel()
+		if reset {
+			n, err := s.control.Get(ctx, id)
+			if err != nil {
+				return nil, err
+			}
+			input.NodeConfig = n.NodeConfig
 		}
-		input.NodeConfig = n.NodeConfig
-	}
-	n, err := s.control.UpdateNode(ctx, id, input.NodeConfig, input.TrafficUsedBytes, reset, input.ConfigRevision)
+		n, err := s.control.UpdateNode(ctx, id, input.NodeConfig, input.TrafficUsedBytes, reset, input.ConfigRevision)
+		if err != nil {
+			s.controlWriteError(err)
+			return nil, err
+		}
+		s.refreshCommitted(ctx)
+		return n, nil
+	}()
 	if err != nil {
-		s.controlWriteError(w, r, err)
+		controlError(w, r, err)
 		return
 	}
-	s.refreshCommitted(ctx)
 	adminJSON(w, 200, nodeSettings{n.NodeConfig, n.ConfigRevision})
 }
 
@@ -167,4 +177,5 @@ func (s *Service) invalidateCredentials() {
 	s.configs.Store(&empty)
 	s.applyCredentials(nil)
 	s.credentialError.Store(true)
+	s.invalidateAdminSnapshot()
 }

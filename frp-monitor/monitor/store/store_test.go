@@ -214,11 +214,111 @@ func TestInvalidInputAndQueryCancellation(t *testing.T) {
 	if _, err := s.History(ctx, "1", at, at.Add(time.Minute), time.Minute); !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}
-	if !s.Status().Degraded || s.Status().QueryErrors == 0 {
+	if s.Status().Degraded || s.Status().QueryErrors != 0 {
 		t.Fatal(s.Status())
+	}
+	ctx, cancel = context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	if _, err := s.ProbeHistory(ctx, "1", "task", at, at.Add(time.Minute), time.Minute); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal(err)
+	}
+	if s.Status().Degraded || s.Status().QueryErrors != 0 {
+		t.Fatal("caller deadline changed storage health", s.Status())
 	}
 	if _, err := s.History(context.Background(), "1", at.Add(-32*24*time.Hour), at, time.Minute); err == nil {
 		t.Fatal("unbounded query")
+	}
+}
+
+func TestQueryErrorsDistinguishCallerAndStorageFailures(t *testing.T) {
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	for _, tt := range []struct {
+		name   string
+		parent context.Context
+		err    error
+		failed bool
+	}{
+		{"caller cancellation", canceled, context.Canceled, false},
+		{"caller VM deadline", canceled, storage.ErrDeadlineExceeded, false},
+		{"internal context budget", context.Background(), context.DeadlineExceeded, true},
+		{"internal VM budget", context.Background(), storage.ErrDeadlineExceeded, true},
+		{"failure during cancellation", canceled, errors.New("invalid history block"), true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &Store{}
+			if err := s.queryError(tt.parent, tt.err); err == nil {
+				t.Fatal("query error lost")
+			}
+			if status := s.Status(); status.Degraded != tt.failed || (status.QueryErrors != 0) != tt.failed {
+				t.Fatal(status)
+			}
+		})
+	}
+
+	s := openTest(t)
+	at := minute()
+	if !s.Accept("1", at, metrics(t)) {
+		t.Fatal("sample rejected")
+	}
+	flush(t, s)
+	for _, reason := range []string{"write_failed", "query_failed"} {
+		s.failure.Store(&reason)
+		if _, err := s.History(context.Background(), "1", at, at.Add(time.Minute), time.Minute); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.History(canceled, "1", at, at.Add(time.Minute), time.Minute); !errors.Is(err, context.Canceled) {
+			t.Fatal(err)
+		}
+		if status := s.Status(); !status.Degraded || status.LastError != reason || status.QueryErrors != 0 {
+			t.Fatal("successful or canceled query changed an existing failure", status)
+		}
+	}
+}
+
+// flushReadyContext holds Flush before its response select until the worker
+// has made both the answer and shutdown notification ready.
+type flushReadyContext struct {
+	context.Context
+	ready <-chan struct{}
+	calls int
+}
+
+func (c *flushReadyContext) Done() <-chan struct{} {
+	c.calls++
+	if c.calls == 2 {
+		<-c.ready
+	}
+	return c.Context.Done()
+}
+
+func TestFlushPreservesAnswerWhenShutdownAlsoCompletes(t *testing.T) {
+	failure := errors.New("test flush failure")
+	for _, answer := range []error{nil, failure} {
+		for range 32 {
+			s := &Store{queue: make(chan event, 1), stop: make(chan struct{}), done: make(chan struct{})}
+			ready := make(chan struct{})
+			ctx := &flushReadyContext{Context: context.Background(), ready: ready}
+			go func() {
+				e := <-s.queue
+				e.flush <- answer
+				close(s.done)
+				close(ready)
+			}()
+			if err := s.Flush(ctx); !errors.Is(err, answer) {
+				t.Fatal("shutdown replaced the completed flush result", err, answer)
+			}
+		}
+	}
+	s := &Store{queue: make(chan event, 1), stop: make(chan struct{}), done: make(chan struct{})}
+	ready := make(chan struct{})
+	go func() {
+		<-s.queue // No response: shutdown interrupted the request.
+		close(s.done)
+		close(ready)
+	}()
+	if err := s.Flush(&flushReadyContext{Context: context.Background(), ready: ready}); !errors.Is(err, ErrClosed) {
+		t.Fatal("unanswered flush did not report shutdown", err)
 	}
 }
 func TestPrivatePathLimitsAndMaskedOpenError(t *testing.T) {

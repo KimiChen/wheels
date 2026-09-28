@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -34,7 +35,13 @@ class PipelineError(Exception):
 def read_regular(path: Path) -> bytes:
     if path.is_symlink() or not path.is_file():
         raise PipelineError(f"Expected a regular, non-symlink file: {path}")
-    return path.read_bytes()
+    # Recheck the opened object, without following a replacement link or
+    # blocking if the pathname was replaced by a FIFO after the first check.
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as stream:
+        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            raise PipelineError(f"Expected a regular file: {path}")
+        return stream.read()
 
 
 def load_lock(root: Path) -> dict:
@@ -480,7 +487,7 @@ class Pipeline:
                                       "SQLite control storage is required; embedded history is optional. Administration uses GitHub OAuth only.\n"
                                       "Operations and systemd instructions: packaging/README.md; tools require Python 3.11+.\n"
                                       "Build provenance and exact Go version: BUILD.json.\n").encode("utf-8")
-            for name in ("scripts/ops.py", "scripts/local.py", "packaging/README.md", ".env.example"):
+            for name in ("scripts/ops.py", "scripts/local.py", "packaging/README.md", "packaging/nginx.conf.example", ".env.example"):
                 payload[name] = read_regular(self.root / name)
             payload["monitor/control/schema.sql"] = read_regular(self.root / "monitor/control/schema.sql")
             payload["SHA256SUMS"] = "".join(f"{digest(data)}  {name}\n" for name, data in sorted(payload.items())).encode("utf-8")
@@ -526,7 +533,7 @@ def main(argv: list[str] | None = None) -> int:
             result = pipeline.build(args.target, args.native) if args.command == "build" else getattr(pipeline, args.command)()
         print(json.dumps(result, sort_keys=True, indent=2))
         return 0
-    except (PipelineError, OSError, UnicodeError, ValueError) as exc:
+    except (PipelineError, OSError, UnicodeError, ValueError, tarfile.TarError) as exc:
         print(f"frp-monitor: {exc}", file=sys.stderr)
         return 1
 

@@ -30,10 +30,15 @@ def settings(root=ROOT, environment=None):
               "FRP_MONITOR_RETENTION_DAYS": "7", "FRP_AGENT_NAME": "本地演示节点", "FRP_AGENT_IFACE": "", "FRP_MONITOR_HISTORY_DATA_PATH": "",
               "FRP_GITHUB_CLIENT_ID": "", "FRP_GITHUB_CLIENT_SECRET_FILE": "", "FRP_GITHUB_CALLBACK_URL": "", "FRP_GITHUB_ADMIN_USERS": ""}
     path = root / ".env"
-    if path.exists():
-        if path.is_symlink() or not path.is_file():
-            raise ValueError(".env must be a regular file")
-        for line in path.read_text(encoding="utf-8").splitlines():
+    if path.exists() or path.is_symlink():
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                raise ValueError(".env must be a regular file")
+            data = stream.read(1024 * 1024 + 1)
+        if len(data) > 1024 * 1024:
+            raise ValueError(".env exceeds the size limit")
+        for line in data.decode("utf-8").splitlines():
             line = line.strip()
             if line.startswith("export "):
                 line = line[7:].strip()
@@ -287,6 +292,18 @@ def _signal_group(process, sig):
 def run_demo(folder: Path):
     binaries = native_binaries()
     environment = {k: v for k, v in os.environ.items() if k in ("PATH", "HOME", "TMPDIR")}
+    # Generated TLS demos are short-lived; diagnose expiry before launching
+    # two processes which would otherwise only log repeated TLS failures.
+    certificate = folder / "local.crt"
+    if certificate.exists() or certificate.is_symlink():
+        data = read_private(certificate)
+        try:
+            check = subprocess.run(["openssl", "x509", "-checkend", "0", "-noout"],
+                                   input=data, env=environment, capture_output=True, timeout=5)
+        except subprocess.TimeoutExpired as exc:
+            raise ValueError("local TLS certificate check timed out") from exc
+        if check.returncode:
+            raise ValueError("local TLS certificate expired or invalid; initialize a new demo directory")
     for binary, config in zip(binaries, ("server.toml", "agent.toml")):
         if not binary.is_file() or not os.access(binary, os.X_OK):
             raise ValueError("native binaries missing; run scripts/frp.py build --native")

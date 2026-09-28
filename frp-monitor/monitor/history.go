@@ -92,7 +92,7 @@ func projectPoint(p store.Point) historyPoint {
 func (s *Service) handleHistory(w http.ResponseWriter, r *http.Request) {
 	publicHeaders(w)
 	if r.Method != http.MethodGet {
-		w.WriteHeader(http.StatusMethodNotAllowed)
+		methodNotAllowed(w, http.MethodGet)
 		return
 	}
 	path := strings.TrimPrefix(r.URL.Path, "/api/public/v1/nodes/")

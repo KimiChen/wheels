@@ -729,6 +729,41 @@ func TestTrafficPartialTracksCurrentRanges(t *testing.T) {
 	})
 }
 
+func TestCallerErrorsDoNotDegradeAccounting(t *testing.T) {
+	f := setup(t, utc("2026-09-28T12:00:00Z"), time.UTC)
+	for _, cause := range []error{context.Canceled, context.DeadlineExceeded} {
+		// Exercise the worker-result branch of call, even when cancellation
+		// would normally win its competing context select.
+		err := f.s.call(context.Background(), func(*sql.Tx) error { return fmt.Errorf("query interrupted: %w", cause) })
+		if !errors.Is(err, cause) || !f.s.Healthy() {
+			t.Fatal("caller error changed accounting health", err, f.s.Healthy())
+		}
+	}
+	failure := errors.New("test database failure")
+	if err := f.s.call(context.Background(), func(*sql.Tx) error { return failure }); !errors.Is(err, failure) || f.s.Healthy() {
+		t.Fatal("storage failure not reflected in health", err)
+	}
+	if err := f.s.call(context.Background(), func(*sql.Tx) error { return context.Canceled }); !errors.Is(err, context.Canceled) || f.s.Healthy() {
+		t.Fatal("cancellation cleared an existing storage failure", err)
+	}
+}
+
+func TestCanceledTransactionReportsItsContextError(t *testing.T) {
+	f := setup(t, utc("2026-09-28T12:00:00Z"), time.UTC)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r := request{ctx: ctx, done: make(chan error, 1), call: func(tx *sql.Tx) error {
+		cancel()
+		// Model database/sql's cancellation rollback happening before Commit.
+		_ = tx.Rollback()
+		return nil
+	}}
+	f.s.serveCall(r)
+	if err := <-r.done; !errors.Is(err, context.Canceled) {
+		t.Fatal("canceled transaction reported a storage failure", err)
+	}
+}
+
 func TestStaleIngestErrorFlushKeepsRecoveredHealth(t *testing.T) {
 	at := utc("2026-09-28T12:00:00Z")
 	f := setup(t, at, time.UTC)

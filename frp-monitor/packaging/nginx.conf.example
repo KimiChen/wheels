@@ -1,0 +1,80 @@
+# Include this file inside nginx's http {} block. Replace the domain and TLS
+# certificate paths, and keep the monitor HTTP listener on loopback only.
+# These limits use the connecting IP, never a client-supplied X-Forwarded-For.
+# Behind another proxy, enable real_ip only for its known, trusted CIDRs using
+# set_real_ip_from; do not trust 0.0.0.0/0, ::/0, or arbitrary forwarded headers.
+
+limit_req_zone $binary_remote_addr zone=frp_monitor_oauth:1m rate=6r/m;
+limit_req_zone $binary_remote_addr zone=frp_monitor_sse_rate:1m rate=1r/s;
+limit_req_zone $binary_remote_addr zone=frp_monitor_public_api:1m rate=10r/s;
+limit_conn_zone $binary_remote_addr zone=frp_monitor_public_sse_ip:1m;
+limit_conn_zone $server_name zone=frp_monitor_public_sse_total:1m;
+limit_conn_zone $binary_remote_addr zone=frp_monitor_admin_sse_ip:1m;
+
+map $http_upgrade $frp_monitor_connection {
+    default upgrade;
+    '' close;
+}
+
+server {
+    listen 443 ssl;
+    server_name monitor.example.invalid;
+
+    ssl_certificate /etc/nginx/tls/monitor.example.invalid/fullchain.pem;
+    ssl_certificate_key /etc/nginx/tls/monitor.example.invalid/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    limit_req_status 429;
+    limit_conn_status 429;
+
+    proxy_http_version 1.1;
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $frp_monitor_connection;
+
+    location = /agent/v1/ws {
+        proxy_read_timeout 1h;
+        proxy_send_timeout 1h;
+        proxy_buffering off;
+        proxy_pass http://127.0.0.1:17401;
+    }
+
+    # Only login initiation consumes this budget; callbacks use location /.
+    location = /api/admin/v1/auth/github {
+        limit_req zone=frp_monitor_oauth burst=1 nodelay;
+        proxy_pass http://127.0.0.1:17401;
+    }
+
+    location = /events/public {
+        limit_req zone=frp_monitor_sse_rate burst=4 nodelay;
+        limit_conn frp_monitor_public_sse_ip 4;
+        limit_conn frp_monitor_public_sse_total 96;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 1h;
+        proxy_send_timeout 1h;
+        proxy_pass http://127.0.0.1:17401;
+    }
+
+    # Admin streams do not consume the public stream connection pool.
+    location = /events/admin {
+        limit_conn frp_monitor_admin_sse_ip 8;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 1h;
+        proxy_send_timeout 1h;
+        proxy_pass http://127.0.0.1:17401;
+    }
+
+    location ^~ /api/public/ {
+        limit_req zone=frp_monitor_public_api burst=20 nodelay;
+        proxy_pass http://127.0.0.1:17401;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:17401;
+    }
+}

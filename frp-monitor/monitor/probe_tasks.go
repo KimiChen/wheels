@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/fatedier/frp/extension/frpmonitor/monitor/control"
 	"github.com/fatedier/frp/extension/frpmonitor/shared"
 	"github.com/gorilla/websocket"
 )
@@ -36,19 +37,27 @@ type probeFile struct {
 
 func (s *Service) reloadTasks() {
 	next, err := s.readTasks()
+	s.applyTasks(next, err)
+}
+
+// Caller holds configMu once the service is running.
+func (s *Service) applyTasks(next *probeBook, err error) {
 	if err != nil {
 		s.taskError.Store(true)
+		s.invalidateAdminSnapshot()
 		return
 	}
 	previous := s.tasks.Load()
 	if next.Version < previous.Version || (next.Version == previous.Version && !reflect.DeepEqual(next.Nodes, previous.Nodes)) {
 		s.taskError.Store(true)
+		s.invalidateAdminSnapshot()
 		return
 	}
 	if next.Version > previous.Version {
 		s.tasks.Store(next)
 	}
 	s.taskError.Store(false)
+	s.invalidateAdminSnapshot()
 }
 
 func (s *Service) readTasks() (*probeBook, error) {
@@ -59,6 +68,11 @@ func (s *Service) readTasks() (*probeBook, error) {
 	if err != nil {
 		return nil, invalid
 	}
+	return s.parseTasks(data)
+}
+
+func (s *Service) parseTasks(data []byte) (*probeBook, error) {
+	invalid := errors.New("invalid local probe task configuration")
 	var cfg probeFile
 	if strictJSON(data, &cfg) != nil {
 		return nil, invalid
@@ -108,15 +122,50 @@ func (s *Service) taskLoop() {
 		case <-s.ctx.Done():
 			return
 		case <-ticker.C:
-			func() {
-				s.configMu.Lock()
-				defer s.configMu.Unlock()
-				s.reloadCredentials()
-				s.reloadAdmin()
-				s.reloadTasks()
-			}()
+			s.refreshConfiguration()
 		}
 	}
+}
+
+// Database waits happen outside configMu. A concurrent management change
+// replaces one of these immutable pointers; discard the old read in that case
+// so a pre-revocation snapshot cannot restore a removed credential or task.
+func (s *Service) refreshConfiguration() {
+	read := configurationRead{configs: s.configs.Load(), tasks: s.tasks.Load()}
+	ctx, cancel := context.WithTimeout(s.ctx, 2*time.Second)
+	read.nodes, read.nodeErr = s.control.Nodes(ctx)
+	read.taskData, read.taskErr = s.control.ReadProbes(ctx)
+	cancel()
+	s.reloadAdmin()
+	s.applyConfiguration(read)
+}
+
+type configurationRead struct {
+	configs  *nodeConfigs
+	tasks    *probeBook
+	nodes    []*control.Node
+	nodeErr  error
+	taskData []byte
+	taskErr  error
+}
+
+func (s *Service) applyConfiguration(read configurationRead) {
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
+	if read.configs != s.configs.Load() || read.tasks != s.tasks.Load() {
+		return
+	}
+	if read.nodeErr != nil {
+		s.credentialError.Store(true)
+		s.invalidateAdminSnapshot()
+	} else {
+		s.applyNodes(read.nodes)
+	}
+	var next *probeBook
+	if read.taskErr == nil {
+		next, read.taskErr = s.parseTasks(read.taskData)
+	}
+	s.applyTasks(next, read.taskErr)
 }
 func hasCapability(values []string, name string) bool {
 	for _, value := range values {

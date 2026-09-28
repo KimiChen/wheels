@@ -167,12 +167,15 @@ func TestAdminAuthenticationCSRFAndRedaction(t *testing.T) {
 	if len(session.CSRF) != 43 || time.Until(session.ExpiresAt) < 7*time.Hour {
 		t.Fatal("bad session")
 	}
-	private := adminRequest(t, s, "GET", "/api/admin/v1/nodes", "", cookie, "", nil)
-	expectStatus(t, private, 200)
-	data, _ := io.ReadAll(private.Body)
-	if !strings.Contains(string(data), `"hostname"`) || !strings.Contains(string(data), `"raw_client_id"`) {
-		t.Fatal("private facts missing")
-	}
+	// Live facts join the shared management snapshot on its next publication.
+	var data []byte
+	eventually(t, func() bool {
+		private := adminRequest(t, s, "GET", "/api/admin/v1/nodes", "", cookie, "", nil)
+		expectStatus(t, private, 200)
+		data, _ = io.ReadAll(private.Body)
+		private.Body.Close()
+		return strings.Contains(string(data), `"hostname"`) && strings.Contains(string(data), `"raw_client_id"`)
+	})
 	for _, secret := range []string{"token_sha256", agent, admin, tokenHash(agent), tokenHash(admin)} {
 		if strings.Contains(string(data), secret) {
 			t.Fatalf("private read exposed credential %q", secret)
@@ -632,5 +635,214 @@ func TestAdminSameOriginRejectsMissingCallback(t *testing.T) {
 	s.githubStart(record, httptest.NewRequest("GET", "http://"+s.Address()+"/api/admin/v1/auth/github", nil))
 	if record.Code != 403 {
 		t.Fatalf("missing callback tolerated: %d", record.Code)
+	}
+}
+
+func TestAdminSameOriginNormalizesDefaultPorts(t *testing.T) {
+	for _, tc := range []struct {
+		name, callback, origin, host string
+		want                         bool
+	}{
+		{"https omitted", "https://monitor.example.invalid:443", "https://monitor.example.invalid", "monitor.example.invalid", true},
+		{"https explicit", "https://monitor.example.invalid", "https://monitor.example.invalid:443", "monitor.example.invalid:443", true},
+		{"http omitted", "http://127.0.0.1:80", "http://127.0.0.1", "127.0.0.1", true},
+		{"http explicit", "http://127.0.0.1", "http://127.0.0.1:80", "127.0.0.1:80", true},
+		{"hostname case", "https://MONITOR.example.invalid:443", "https://monitor.example.invalid", "monitor.example.invalid", true},
+		{"ipv6", "http://[::1]:80", "http://[::1]", "[::1]", true},
+		{"unbracketed ipv6", "http://[::1]:80", "http://::1:80", "[::1]", false},
+		{"bracketed domain", "https://monitor.example.invalid", "https://[monitor.example.invalid]", "monitor.example.invalid", false},
+		{"custom port", "https://monitor.example.invalid:8443", "https://monitor.example.invalid:8443", "monitor.example.invalid:8443", true},
+		{"wrong origin port", "https://monitor.example.invalid", "https://monitor.example.invalid:8443", "monitor.example.invalid", false},
+		{"wrong host port", "https://monitor.example.invalid", "https://monitor.example.invalid", "monitor.example.invalid:8443", false},
+		{"wrong host", "https://monitor.example.invalid", "https://monitor.example.invalid", "other.example.invalid", false},
+		{"wrong scheme", "https://monitor.example.invalid", "http://monitor.example.invalid", "monitor.example.invalid", false},
+		{"userinfo", "https://monitor.example.invalid", "https://user@monitor.example.invalid", "monitor.example.invalid", false},
+		{"path", "https://monitor.example.invalid", "https://monitor.example.invalid/", "monitor.example.invalid", false},
+		{"query", "https://monitor.example.invalid", "https://monitor.example.invalid?x=1", "monitor.example.invalid", false},
+		{"empty query", "https://monitor.example.invalid", "https://monitor.example.invalid?", "monitor.example.invalid", false},
+		{"fragment", "https://monitor.example.invalid", "https://monitor.example.invalid#x", "monitor.example.invalid", false},
+		{"empty fragment", "https://monitor.example.invalid", "https://monitor.example.invalid#", "monitor.example.invalid", false},
+		{"empty port", "https://monitor.example.invalid", "https://monitor.example.invalid:", "monitor.example.invalid", false},
+		{"overflow port", "https://monitor.example.invalid", "https://monitor.example.invalid:65536", "monitor.example.invalid", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &Service{cfg: shared.MonitorConfig{GitHubCallbackURL: tc.callback + "/api/admin/v1/auth/github/callback"}}
+			r := httptest.NewRequest(http.MethodPatch, "https://monitor.example.invalid/api/admin/v1/nodes/1/settings", nil)
+			r.Host = tc.host
+			r.Header.Set("Origin", tc.origin)
+			r.Header.Set("Sec-Fetch-Site", "same-origin")
+			if got := s.adminSameOrigin(r); got != tc.want {
+				t.Fatalf("same origin = %v, want %v", got, tc.want)
+			}
+			r.Header.Add("Origin", tc.origin)
+			if s.adminSameOrigin(r) {
+				t.Fatal("multiple Origin headers accepted")
+			}
+		})
+	}
+}
+
+// Network callbacks must never run with the configuration lock held. Wait for
+// another goroutine rather than TryLock so an unrelated brief publisher is OK.
+func assertConfigUnlocked(t *testing.T, s *Service) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() { s.configMu.Lock(); s.configMu.Unlock(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Error("configuration lock held during HTTP body I/O")
+	}
+}
+
+type configUnlockedRecorder struct {
+	*httptest.ResponseRecorder
+	t *testing.T
+	s *Service
+}
+
+func (w *configUnlockedRecorder) WriteHeader(status int) {
+	assertConfigUnlocked(w.t, w.s)
+	w.ResponseRecorder.WriteHeader(status)
+}
+func (w *configUnlockedRecorder) Write(data []byte) (int, error) {
+	assertConfigUnlocked(w.t, w.s)
+	return w.ResponseRecorder.Write(data)
+}
+
+type configUnlockedBody struct {
+	io.Reader
+	t *testing.T
+	s *Service
+}
+
+func (b configUnlockedBody) Read(data []byte) (int, error) {
+	assertConfigUnlocked(b.t, b.s)
+	return b.Reader.Read(data)
+}
+
+func TestAdminProbeBodiesStayOutsideConfigLock(t *testing.T) {
+	s, _, _ := testAdmin(t)
+	for _, tc := range []struct {
+		method, body string
+		status       int
+	}{
+		{http.MethodPut, `{"version":2,"nodes":[]}`, 200},
+		{http.MethodPut, `{"version":2,"nodes":[]}`, 409},
+		{http.MethodPut, `{"version":3,"nodes":[{"agent_id":"999","tasks":[]}]}`, 400},
+		{http.MethodPut, `{"version":`, 400},
+		{http.MethodGet, "", 200},
+	} {
+		r := httptest.NewRequest(tc.method, "/api/admin/v1/probes", configUnlockedBody{strings.NewReader(tc.body), t, s})
+		r.Header.Set("Content-Type", "application/json")
+		w := &configUnlockedRecorder{httptest.NewRecorder(), t, s}
+		s.handleAdminProbes(w, r)
+		if w.Code != tc.status {
+			t.Fatalf("%s %s: %d, want %d", tc.method, tc.body, w.Code, tc.status)
+		}
+	}
+}
+
+func TestAdminMutationsWriteResponsesOutsideConfigLock(t *testing.T) {
+	for _, action := range []string{"create", "invalid create", "rotate", "binding", "delete", "missing", "storage error"} {
+		t.Run(action, func(t *testing.T) {
+			s, _, _ := testAdmin(t)
+			w := &configUnlockedRecorder{httptest.NewRecorder(), t, s}
+			method, path, body, want := http.MethodPost, "1/rotate", "", 200
+			switch action {
+			case "create":
+				body, want = `{"name":"Second"}`, 201
+			case "invalid create":
+				body, want = `{"name":""}`, 400
+			case "binding":
+				method, path, body, want = http.MethodPut, "1/binding", `{"server_id":"example","user":"","raw_client_id":"bound"}`, 204
+			case "delete":
+				method, path, want = http.MethodDelete, "1", 204
+			case "missing":
+				method, path, want = http.MethodDelete, "999", 404
+			case "storage error":
+				s.control.Close()
+				want = 503
+			}
+			r := httptest.NewRequest(method, "/api/admin/v1/nodes/"+path, strings.NewReader(body))
+			r.Header.Set("Content-Type", "application/json")
+			if action == "create" || action == "invalid create" {
+				s.createNode(w, r)
+			} else {
+				s.mutateNode(w, r, path)
+			}
+			if w.Code != want {
+				t.Fatalf("status %d, want %d", w.Code, want)
+			}
+		})
+	}
+}
+
+func TestAdminHEADHasAllowAndCannotMutateWithoutCSRF(t *testing.T) {
+	s, _, admin := testAdmin(t)
+	cookie, _ := login(t, s, admin)
+	for _, tc := range []struct{ path, allow string }{
+		{"auth", "GET"}, {"session", "GET"}, {"logout", "POST"}, {"nodes", "GET, POST"},
+		{"nodes/1", "DELETE"}, {"nodes/1/rotate", "POST"}, {"nodes/1/binding", "PUT, DELETE"},
+		{"nodes/1/settings", "PATCH"}, {"nodes/1/reset-traffic", "POST"}, {"probes", "GET, PUT"},
+	} {
+		res := adminRequest(t, s, http.MethodHead, "/api/admin/v1/"+tc.path, "", cookie, "", nil)
+		if res.StatusCode != 405 || res.Header.Get("Allow") != tc.allow {
+			t.Fatalf("%s: status %d Allow %q", tc.path, res.StatusCode, res.Header.Get("Allow"))
+		}
+	}
+	if _, err := s.control.Get(context.Background(), "1"); err != nil {
+		t.Fatal("HEAD removed node", err)
+	}
+	expectStatus(t, adminRequest(t, s, http.MethodGet, "/api/admin/v1/session", "", cookie, "", nil), 200)
+}
+
+func TestAdminCacheDoesNotServeDeletedNode(t *testing.T) {
+	s, _, admin := testAdmin(t)
+	cookie, session := login(t, s, admin)
+	s.publishAdminSnapshot()
+	before := s.adminJSON.Load()
+	if before == nil || len(s.adminSnapshotBytes()) == 0 {
+		t.Fatal("admin cache was not published")
+	}
+	expectStatus(t, adminRequest(t, s, http.MethodDelete, "/api/admin/v1/nodes/1", "", cookie, session.CSRF, nil), 204)
+	// Model an old encoder completing after invalidation. The generation check
+	// must reject these bytes, not leak the deleted node until the next tick.
+	s.adminJSON.Store(before)
+	res := adminRequest(t, s, http.MethodGet, "/api/admin/v1/nodes", "", cookie, "", nil)
+	defer res.Body.Close()
+	var snapshot adminSnapshot
+	if res.StatusCode != 200 || json.NewDecoder(res.Body).Decode(&snapshot) != nil || len(snapshot.Nodes) != 0 {
+		t.Fatal("GET reused a revoked admin snapshot")
+	}
+}
+
+func TestAdminSnapshotEncodingSharedByConcurrentReaders(t *testing.T) {
+	fixture, _, _ := testAdmin(t)
+	n, err := fixture.control.Get(context.Background(), "1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An independent service has no periodic publisher, making concurrent cache
+	// misses deterministic without sleeping across ticker boundaries.
+	s := &Service{cfg: shared.MonitorConfig{ReportIntervalSeconds: 1}, location: time.UTC,
+		admin: &adminState{}, nodes: map[string]*node{"1": {credential: credential{AgentID: "1", Name: n.Name}}}}
+	configs := nodeConfigs{"1": n}
+	s.configs.Store(&configs)
+	start := make(chan struct{})
+	results := make(chan []byte, 64)
+	for i := 0; i < cap(results); i++ {
+		go func() { <-start; results <- s.adminSnapshotBytes() }()
+	}
+	close(start)
+	first := <-results
+	if len(first) == 0 {
+		t.Fatal("snapshot encoding unavailable")
+	}
+	for i := 1; i < cap(results); i++ {
+		next := <-results
+		if len(next) == 0 || &next[0] != &first[0] {
+			t.Fatal("concurrent readers did not share one encoding")
+		}
 	}
 }

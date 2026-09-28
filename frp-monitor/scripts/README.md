@@ -93,7 +93,7 @@ dist/<本机OS>-<本机架构>/         --native 产物
 发布包只包含两个二进制、`BUILD.json`、`LICENSE`、`LICENSE.monitor-probe`、`THIRD_PARTY_NOTICES.md`、
 `upstream.lock`、SQLite/TSDB 依赖许可证 `licenses/`、`scripts/ops.py`、`scripts/local.py`、
 `monitor/control/schema.sql`、
-`packaging/README.md`、`.env.example`、说明及包内 `SHA256SUMS`。许可证使用
+`packaging/README.md`、`packaging/nginx.conf.example`、`.env.example`、说明及包内 `SHA256SUMS`。许可证使用
 文件名白名单并保留来源目录；不会打包 `.env`、本地运行数据、
 上游临时树、npm 依赖目录或源码。`package` 失败时同样不能沿用残留发布包。
 
@@ -126,6 +126,7 @@ FRP 实际转发与重连验收另见 `tests/README.md`。
 
 OAuth 四项一起配置；全部留空时管理登录不可用，公开监控和节点上报仍可运行。
 工具只按 UTF-8 读取字面量，不执行 shell 或展开凭据。其他 `.env` 键不传入运行进程。
+读取时拒绝符号链接和特殊文件，打开后核验常规文件类型，最多读取 1 MiB。
 
 初始化在 `data/local/` 创建 `control.sqlite`，预置自增数字 ID 的本地节点、节点令牌
 摘要和可信 FRP 绑定；生成独立 FRP/节点 Token、TOML 与带回环 SAN 的 30 天自签证书。
@@ -139,8 +140,9 @@ OAuth 四项一起配置；全部留空时管理登录不可用，公开监控�
 访问私网/回环。后续探测修改由管理 API 写入控制库；目标和 Token 不进入公开网页。
 管理员访问 `/admin/` 后跳转 GitHub 登录，初始化不生成管理员登录令牌。
 
-`python3 scripts/local.py run` 先使用 native `verify` 校验配置，再启动当前平台
+`python3 scripts/local.py run` 先检查演示目录中 `local.crt` 的有效期，再使用 native `verify` 校验配置，最后启动当前平台
 `dist/<OS>-<ARCH>/` 的两个程序。自定义构建输出目录需直接使用相应二进制。
+过期或无效证书会在启动前报错，应在新目录重新初始化演示；HTTP 演示无需证书检查。
 Ctrl-C/TERM 清理子进程，日志留在私有目录。已有安装不会随 `.env` 自动更新；
 TOML、OAuth 允许列表与启动密钥修改后重启，节点与探测业务通过管理界面即时更新。
 

@@ -78,6 +78,56 @@ class LocalTests(unittest.TestCase):
             self.assertEqual(document["nodes"][0]["agent_id"], "1")
             self.assertEqual(tasks[0]["target"], "127.0.0.1:17000")
 
+    def test_env_size_limit_preserves_boundary_and_regular_parsing(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / '.env'
+            content = b'export FRP_AGENT_NAME="boundary node"\nFRP_MONITOR_PORT=17402 # local\n#'
+            path.write_bytes(content + b'x' * (1024 * 1024 - len(content)))
+            config = local.settings(root, {})
+            self.assertEqual(config['FRP_AGENT_NAME'], 'boundary node')
+            self.assertEqual(config['FRP_MONITOR_PORT'], 17402)
+            with path.open('ab') as stream:
+                stream.write(b'x')
+            with self.assertRaisesRegex(ValueError, 'size limit'):
+                local.settings(root, {})
+
+    @unittest.skipUnless(hasattr(os, 'mkfifo'), 'requires Unix FIFO')
+    def test_env_nonregular_input_is_rejected_without_blocking(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / '.env'
+            os.mkfifo(path, 0o600)
+            original_open = os.open
+
+            def nonblocking_open(value, flags, *args, **kwargs):
+                self.assertTrue(flags & os.O_NONBLOCK, 'FIFO opening must not block')
+                return original_open(value, flags, *args, **kwargs)
+
+            with mock.patch.object(local.os, 'open', side_effect=nonblocking_open), self.assertRaises(ValueError):
+                local.settings(root, {})
+
+    def test_env_link_and_link_replacement_are_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path, target = root / '.env', root / 'outside'
+            target.write_text('FRP_AGENT_NAME="private target"\n')
+            path.symlink_to(target)
+            with self.assertRaises((ValueError, OSError)):
+                local.settings(root, {})
+            path.unlink()
+            path.write_text('FRP_AGENT_NAME="original"\n')
+            original_open = os.open
+
+            def replace_before_open(value, flags, *args, **kwargs):
+                path.unlink()
+                path.symlink_to(target)
+                return original_open(value, flags, *args, **kwargs)
+
+            with mock.patch.object(local.os, 'open', side_effect=replace_before_open), self.assertRaises(OSError):
+                local.settings(root, {})
+            self.assertEqual(target.read_text(), 'FRP_AGENT_NAME="private target"\n')
+
     def test_github_login_copies_secret_and_uses_allowlist_without_token_fallback(self):
         with tempfile.TemporaryDirectory() as root:
             root = Path(root).resolve()
@@ -237,6 +287,29 @@ class LocalTests(unittest.TestCase):
                     mock.patch("builtins.print"):
                 with self.assertRaises(ValueError):
                     local.run_demo(folder)
+
+    def test_run_demo_rejects_expired_tls_before_starting_processes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            folder = Path(temporary).resolve()
+            local.private(folder / 'local.crt', 'fixture certificate\n')
+            for result in (mock.Mock(returncode=1), local.subprocess.TimeoutExpired('openssl', 5)):
+                with self.subTest(result=type(result).__name__), \
+                        mock.patch.object(local, 'native_binaries', return_value=(folder / 'server', folder / 'agent')), \
+                        mock.patch.object(local.subprocess, 'run') as run, \
+                        mock.patch.object(local.subprocess, 'Popen') as launch:
+                    if isinstance(result, BaseException):
+                        run.side_effect = result
+                    else:
+                        run.return_value = result
+                    with self.assertRaisesRegex(ValueError, 'certificate.*(expired|timed out)'):
+                        local.run_demo(folder)
+                    run.assert_called_once()
+                    self.assertEqual(run.call_args.args[0], ['openssl', 'x509', '-checkend', '0', '-noout'])
+                    self.assertEqual(run.call_args.kwargs['input'], b'fixture certificate\n')
+                    self.assertEqual(run.call_args.kwargs['timeout'], 5)
+                    launch.assert_not_called()
+                    self.assertFalse((folder / 'server.log').exists())
+                    self.assertFalse((folder / 'agent.log').exists())
 
 
 if __name__ == "__main__":

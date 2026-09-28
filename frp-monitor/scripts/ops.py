@@ -248,7 +248,7 @@ def backup(directory, output):
     folder = private_directory(directory)
     output = path_without_links(output)
     private_directory(output.parent)
-    if output.exists() or output.parent == folder:
+    if output.exists() or output == folder or folder in output.parents:
         raise ValueError('backup output must be new and outside the runtime directory')
     files = managed_files(folder)
     with tempfile.TemporaryDirectory(prefix='.frp-backup-', dir=output.parent) as temporary:

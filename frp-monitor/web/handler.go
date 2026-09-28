@@ -7,6 +7,7 @@ import (
 	"embed"
 	"encoding/hex"
 	"net/http"
+	"path"
 	"regexp"
 	"strconv"
 	"strings"
@@ -117,8 +118,17 @@ func Handler() http.Handler {
 			http.NotFound(w, r)
 			return
 		}
-		if len(name) > 4 && name[len(name)-4:] == ".mjs" {
+		// Embedded assets have fixed formats; do not let host MIME mappings
+		// change whether browsers accept scripts and styles with nosniff.
+		switch path.Ext(name) {
+		case ".html":
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		case ".css":
+			w.Header().Set("Content-Type", "text/css; charset=utf-8")
+		case ".js", ".mjs":
 			w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+		case ".svg":
+			w.Header().Set("Content-Type", "image/svg+xml")
 		}
 		http.ServeContent(w, r, name, time.Time{}, bytes.NewReader(data))
 	})

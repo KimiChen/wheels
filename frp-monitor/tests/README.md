@@ -19,6 +19,8 @@ python3 scripts/frp.py build --native
 registry、proxy 及所有监控扩展测试。采集的 17 组脱敏向量保存在
 [fixtures/collect](fixtures/collect/README.md)，入口自动设置其路径。
 对并发/生命周期改动，在准备目录运行相关包的 `go test -race`；扩展包同时运行 `go vet`。
+`nginx_test.py` 另需本机 nginx 与 openssl；缺少时明确跳过。它在临时回环端口启动隔离反代，
+检查随包模板的来源限流、SSE 配额、OAuth 回调和 WSS 握手，不接触现有服务。
 
 | 范围 | 关键验证 |
 |---|---|

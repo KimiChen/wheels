@@ -86,7 +86,7 @@ func Start(ctx context.Context, cfg shared.AgentConfig, snapshot func() shared.F
 	if !cfg.Enabled {
 		return nil, nil
 	}
-	if err := cfg.Validate(); err != nil {
+	if err := cfg.Complete(); err != nil {
 		return nil, errors.New("invalid telemetry configuration")
 	}
 	c, err := collect.New(collect.Config{Iface: cfg.Iface, Version: shared.Version})
@@ -126,23 +126,42 @@ func start(ctx context.Context, cfg shared.AgentConfig, snapshot func() shared.F
 }
 func readRegular(path string, limit int64, private bool) ([]byte, error) {
 	st, err := os.Lstat(path)
-	if err != nil || !st.Mode().IsRegular() || st.Size() > limit || (private && runtime.GOOS != "windows" && st.Mode().Perm() != 0600) {
+	if err != nil {
 		return nil, errors.New("invalid local telemetry file")
 	}
-	f, err := os.Open(path)
+	f, err := openRegular(path, st, limit, private)
 	if err != nil {
-		return nil, errors.New("local telemetry file unavailable")
+		return nil, err
 	}
 	defer f.Close()
-	actual, err := f.Stat()
-	if err != nil || !actual.Mode().IsRegular() || actual.Size() > limit || (private && runtime.GOOS != "windows" && actual.Mode().Perm() != 0600) {
-		return nil, errors.New("invalid local telemetry file")
-	}
 	data, err := io.ReadAll(io.LimitReader(f, limit+1))
 	if err != nil || int64(len(data)) > limit {
 		return nil, errors.New("invalid local telemetry file")
 	}
 	return data, nil
+}
+
+// Reject a replaced path before reading, including replacements between Lstat
+// and open. The platform opener also prevents a substituted Unix FIFO blocking.
+func openRegular(path string, expected os.FileInfo, limit int64, private bool) (*os.File, error) {
+	valid := func(st os.FileInfo) bool {
+		return st.Mode().IsRegular() && st.Size() <= limit && (!private || runtime.GOOS == "windows" || st.Mode().Perm() == 0600)
+	}
+	// Windows fills FileInfo's file ID lazily; capture it before opening the
+	// path again so the later SameFile check compares against this observation.
+	if !valid(expected) || !os.SameFile(expected, expected) {
+		return nil, errors.New("invalid local telemetry file")
+	}
+	f, err := openLocalFile(path)
+	if err != nil {
+		return nil, errors.New("local telemetry file unavailable")
+	}
+	actual, err := f.Stat()
+	if err != nil || !valid(actual) || !os.SameFile(expected, actual) {
+		f.Close()
+		return nil, errors.New("invalid local telemetry file")
+	}
+	return f, nil
 }
 func readToken(path string) (string, error) {
 	data, err := readRegular(path, 512, true)

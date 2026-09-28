@@ -285,7 +285,14 @@ func (s *Store) Flush(ctx context.Context) error {
 	case err := <-answer:
 		return err
 	case <-s.done:
-		return ErrClosed
+		// Shutdown may finish after the worker has already answered this
+		// flush. Preserve that result when both channels are ready.
+		select {
+		case err := <-answer:
+			return err
+		default:
+			return ErrClosed
+		}
 	case <-ctx.Done():
 		return ctx.Err()
 	}
@@ -471,7 +478,13 @@ func queryRange(node string, from, to time.Time, step time.Duration) (time.Time,
 	}
 	return from, to, step, nil
 }
-func (s *Store) queryError(err error) error {
+func (s *Store) queryError(parent context.Context, err error) error {
+	// A caller abandoning its request says nothing about storage health.
+	// VM has its own timeout error; normalize it only when the caller's
+	// context also expired. The store's own query budget remains a failure.
+	if cause := parent.Err(); cause != nil && (errors.Is(err, cause) || errors.Is(err, storage.ErrDeadlineExceeded)) {
+		return cause
+	}
 	if err != nil {
 		s.queries.Add(1)
 		reason := "query_failed"
@@ -484,11 +497,12 @@ func (s *Store) queryError(err error) error {
 // retained. VictoriaMetrics' deadline plus per-block context checks bound work;
 // an operating-system disk stall can still delay the storage library itself.
 func (s *Store) scan(ctx context.Context, node, task string, from, to time.Time, visit func(string, int64, float64) error) (err error) {
+	parent := ctx
 	defer func() {
 		if recover() != nil {
 			err = errors.New("history query failed")
 		}
-		err = s.queryError(err)
+		err = s.queryError(parent, err)
 	}()
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()

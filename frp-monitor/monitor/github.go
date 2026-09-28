@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -75,8 +76,50 @@ func (s *Service) adminSameOrigin(r *http.Request) bool {
 	if len(origins) != 1 {
 		return false
 	}
-	u, err := url.Parse(s.cfg.GitHubCallbackURL)
-	return err == nil && origins[0] == u.Scheme+"://"+u.Host && r.Host == u.Host
+	callback, err := url.Parse(s.cfg.GitHubCallbackURL)
+	if err != nil {
+		return false
+	}
+	origin, err := url.Parse(origins[0])
+	if err != nil || origin.User != nil || origin.Opaque != "" || origin.Path != "" || origin.RawQuery != "" || origin.ForceQuery || origin.Fragment != "" || strings.Contains(origins[0], "#") {
+		return false
+	}
+	expected, ok := originAuthority(callback.Scheme, callback.Host)
+	actual, valid := originAuthority(origin.Scheme, origin.Host)
+	host, hostValid := originAuthority(callback.Scheme, r.Host)
+	return ok && valid && hostValid && origin.Scheme == callback.Scheme && actual == expected && host == expected
+}
+
+// Browsers omit default ports from Origin. Compare effective ports while still
+// requiring the request Host and the complete Origin authority to match.
+func originAuthority(scheme, authority string) (string, bool) {
+	if scheme != "http" && scheme != "https" || authority == "" || strings.ContainsAny(authority, "/?#@\\") {
+		return "", false
+	}
+	u, err := url.Parse(scheme + "://" + authority)
+	if err != nil || u.Host != authority || u.Hostname() == "" || u.User != nil {
+		return "", false
+	}
+	if strings.HasPrefix(authority, "[") {
+		if !strings.Contains(u.Hostname(), ":") || net.ParseIP(u.Hostname()) == nil {
+			return "", false
+		}
+	} else if strings.Contains(u.Hostname(), ":") {
+		return "", false
+	}
+	port := 80
+	if scheme == "https" {
+		port = 443
+	}
+	if value := u.Port(); value != "" {
+		port, err = strconv.Atoi(value)
+		if err != nil || port < 1 || port > 65535 {
+			return "", false
+		}
+	} else if strings.HasSuffix(authority, ":") {
+		return "", false
+	}
+	return net.JoinHostPort(strings.ToLower(u.Hostname()), strconv.Itoa(port)), true
 }
 
 // clientIP uses the connection peer for the pending-attempt quota only. Proxy
@@ -91,7 +134,7 @@ func clientIP(r *http.Request) string {
 
 func (s *Service) githubStart(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		w.WriteHeader(405)
+		methodNotAllowed(w, http.MethodGet)
 		return
 	}
 	if !s.adminSameOrigin(r) {
@@ -163,7 +206,7 @@ func (s *Service) githubStart(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) githubCallback(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		w.WriteHeader(405)
+		methodNotAllowed(w, http.MethodGet)
 		return
 	}
 	fail := func(kind string) { http.Redirect(w, r, "/admin/?auth_error="+kind, http.StatusSeeOther) }

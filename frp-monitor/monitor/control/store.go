@@ -271,6 +271,11 @@ func (s *Store) serveCall(r request) {
 			tx.Rollback()
 		}
 	}
+	// database/sql can roll the transaction back on cancellation before
+	// Commit runs, returning ErrTxDone instead of the context error.
+	if errors.Is(err, sql.ErrTxDone) && r.ctx.Err() != nil {
+		err = r.ctx.Err()
+	}
 	r.done <- err
 }
 
@@ -365,14 +370,15 @@ func (s *Store) call(ctx context.Context, fn func(*sql.Tx) error) error {
 }
 
 // classify maps SQLite constraint violations to conflicts and marks real
-// storage failures unhealthy. Flush retellings (ingestReport) are exempt.
+// storage failures unhealthy. Caller cancellation and Flush retellings
+// (ingestReport) are exempt.
 func (s *Store) classify(err error) error {
 	var constraint interface{ Code() int }
 	if errors.As(err, &constraint) && (constraint.Code() == 2067 || constraint.Code() == 1555) {
 		err = fmt.Errorf("%w: duplicate node credential or FRP binding", ErrConflict)
 	}
 	var report ingestReport
-	if err != nil && !errors.Is(err, ErrInvalid) && !errors.Is(err, ErrConflict) && !errors.Is(err, ErrNotFound) && !errors.As(err, &report) {
+	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, ErrInvalid) && !errors.Is(err, ErrConflict) && !errors.Is(err, ErrNotFound) && !errors.As(err, &report) {
 		s.unhealthy.Store(true)
 	}
 	return err
