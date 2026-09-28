@@ -49,7 +49,7 @@
       </div>
       <div id="node-list" class="fm-node-grid"></div>
       <div id="table-view" class="wsk-table-wrap fm-table-wrap" role="region" aria-label="节点资源表，可横向滚动" tabindex="0" hidden>
-        <table class="wsk-table fm-table"><caption class="wsk-sr-only">节点实时资源与连接状态</caption><thead><tr><th scope="col">节点</th><th scope="col">状态</th><th scope="col">CPU</th><th scope="col">内存</th><th scope="col">磁盘</th><th scope="col">发送 / 接收</th><th scope="col">负载</th><th scope="col">运行时间</th><th scope="col">FRP</th><th scope="col">详情</th></tr></thead><tbody id="node-table-body"></tbody></table>
+        <table class="wsk-table fm-table"><caption class="wsk-sr-only">节点实时资源与连接状态</caption><thead><tr><th scope="col">节点</th><th scope="col">状态</th><th scope="col">CPU</th><th scope="col">内存</th><th scope="col">磁盘</th><th scope="col">发送 / 接收</th><th scope="col">负载</th><th scope="col">运行时间</th><th scope="col">详情</th></tr></thead><tbody id="node-table-body"></tbody></table>
       </div>
       <div id="empty-state" class="wsk-empty-state fm-empty"><span class="wsk-empty-icon fm-empty-icon"><svg class="wsk-icon" aria-hidden="true"><use href="#server"/></svg></span><h2 id="empty-title">正在读取节点</h2><p id="empty-copy">获取服务端快照后，将在这里显示节点资源。</p></div>
       <div class="fm-list-footer"><span id="list-summary">等待数据</span><span>— 表示暂无有效采样</span></div>
@@ -71,7 +71,7 @@
       <div class="fm-resource"><div class="fm-resource-usage"><span class="fm-resource-label" data-value="traffic-label">流量 —</span><strong data-value="traffic">—</strong><progress max="100" data-meter="traffic" aria-label="周期流量使用率" hidden></progress></div></div>
     </div>
     <div class="fm-network"><div><span><svg class="wsk-icon" aria-hidden="true"><use href="#arrow-down"/></svg>接收</span><strong data-value="rx">—</strong></div><div><span><svg class="wsk-icon" aria-hidden="true"><use href="#arrow-up"/></svg>发送</span><strong data-value="tx">—</strong></div></div>
-    <footer class="fm-card-footer"><span class="fm-data-state" data-value="freshness"></span><span>FRP <b data-value="frp"></b></span><a class="fm-node-link fm-open-node">详情 →</a></footer>
+    <footer class="fm-card-footer"><span class="fm-data-state" data-value="freshness"></span><a class="fm-node-link fm-open-node">详情 →</a></footer>
   </article></template>
   <template id="row-template"><tr class="fm-table-row">
     <th scope="row"><a class="wsk-button wsk-quiet fm-detail-link" data-value="name"></a><small data-value="hardware"></small><small class="fm-node-groups" data-value="groups">未分组</small></th>
@@ -82,7 +82,6 @@
     <td class="fm-table-network"><span>↑ <b data-value="tx">—</b></span><span>↓ <b data-value="rx">—</b></span></td>
     <td><span data-value="load">—</span><small>1 / 5 / 15 分钟</small></td>
     <td data-value="uptime">—</td>
-    <td><span data-value="frp">—</span><small>隧道 <span data-value="proxies">—</span></small><small data-value="frp-reconciliation"></small></td>
     <td><a class="wsk-button wsk-quiet fm-detail-link">详情 →</a></td>
   </tr></template>
 </body>

@@ -1,4 +1,4 @@
-import {UNKNOWN, bytes, capacity, decimal, percent, percentage, ratio, quality, loadText, uptime, timeText, sessionLabels, freshnessLabels, frpLabel, reconciliationText} from "./format.mjs";
+import {UNKNOWN, bytes, capacity, decimal, percent, percentage, ratio, quality, loadText, uptime, timeText, sessionLabels, freshnessLabels} from "./format.mjs";
 import {select, overview, groupOptions, resolveGroupSelection, ALL_GROUPS, UNGROUPED} from "./store.mjs";
 import {connect} from "./transport.mjs";
 import {planText} from "./node-settings.mjs";
@@ -74,8 +74,6 @@ function patchCard(card, node) {
   text("scope", ({host: "主机采集", namespace: "容器 / 命名空间采集", unknown: "采集范围未知"})[metric.scope] ?? "等待资源报告");
   text("session", sessionLabels[node.session]); state("session", node.session);
   text("freshness", freshnessLabels[node.freshness]); state("freshness", node.freshness);
-  text("frp", frpLabel(node.frp?.control_state));
-  text("frp-reconciliation", reconciliationText(node.frp));
   const cpu = percent(metric.cpu), mem = ratio(metric.mem_used, metric.mem_total), disk = ratio(metric.disk_used, metric.disk_total);
   text("cpu", percentage(cpu)); text("mem", percentage(mem)); text("disk", percentage(disk));
   meter("cpu", cpu); meter("mem", mem); meter("disk", disk);
@@ -89,8 +87,6 @@ function patchCard(card, node) {
   text("traffic-label", `流量 ${plan.quota}`); text("traffic", plan.percent); meter("traffic", plan.meter);
   card.element.querySelector('[data-value="traffic"]').title = node.traffic_plan?.partial ? "周期流量统计不完整" : "周期流量使用率";
   text("load", loadText(metric.load)); text("uptime", uptime(metric.uptime));
-  const frp = node.frp;
-  text("proxies", frp?.control_state && frp.control_state !== "unknown" && Number.isSafeInteger(frp.proxy_running) && Number.isSafeInteger(frp.proxy_total) ? `${frp.proxy_running} / ${frp.proxy_total}` : UNKNOWN);
   text("sample-time", node.metrics_at ? `采样于 ${timeText(node.metrics_at)}${node.freshness === "stale" ? " · 已过期" : ""}` : "尚未收到资源报告");
   text("interval", Number.isFinite(node.interval_seconds) && node.interval_seconds > 0 ? `${node.interval_seconds} 秒 / 次` : UNKNOWN);
   for (const el of card.labels.get("freshness")) el.title = node.metrics_at ? `资源采样于 ${timeText(node.metrics_at)}` : "尚未收到资源报告";
