@@ -39,7 +39,7 @@
             <div class="fm-node-name"><h1 data-value="name">—</h1><span class="wsk-badge fm-badge" data-value="session"></span></div>
           </div>
         </div>
-        <button id="retry" class="wsk-secondary wsk-button fm-refresh" type="button" data-js-only><svg class="wsk-icon" aria-hidden="true"><use href="#refresh"/></svg>刷新</button>
+        <p class="fm-refresh-info" data-js-only>每 <strong><span id="snapshot-refresh-seconds">—</span> 秒</strong>刷新一次</p>
       </header>
       <div class="wsk-panel fm-node-overview">
         <div class="fm-node-sections">
@@ -48,8 +48,8 @@
             <dl class="fm-node-facts">
               <div class="fm-node-fact-wide"><dt>操作系统</dt><dd data-value="os">—</dd></div>
               <div class="fm-node-fact-wide"><dt>CPU</dt><dd data-value="cpu-model">—</dd></div>
-              <div><dt>内存</dt><dd data-value="memory-total">—</dd></div>
-              <div><dt>硬盘</dt><dd data-value="disk-total">—</dd></div>
+              <div><dt>内存 <span class="fm-fact-unit">已用 / 总量</span></dt><dd data-value="memory-usage">—</dd></div>
+              <div><dt>存储 <span class="fm-fact-unit">已用 / 总量</span></dt><dd data-value="storage-usage">—</dd></div>
             </dl>
           </section>
           <section class="fm-node-section fm-node-runtime" aria-labelledby="node-runtime-title">

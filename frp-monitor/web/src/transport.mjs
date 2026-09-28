@@ -1,5 +1,8 @@
 import {snapshot} from "./store.mjs";
 
+// Public SSE cadence in monitor/service.go (separate from the agent report interval).
+export const SNAPSHOT_REFRESH_SECONDS = 2;
+
 // A reconnect always starts with an authoritative GET, then opens a new stream.
 // Native EventSource retries are closed to prevent older snapshots racing a GET.
 export function connect({onSnapshot, onState, fetcher = globalThis.fetch, Source = globalThis.EventSource, timer = globalThis.setTimeout, cancel = globalThis.clearTimeout}) {

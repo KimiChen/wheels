@@ -78,7 +78,7 @@ export function chart(rows, series, {window, generatedAt, step, ceiling = null})
 export const resourceCharts = [
   {key: "cpu", title: "CPU 使用率", ceiling: 100, series: [{name: "CPU", read: p => finite(p.cpu) !== null && p.cpu <= 100 ? p.cpu : null, format: n => `${n.toFixed(1)}%`}]},
   {key: "memory", title: "内存使用率", ceiling: 100, series: [{name: "内存", read: memoryPercent, format: n => `${n.toFixed(1)}%`}]},
-  {key: "disk", title: "硬盘使用率", ceiling: 100, series: [{name: "硬盘", read: diskPercent, format: n => `${n.toFixed(1)}%`}]},
+  {key: "disk", title: "存储使用率", ceiling: 100, series: [{name: "存储", read: diskPercent, format: n => `${n.toFixed(1)}%`}]},
   {key: "network", title: "网络速率", series: [{name: "接收", read: p => uint64(p.net_rx), format: n => bytes(n, true)}, {name: "发送", read: p => uint64(p.net_tx), format: n => bytes(n, true)}]},
   {key: "load", title: "系统负载", series: [0,1,2].map((index) => ({name: `${[1,5,15][index]} 分钟`, read: p => Array.isArray(p.load) ? finite(p.load[index]) : null, format: n => n.toFixed(2)}))},
 ];

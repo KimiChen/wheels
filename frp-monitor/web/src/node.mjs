@@ -1,7 +1,7 @@
 import {UNKNOWN, bytes, decimal, percent, percentage, loadText, uptime, timeText, sessionLabels} from "./format.mjs";
 import {nodeID, hardwareValue, cpuModel, nodeBadgeText} from "./node-data.mjs";
 import {billingText, todayText, planText, trafficModes, dateOnly} from "./node-settings.mjs";
-import {connect} from "./transport.mjs";
+import {connect, SNAPSHOT_REFRESH_SECONDS} from "./transport.mjs";
 import {createConnectionStatus} from "./connection-status.mjs";
 import {createHistoryPanel} from "./history-view.mjs";
 
@@ -11,6 +11,7 @@ const labels = new Map([...document.querySelectorAll("[data-value]")].map(elemen
 const put = (key, value) => write(labels.get(key), value);
 const id = nodeID(window.location.pathname), detail = byID("node-detail"), empty = byID("node-empty"), historyHost = byID("node-history");
 const connectionStatus = createConnectionStatus({status: byID("stream-status"), label: byID("stream-label"), notice: byID("connection-notice")});
+write(byID("snapshot-refresh-seconds"), SNAPSHOT_REFRESH_SECONDS);
 let current = null, panel = null, connection = null;
 
 function showEmpty(title, copy) {
@@ -34,7 +35,8 @@ function patchNode(node) {
   const system = ["os", "arch", "virt"].map(key => hardwareValue(hardware?.[key])).filter(value => value !== UNKNOWN);
   put("os", system.length ? system.join(" · ") : UNKNOWN);
   put("cpu-model", cpuModel(hardware)); put("load", loadText(metrics.load));
-  put("memory-total", bytes(decimal(metrics.mem_total))); put("disk-total", bytes(decimal(metrics.disk_total)));
+  put("memory-usage", `${bytes(decimal(metrics.mem_used))} / ${bytes(decimal(metrics.mem_total))}`);
+  put("storage-usage", `${bytes(decimal(metrics.disk_used))} / ${bytes(decimal(metrics.disk_total))}`);
   for (const [key, field] of [["processes", "procs"], ["tcp", "tcp"], ["udp", "udp"]]) put(key, decimal(metrics[field]));
   const today = todayText(node.traffic_today), plan = planText(node.traffic_plan);
   put("traffic-rx", today.rx); put("traffic-tx", today.tx);
@@ -67,7 +69,7 @@ else {
   byID("connection-notice").hidden = true; byID("retry-empty").hidden = true;
   byID("stream-status").dataset.state = "error"; write(byID("stream-label"), "地址无效");
 }
-for (const button of [byID("retry"), byID("retry-empty")]) button.addEventListener("click", () => connection?.refresh());
+byID("retry-empty").addEventListener("click", () => connection?.refresh());
 document.addEventListener("visibilitychange", () => panel?.setVisible(document.visibilityState !== "hidden"));
 window.addEventListener("pagehide", () => { connection?.stop(); connectionStatus.stop(); panel?.stop(); });
 window.addEventListener("pageshow", event => { if (event.persisted) window.location.reload(); });

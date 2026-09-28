@@ -1,5 +1,7 @@
 import {history, windows} from "./history-data.mjs";
 
+export const HISTORY_REFRESH_SECONDS = 30;
+
 // One request per visible node detail page; superseded responses cannot change its graph.
 export function connectHistory({nodeID, onData, onState, fetcher = globalThis.fetch, timer = globalThis.setTimeout, cancel = globalThis.clearTimeout}) {
   let selected = "1h", active = false, generation = 0, pending = null, timeout = null, controller = null;
@@ -20,7 +22,7 @@ export function connectHistory({nodeID, onData, onState, fetcher = globalThis.fe
     } catch {
       if (active && current === generation) onState("error");
     } finally {
-      if (active && current === generation) { cancel(timeout); timeout = null; controller = null; pending = timer(refresh, 30000); }
+      if (active && current === generation) { cancel(timeout); timeout = null; controller = null; pending = timer(refresh, HISTORY_REFRESH_SECONDS * 1000); }
     }
   }
   return {

@@ -1,6 +1,6 @@
 import {UNKNOWN, bytes, decimal, percent, percentage, ratio, capacity, loadText} from "./format.mjs";
 import {windows, finite, count, dateText, coverage, failureRate, chart, resourceCharts} from "./history-data.mjs";
-import {connectHistory} from "./history-transport.mjs";
+import {connectHistory, HISTORY_REFRESH_SECONDS} from "./history-transport.mjs";
 
 const svgNS = "http://www.w3.org/2000/svg";
 function el(tag, className, text) {
@@ -82,7 +82,9 @@ function createProbe(probe) {
 export function createHistoryPanel(body, nodeID) {
   const identifier = body.id;
   const toolbar = el("div", "fm-history-toolbar");
-  const refresh = el("button", "wsk-button wsk-secondary fm-refresh", "刷新历史"); refresh.type = "button";
+  const refreshInfo = el("p", "fm-refresh-info");
+  refreshInfo.append(el("strong", "", `${HISTORY_REFRESH_SECONDS} 秒`), "刷新");
+  refreshInfo.title = "页面可见期间自动刷新历史数据";
   const sections = el("div", "fm-history-sections"), sectionSwitch = el("div", "wsk-view-switch"), rangeSwitch = el("div", "wsk-view-switch fm-history-ranges");
   sections.append(sectionSwitch);
   sectionSwitch.setAttribute("role", "group"); sectionSwitch.setAttribute("aria-label", "历史图表内容");
@@ -103,7 +105,7 @@ export function createHistoryPanel(body, nodeID) {
       connection.select(key);
     });
   }
-  const controls = el("div", "fm-history-controls"); controls.append(rangeSwitch, refresh);
+  const controls = el("div", "fm-history-controls"); controls.append(rangeSwitch, refreshInfo);
   toolbar.append(sections, controls);
   const status = el("p", "fm-history-status", "正在准备历史记录…"); status.setAttribute("role", "status");
   const storage = el("p", "wsk-alert wsk-info fm-history-storage"), content = el("div", "fm-history-content"); storage.hidden = true;
@@ -125,7 +127,7 @@ export function createHistoryPanel(body, nodeID) {
     const stamp = last ? `${windows[last.window]} · 更新于 ${dateText(last.generated_at)}` : "";
     status.dataset.state = state;
     body.setAttribute("aria-busy", state === "loading" ? "true" : "false");
-    write(status, state === "loading" ? (last ? `正在读取；当前保留上次成功结果（${stamp}）。` : "正在读取历史记录…") : state === "error" ? (last ? `历史更新失败，30 秒后重试。以下为上次成功结果（${stamp}），可能已过期。` : "暂时无法读取历史记录，30 秒后重试。") : `${stamp} · 页面可见期间每 30 秒更新`);
+    write(status, state === "loading" ? (last ? `正在读取；当前保留上次成功结果（${stamp}）。` : "正在读取历史记录…") : state === "error" ? (last ? `历史更新失败，${HISTORY_REFRESH_SECONDS} 秒后重试。以下为上次成功结果（${stamp}），可能已过期。` : `暂时无法读取历史记录，${HISTORY_REFRESH_SECONDS} 秒后重试。`) : `${stamp} · 页面可见期间每 ${HISTORY_REFRESH_SECONDS} 秒更新`);
   }
   function onData(data) {
     last = data;
@@ -149,7 +151,6 @@ export function createHistoryPanel(body, nodeID) {
     probeEmpty.hidden = data.probes.length !== 0;
   }
   const connection = connectHistory({nodeID, onData, onState});
-  refresh.addEventListener("click", () => connection.refresh());
   return {
     updateMetrics(metrics) {
       const current = {

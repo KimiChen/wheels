@@ -1,5 +1,5 @@
 import {UNKNOWN, bytes, capacity, decimal, percent, percentage, ratio, quality, loadText, uptime, timeText, sessionLabels, freshnessLabels} from "./format.mjs";
-import {select, overview, groupOptions, resolveGroupSelection, ALL_GROUPS, UNGROUPED} from "./store.mjs";
+import {select, overview, groupOptions, resolveGroupSelection, sortOptions, sortNodes, ALL_GROUPS, UNGROUPED} from "./store.mjs";
 import {connect} from "./transport.mjs";
 import {createConnectionStatus} from "./connection-status.mjs";
 import {planText} from "./node-settings.mjs";
@@ -11,10 +11,15 @@ const put = (id, text) => write(byID(id), text);
 const list = byID("node-list"), table = byID("table-view"), rows = byID("node-table-body"), cards = new Map();
 const search = byID("node-search"), viewButtons = [...document.querySelectorAll("[data-fm-view]")];
 const groupBar = byID("node-group-filter"), groupButtons = new Map(), groupStorageKey = "frp-monitor-public-group";
+const sort = byID("node-sort"), sortStorageKey = "frp-monitor-public-sort";
+sort.replaceChildren(...sortOptions.map(([value, name]) => {
+  const option = document.createElement("option"); option.value = value; option.textContent = name; return option;
+}));
 const connectionStatus = createConnectionStatus({status: byID("stream-status"), label: byID("stream-label"), notice: byID("connection-notice")});
 let current = null, view = "cards", selectedGroup = ALL_GROUPS;
 try { if (localStorage.getItem("frp-monitor-view") === "table") view = "table"; } catch { /* Storage is optional. */ }
 try { selectedGroup = sessionStorage.getItem(groupStorageKey) ?? ALL_GROUPS; } catch { /* Storage is optional. */ }
+try { const saved = sessionStorage.getItem(sortStorageKey); if (sortOptions.some(([key]) => key === saved)) sort.value = saved; } catch { /* Storage is optional. */ }
 function rememberGroup() {
   try {
     if (selectedGroup === ALL_GROUPS) sessionStorage.removeItem(groupStorageKey);
@@ -29,13 +34,13 @@ function syncGroups(nodes) {
   options.forEach((group, index) => {
     let button = groupButtons.get(group.key);
     if (!button) {
-      button = document.createElement("button"); button.type = "button"; button.className = "wsk-button wsk-secondary fm-group-button";
-      const name = document.createElement("span"), count = document.createElement("span"); count.className = "fm-group-count";
-      button.append(name, count);
+      button = document.createElement("button"); button.type = "button"; button.className = "wsk-button wsk-quiet fm-group-button";
+      button.append(document.createElement("span"));
       button.addEventListener("click", () => { selectedGroup = group.key; rememberGroup(); render(); });
       groupButtons.set(group.key, button);
     }
-    write(button.firstElementChild, group.name); write(button.lastElementChild, group.count);
+    write(button.firstElementChild, group.key === ALL_GROUPS ? "All" : group.name);
+    button.title = `${group.name} · ${group.count} 个节点`;
     const selected = group.key === selectedGroup;
     button.setAttribute("aria-pressed", String(selected)); button.classList.toggle("wsk-is-active", selected);
     button.setAttribute("aria-label", `${group.key === ALL_GROUPS ? "全部节点" : group.key === UNGROUPED ? "没有分组的节点" : `分组：${group.name}`}，${group.count} 个公开节点`);
@@ -82,7 +87,7 @@ function patchCard(card, node) {
   text("cpu", percentage(cpu)); text("mem", percentage(mem)); text("disk", percentage(disk));
   meter("cpu", cpu); meter("mem", mem); meter("disk", disk);
   text("mem-label", `内存 ${bytes(decimal(metric.mem_total))}`);
-  text("disk-label", `硬盘 ${bytes(decimal(metric.disk_total))}`);
+  text("disk-label", `存储 ${bytes(decimal(metric.disk_total))}`);
   text("cpu-note", cpu === null ? quality(metric.cpu) : "CPU 使用率");
   text("mem-note", capacity(metric.mem_used, metric.mem_total));
   text("disk-note", capacity(metric.disk_used, metric.disk_total));
@@ -103,10 +108,15 @@ function render() {
   put("snapshot-at", timeText(current.generated_at)); byID("snapshot-at").dateTime = current.generated_at;
   put("stat-online", summary.online); put("stat-total", summary.total);
   put("stat-offline", summary.offline); put("stat-waiting", summary.waiting);
+  byID("stat-waiting-note").hidden = summary.waiting === 0;
   put("stat-cpu", percentage(summary.cpu.value));
   byID("stat-cpu-note").title = `来自 ${summary.cpu.count} 个在线且新鲜的有效 CPU 样本`;
   put("stat-rx", bytes(summary.rx.value, true)); put("stat-tx", bytes(summary.tx.value, true));
   byID("stat-network-note").title = `仅汇总在线且新鲜的有效采样：发送 ${summary.tx.count} / 接收 ${summary.rx.count} 个节点`;
+  put("fleet-rx", bytes(summary.rx.value, true)); put("fleet-tx", bytes(summary.tx.value, true));
+  byID("fleet-network-rates").title = byID("stat-network-note").title;
+  put("stat-rx-total", bytes(summary.rxTotal.value)); put("stat-tx-total", bytes(summary.txTotal.value));
+  byID("fleet-network-totals").title = `系统累计流量（节点重启可能归零），含离线节点最后有效采样：上传 ${summary.txTotal.count} / 下载 ${summary.rxTotal.count} 个节点`;
 
   const existing = new Set(nodes.map(n => n.id));
   for (const [id, card] of cards) if (!existing.has(id)) {
@@ -116,12 +126,12 @@ function render() {
     if (!cards.has(node.id)) cards.set(node.id, createCard(node));
     patchCard(cards.get(node.id), node);
   }
-  const shown = select(nodes, search.value, selectedGroup), visible = new Set(shown.map(n => n.id));
+  const ordered = sortNodes(nodes, sort.value), shown = select(ordered, search.value, selectedGroup), visible = new Set(shown.map(n => n.id));
   for (const [id, card] of cards) {
     card.element.hidden = !visible.has(id); card.row.hidden = !visible.has(id);
   }
   // Stable card and row identities preserve keyboard focus across live snapshots.
-  nodes.forEach((node, index) => {
+  ordered.forEach((node, index) => {
     const card = cards.get(node.id);
     for (const [parent, element] of [[list, card.element], [rows, card.row]]) {
       const before = parent.children[index] ?? null;
@@ -140,6 +150,10 @@ function onState(next) {
   if (!current && next === "error") { byID("empty-state").hidden = false; put("empty-title", "暂时无法读取节点"); put("empty-copy", "监控服务恢复后页面会自动重新同步，也可以点击刷新重试。"); }
 }
 search.addEventListener("input", render);
+sort.addEventListener("change", () => {
+  try { sessionStorage.setItem(sortStorageKey, sort.value); } catch { /* Storage is optional. */ }
+  render();
+});
 for (const button of viewButtons) button.addEventListener("click", () => {
   view = button.dataset.fmView;
   try { localStorage.setItem("frp-monitor-view", view); } catch { /* Storage is optional. */ }

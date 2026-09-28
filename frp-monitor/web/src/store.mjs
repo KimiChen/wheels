@@ -1,5 +1,5 @@
-import {decimal, percent} from "./format.mjs";
-import {validNodeID, nodeGroups} from "./node-data.mjs";
+import {UNKNOWN, decimal, percent} from "./format.mjs";
+import {validNodeID, nodeGroups, hardwareValue} from "./node-data.mjs";
 
 export const ALL_GROUPS = "all", UNGROUPED = "ungrouped";
 export const groupKey = id => `group:${id}`;
@@ -42,14 +42,45 @@ export function select(nodes, query = "", selectedGroup = ALL_GROUPS) {
     return selectedGroup === UNGROUPED ? groups.length === 0 : groups.some(group => groupKey(group.id) === selectedGroup);
   });
 }
+export const sortOptions = [
+  ["default", "默认"], ["name", "名称"], ["uptime", "运行时间"], ["system", "系统"],
+  ["cpu", "CPU"], ["memory", "内存"], ["disk", "存储"], ["upload", "上传"],
+  ["download", "下载"], ["upload-total", "上传总量"], ["download-total", "下载总量"],
+];
+const names = new Intl.Collator("zh-CN", {numeric: true, sensitivity: "base"});
+const compare = (a, b) => a < b ? -1 : a > b ? 1 : 0;
+function usage(metrics, prefix) {
+  const used = decimal(metrics?.[`${prefix}_used`]), total = decimal(metrics?.[`${prefix}_total`]);
+  return used === null || total === null || total === 0n || used > total ? null : {used, total};
+}
+export function sortNodes(nodes, order = "default") {
+  if (order === "default" || !sortOptions.some(([key]) => key === order)) return [...nodes];
+  const fields = {uptime: "uptime", upload: "net_tx", download: "net_rx", "upload-total": "net_tx_total", "download-total": "net_rx_total"};
+  const readers = {
+    name: node => node.name,
+    system: node => { const os = hardwareValue(node.hardware?.os); return os === UNKNOWN ? null : os; },
+    cpu: node => percent(node.metrics?.cpu),
+    memory: node => usage(node.metrics, "mem"), disk: node => usage(node.metrics, "disk"),
+  };
+  const read = readers[order] ?? (fields[order] ? node => decimal(node.metrics?.[fields[order]]) : null);
+  if (!read) return [...nodes];
+  // Equal values retain server order. Unknown values stay last in every mode.
+  return nodes.map(node => ({node, value: read(node)})).sort((a, b) => {
+    if (a.value === null || b.value === null) return a.value === b.value ? 0 : a.value === null ? 1 : -1;
+    if (order === "name" || order === "system") return names.compare(a.value, b.value);
+    if (order === "memory" || order === "disk") return compare(b.value.used * a.value.total, a.value.used * b.value.total);
+    return compare(b.value, a.value);
+  }).map(item => item.node);
+}
 export function overview(nodes) {
   const live = nodes.filter(n => n.session === "online" && n.freshness === "fresh");
-  const sum = key => {
-    const values = live.map(n => decimal(n.metrics?.[key])).filter(v => v !== null);
+  const sum = (key, source = live) => {
+    const values = source.map(n => decimal(n.metrics?.[key])).filter(v => v !== null);
     return {value: values.length ? values.reduce((a,b) => a+b, 0n) : null, count: values.length};
   };
   const cpu = live.map(n => percent(n.metrics?.cpu)).filter(value => value !== null);
   return {total: nodes.length, online: nodes.filter(n => n.session === "online").length,
     offline: nodes.filter(n => n.session === "offline").length, waiting: nodes.filter(n => n.session === "waiting").length,
-    rx: sum("net_rx"), tx: sum("net_tx"), cpu: {value: cpu.length ? cpu.reduce((a,b) => a+b, 0) / cpu.length : null, count: cpu.length}};
+    rx: sum("net_rx"), tx: sum("net_tx"), rxTotal: sum("net_rx_total", nodes), txTotal: sum("net_tx_total", nodes),
+    cpu: {value: cpu.length ? cpu.reduce((a,b) => a+b, 0) / cpu.length : null, count: cpu.length}};
 }
