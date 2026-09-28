@@ -40,7 +40,8 @@ function patchNode(node) {
   const today = todayText(node.traffic_today), plan = planText(node.traffic_plan);
   put("traffic-rx", today.rx); put("traffic-tx", today.tx);
   put("system-rx", bytes(decimal(metrics.net_rx_total))); put("system-tx", bytes(decimal(metrics.net_tx_total)));
-  byID("node-plan").hidden = !node.traffic_plan; put("plan-usage", `${plan.used} / ${plan.quota}`);
+  for (const field of document.querySelectorAll("[data-plan-field]")) field.hidden = !node.traffic_plan;
+  put("plan-usage", `${plan.used} / ${plan.quota}`);
   put("plan-percent", plan.percent); put("plan-note", trafficModes[node.traffic_plan?.mode] ?? UNKNOWN);
   put("plan-period", `${dateOnly(node.traffic_plan?.period_start_at_ms)} - ${dateOnly(node.traffic_plan?.period_end_at_ms)}`);
   byID("node-billing").hidden = !node.billing; put("billing", billingText(node.billing)); put("renewal-note", node.billing?.renewal_note || "未填写续费说明");
