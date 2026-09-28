@@ -1,4 +1,4 @@
-import {UNKNOWN, bytes, capacity, decimal, percent, percentage, ratio, quality, loadText, uptime, timeText, sessionLabels, freshnessLabels} from "./format.mjs";
+import {UNKNOWN, bytes, capacity, decimal, percent, percentage, ratio, quality, loadText, onlineUptime, timeText, sessionLabels, freshnessLabels} from "./format.mjs";
 import {select, overview, groupOptions, resolveGroupSelection, sortOptions, sortNodes, ALL_GROUPS, UNGROUPED} from "./store.mjs";
 import {connect} from "./transport.mjs";
 import {createConnectionStatus} from "./connection-status.mjs";
@@ -134,7 +134,7 @@ function patchCard(card, node) {
     label.hidden = !expiry;
     label.title = expiry ? `到期时间：${dateTime(node.billing.expires_at_ms)}` : "";
   }
-  text("load", loadText(metric.load)); text("uptime", uptime(metric.uptime));
+  text("load", loadText(metric.load)); text("uptime", onlineUptime(metric.uptime, node.session));
   text("sample-time", node.metrics_at ? `采样于 ${timeText(node.metrics_at)}${node.freshness === "stale" ? " · 已过期" : ""}` : "尚未收到资源报告");
   text("interval", Number.isFinite(node.interval_seconds) && node.interval_seconds > 0 ? `${node.interval_seconds} 秒 / 次` : UNKNOWN);
   for (const el of card.labels.get("freshness")) el.title = node.metrics_at ? `资源采样于 ${timeText(node.metrics_at)}` : "尚未收到资源报告";

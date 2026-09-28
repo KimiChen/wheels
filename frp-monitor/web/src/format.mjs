@@ -50,6 +50,11 @@ export function uptime(field) {
   if (seconds >= 3600n) return `${seconds / 3600n} 小时 ${seconds % 3600n / 60n} 分钟`;
   return `${seconds / 60n} 分钟`;
 }
+export function onlineUptime(field, session) {
+  const duration = uptime(field);
+  if (duration === UNKNOWN) return UNKNOWN;
+  return `${session === "online" ? "在线" : "运行"} ${duration}`;
+}
 export function timeText(raw) {
   if (typeof raw !== "string") return UNKNOWN;
   const date = new Date(raw);

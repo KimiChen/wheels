@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {uint64, cumulative, decimal, bytes, ratio, percent, percentage, uptime, loadText, reconciliationText} from "../src/format.mjs";
+import {uint64, cumulative, decimal, bytes, ratio, percent, percentage, uptime, onlineUptime, loadText, reconciliationText} from "../src/format.mjs";
 import {overview, select, snapshot} from "../src/store.mjs";
 const ok = value => ({value, quality: "ok"});
 test("uint64 bytes preserve integer precision and distinguish missing from zero", () => {
@@ -89,4 +89,13 @@ test("public reconciliation separates registration from agent-reported control s
   assert.equal(reconciliationText({reconciliation: "matched", server_online: true, registered: 0}), "已核对 · 服务端在线 · 已登记 0 条");
   assert.equal(reconciliationText({reconciliation: "matched", server_online: false, registered: 1}), "已核对 · 服务端离线 · 已登记 1 条");
   assert.equal(reconciliationText({reconciliation: "matched", server_online: null, registered: -1}), "已核对 · 服务端状态未知 · 登记数未知");
+});
+
+test("online uptime labels follow node status and preserve missing samples", () => {
+  assert.equal(onlineUptime(ok("90061"), "online"), "在线 1 天 1 小时");
+  assert.equal(onlineUptime(ok("3660"), "online"), "在线 1 小时 1 分钟");
+  assert.equal(onlineUptime(ok("0"), "online"), "在线 0 分钟");
+  assert.equal(onlineUptime(ok("90061"), "offline"), "运行 1 天 1 小时");
+  assert.equal(onlineUptime(undefined, "waiting"), "—");
+  assert.equal(onlineUptime({quality: "unavailable", value: "90061"}, "online"), "—");
 });
