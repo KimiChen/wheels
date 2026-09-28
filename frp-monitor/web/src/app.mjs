@@ -10,6 +10,7 @@ const write = (element, text) => { const next = String(text ?? UNKNOWN); if (ele
 const put = (id, text) => write(byID(id), text);
 const list = byID("node-list"), table = byID("table-view"), rows = byID("node-table-body"), cards = new Map();
 const search = byID("node-search"), viewButtons = [...document.querySelectorAll("[data-fm-view]")];
+const searchDialog = byID("node-search-dialog"), searchToggle = byID("search-toggle"), searchResults = byID("search-results"), searchItems = new Map();
 const groupBar = byID("node-group-filter"), groupButtons = new Map(), groupStorageKey = "frp-monitor-public-group";
 const sort = byID("node-sort"), sortStorageKey = "frp-monitor-public-sort";
 sort.replaceChildren(...sortOptions.map(([value, name]) => {
@@ -54,6 +55,36 @@ function syncView() {
     const selected = button.dataset.fmView === view;
     button.setAttribute("aria-pressed", String(selected)); button.classList.toggle("wsk-is-active", selected);
   }
+}
+function syncSearch(nodes) {
+  const query = search.value.trim();
+  byID("clear-search").hidden = !query;
+  put("search-filter-label", `搜索：${query}`);
+  searchToggle.dataset.active = String(Boolean(query));
+  put("search-summary", `${selectedGroup === ALL_GROUPS ? "全部节点" : "当前分组"} · ${nodes.length} 个结果`);
+  byID("search-empty").hidden = nodes.length > 0;
+  const visible = new Set(nodes.map(node => node.id)), focused = searchResults.contains(document.activeElement) ? document.activeElement : null;
+  for (const [id, item] of searchItems) if (!visible.has(id)) { item.element.remove(); searchItems.delete(id); }
+  nodes.forEach((node, index) => {
+    let item = searchItems.get(node.id);
+    if (!item) {
+      const element = document.createElement("li"), link = document.createElement("a"), name = document.createElement("span"), badge = document.createElement("span");
+      link.className = "fm-search-result"; link.href = nodeURL(node.id);
+      name.className = "fm-search-result-name"; badge.className = "wsk-badge fm-badge";
+      link.append(name, badge); element.append(link);
+      item = {element, link, name, badge}; searchItems.set(node.id, item);
+    }
+    write(item.name, node.name); item.name.title = node.name; write(item.badge, nodeBadgeText(node));
+    item.badge.dataset.state = node.session; item.badge.title = sessionLabels[node.session];
+    item.link.setAttribute("aria-label", `${node.name} · ${sessionLabels[node.session]}`);
+    if (searchResults.children[index] !== item.element) searchResults.insertBefore(item.element, searchResults.children[index] ?? null);
+  });
+  if (focused?.isConnected && document.activeElement !== focused) focused.focus({preventScroll: true});
+}
+function openSearch() {
+  if (!searchDialog.open) searchDialog.showModal();
+  searchToggle.setAttribute("aria-expanded", "true");
+  search.focus(); search.select();
 }
 function createCard(node) {
   const element = byID("node-template").content.firstElementChild.cloneNode(true);
@@ -127,6 +158,7 @@ function render() {
     patchCard(cards.get(node.id), node);
   }
   const ordered = sortNodes(nodes, sort.value), shown = select(ordered, search.value, selectedGroup), visible = new Set(shown.map(n => n.id));
+  syncSearch(shown);
   for (const [id, card] of cards) {
     card.element.hidden = !visible.has(id); card.row.hidden = !visible.has(id);
   }
@@ -150,6 +182,24 @@ function onState(next) {
   if (!current && next === "error") { byID("empty-state").hidden = false; put("empty-title", "暂时无法读取节点"); put("empty-copy", "监控服务恢复后页面会自动重新同步，也可以点击刷新重试。"); }
 }
 search.addEventListener("input", render);
+searchToggle.addEventListener("click", openSearch);
+searchDialog.addEventListener("close", () => { searchToggle.setAttribute("aria-expanded", "false"); searchToggle.focus(); });
+byID("clear-search").addEventListener("click", () => { search.value = ""; render(); searchToggle.focus(); });
+document.addEventListener("keydown", event => {
+  if (!event.isComposing && (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") { event.preventDefault(); openSearch(); }
+});
+searchDialog.addEventListener("keydown", event => {
+  if (event.isComposing) return;
+  if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); searchDialog.close(); return; }
+  const links = [...searchResults.querySelectorAll("a")], index = links.indexOf(document.activeElement);
+  if (["ArrowDown", "ArrowUp"].includes(event.key) && (event.target === search || index >= 0) && links.length) {
+    event.preventDefault();
+    const next = event.key === "ArrowDown" ? (index + 1) % links.length : (index < 0 ? links.length - 1 : index - 1);
+    if (next < 0) search.focus(); else links[next].focus();
+  } else if (event.key === "Enter" && event.target === search && links.length) {
+    event.preventDefault(); links[0].click();
+  }
+});
 sort.addEventListener("change", () => {
   try { sessionStorage.setItem(sortStorageKey, sort.value); } catch { /* Storage is optional. */ }
   render();

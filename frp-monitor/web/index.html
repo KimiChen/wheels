@@ -22,6 +22,7 @@
     <symbol id="server" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="7" rx="2"/><path d="M7 6.5h.01M7 17.5h.01M12 6.5h5M12 17.5h5"/></symbol>
     <symbol id="theme" viewBox="0 0 24 24"><path d="M20.7 13.5A9 9 0 0 1 10.5 3.3 9 9 0 1 0 20.7 13.5Z"/></symbol>
     <symbol id="search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></symbol>
+    <symbol id="close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
     <symbol id="refresh" viewBox="0 0 24 24"><path d="M20 8a8 8 0 1 0 1 7M20 3v5h-5"/></symbol>
     <symbol id="arrow-up" viewBox="0 0 24 24"><path d="M12 20V4m-6 6 6-6 6 6"/></symbol>
     <symbol id="arrow-down" viewBox="0 0 24 24"><path d="M12 4v16m-6-6 6 6 6-6"/></symbol>
@@ -31,9 +32,10 @@
     <a class="wsk-brand fm-brand" href="/" aria-label="FRP Monitor 首页"><span class="wsk-brand-mark fm-brand-mark"><svg class="wsk-icon" aria-hidden="true"><use href="#pulse"/></svg></span><span>FRP <b>Monitor</b></span></a>
     <div class="fm-top-actions">
       <div class="wsk-view-switch fm-view-switch" role="group" aria-label="展示方式" data-js-only>
-        <button class="fm-view-button" data-fm-view="cards" type="button" aria-pressed="true"><svg class="wsk-icon" aria-hidden="true"><use href="#grid"/></svg>卡片</button>
-        <button class="fm-view-button" data-fm-view="table" type="button" aria-pressed="false"><svg class="wsk-icon" aria-hidden="true"><use href="#table"/></svg>表格</button>
+        <button class="fm-view-button" data-fm-view="cards" type="button" aria-label="卡片" aria-pressed="true"><svg class="wsk-icon" aria-hidden="true"><use href="#grid"/></svg>卡片</button>
+        <button class="fm-view-button" data-fm-view="table" type="button" aria-label="表格" aria-pressed="false"><svg class="wsk-icon" aria-hidden="true"><use href="#table"/></svg>表格</button>
       </div>
+      <button id="search-toggle" class="wsk-icon-button fm-search-toggle" data-js-only type="button" aria-label="搜索节点" aria-haspopup="dialog" aria-controls="node-search-dialog" aria-expanded="false" title="搜索节点（⌘ / Ctrl K）"><svg class="wsk-icon" aria-hidden="true"><use href="#search"/></svg></button>
       <button class="wsk-icon-button fm-theme" data-theme-toggle data-js-only type="button" aria-label="切换主题"><svg class="wsk-icon" aria-hidden="true"><use href="#theme"/></svg></button>
       <a class="wsk-button wsk-secondary fm-admin" href="/admin/" aria-label="管理工作台" title="管理工作台"><svg class="wsk-icon" aria-hidden="true"><use href="#settings"/></svg><span>管理</span></a>
     </div>
@@ -51,8 +53,8 @@
       </div>
       <div class="fm-toolbar" data-js-only>
         <div id="node-group-filter" class="fm-group-filter" role="group" aria-label="按节点分组查看" data-js-only></div>
+        <button id="clear-search" class="wsk-button wsk-secondary fm-search-filter" type="button" aria-label="清除名称搜索" hidden><span id="search-filter-label"></span><svg class="wsk-icon" aria-hidden="true"><use href="#close"/></svg></button>
         <div class="fm-list-controls">
-          <label class="fm-search"><svg class="wsk-icon" aria-hidden="true"><use href="#search"/></svg><input class="wsk-control" id="node-search" type="search" placeholder="搜索节点名称…" aria-label="搜索节点名称" autocomplete="off"></label>
           <label class="fm-sort"><span aria-hidden="true"><svg class="wsk-icon" viewBox="0 0 24 24"><path d="M7 3v18m-4-4 4 4 4-4M17 21V3m-4 4 4-4 4 4"/></svg>Sort</span><select id="node-sort" class="wsk-select" aria-label="节点排序方式" title="名称和系统按升序，指标按降序；缺失指标排在最后"><option value="default">默认</option></select></label>
           <button id="retry" class="wsk-icon-button fm-refresh" type="button" aria-label="刷新节点" title="刷新节点"><svg class="wsk-icon" aria-hidden="true"><use href="#refresh"/></svg></button>
         </div>
@@ -65,6 +67,14 @@
       <div class="fm-list-footer"><span id="list-summary">等待数据</span><span>— 表示暂无有效采样</span></div>
     </section>
   </main>
+  <dialog id="node-search-dialog" class="wsk-dialog fm-search-dialog" aria-labelledby="search-title">
+    <div class="fm-search-dialog-inner">
+      <h2 id="search-title" class="wsk-sr-only">搜索节点</h2>
+      <header class="wsk-dialog-head fm-search-head"><label class="fm-search"><svg class="wsk-icon" aria-hidden="true"><use href="#search"/></svg><input class="wsk-control" id="node-search" type="search" placeholder="搜索节点名称…" aria-label="搜索节点名称" aria-controls="search-results" aria-describedby="search-summary" autocomplete="off" autofocus></label><button class="wsk-icon-button" type="button" data-dialog-close aria-label="关闭搜索"><svg class="wsk-icon" aria-hidden="true"><use href="#close"/></svg></button></header>
+      <div class="fm-search-body"><p id="search-summary" class="fm-search-summary" role="status">正在连接监控服务…</p><ul id="search-results" class="fm-search-results" aria-label="匹配的节点"></ul><p id="search-empty" class="fm-search-empty" hidden>没有匹配的节点。</p></div>
+      <footer class="wsk-dialog-foot fm-search-foot"><span>↑ ↓ 选择 · Enter 打开 · Esc 关闭</span><button class="wsk-button wsk-quiet" type="button" data-dialog-close>查看筛选结果</button></footer>
+    </div>
+  </dialog>
   <footer class="fm-footer"><div class="fm-footer-inner"><div class="fm-footer-live">
     <span class="fm-stream" data-state="pending" id="stream-status" role="status"><i></i><span id="stream-label"></span></span>
     <span class="fm-snapshot">快照 <time id="snapshot-at">—</time></span>
