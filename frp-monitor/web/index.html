@@ -85,7 +85,7 @@
   <template id="node-template"><article class="wsk-panel fm-node-card">
     <header class="fm-card-header fm-node-identity">
       <div class="fm-card-heading"><h2><a class="fm-node-link" data-value="name"></a></h2><span class="wsk-badge fm-badge" data-value="session"></span></div>
-      <div class="fm-card-summary"><p data-value="hardware-short">系统信息待上报</p><small data-value="uptime">—</small></div>
+      <div class="fm-card-summary"><p data-value="hardware-short">系统信息待上报</p><small class="fm-card-timing"><span data-value="uptime">—</span><span data-value="expiry" hidden></span></small></div>
     </header>
     <div class="wsk-progress-list fm-resource-grid">
       <div class="fm-resource"><div class="fm-resource-usage"><span class="fm-resource-label" data-value="cpu-label">CPU</span><strong data-value="cpu">—</strong><progress max="100" data-meter="cpu" aria-label="CPU 使用率" hidden></progress></div></div>
@@ -104,7 +104,7 @@
     <td class="wsk-progress-list fm-resource"><strong data-value="disk">—</strong><progress max="100" data-meter="disk" aria-label="存储使用率" hidden></progress><small data-value="disk-note"></small></td>
     <td class="fm-table-network"><span>↑ <b data-value="tx">—</b></span><span>↓ <b data-value="rx">—</b></span></td>
     <td><span data-value="load">—</span><small>1 / 5 / 15 分钟</small></td>
-    <td data-value="uptime">—</td>
+    <td><span data-value="uptime">—</span><small data-value="expiry" hidden></small></td>
     <td><a class="wsk-button wsk-quiet fm-detail-link">详情 →</a></td>
   </tr></template>
 </body>

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {billingText, todayText, planText, gibBytes, gibInput, priceMinor, priceInput, settingsRequest, localDateInput} from "../src/node-settings.mjs";
+import {expiryText, billingText, todayText, planText, gibBytes, gibInput, priceMinor, priceInput, settingsRequest, localDateInput} from "../src/node-settings.mjs";
 
 const form = {name: "测试节点", public_note: "公开", private_note: "私有", is_public: true, publish_billing: false, publish_traffic_plan: true,
   price: "12.34", currency: "CNY", billing_cycle: "月付", expires_at_ms: "", renewal_note: "人工续费",
@@ -66,4 +66,14 @@ test("settings reject invalid timezone, date, quota and missing revision", () =>
   assert.equal(localDateInput(null), "");
   const date = new Date("2026-09-28T00:00:00Z");
   assert.equal(new Date(localDateInput(date.getTime())).getTime(), date.getTime());
+});
+
+test("expiry countdown hides missing dates and rounds remaining days up", () => {
+  const now = Date.UTC(2026, 8, 29), day = 86400000;
+  for (const raw of [undefined, null, "", "123", NaN, Infinity, 1.5, Number.MAX_SAFE_INTEGER]) assert.equal(expiryText(raw, now), "");
+  assert.equal(expiryText(now + 3 * day, now), "3 天后到期");
+  assert.equal(expiryText(now + day + 1, now), "2 天后到期");
+  assert.equal(expiryText(now + 1, now), "1 天后到期");
+  assert.equal(expiryText(now, now), "已到期");
+  assert.equal(expiryText(now - day, now), "已到期");
 });

@@ -50,6 +50,11 @@ export function gibBytes(raw) {
   const [whole, fraction = ""] = text.split(".");
   return String(BigInt(whole) * gib + BigInt(fraction || "0") * gib / 10n ** BigInt(fraction.length));
 }
+export function expiryText(raw, now = Date.now()) {
+  if (!Number.isSafeInteger(raw) || Number.isNaN(new Date(raw).getTime())) return "";
+  const remaining = raw - now;
+  return remaining <= 0 ? "已到期" : `${Math.ceil(remaining / 86400000)} 天后到期`;
+}
 export function billingText(billing) {
   if (!billing) return "";
   const amount = priceInput(billing.price_minor, billing.currency);

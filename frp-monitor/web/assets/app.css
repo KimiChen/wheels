@@ -185,3 +185,5 @@ main { max-width: 1500px; margin: 0 auto; padding: var(--space-24) var(--space-3
   .fm-resource progress { border: 1px solid CanvasText; }
   .wsk-view-switch .wsk-is-active { outline: 1px solid Highlight; }
 }
+
+.fm-card-timing { display: flex; flex-direction: column; align-items: flex-end; gap: var(--space-4); }

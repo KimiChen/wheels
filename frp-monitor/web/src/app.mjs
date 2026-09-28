@@ -2,7 +2,7 @@ import {UNKNOWN, bytes, capacity, decimal, percent, percentage, ratio, quality, 
 import {select, overview, groupOptions, resolveGroupSelection, sortOptions, sortNodes, ALL_GROUPS, UNGROUPED} from "./store.mjs";
 import {connect} from "./transport.mjs";
 import {createConnectionStatus} from "./connection-status.mjs";
-import {planText} from "./node-settings.mjs";
+import {planText, expiryText, dateTime} from "./node-settings.mjs";
 import {nodeURL, hardwareText, cardHardwareText, cpuLabel, groupText, nodeBadgeText} from "./node-data.mjs";
 
 const byID = id => document.getElementById(id);
@@ -128,6 +128,12 @@ function patchCard(card, node) {
   const plan = planText(node.traffic_plan);
   text("traffic-label", `流量 ${plan.quota}`); text("traffic", plan.percent); meter("traffic", plan.meter);
   card.element.querySelector('[data-value="traffic"]').title = "周期流量使用率";
+  const expiry = expiryText(node.billing?.expires_at_ms);
+  text("expiry", expiry);
+  for (const label of card.labels.get("expiry") ?? []) {
+    label.hidden = !expiry;
+    label.title = expiry ? `到期时间：${dateTime(node.billing.expires_at_ms)}` : "";
+  }
   text("load", loadText(metric.load)); text("uptime", uptime(metric.uptime));
   text("sample-time", node.metrics_at ? `采样于 ${timeText(node.metrics_at)}${node.freshness === "stale" ? " · 已过期" : ""}` : "尚未收到资源报告");
   text("interval", Number.isFinite(node.interval_seconds) && node.interval_seconds > 0 ? `${node.interval_seconds} 秒 / 次` : UNKNOWN);
