@@ -20,7 +20,7 @@ function rememberGroup() {
   } catch { /* Storage is optional. */ }
 }
 function syncGroups(nodes) {
-  const options = groupOptions(nodes), valid = new Set(options.map(group => group.key));
+  const options = groupOptions(nodes).filter(group => group.key !== UNGROUPED), valid = new Set(options.map(group => group.key));
   const next = resolveGroupSelection(selectedGroup, options);
   if (next !== selectedGroup) { selectedGroup = next; rememberGroup(); }
   for (const [key, button] of groupButtons) if (!valid.has(key)) { button.remove(); groupButtons.delete(key); }
@@ -65,7 +65,9 @@ function patchCard(card, node) {
   const metric = node.metrics ?? {};
   const meter = (key, n) => { for (const el of card.meters.get(key) ?? []) { el.hidden = n === null; if (n !== null && el.value !== n) el.value = n; } };
   text("name", node.name);
-  text("groups", groupText(node));
+  const groups = groupText(node);
+  text("groups", groups);
+  for (const label of card.labels.get("groups")) label.hidden = !groups;
   for (const link of [card.element.querySelector(".fm-open-node"), card.row.lastElementChild.querySelector("a")]) link.setAttribute("aria-label", `${node.name} · 节点详情`);
   text("hardware", hardwareText(node.hardware)); text("cpu-label", cpuLabel(node.hardware));
   const hardware = hardwareText(node.hardware);

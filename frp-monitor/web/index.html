@@ -63,7 +63,7 @@
   </div><span class="fm-footer-brand">FRP Monitor <span class="fm-footer-separator">/</span> 公开 · 只读</span></div></footer>
 
   <template id="node-template"><article class="wsk-panel fm-node-card">
-    <header class="fm-card-header"><div class="fm-node-identity"><div><h2><a class="fm-node-link" data-value="name"></a></h2><p data-value="hardware">系统信息待上报</p><p class="fm-node-groups" data-value="groups">未分组</p></div></div><div class="fm-card-status"><span class="wsk-badge fm-badge" data-value="session"></span><small data-value="uptime">—</small></div></header>
+    <header class="fm-card-header"><div class="fm-node-identity"><div><h2><a class="fm-node-link" data-value="name"></a></h2><p data-value="hardware">系统信息待上报</p><p class="fm-node-groups" data-value="groups"></p></div></div><div class="fm-card-status"><span class="wsk-badge fm-badge" data-value="session"></span><small data-value="uptime">—</small></div></header>
     <div class="wsk-progress-list fm-resource-grid">
       <div class="fm-resource"><div class="fm-resource-usage"><span class="fm-resource-label" data-value="cpu-label">CPU</span><strong data-value="cpu">—</strong><progress max="100" data-meter="cpu" aria-label="CPU 使用率" hidden></progress></div></div>
       <div class="fm-resource"><div class="fm-resource-usage"><span class="fm-resource-label" data-value="mem-label">内存 —</span><strong data-value="mem">—</strong><progress max="100" data-meter="mem" aria-label="内存使用率" hidden></progress></div></div>
@@ -74,7 +74,7 @@
     <footer class="fm-card-footer"><span class="fm-data-state" data-value="freshness"></span><a class="fm-node-link fm-open-node">详情 →</a></footer>
   </article></template>
   <template id="row-template"><tr class="fm-table-row">
-    <th scope="row"><a class="wsk-button wsk-quiet fm-detail-link" data-value="name"></a><small data-value="hardware"></small><small class="fm-node-groups" data-value="groups">未分组</small></th>
+    <th scope="row"><a class="wsk-button wsk-quiet fm-detail-link" data-value="name"></a><small data-value="hardware"></small><small class="fm-node-groups" data-value="groups"></small></th>
     <td><span class="wsk-badge fm-badge" data-value="session"></span><small class="fm-data-state" data-value="freshness"></small></td>
     <td class="wsk-progress-list fm-resource"><strong data-value="cpu">—</strong><progress max="100" data-meter="cpu" aria-label="CPU 使用率" hidden></progress><small data-value="cpu-note"></small></td>
     <td class="wsk-progress-list fm-resource"><strong data-value="mem">—</strong><progress max="100" data-meter="mem" aria-label="内存使用率" hidden></progress><small data-value="mem-note"></small></td>

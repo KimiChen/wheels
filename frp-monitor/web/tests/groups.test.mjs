@@ -65,7 +65,7 @@ test("old snapshots without groups remain ungrouped and names remain plain displ
   const legacy = {id: "1", name: "legacy", session: "waiting", freshness: "waiting"};
   assert.equal(snapshot({generated_at: now, nodes: [legacy]}).nodes[0], legacy);
   assert.deepEqual(nodeGroups(legacy), []);
-  assert.equal(groupText(legacy), "未分组");
+  assert.equal(groupText(legacy), "");
   assert.deepEqual(select([legacy], "", UNGROUPED), [legacy]);
   assert.equal(groupText(nodes[0]), "亚洲 · 欧洲");
   const text = `<img src=x onerror="alert(1)">`;

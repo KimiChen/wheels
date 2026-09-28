@@ -9,7 +9,7 @@ export function nodeGroups(node) {
     seen.add(group.id); return true;
   });
 }
-export function groupText(node) { return nodeGroups(node).map(group => group.name).join(" · ") || "未分组"; }
+export function groupText(node) { return nodeGroups(node).map(group => group.name).join(" · "); }
 export function nodeID(pathname) {
   const match = /^\/node\/([^/]+)\/?$/.exec(pathname);
   if (!match) return null;
