@@ -30,6 +30,15 @@ export function hardwareText(hardware) {
   const parts = ["os", "virt", "arch"].map(key => hardwareValue(hardware?.[key])).filter(item => item !== UNKNOWN);
   return parts.length ? parts.join(" · ") : "系统信息待上报";
 }
+export function cardHardwareText(hardware) {
+  const os = hardwareValue(hardware?.os)
+    .replace(/\bGNU\/Linux\b/gi, "")
+    .replace(/\([^)]*\)/g, "")
+    .replace(/\s+/g, " ").trim()
+    .replace(/^Alpine(?: Linux)?\s+v?(?=\d)/i, "Alpine ");
+  const parts = [os, hardwareValue(hardware?.arch)].filter(item => item && item !== UNKNOWN);
+  return parts.length ? parts.join(" · ") : "系统信息待上报";
+}
 export function cpuLabel(hardware) { const n = cpuCores(hardware); return n === null ? "CPU" : `CPU ${n} 核`; }
 export function cpuModel(hardware) {
   const name = hardwareValue(hardware?.cpu_name), cores = cpuCores(hardware);

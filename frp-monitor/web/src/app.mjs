@@ -3,7 +3,7 @@ import {select, overview, groupOptions, resolveGroupSelection, sortOptions, sort
 import {connect} from "./transport.mjs";
 import {createConnectionStatus} from "./connection-status.mjs";
 import {planText} from "./node-settings.mjs";
-import {nodeURL, hardwareText, cpuLabel, groupText, nodeBadgeText} from "./node-data.mjs";
+import {nodeURL, hardwareText, cardHardwareText, cpuLabel, groupText, nodeBadgeText} from "./node-data.mjs";
 
 const byID = id => document.getElementById(id);
 const write = (element, text) => { const next = String(text ?? UNKNOWN); if (element.textContent !== next) element.textContent = next; };
@@ -107,9 +107,11 @@ function patchCard(card, node) {
   text("groups", groups);
   for (const label of card.labels.get("groups")) label.hidden = !groups;
   for (const link of [card.element.querySelector(".fm-open-node"), card.row.lastElementChild.querySelector("a")]) link.setAttribute("aria-label", `${node.name} · 节点详情`);
-  text("hardware", hardwareText(node.hardware)); text("cpu-label", cpuLabel(node.hardware));
-  const hardware = hardwareText(node.hardware);
-  for (const label of card.labels.get("hardware")) label.title = hardware;
+  for (const [key, value] of [["hardware", hardwareText(node.hardware)], ["hardware-short", cardHardwareText(node.hardware)]]) {
+    text(key, value);
+    for (const label of card.labels.get(key) ?? []) label.title = value;
+  }
+  text("cpu-label", cpuLabel(node.hardware));
   card.element.dataset.state = node.session;
   text("session", nodeBadgeText(node)); state("session", node.session);
   for (const label of card.labels.get("session")) label.title = sessionLabels[node.session];

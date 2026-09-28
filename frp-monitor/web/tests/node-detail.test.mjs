@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {nodeID, nodeURL, hardwareValue, hardwareText, cpuCores, cpuLabel, cpuModel} from "../src/node-data.mjs";
+import {nodeID, nodeURL, hardwareValue, hardwareText, cardHardwareText, cpuCores, cpuLabel, cpuModel} from "../src/node-data.mjs";
 import {diskPercent, resourceCharts, chart} from "../src/history-data.mjs";
 
 const ok = value => ({quality: "ok", value});
@@ -23,6 +23,22 @@ test("hardware display projects only known fields and quality-ok values", () => 
   for (const value of [0, -1, 1.5, "8", Infinity, 4294967296]) assert.equal(cpuCores({cpu_cores: ok(value)}), null);
   assert.equal(cpuModel({cpu_name: ok(" "), cpu_cores: ok(2)}), "2 个逻辑核心");
   assert.equal(cpuLabel({}), "CPU");
+});
+test("homepage cards show concise OS versions and architectures without virtualization", () => {
+  for (const [os, arch, expected] of [
+    ["Debian GNU/Linux 12 (bookworm)", "x86_64", "Debian 12 · x86_64"],
+    ["Ubuntu 24.04 LTS (Noble Numbat)", "aarch64", "Ubuntu 24.04 LTS · aarch64"],
+    ["Alpine Linux v3.20", "x86_64", "Alpine 3.20 · x86_64"],
+    ["Alpine 3.20", "x86_64", "Alpine 3.20 · x86_64"],
+    ["Arch Linux", "x86_64", "Arch Linux · x86_64"],
+  ]) {
+    const hardware = {os: ok(os), arch: ok(arch), virt: ok("qemu")};
+    assert.equal(cardHardwareText(hardware), expected);
+    assert.equal(hardwareText(hardware), `${os} · qemu · ${arch}`);
+  }
+  assert.equal(cardHardwareText({os: {quality: "unavailable", value: "Debian GNU/Linux 12"}, arch: ok("aarch64"), virt: ok("qemu")}), "aarch64");
+  assert.equal(cardHardwareText({os: ok("Debian GNU/Linux 12 (bookworm)"), arch: {quality: "unsupported", value: "x86_64"}}), "Debian 12");
+  for (const hardware of [null, {}, {os: ok(" "), virt: ok("qemu")}, {os: ok("GNU/Linux (unknown)")}]) assert.equal(cardHardwareText(hardware), "系统信息待上报");
 });
 test("disk history reads quality-counted fields with precise integer ratios", () => {
   const fields = (used, total, samples = 1) => ({disk_used: {value: used, samples}, disk_total: {value: total, samples}});
