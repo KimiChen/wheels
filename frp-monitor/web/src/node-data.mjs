@@ -2,6 +2,14 @@ import {UNKNOWN, value} from "./format.mjs";
 
 export function validNodeID(id) { return typeof id === "string" && /^[1-9][0-9]{0,18}$/.test(id) && BigInt(id) <= 9223372036854775807n; }
 export function nodeURL(id) { return validNodeID(id) ? `/node/${id}` : null; }
+export function nodeGroups(node) {
+  const seen = new Set();
+  return (Array.isArray(node?.groups) ? node.groups : []).filter(group => {
+    if (!group || !validNodeID(group.id) || typeof group.name !== "string" || !group.name.trim() || seen.has(group.id)) return false;
+    seen.add(group.id); return true;
+  });
+}
+export function groupText(node) { return nodeGroups(node).map(group => group.name).join(" · ") || "未分组"; }
 export function nodeID(pathname) {
   const match = /^\/node\/([^/]+)\/?$/.exec(pathname);
   if (!match) return null;

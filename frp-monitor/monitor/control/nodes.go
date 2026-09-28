@@ -468,6 +468,12 @@ func (s *Store) DeleteNode(ctx context.Context, id string) error {
 				return err
 			}
 		}
+		// Membership changes invalidate an editor's earlier group snapshot.
+		// The following node deletion removes these links through foreign keys.
+		if _, err = tx.Exec(`UPDATE node_groups SET config_revision=config_revision+1
+ WHERE id IN (SELECT group_id FROM node_group_members WHERE node_id=?)`, id); err != nil {
+			return err
+		}
 		_, err = tx.Exec("DELETE FROM nodes WHERE id=?", id)
 		return err
 	})

@@ -1,5 +1,5 @@
 import {UNKNOWN, bytes, cumulative, decimal, percent, percentage, loadText, uptime, timeText, sessionLabels, freshnessLabels, frpLabel, reconciliationText} from "./format.mjs";
-import {nodeID, hardwareValue, cpuModel} from "./node-data.mjs";
+import {nodeID, hardwareValue, cpuModel, groupText} from "./node-data.mjs";
 import {billingText, todayText, planText, dateTime} from "./node-settings.mjs";
 import {connect} from "./transport.mjs";
 import {createHistoryPanel} from "./history-view.mjs";
@@ -27,6 +27,7 @@ function patchNode(node) {
   const metrics = node.metrics ?? {}, hardware = node.hardware;
   document.title = `${node.name} · FRP Monitor`;
   put("name", node.name); put("session", sessionLabels[node.session]); labels.get("session").dataset.state = node.session;
+  put("groups", groupText(node));
   put("freshness", `数据${freshnessLabels[node.freshness]}`); labels.get("freshness").dataset.state = node.freshness;
   put("uptime", uptime(metrics.uptime)); put("agent", hardwareValue(hardware?.agent_version));
   put("os", hardwareValue(hardware?.os)); put("cpu-model", cpuModel(hardware)); put("load", loadText(metrics.load));

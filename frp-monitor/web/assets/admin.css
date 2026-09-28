@@ -90,6 +90,26 @@
 .fa-detail-list dd { margin: 0; font-size: var(--type-sm); color: var(--text); overflow-wrap: anywhere; line-height: 1.6; }
 .fa-detail-note { padding: var(--space-12); background: var(--surface-soft); border-radius: var(--radius-sm); }
 .fa-confirm { display: block; margin-top: var(--space-20); }
+.fa-groups-heading > button { flex-shrink: 0; white-space: nowrap; }
+.fa-groups-layout { display: grid; grid-template-columns: minmax(200px,1fr) minmax(0,2fr); gap: var(--space-20); align-items: start; }
+.fa-group-directory { min-width: 0; padding: var(--space-20); }
+.fa-groups-layout h2 { margin: 0 0 var(--space-20); font-size: var(--type-lg); }
+.fa-group-list { list-style: none; padding: 0; margin: 0; display: grid; gap: var(--space-8); max-height: 65vh; overflow-y: auto; }
+.fa-group-choice { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: var(--space-12); text-align: left; padding: var(--space-12); color: var(--text); background: var(--surface-soft); border: 1px solid transparent; border-radius: var(--radius-sm); font: inherit; cursor: pointer; }
+.fa-group-choice > span { overflow-wrap: anywhere; min-width: 0; }
+.fa-group-choice > small { flex-shrink: 0; color: var(--muted-soft); font-size: var(--type-xs); }
+.fa-group-choice:hover, .fa-group-choice[aria-pressed="true"] { border-color: var(--accent); }
+.fa-group-choice[aria-pressed="true"] { color: var(--accent); }
+.fa-group-form { min-width: 0; }
+.fa-group-members-field { border: 0; margin: var(--space-24) 0 var(--space-12); padding: 0; min-width: 0; }
+.fa-group-members-field legend { margin-bottom: var(--space-12); font-weight: 600; }
+.fa-group-members { display: grid; gap: var(--space-8); max-height: 380px; overflow-y: auto; }
+.fa-group-member { display: flex; align-items: start; gap: var(--space-12); padding: var(--space-12); background: var(--surface-soft); border-radius: var(--radius-sm); cursor: pointer; }
+.fa-group-member input { flex-shrink: 0; margin-top: var(--space-4); }
+.fa-group-member span { min-width: 0; overflow-wrap: anywhere; }
+.fa-group-member small { display: block; color: var(--muted-soft); font-size: var(--type-xs); margin-top: var(--space-4); }
+.fa-group-actions { display: flex; justify-content: space-between; flex-wrap: wrap; gap: var(--space-12); margin-top: var(--space-20); }
+.fa-group-actions > .fa-actions { margin-left: auto; }
 .fa-probe-rows { display: grid; gap: var(--space-16); margin-bottom: var(--space-20); }
 .fa-probe-row { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: var(--space-12); align-items: end; padding: var(--space-16); }
 .fa-form-note { margin: var(--space-20) 0 0; }
@@ -100,7 +120,7 @@
   .fa-top-label { display: none; }
   .fa-actions a { font-size: var(--type-2xs); margin-right: 0; }
   .fa-main { padding-inline: var(--space-16); }
-  .fa-navigation { min-height: 56px; gap: var(--space-20); }
+  .fa-navigation { min-height: 56px; gap: var(--space-20); overflow-x: auto; }
   .fa-navigation a { font-size: var(--type-sm); gap: var(--space-6); }
   .fa-node-heading { align-items: stretch; flex-direction: column; }
   .fa-page-actions { width: 100%; }
@@ -111,6 +131,8 @@
   .fa-settings-grid { grid-template-columns: minmax(0,1fr); }
   .fa-detail-list { gap: var(--space-14); }
   .fa-probe-row { grid-template-columns: minmax(0,1fr); }
+  .fa-groups-layout { grid-template-columns: minmax(0,1fr); }
+  .fa-group-list { max-height: 260px; }
   .fa-panel { padding: var(--space-16); }
   .fa-login { margin: var(--space-48) auto 80px; }
 }

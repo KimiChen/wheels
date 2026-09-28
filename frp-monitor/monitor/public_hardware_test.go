@@ -45,7 +45,7 @@ func TestPublicHardwareExplicitAllowlist(t *testing.T) {
 	if err := json.Unmarshal(encoded, &data); err != nil {
 		t.Fatal(err)
 	}
-	wantNodeKeys := []string{"accounting_state", "freshness", "frp", "hardware", "id", "interval_seconds", "last_seen", "metrics", "metrics_at", "name", "public_note", "session", "traffic_plan", "traffic_today"}
+	wantNodeKeys := []string{"accounting_state", "freshness", "frp", "groups", "hardware", "id", "interval_seconds", "last_seen", "metrics", "metrics_at", "name", "public_note", "session", "traffic_plan", "traffic_today"}
 	if got := jsonKeys(data.Nodes[0]); !reflect.DeepEqual(got, wantNodeKeys) {
 		t.Fatalf("public node keys: %v", got)
 	}

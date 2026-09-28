@@ -11,6 +11,7 @@
   <a class="wsk-skip-link" href="#main">跳到主要内容</a>
   <svg class="wsk-icon-sprite fm-symbols" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><defs>
     <symbol id="server" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="7" rx="2"/><path d="M7 6.5h.01M7 17.5h.01M12 6.5h5M12 17.5h5"/></symbol>
+    <symbol id="groups" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></symbol>
     <symbol id="activity" viewBox="0 0 24 24"><path d="M2 12h5l3-8 4 16 3-8h5"/></symbol>
     <symbol id="link" viewBox="0 0 24 24"><path d="m10 13 4-4M8 15l-2 2a4 4 0 0 1-6-6l4-4a4 4 0 0 1 6 0m4 2 2-2a4 4 0 0 1 6 6l-4 4a4 4 0 0 1-6 0" transform="translate(1 0)"/></symbol>
     <symbol id="plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
@@ -30,6 +31,7 @@
     <div id="workspace" hidden>
       <nav class="wsk-tab-list fa-navigation" aria-label="管理导航">
           <a href="#nodes" data-admin-view="nodes" aria-current="page"><svg class="wsk-icon" aria-hidden="true"><use href="#server"/></svg>节点</a>
+          <a href="#groups" data-admin-view="groups"><svg class="wsk-icon" aria-hidden="true"><use href="#groups"/></svg>分组</a>
           <a href="#probes" data-admin-view="probes"><svg class="wsk-icon" aria-hidden="true"><use href="#activity"/></svg>网络探测</a>
           <a href="#frp" data-admin-view="frp"><svg class="wsk-icon" aria-hidden="true"><use href="#link"/></svg>FRP 注册表</a>
       </nav>
@@ -38,6 +40,22 @@
             <div class="fa-page-heading fa-node-heading"><div><h1 id="nodes-title">节点</h1><p><span id="node-count">—</span> 个接入节点</p></div><div class="fa-page-actions"><label class="wsk-sr-only fa-sr-only" for="node-search">搜索节点</label><input class="wsk-control" id="node-search" type="search" placeholder="搜索名称或节点 ID" autocomplete="off"><button id="refresh" class="wsk-button wsk-secondary fa-refresh" type="button" aria-label="刷新节点列表" title="刷新节点列表"><svg class="wsk-icon" aria-hidden="true"><use href="#icon-refresh"/></svg></button><button id="add-node" class="wsk-button fa-primary" type="button"><svg class="wsk-icon" aria-hidden="true"><use href="#plus"/></svg>添加节点</button></div></div>
             <div class="wsk-table-wrap fa-table-wrap fa-directory" role="region" aria-label="节点管理表，可横向滚动" tabindex="0"><table class="wsk-table fa-table fa-node-table"><caption class="wsk-sr-only fa-sr-only">节点接入、流量与费用</caption><thead><tr><th scope="col">ID</th><th scope="col">名称</th><th scope="col">IP 地址</th><th scope="col">状态</th><th scope="col">套餐流量</th><th scope="col">价格</th><th scope="col">到期</th><th scope="col" class="fa-align-right">操作</th></tr></thead><tbody id="node-list"></tbody></table><p id="nodes-empty" class="fa-empty">等待节点快照…</p></div>
             <p id="snapshot-at" class="fa-muted fa-sync">—</p>
+          </section>
+          <section data-admin-panel="groups" aria-labelledby="groups-title" hidden>
+            <div class="fa-page-heading fa-groups-heading"><div><h1 id="groups-title">节点分组</h1><p>一个节点可以加入多个分组，也可以保留空分组。</p></div><button id="group-new" class="wsk-button fa-primary" type="button"><svg class="wsk-icon" aria-hidden="true"><use href="#plus"/></svg>新建分组</button></div>
+            <p id="groups-health" class="wsk-alert wsk-info fa-notice" role="status" hidden>分组配置暂不可用，已保留当前编辑内容。请重新读取后再保存。</p>
+            <div class="fa-groups-layout">
+              <div class="wsk-panel fa-group-directory"><h2>已有分组 <span id="group-count" class="fa-muted">—</span></h2><ul id="group-list" class="fa-group-list" aria-label="选择要编辑的分组"></ul><p id="groups-empty" class="fa-empty">等待分组快照…</p></div>
+              <form id="group-form" class="wsk-panel fa-panel fa-group-form" aria-labelledby="group-editor-title">
+                <h2 id="group-editor-title">新建分组</h2>
+                <label class="wsk-field"><span class="wsk-label">分组名称</span><input id="group-name" class="wsk-control" name="name" required maxlength="128" autocomplete="off" aria-describedby="group-name-help" placeholder="例如：亚洲、生产环境"><small id="group-name-help" class="fa-muted">最多 128 字节。名称会随公开节点显示在公开页面。</small></label>
+                <fieldset class="fa-group-members-field"><legend>成员节点 <span id="group-member-count" class="fa-muted">0 个已选</span></legend><div id="group-members" class="fa-group-members"></div><p id="group-members-empty" class="fa-muted">尚无节点，可以先保存空分组。</p></fieldset>
+                <p class="fa-muted">可同时勾选多个节点；节点原有的其他分组不受影响。未加入任何分组的节点归为「未分组」。</p>
+                <p id="group-status" class="fa-muted" role="status" aria-live="polite">读取后即可创建分组。</p>
+                <div class="fa-group-actions"><button id="group-delete" class="wsk-danger wsk-button fa-danger" type="button" hidden>删除分组</button><div class="fa-actions"><button id="groups-reload" class="wsk-secondary wsk-button" type="button">重新读取</button><button id="group-save" class="wsk-button fa-primary" type="submit">创建分组</button></div></div>
+                <div id="group-confirm" class="wsk-alert wsk-warning fa-confirm" hidden><p id="group-confirm-copy"></p><div class="fa-actions"><button id="group-delete-no" class="wsk-secondary wsk-button" type="button">取消</button><button id="group-delete-yes" class="wsk-danger wsk-button fa-danger" type="button">确认删除分组</button></div></div>
+              </form>
+            </div>
           </section>
           <section data-admin-panel="probes" aria-labelledby="probes-title" hidden>
             <div class="fa-page-heading"><div><h1 id="probes-title">网络探测</h1><p>为节点配置 TCP 建连延迟监控。</p></div><button id="probes-reload" class="wsk-secondary wsk-button" type="button">重新读取</button></div>

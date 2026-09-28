@@ -82,6 +82,7 @@ type Service struct {
 	adminJSON       atomic.Pointer[adminEncodedSnapshot]
 	control         *control.Store
 	configs         atomic.Pointer[nodeConfigs]
+	groups          atomic.Pointer[groupBook]
 	store           *store.Store
 	storeFailed     bool
 	tasks           atomic.Pointer[probeBook]
@@ -596,6 +597,7 @@ type PublicFRP struct {
 type PublicNode struct {
 	ID              string          `json:"id"`
 	Name            string          `json:"name"`
+	Groups          []NodeGroupRef  `json:"groups"`
 	Session         string          `json:"session"`
 	Freshness       string          `json:"freshness"`
 	LastSeen        *time.Time      `json:"last_seen"`
@@ -618,6 +620,7 @@ type PublicSnapshot struct {
 func (s *Service) snapshot(now time.Time) PublicSnapshot { return s.snapshotFor(now, false) }
 func (s *Service) snapshotFor(now time.Time, private bool) PublicSnapshot {
 	configs := s.configs.Load()
+	groups := s.groups.Load()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := PublicSnapshot{Nodes: make([]PublicNode, 0, len(s.nodes)), GeneratedAt: now.UTC()}
@@ -630,6 +633,10 @@ func (s *Service) snapshotFor(now time.Time, private bool) PublicSnapshot {
 			continue
 		}
 		p := PublicNode{ID: n.credential.AgentID, Name: n.credential.Name, Session: "waiting", Freshness: "waiting", IntervalSeconds: s.cfg.ReportIntervalSeconds, FRP: PublicFRP{ControlState: "unknown"}}
+		p.Groups = []NodeGroupRef{}
+		if groups != nil && groups.ByNode[p.ID] != nil {
+			p.Groups = groups.ByNode[p.ID]
+		}
 		p.AccountingState = "ready"
 		if s.control != nil && !s.control.Healthy() {
 			p.AccountingState = "degraded"

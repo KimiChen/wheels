@@ -181,7 +181,18 @@ func (s *Service) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w, http.MethodGet, http.MethodPost)
 	case "probes":
 		s.handleAdminProbes(w, r)
+	case "groups":
+		s.handleAdminGroups(w, r, "")
 	default:
+		if strings.HasPrefix(path, "groups/") {
+			id := strings.TrimPrefix(path, "groups/")
+			if !validNodeID(id) {
+				http.NotFound(w, r)
+				return
+			}
+			s.handleAdminGroups(w, r, id)
+			return
+		}
 		if strings.HasPrefix(path, "nodes/") {
 			s.mutateNode(w, r, strings.TrimPrefix(path, "nodes/"))
 			return
@@ -193,6 +204,7 @@ func (s *Service) handleAdmin(w http.ResponseWriter, r *http.Request) {
 type adminNode struct {
 	ID              string               `json:"id"`
 	Name            string               `json:"name"`
+	Groups          []NodeGroupRef       `json:"groups"`
 	Session         string               `json:"session"`
 	Freshness       string               `json:"freshness"`
 	LastSeen        *time.Time           `json:"last_seen"`
@@ -209,11 +221,13 @@ type adminNode struct {
 	TrafficPlan     *nodePlan            `json:"traffic_plan"`
 }
 type adminSnapshot struct {
-	GeneratedAt      time.Time      `json:"generated_at"`
-	Nodes            []adminNode    `json:"nodes"`
-	CredentialsState string         `json:"credentials_state"`
-	ProbesState      string         `json:"probes_state"`
-	FRP              Reconciliation `json:"frp"`
+	GeneratedAt      time.Time           `json:"generated_at"`
+	Nodes            []adminNode         `json:"nodes"`
+	CredentialsState string              `json:"credentials_state"`
+	ProbesState      string              `json:"probes_state"`
+	GroupsState      string              `json:"groups_state"`
+	Groups           []control.NodeGroup `json:"groups"`
+	FRP              Reconciliation      `json:"frp"`
 }
 
 type adminEncodedSnapshot struct {
@@ -276,6 +290,11 @@ func (s *Service) adminSnapshotLocked() adminSnapshot {
 	now := time.Now()
 	public := s.snapshotFor(now, true)
 	out := adminSnapshot{GeneratedAt: now.UTC(), Nodes: []adminNode{}, CredentialsState: "ready", ProbesState: "ready"}
+	out.Groups = []control.NodeGroup{}
+	out.GroupsState = "degraded"
+	if groups := s.groups.Load(); groups != nil && !groups.Failed {
+		out.Groups, out.GroupsState = groups.Groups, "ready"
+	}
 	if s.taskError.Load() {
 		out.ProbesState = "degraded"
 	}
@@ -297,6 +316,7 @@ func (s *Service) adminSnapshotLocked() adminSnapshot {
 			}
 		}
 		row := adminNode{ID: p.ID, Name: p.Name, Session: p.Session, Freshness: p.Freshness, LastSeen: p.LastSeen, MetricsAt: p.MetricsAt, IntervalSeconds: p.IntervalSeconds, Metrics: p.Metrics, FRPSummary: p.FRP, Facts: facts, FRP: n.frp, FRPBinding: n.credential.FRPBinding, Billing: p.Billing, TrafficToday: p.TrafficToday, TrafficPlan: p.TrafficPlan}
+		row.Groups = p.Groups
 		if configs := s.configs.Load(); configs != nil {
 			if config := (*configs)[p.ID]; config != nil {
 				row.Settings = &nodeSettings{config.NodeConfig, config.ConfigRevision}

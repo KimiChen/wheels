@@ -45,6 +45,7 @@
       <div class="wsk-panel fm-fleet-panel">
         <div class="fm-section-heading"><div><svg class="wsk-icon" aria-hidden="true"><use href="#server"/></svg><h1 id="nodes-title">节点群</h1><div class="fm-fleet-counts" aria-label="监控会话统计"><span class="wsk-badge fm-count" data-state="online"><b id="stat-online">—</b> 在线</span><span class="wsk-badge fm-count" data-state="offline"><b id="stat-offline">—</b> 离线</span><span class="wsk-badge fm-count" data-state="waiting"><b id="stat-waiting">—</b> 待接入</span><span class="wsk-badge fm-count">ALL <b id="stat-total">—</b></span></div></div><button id="retry" class="wsk-secondary wsk-button fm-refresh" type="button" data-js-only><svg class="wsk-icon" aria-hidden="true"><use href="#refresh"/></svg>刷新</button></div>
         <div class="fm-toolbar" data-js-only><label class="fm-search"><svg class="wsk-icon" aria-hidden="true"><use href="#search"/></svg><input class="wsk-control" id="node-search" type="search" placeholder="搜索节点名称…" aria-label="搜索节点名称" autocomplete="off"></label></div>
+        <div id="node-group-filter" class="fm-group-filter" role="group" aria-label="按节点分组查看" data-js-only></div>
       </div>
       <div id="node-list" class="fm-node-grid"></div>
       <div id="table-view" class="wsk-table-wrap fm-table-wrap" role="region" aria-label="节点资源表，可横向滚动" tabindex="0" hidden>
@@ -62,7 +63,7 @@
   </div><span class="fm-footer-brand">FRP Monitor <span class="fm-footer-separator">/</span> 公开 · 只读</span></div></footer>
 
   <template id="node-template"><article class="wsk-panel fm-node-card">
-    <header class="fm-card-header"><div class="fm-node-identity"><div><h2><a class="fm-node-link" data-value="name"></a></h2><p data-value="hardware">系统信息待上报</p></div></div><div class="fm-card-status"><span class="wsk-badge fm-badge" data-value="session"></span><small data-value="uptime">—</small></div></header>
+    <header class="fm-card-header"><div class="fm-node-identity"><div><h2><a class="fm-node-link" data-value="name"></a></h2><p data-value="hardware">系统信息待上报</p><p class="fm-node-groups" data-value="groups">未分组</p></div></div><div class="fm-card-status"><span class="wsk-badge fm-badge" data-value="session"></span><small data-value="uptime">—</small></div></header>
     <div class="wsk-progress-list fm-resource-grid">
       <div class="fm-resource"><div class="fm-resource-usage"><span class="fm-resource-label" data-value="cpu-label">CPU</span><strong data-value="cpu">—</strong><progress max="100" data-meter="cpu" aria-label="CPU 使用率" hidden></progress></div></div>
       <div class="fm-resource"><div class="fm-resource-usage"><span class="fm-resource-label" data-value="mem-label">内存 —</span><strong data-value="mem">—</strong><progress max="100" data-meter="mem" aria-label="内存使用率" hidden></progress></div></div>
@@ -73,7 +74,7 @@
     <footer class="fm-card-footer"><span class="fm-data-state" data-value="freshness"></span><span>FRP <b data-value="frp"></b></span><a class="fm-node-link fm-open-node">详情 →</a></footer>
   </article></template>
   <template id="row-template"><tr class="fm-table-row">
-    <th scope="row"><a class="wsk-button wsk-quiet fm-detail-link" data-value="name"></a><small data-value="hardware"></small></th>
+    <th scope="row"><a class="wsk-button wsk-quiet fm-detail-link" data-value="name"></a><small data-value="hardware"></small><small class="fm-node-groups" data-value="groups">未分组</small></th>
     <td><span class="wsk-badge fm-badge" data-value="session"></span><small class="fm-data-state" data-value="freshness"></small></td>
     <td class="wsk-progress-list fm-resource"><strong data-value="cpu">—</strong><progress max="100" data-meter="cpu" aria-label="CPU 使用率" hidden></progress><small data-value="cpu-note"></small></td>
     <td class="wsk-progress-list fm-resource"><strong data-value="mem">—</strong><progress max="100" data-meter="mem" aria-label="内存使用率" hidden></progress><small data-value="mem-note"></small></td>

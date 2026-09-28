@@ -67,6 +67,11 @@ func (s *Service) refreshNodes(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	groups, err := s.control.Groups(ctx)
+	if err != nil {
+		return err
+	}
+	s.applyGroups(groups, nil)
 	s.applyNodes(nodes)
 	return nil
 }
@@ -173,6 +178,7 @@ func (s *Service) refreshCommitted(ctx context.Context) {
 }
 
 func (s *Service) invalidateCredentials() {
+	s.applyGroups(nil, control.ErrClosed)
 	empty := nodeConfigs{}
 	s.configs.Store(&empty)
 	s.applyCredentials(nil)

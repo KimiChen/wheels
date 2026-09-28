@@ -23,6 +23,8 @@ import (
 //go:embed schema.sql
 var Schema string
 
+const groupSchemaMarker = "-- Node groups (schema v5).\n"
+
 type request struct {
 	sample *sample
 	call   func(*sql.Tx) error
@@ -91,6 +93,7 @@ func Open(cfg Config) (*Store, error) {
 	if err = db.QueryRowContext(ctx, "PRAGMA application_id").Scan(&application); err != nil {
 		return fail(err)
 	}
+	var schemaChange string
 	if version == 0 && application == 0 {
 		var tables int
 		if err = db.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_master WHERE type='table'").Scan(&tables); err != nil {
@@ -99,19 +102,30 @@ func Open(cfg Config) (*Store, error) {
 		if tables != 0 {
 			return fail(errors.New("control database must be a new empty database"))
 		}
+		schemaChange = Schema
+	} else if application != 1179798836 || (version != 4 && version != 5) {
+		return fail(errors.New("unsupported control database"))
+	} else if version == 4 {
+		// Reuse the fresh schema's group DDL. Migration only adds tables and
+		// an index; node IDs, counters, credentials and settings stay intact.
+		var found bool
+		_, schemaChange, found = strings.Cut(Schema, groupSchemaMarker)
+		if !found {
+			return fail(errors.New("missing control group schema"))
+		}
+	}
+	if schemaChange != "" {
 		tx, e := db.BeginTx(ctx, nil)
 		if e != nil {
 			return fail(e)
 		}
-		if _, e = tx.ExecContext(ctx, Schema); e != nil {
+		if _, e = tx.ExecContext(ctx, schemaChange); e != nil {
 			tx.Rollback()
 			return fail(e)
 		}
 		if e = tx.Commit(); e != nil {
 			return fail(e)
 		}
-	} else if version != 4 || application != 1179798836 {
-		return fail(errors.New("unsupported control database"))
 	}
 	var mode string
 	if err = db.QueryRowContext(ctx, "PRAGMA journal_mode=WAL").Scan(&mode); err != nil {
@@ -375,7 +389,7 @@ func (s *Store) call(ctx context.Context, fn func(*sql.Tx) error) error {
 func (s *Store) classify(err error) error {
 	var constraint interface{ Code() int }
 	if errors.As(err, &constraint) && (constraint.Code() == 2067 || constraint.Code() == 1555) {
-		err = fmt.Errorf("%w: duplicate node credential or FRP binding", ErrConflict)
+		err = fmt.Errorf("%w: duplicate configuration value", ErrConflict)
 	}
 	var report ingestReport
 	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, ErrInvalid) && !errors.Is(err, ErrConflict) && !errors.Is(err, ErrNotFound) && !errors.As(err, &report) {

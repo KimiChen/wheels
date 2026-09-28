@@ -13,6 +13,7 @@ import tempfile
 import threading
 import tomllib
 import unittest
+from contextlib import closing
 from unittest import mock
 
 SCRIPTS = Path(__file__).resolve().parents[1] / 'scripts'
@@ -284,6 +285,49 @@ class OpsTests(unittest.TestCase):
         db = sqlite3.connect(restored / 'control.sqlite')
         self.assertEqual(db.execute('SELECT traffic_period_rx_bytes,traffic_adjustment_bytes,private_note FROM nodes').fetchone(), ('9007199254740993', '-3', 'private'))
         db.close()
+
+    def test_backup_preserves_groups_memberships_and_revisions(self):
+        with closing(sqlite3.connect(self.runtime / 'control.sqlite')) as database:
+            with database:
+                database.execute("INSERT INTO node_groups(id,name,config_revision) VALUES(7,'生产🛰',9)")
+                database.execute("INSERT INTO node_groups(id,name,config_revision) VALUES(8,'empty',2)")
+                database.execute("INSERT INTO node_group_members(group_id,node_id) VALUES(7,1)")
+                database.execute("INSERT INTO node_groups(id,name) VALUES(20,'deleted')")
+                database.execute("DELETE FROM node_groups WHERE id=20")
+            expected_node = database.execute('SELECT * FROM nodes').fetchall()
+        archive = ops.backup(self.runtime, self.backups / 'groups.tar.gz')
+        restored = ops.restore(archive, self.root / 'restored-groups')
+        with closing(sqlite3.connect(restored / 'control.sqlite')) as database:
+            self.assertEqual(database.execute('PRAGMA user_version').fetchone(), (5,))
+            self.assertEqual(database.execute('SELECT * FROM nodes').fetchall(), expected_node)
+            self.assertEqual(database.execute('SELECT id,name,config_revision FROM node_groups ORDER BY id').fetchall(),
+                             [(7, '生产🛰', 9), (8, 'empty', 2)])
+            self.assertEqual(database.execute('SELECT group_id,node_id FROM node_group_members').fetchall(), [(7, 1)])
+            cursor = database.execute("INSERT INTO node_groups(name) VALUES('next')")
+            self.assertEqual(cursor.lastrowid, 21)
+            self.assertEqual(database.execute('PRAGMA foreign_key_check').fetchall(), [])
+
+    def test_restore_keeps_supported_v4_for_startup_migration_and_rejects_other_versions(self):
+        with closing(sqlite3.connect(self.runtime / 'control.sqlite')) as database:
+            database.executescript('DROP TABLE node_group_members; DROP TABLE node_groups; PRAGMA user_version=4;')
+            expected_node = database.execute('SELECT * FROM nodes').fetchall()
+            expected_settings = database.execute('SELECT * FROM settings').fetchall()
+        archive = ops.backup(self.runtime, self.backups / 'legacy.tar.gz')
+        restored = ops.restore(archive, self.root / 'legacy-restored')
+        with closing(sqlite3.connect(restored / 'control.sqlite')) as database:
+            self.assertEqual(database.execute('PRAGMA user_version').fetchone(), (4,))
+            self.assertEqual(database.execute('SELECT * FROM nodes').fetchall(), expected_node)
+            self.assertEqual(database.execute('SELECT * FROM settings').fetchall(), expected_settings)
+            self.assertEqual(database.execute("SELECT count(*) FROM sqlite_master WHERE name='node_groups'").fetchone(), (0,))
+        for version, application in ((3, 1179798836), (6, 1179798836), (4, 123), (5, 123)):
+            with self.subTest(version=version, application=application):
+                with closing(sqlite3.connect(self.runtime / 'control.sqlite')) as database:
+                    database.executescript(f'PRAGMA user_version={version}; PRAGMA application_id={application};')
+                archive = ops.backup(self.runtime, self.backups / f'unsupported-{version}-{application}.tar.gz')
+                target = self.root / f'unsupported-{version}-{application}'
+                with self.assertRaisesRegex(ValueError, 'unsupported control database'):
+                    ops.restore(archive, target)
+                self.assertFalse(target.exists())
 
     def test_old_installation_format_and_missing_control_database_are_rejected(self):
         metadata = self.runtime / 'installation.json'

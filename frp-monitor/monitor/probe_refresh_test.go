@@ -47,11 +47,12 @@ func testConfigurationRefresh(t *testing.T) *Service {
 
 func pendingConfigurationRead(t *testing.T, s *Service) configurationRead {
 	t.Helper()
-	read := configurationRead{configs: s.configs.Load(), tasks: s.tasks.Load()}
+	read := configurationRead{configs: s.configs.Load(), tasks: s.tasks.Load(), groups: s.groups.Load()}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	read.nodes, read.nodeErr = s.control.Nodes(ctx)
 	read.taskData, read.taskErr = s.control.ReadProbes(ctx)
+	read.groupData, read.groupErr = s.control.Groups(ctx)
 	if read.nodeErr != nil || read.taskErr != nil {
 		t.Fatalf("read pending configuration: %v, %v", read.nodeErr, read.taskErr)
 	}

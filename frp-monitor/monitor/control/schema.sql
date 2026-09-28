@@ -1,4 +1,4 @@
--- Fresh P4 control database. No import or migration of development-era stores.
+-- Current control database. Existing v4 databases add only the group tables.
 CREATE TABLE nodes (
  id INTEGER PRIMARY KEY AUTOINCREMENT,
  name TEXT NOT NULL,
@@ -49,7 +49,19 @@ CREATE TABLE settings (
  probe_json TEXT NOT NULL CHECK (json_valid(probe_json) AND json_type(probe_json)='object')
 );
 INSERT INTO settings(id,probe_json) VALUES (1,'{"version":1,"nodes":[]}');
+-- Node groups (schema v5).
+CREATE TABLE node_groups (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ name TEXT NOT NULL UNIQUE,
+ config_revision INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE node_group_members (
+ group_id INTEGER NOT NULL REFERENCES node_groups(id) ON DELETE CASCADE,
+ node_id INTEGER NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+ PRIMARY KEY (group_id,node_id)
+);
+CREATE INDEX node_group_members_node_id ON node_group_members(node_id);
 -- Database identity; must match the restore check in scripts/ops.py
 -- and the startup check in monitor/control/store.go.
 PRAGMA application_id=1179798836;
-PRAGMA user_version=4;
+PRAGMA user_version=5;

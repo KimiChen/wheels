@@ -46,6 +46,15 @@ type NodeConfig struct {
 	TrafficResetTimezone string  `json:"traffic_reset_timezone"`
 }
 
+// NodeGroup is an administrator-managed set of node memberships. Nodes may
+// appear in several groups; an empty group remains a valid saved group.
+type NodeGroup struct {
+	ID             string   `json:"id"`
+	Name           string   `json:"name"`
+	NodeIDs        []string `json:"node_ids"`
+	ConfigRevision int64    `json:"config_revision"`
+}
+
 func DefaultNodeConfig(name string) NodeConfig {
 	return NodeConfig{Name: name, IsPublic: true, PublishTrafficPlan: true, TrafficMode: "max", TrafficResetMode: "monthly", TrafficResetDay: 1, TrafficResetTimezone: "UTC"}
 }

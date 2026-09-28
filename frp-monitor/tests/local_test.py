@@ -26,7 +26,9 @@ class LocalTests(unittest.TestCase):
             with closing(sqlite3.connect(folder / "control.sqlite")) as database:
                 database.row_factory = sqlite3.Row
                 credentials = dict(database.execute("SELECT * FROM nodes").fetchone())
-                self.assertEqual(database.execute("PRAGMA user_version").fetchone()[0], 4)
+                self.assertEqual(database.execute("PRAGMA user_version").fetchone()[0], 5)
+                self.assertEqual(database.execute("SELECT count(*) FROM node_groups").fetchone()[0], 0)
+                self.assertEqual(database.execute("SELECT count(*) FROM node_group_members").fetchone()[0], 0)
             agent = tomllib.loads((folder / "agent.toml").read_text())
             server = tomllib.loads((folder / "server.toml").read_text())
             self.assertEqual(credentials["token_sha256"], hashlib.sha256(token.encode()).hexdigest())

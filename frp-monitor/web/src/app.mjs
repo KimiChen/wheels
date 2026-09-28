@@ -1,16 +1,45 @@
 import {UNKNOWN, bytes, capacity, decimal, percent, percentage, ratio, quality, loadText, uptime, timeText, sessionLabels, freshnessLabels, frpLabel, reconciliationText} from "./format.mjs";
-import {select, overview} from "./store.mjs";
+import {select, overview, groupOptions, resolveGroupSelection, ALL_GROUPS, UNGROUPED} from "./store.mjs";
 import {connect} from "./transport.mjs";
 import {planText} from "./node-settings.mjs";
-import {nodeURL, hardwareText, cpuLabel} from "./node-data.mjs";
+import {nodeURL, hardwareText, cpuLabel, groupText} from "./node-data.mjs";
 
 const byID = id => document.getElementById(id);
 const write = (element, text) => { const next = String(text ?? UNKNOWN); if (element.textContent !== next) element.textContent = next; };
 const put = (id, text) => write(byID(id), text);
 const list = byID("node-list"), table = byID("table-view"), rows = byID("node-table-body"), cards = new Map();
 const search = byID("node-search"), viewButtons = [...document.querySelectorAll("[data-fm-view]")];
-let current = null, view = "cards";
+const groupBar = byID("node-group-filter"), groupButtons = new Map(), groupStorageKey = "frp-monitor-public-group";
+let current = null, view = "cards", selectedGroup = ALL_GROUPS;
 try { if (localStorage.getItem("frp-monitor-view") === "table") view = "table"; } catch { /* Storage is optional. */ }
+try { selectedGroup = sessionStorage.getItem(groupStorageKey) ?? ALL_GROUPS; } catch { /* Storage is optional. */ }
+function rememberGroup() {
+  try {
+    if (selectedGroup === ALL_GROUPS) sessionStorage.removeItem(groupStorageKey);
+    else sessionStorage.setItem(groupStorageKey, selectedGroup);
+  } catch { /* Storage is optional. */ }
+}
+function syncGroups(nodes) {
+  const options = groupOptions(nodes), valid = new Set(options.map(group => group.key));
+  const next = resolveGroupSelection(selectedGroup, options);
+  if (next !== selectedGroup) { selectedGroup = next; rememberGroup(); }
+  for (const [key, button] of groupButtons) if (!valid.has(key)) { button.remove(); groupButtons.delete(key); }
+  options.forEach((group, index) => {
+    let button = groupButtons.get(group.key);
+    if (!button) {
+      button = document.createElement("button"); button.type = "button"; button.className = "wsk-button wsk-secondary fm-group-button";
+      const name = document.createElement("span"), count = document.createElement("span"); count.className = "fm-group-count";
+      button.append(name, count);
+      button.addEventListener("click", () => { selectedGroup = group.key; rememberGroup(); render(); });
+      groupButtons.set(group.key, button);
+    }
+    write(button.firstElementChild, group.name); write(button.lastElementChild, group.count);
+    const selected = group.key === selectedGroup;
+    button.setAttribute("aria-pressed", String(selected)); button.classList.toggle("wsk-is-active", selected);
+    button.setAttribute("aria-label", `${group.key === ALL_GROUPS ? "全部节点" : group.key === UNGROUPED ? "没有分组的节点" : `分组：${group.name}`}，${group.count} 个公开节点`);
+    if (groupBar.children[index] !== button) groupBar.insertBefore(button, groupBar.children[index] ?? null);
+  });
+}
 function syncView() {
   list.hidden = view !== "cards";
   table.hidden = view !== "table" || !current?.nodes.length;
@@ -36,6 +65,7 @@ function patchCard(card, node) {
   const metric = node.metrics ?? {};
   const meter = (key, n) => { for (const el of card.meters.get(key) ?? []) { el.hidden = n === null; if (n !== null && el.value !== n) el.value = n; } };
   text("name", node.name);
+  text("groups", groupText(node));
   for (const link of [card.element.querySelector(".fm-open-node"), card.row.lastElementChild.querySelector("a")]) link.setAttribute("aria-label", `${node.name} · 节点详情`);
   text("hardware", hardwareText(node.hardware)); text("cpu-label", cpuLabel(node.hardware));
   const hardware = hardwareText(node.hardware);
@@ -69,6 +99,7 @@ function patchCard(card, node) {
 function render() {
   if (!current) return;
   const nodes = current.nodes, summary = overview(nodes);
+  syncGroups(nodes);
   put("snapshot-at", timeText(current.generated_at)); byID("snapshot-at").dateTime = current.generated_at;
   put("stat-online", summary.online); put("stat-total", summary.total);
   put("stat-offline", summary.offline); put("stat-waiting", summary.waiting);
@@ -85,7 +116,7 @@ function render() {
     if (!cards.has(node.id)) cards.set(node.id, createCard(node));
     patchCard(cards.get(node.id), node);
   }
-  const shown = select(nodes, search.value), visible = new Set(shown.map(n => n.id));
+  const shown = select(nodes, search.value, selectedGroup), visible = new Set(shown.map(n => n.id));
   for (const [id, card] of cards) {
     card.element.hidden = !visible.has(id); card.row.hidden = !visible.has(id);
   }
@@ -101,7 +132,7 @@ function render() {
   table.hidden = view !== "table" || !shown.length;
   byID("empty-state").hidden = shown.length !== 0;
   if (!nodes.length) { put("empty-title", "还没有监控节点"); put("empty-copy", "节点接入后，资源和连接状态会自动出现在这里。"); }
-  else { put("empty-title", "没有匹配的节点"); put("empty-copy", "试试其他名称，或清空搜索查看全部节点。"); }
+  else { put("empty-title", "没有匹配的节点"); put("empty-copy", "请清空名称搜索，或切换到其他分组查看节点。"); }
   put("list-summary", `显示 ${shown.length} / ${nodes.length} 个节点`);
 }
 function onState(next) {

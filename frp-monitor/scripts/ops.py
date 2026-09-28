@@ -327,7 +327,7 @@ def restore(archive_path, directory):
                 integrity_check(connection, time.monotonic() + 30)
                 # Database identity constants; must match monitor/control/schema.sql
                 # and the startup check in monitor/control/store.go.
-                if connection.execute('PRAGMA application_id').fetchone() != (1179798836,) or connection.execute('PRAGMA user_version').fetchone() != (4,):
+                if connection.execute('PRAGMA application_id').fetchone() != (1179798836,) or connection.execute('PRAGMA user_version').fetchone()[0] not in (4, 5):
                     raise ValueError('unsupported control database schema')
         # Generated TOML uses JSON-compatible quoted strings for file paths.
         for name in ('server.toml', 'agent.toml'):

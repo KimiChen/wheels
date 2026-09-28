@@ -81,15 +81,18 @@ monitor:
 
 ## SQLite 控制库与节点凭据
 
-`control` 包保存两张业务表：
+`control` 包保存四张业务表：
 
 | 表 | 内容 |
 |---|---|
 | `nodes` | 自增数字 ID、节点名称/公开策略、费用到期、套餐、当前周期和今日流量、计数器基线、当前令牌摘要及可信 FRP 绑定 |
 | `settings` | `id=1` 的单行，`probe_json` 保存带版本的探测文档 |
+| `node_groups` | 自增 ID、唯一分组名和配置修订号 |
+| `node_group_members` | 分组/节点多对多关系，联合主键去重，外键级联清理关联 |
 
 精确结构见 [control/schema.sql](control/schema.sql) 和[项目数据结构](../README.md#存储与节点数据结构)。
-只创建新结构，不导入旧库。`nodes.id` 使用 `INTEGER PRIMARY KEY AUTOINCREMENT`，
+新库直接创建 v5 结构；本项目 v4 库在一个事务内补充分组表，保留原有配置与账本，
+其他身份或版本仍拒绝。`nodes.id` 使用 `INTEGER PRIMARY KEY AUTOINCREMENT`，
 删除后不复用；API 使用其十进制字符串，例如 `"1"`。最多 1,024 个节点。
 
 数据库直接父目录必须是 0700，数据库及 WAL/SHM 必须为私有常规文件，路径拒绝符号链接。
@@ -174,6 +177,8 @@ API/SSE 使用 `Cache-Control: no-store`。公开 SSE 最多 128 并发，管理
 包含 `day/timezone/rx_bytes/tx_bytes/partial`；`traffic_plan` 包含额度、类型、重置设置、
 周期起止、RX/TX、已用与不完整标记。系统累计仍在实时 metrics 中，FRP 流量保留自己的口径。
 `hardware` 只含 `os/arch/virt/cpu_name/cpu_cores/agent_version`，保留质量标记。
+`groups` 为当前节点所属分组的 `{id,name}` 数组，未分组返回 `[]`。不提供公开的全库分组目录，
+隐藏节点专属组及空组不会进入公开快照。组内成员变化不改变节点接入凭据或 FRP 连接。
 
 公开投影不含私有备注、主机名、IP、精确内核、boot/interface 标识、FRP 身份/目标和凭据。
 实时 uint64 与费用最小单位、流量字节值使用十进制字符串，缺样为 null。
@@ -208,6 +213,10 @@ Cookie 为 SameSite=Lax，便于回调。写请求检查同源和 `X-CSRF-Token`
 | `GET /api/admin/v1/session` | 当前登录名、CSRF 与过期时间 |
 | `POST /api/admin/v1/logout` | 注销当前会话 |
 | `GET /api/admin/v1/nodes`、`GET /events/admin` | 节点配置/实时状态、存储状态与私有 FRP 对账 |
+| `GET /api/admin/v1/groups` | `{groups:[{id,name,node_ids,config_revision}]}`，包括空组和隐藏节点成员 |
+| `POST /api/admin/v1/groups` | `{name,node_ids}`，创建并返回分组 |
+| `PATCH /api/admin/v1/groups/{id}` | `{name,node_ids,config_revision}`，完整替换名称与成员，返回更新分组 |
+| `DELETE /api/admin/v1/groups/{id}` | `{config_revision}`，只删除分组及其关联 |
 | `POST /api/admin/v1/nodes` | `{name,frp_binding?}`，返回数字 ID 字符串及一次性节点 token |
 | `PATCH /api/admin/v1/nodes/{id}/settings` | 完整可编辑配置、`config_revision`、可选 `traffic_used_bytes` |
 | `POST /api/admin/v1/nodes/{id}/reset-traffic` | `{config_revision}`，重置当前套餐周期 |
@@ -221,6 +230,10 @@ Cookie 为 SameSite=Lax，便于回调。写请求检查同源和 `X-CSRF-Token`
 配置和计费修改写入 SQLite，不改外部 JSON 文件。修订冲突返回 409，未知节点 404，
 未登录 401，同源/CSRF 拒绝 403，非法输入 400，存储不可用 503。
 管理 DTO 包含 `settings`、费用/流量和私有 Facts/FRP；公开 API 始终使用独立白名单。
+管理快照还包含 `groups` 和 `groups_state`。组名去除首尾空白后唯一、非空、最多 128 个
+UTF-8 字节且不能包含控制字符；最多 128 组，每组最多 1024 个不同的已存在节点，允许空组。
+删除节点自动递增受影响分组的修订号并移除成员；旧版本编辑会被拒绝。后台刷新使用不可变
+分组缓存，并核对节点、探测和分组三份快照，避免旧读结果恢复已删除或已修改的分组。
 
 ## FRP 对账与信任边界
 

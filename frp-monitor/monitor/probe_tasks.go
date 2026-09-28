@@ -131,30 +131,35 @@ func (s *Service) taskLoop() {
 // replaces one of these immutable pointers; discard the old read in that case
 // so a pre-revocation snapshot cannot restore a removed credential or task.
 func (s *Service) refreshConfiguration() {
-	read := configurationRead{configs: s.configs.Load(), tasks: s.tasks.Load()}
+	read := configurationRead{configs: s.configs.Load(), tasks: s.tasks.Load(), groups: s.groups.Load()}
 	ctx, cancel := context.WithTimeout(s.ctx, 2*time.Second)
 	read.nodes, read.nodeErr = s.control.Nodes(ctx)
 	read.taskData, read.taskErr = s.control.ReadProbes(ctx)
+	read.groupData, read.groupErr = s.control.Groups(ctx)
 	cancel()
 	s.reloadAdmin()
 	s.applyConfiguration(read)
 }
 
 type configurationRead struct {
-	configs  *nodeConfigs
-	tasks    *probeBook
-	nodes    []*control.Node
-	nodeErr  error
-	taskData []byte
-	taskErr  error
+	configs   *nodeConfigs
+	tasks     *probeBook
+	groups    *groupBook
+	nodes     []*control.Node
+	nodeErr   error
+	taskData  []byte
+	taskErr   error
+	groupData []control.NodeGroup
+	groupErr  error
 }
 
 func (s *Service) applyConfiguration(read configurationRead) {
 	s.configMu.Lock()
 	defer s.configMu.Unlock()
-	if read.configs != s.configs.Load() || read.tasks != s.tasks.Load() {
+	if read.configs != s.configs.Load() || read.tasks != s.tasks.Load() || read.groups != s.groups.Load() {
 		return
 	}
+	s.applyGroups(read.groupData, read.groupErr)
 	if read.nodeErr != nil {
 		s.credentialError.Store(true)
 		s.invalidateAdminSnapshot()

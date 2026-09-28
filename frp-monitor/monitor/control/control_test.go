@@ -481,6 +481,7 @@ func TestNodeLimitIsTransactionalConflict(t *testing.T) {
 func TestCanceledQueuedCallsDoNotReadWorkerResults(t *testing.T) {
 	f := setup(t, utc("2026-09-28T12:00:00Z"), time.UTC)
 	n := f.create(DefaultNodeConfig("node"))
+	g := newGroup(t, f.s, "existing", n.ID)
 	tests := []struct {
 		name string
 		run  func(context.Context) (bool, error)
@@ -494,6 +495,15 @@ func TestCanceledQueuedCallsDoNotReadWorkerResults(t *testing.T) {
 		}},
 		{"update", func(ctx context.Context) (bool, error) {
 			v, e := f.s.UpdateNode(ctx, n.ID, n.NodeConfig, nil, false, n.ConfigRevision)
+			return v == nil, e
+		}},
+		{"groups", func(ctx context.Context) (bool, error) { v, e := f.s.Groups(ctx); return v == nil, e }},
+		{"create group", func(ctx context.Context) (bool, error) {
+			v, e := f.s.CreateGroup(ctx, "queued group", []string{n.ID})
+			return v == nil, e
+		}},
+		{"update group", func(ctx context.Context) (bool, error) {
+			v, e := f.s.UpdateGroup(ctx, g.ID, "updated group", []string{n.ID}, g.ConfigRevision)
 			return v == nil, e
 		}},
 	}

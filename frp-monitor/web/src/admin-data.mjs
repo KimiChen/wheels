@@ -7,13 +7,42 @@ export const proxyLabels = {unavailable: "暂不可核对", registered: "已登�
 export function fieldText(field) { const v = value(field); return typeof v === "string" || typeof v === "number" ? String(v) : quality(field); }
 export function byteText(raw) { return bytes(uint64(raw)); }
 export function adminSnapshot(raw) {
-  if (!raw || !Array.isArray(raw.nodes) || raw.nodes.length > 1024 || !Number.isFinite(Date.parse(raw.generated_at)) || !["ready", "degraded"].includes(raw.credentials_state)) throw new Error("invalid_snapshot");
+  if (!raw || !Array.isArray(raw.nodes) || raw.nodes.length > 1024 || !Number.isFinite(Date.parse(raw.generated_at)) || !["ready", "degraded"].includes(raw.credentials_state) || !["ready", "degraded"].includes(raw.groups_state)) throw new Error("invalid_snapshot");
+  groupDocument(raw);
   const ids = new Set();
   for (const node of raw.nodes) {
     if (!node || !validNodeID(node.id) || ids.has(node.id) || typeof node.name !== "string" || node.name.length > 128 || !["online", "offline", "waiting"].includes(node.session) || !["fresh", "stale", "waiting"].includes(node.freshness)) throw new Error("invalid_node");
     ids.add(node.id);
   }
   return raw;
+}
+const validGroupName = name => typeof name === "string" && name.trim() !== "" && new TextEncoder().encode(name).length <= 128 && !/[\u0000-\u001f\u007f-\u009f]/u.test(name);
+export function groupDocument(raw) {
+  if (!raw || !Array.isArray(raw.groups) || raw.groups.length > 128) throw new Error("invalid_groups");
+  const ids = new Set();
+  for (const group of raw.groups) {
+    if (!group || !validNodeID(group.id) || ids.has(group.id) || !validGroupName(group.name) || group.name !== group.name.trim() || !Number.isSafeInteger(group.config_revision) || group.config_revision < 1 || !Array.isArray(group.node_ids) || group.node_ids.length > 1024 || group.node_ids.some(id => !validNodeID(id)) || new Set(group.node_ids).size !== group.node_ids.length) throw new Error("invalid_group");
+    ids.add(group.id);
+  }
+  return raw;
+}
+export function groupDraft(group = null) {
+  return group ? {id: group.id, name: group.name, node_ids: [...group.node_ids], config_revision: group.config_revision} : {id: null, name: "", node_ids: [], config_revision: null};
+}
+export function groupDraftState(draft, groups) {
+  if (!draft.id) return "new";
+  const current = groups.find(group => group.id === draft.id);
+  return !current ? "deleted" : current.config_revision !== draft.config_revision ? "changed" : "current";
+}
+export function groupRequest(draft, nodeIDs) {
+  if (typeof draft.name !== "string" || /[\u0000-\u001f\u007f-\u009f]/u.test(draft.name) || !validGroupName(draft.name.trim())) throw new Error("分组名称不能为空、不能包含控制字符，且最多 128 字节（中文通常每字 3 字节）。");
+  if (!Array.isArray(draft.node_ids) || draft.node_ids.length > 1024 || draft.node_ids.some(id => !validNodeID(id) || !nodeIDs.has(id)) || new Set(draft.node_ids).size !== draft.node_ids.length) throw new Error("部分成员节点已不存在，请取消勾选后再保存。");
+  const body = {name: draft.name.trim(), node_ids: [...draft.node_ids]};
+  if (draft.id !== null) {
+    if (!validNodeID(draft.id) || !Number.isSafeInteger(draft.config_revision) || draft.config_revision < 1) throw new Error("分组版本无效，请重新读取。");
+    body.config_revision = draft.config_revision;
+  }
+  return body;
 }
 export function probeDocument(raw) {
   if (!raw || !Number.isSafeInteger(raw.version) || raw.version < 0 || !Array.isArray(raw.nodes) || raw.nodes.length > 1024) throw new Error("invalid_probes");

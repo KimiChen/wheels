@@ -1,4 +1,4 @@
-import {adminClient, adminSnapshot, probeDocument, nextProbeDocument, errorText, fieldText, byteText, reconciliationLabels, proxyLabels, clientProxyLabels} from "./admin-data.mjs";
+import {adminClient, adminSnapshot, groupDocument, groupDraft, groupDraftState, groupRequest, probeDocument, nextProbeDocument, errorText, fieldText, byteText, reconciliationLabels, proxyLabels, clientProxyLabels} from "./admin-data.mjs";
 import {settingsRequest, priceInput, gibInput, localDateInput, todayText, planText, dateTime} from "./node-settings.mjs";
 import {sessionLabels, freshnessLabels, frpLabel, bytes, decimal, percent, percentage, capacity, timeText} from "./format.mjs";
 
@@ -6,6 +6,8 @@ const $ = id => document.getElementById(id);
 const client = adminClient({onExpired: () => locked("管理会话已失效，请重新登录。")});
 let loggedIn = false, busy = false, snapshot = null, selectedID = null, poll = null, probes = null, probeEpoch = 0, pendingAction = null, refreshing = false, snapshotEpoch = 0, settingsRevision = null, settingsDirty = false;
 const cards = new Map();
+let groups = [], groupsReady = false, groupsEpoch = 0, draft = groupDraft(), groupDirty = false, groupMessage = "", pendingGroupDelete = null;
+const groupRows = new Map(), groupMembers = new Map();
 const el = (tag, text, className) => { const node = document.createElement(tag); if (text !== undefined) node.textContent = text; if (className) node.className = className; return node; };
 const safe = raw => typeof raw === "string" || (typeof raw === "number" && Number.isFinite(raw)) ? String(raw) : "—";
 function notice(text, state = "ready") {
@@ -26,6 +28,10 @@ function locked(message = "请使用 GitHub 登录。", disabled = false) {
   for (const dialog of document.querySelectorAll("dialog[open]")) dialog.close();
   client.clear(); loggedIn = false; refreshing = false; clearTimeout(poll); probeEpoch++;
   snapshotEpoch++; snapshot = null; selectedID = null; probes = null; pendingAction = null;
+  groupsEpoch++; groups = []; groupsReady = false; draft = groupDraft(); groupDirty = false; groupMessage = ""; pendingGroupDelete = null;
+  groupRows.clear(); groupMembers.clear(); $("group-list").replaceChildren(); $("group-members").replaceChildren(); $("group-form").reset(); $("group-confirm").hidden = true;
+  $("group-editor-title").textContent = "新建分组"; $("group-save").textContent = "创建分组";
+  for (const id of ["group-count", "group-member-count", "group-status", "group-confirm-copy"]) $(id).textContent = "";
   clearSecret(); cards.clear(); $("node-list").replaceChildren(); $("node-details").replaceChildren(); $("server-registry").replaceChildren(); $("probe-rows").replaceChildren();
   $("binding-form").reset(); $("settings-form").reset(); settingsRevision = null; settingsDirty = false; $("create-form").reset(); $("node-search").value = "";
   $("node-title").textContent = ""; $("node-id").textContent = ""; $("node-session").textContent = "";
@@ -40,12 +46,14 @@ async function unlocked() {
 }
 async function refreshNodes(force = false) {
   if (!loggedIn || (refreshing && !force)) return;
-  const generation = ++snapshotEpoch;
+  const generation = ++snapshotEpoch, groupGeneration = groupsEpoch;
   refreshing = true; clearTimeout(poll);
   try {
     const next = adminSnapshot(await client.request("/api/admin/v1/nodes"));
     if (!loggedIn || generation !== snapshotEpoch) return;
     snapshot = next; renderNodes(); renderRegistry();
+    if (groupGeneration === groupsEpoch) { groups = next.groups; groupsReady = next.groups_state === "ready"; }
+    renderGroups();
     $("probe-health").hidden = next.probes_state !== "degraded";
     if (next.credentials_state === "degraded") notice("节点配置暂不可用，请检查服务端后再操作。", "error");
     else if (!document.querySelector("dialog[open]")) notice("");
@@ -127,7 +135,7 @@ function showEditorPane(pane) {
   }
 }
 function showView() {
-  const key = ["nodes", "probes", "frp"].includes(location.hash.slice(1)) ? location.hash.slice(1) : "nodes";
+  const key = ["nodes", "groups", "probes", "frp"].includes(location.hash.slice(1)) ? location.hash.slice(1) : "nodes";
   for (const panel of document.querySelectorAll("[data-admin-panel]")) panel.hidden = panel.dataset.adminPanel !== key;
   for (const link of document.querySelectorAll("[data-admin-view]")) {
     const selected = link.dataset.adminView === key;
@@ -172,12 +180,92 @@ function setBusy(value) {
   busy = value;
   for (const node of document.querySelectorAll("#workspace button, #workspace input, #workspace select, #workspace textarea, #github-login")) node.disabled = value;
   $("logout").disabled = value;
+  updateGroupControls();
 }
 async function mutation(action, success) {
   if (busy) return; setBusy(true); clearTimeout(poll);
   try { await action(); if (loggedIn && success) notice(success); }
   catch (error) { if (loggedIn) notice(errorText(error), "error"); }
   finally { setBusy(false); clearTimeout(poll); if (loggedIn) poll = setTimeout(refreshNodes, 10000); }
+}
+function renderGroups() {
+  const known = new Set(groups.map(group => group.id));
+  for (const [id, row] of groupRows) if (!known.has(id)) { row.remove(); groupRows.delete(id); }
+  for (const group of groups) {
+    let row = groupRows.get(group.id);
+    if (!row) {
+      row = el("li"); const button = el("button", undefined, "fa-group-choice"); button.type = "button";
+      button.append(el("span"), el("small")); button.addEventListener("click", () => selectGroup(groups.find(item => item.id === group.id)));
+      row.append(button); groupRows.set(group.id, row); $("group-list").append(row);
+    }
+    const button = row.firstElementChild; button.firstElementChild.textContent = group.name; button.lastElementChild.textContent = `${group.node_ids.length} 个节点`;
+    button.setAttribute("aria-pressed", String(draft.id === group.id)); button.disabled = busy;
+  }
+  $("group-count").textContent = `${groups.length} / 128`;
+  $("groups-empty").hidden = groups.length > 0;
+  $("groups-empty").textContent = groupsReady ? "尚无分组，可以在右侧创建。" : "尚无可用分组快照。";
+  $("groups-health").hidden = groupsReady;
+  renderGroupMembers(); renderGroupStatus(); updateGroupControls();
+}
+function selectGroup(group = null) {
+  draft = groupDraft(group); groupDirty = false; groupMessage = ""; pendingGroupDelete = null;
+  $("group-name").value = draft.name; $("group-confirm").hidden = true; $("group-confirm-copy").textContent = "";
+  renderGroups();
+}
+function renderGroupMembers() {
+  const selected = new Set(draft.node_ids), nodes = snapshot?.nodes ?? [], known = new Set(nodes.map(node => node.id));
+  const candidates = [...nodes, ...draft.node_ids.filter(id => !known.has(id)).map(id => ({id, name: `已移除节点 #${id}`, missing: true}))];
+  const shown = new Set(candidates.map(node => node.id));
+  for (const [id, label] of groupMembers) if (!shown.has(id)) { label.remove(); groupMembers.delete(id); }
+  for (const node of candidates) {
+    let label = groupMembers.get(node.id);
+    if (!label) {
+      label = el("label", undefined, "fa-group-member"); const input = el("input"); input.type = "checkbox"; input.value = node.id;
+      const text = el("span"); text.append(el("span"), el("small")); label.append(input, text);
+      groupMembers.set(node.id, label); $("group-members").append(label);
+    }
+    label.firstElementChild.checked = selected.has(node.id);
+    label.lastElementChild.firstElementChild.textContent = node.name;
+    label.lastElementChild.lastElementChild.textContent = node.missing ? "请取消勾选后再保存。" : `#${node.id} · ${node.settings?.is_public === true ? "公开节点" : "不公开节点"}`;
+  }
+  $("group-members-empty").hidden = candidates.length > 0;
+  $("group-member-count").textContent = `${selected.size} 个已选`;
+}
+function renderGroupStatus() {
+  const state = groupDraftState(draft, groups);
+  $("group-editor-title").textContent = draft.id ? `编辑分组 #${draft.id}` : "新建分组";
+  $("group-save").textContent = draft.id ? "保存分组" : "创建分组";
+  $("group-status").textContent = !groupsReady ? "分组配置暂不可用，编辑内容已保留；请重新读取。" : state === "deleted" ? "此分组已被删除，编辑内容已保留。重新读取后可创建新分组。" : state === "changed" ? "此分组已被其他操作更新，编辑内容已保留。请重新读取后再保存。" : groupMessage || (groupDirty ? "有未保存的修改；自动同步不会覆盖编辑内容。" : "修改名称或勾选成员后保存；不勾选任何节点可保存空分组。");
+}
+function updateGroupControls() {
+  const unavailable = busy || !groupsReady, stale = ["changed", "deleted"].includes(groupDraftState(draft, groups));
+  $("group-name").disabled = unavailable;
+  for (const label of groupMembers.values()) label.firstElementChild.disabled = unavailable;
+  $("group-new").disabled = unavailable; $("groups-reload").disabled = busy;
+  $("group-save").disabled = unavailable || stale;
+  $("group-delete").hidden = !draft.id; $("group-delete").disabled = unavailable || stale;
+  $("group-delete-yes").disabled = unavailable || stale; $("group-delete-no").disabled = busy;
+}
+async function reloadGroups() {
+  const generation = ++groupsEpoch, selected = draft.id;
+  const next = groupDocument(await client.request("/api/admin/v1/groups"));
+  if (!loggedIn || generation !== groupsEpoch) return;
+  groups = next.groups; groupsReady = true;
+  selectGroup(groups.find(group => group.id === selected));
+}
+async function changeGroup(action) {
+  if (busy || !groupsReady) return;
+  await mutation(async () => {
+    groupsEpoch++;
+    try { await action(); }
+    catch (error) {
+      if (loggedIn) {
+        groupMessage = error.status === 409 ? "保存冲突：分组名称已存在、已达到 128 个分组上限，或配置已被其他操作更新。请检查名称或重新读取；编辑内容已保留。" : `${errorText(error)} 编辑内容已保留。`;
+        renderGroupStatus();
+      }
+      throw error;
+    }
+  });
 }
 async function loadProbes() {
   if (!loggedIn) return;
@@ -233,6 +321,43 @@ function loadSettings(node) {
   form.elements.traffic_quota.value = gibInput(settings.traffic_quota_bytes);
   form.elements.traffic_used.value = "";
 }
+$("group-new").addEventListener("click", () => { selectGroup(); $("group-name").focus(); });
+$("groups-reload").addEventListener("click", () => mutation(reloadGroups, "已重新读取分组；未保存的编辑已放弃。"));
+$("group-form").addEventListener("input", () => {
+  draft.name = $("group-name").value;
+  draft.node_ids = [...$("group-members").querySelectorAll("input:checked")].map(input => input.value);
+  groupDirty = true; groupMessage = ""; pendingGroupDelete = null; $("group-confirm").hidden = true;
+  $("group-member-count").textContent = `${draft.node_ids.length} 个已选`; renderGroupStatus();
+});
+$("group-form").addEventListener("submit", event => {
+  event.preventDefault();
+  if (["changed", "deleted"].includes(groupDraftState(draft, groups))) { renderGroupStatus(); return; }
+  let body;
+  try { body = groupRequest(draft, new Set((snapshot?.nodes ?? []).map(node => node.id))); }
+  catch (error) { groupMessage = error.message; renderGroupStatus(); return; }
+  const id = draft.id;
+  changeGroup(async () => {
+    const saved = groupDocument({groups: [await client.request(`/api/admin/v1/groups${id ? `/${id}` : ""}`, {method: id ? "PATCH" : "POST", body})]}).groups[0];
+    groups = [...groups.filter(group => group.id !== saved.id), saved]; selectGroup(saved);
+    groupMessage = "分组已保存。节点的其他分组不受影响。"; renderGroupStatus();
+    await refreshNodes(true); notice("分组已保存。");
+  });
+});
+$("group-delete").addEventListener("click", () => {
+  const group = groups.find(item => item.id === draft.id); if (!group) return;
+  pendingGroupDelete = {id: draft.id, config_revision: draft.config_revision};
+  $("group-confirm-copy").textContent = `确认删除「${group.name}」分组？仅删除分组及其成员关系，不会删除节点，节点的其他分组也会保留。${groupDirty ? "当前未保存的编辑将一并放弃。" : ""}`;
+  $("group-confirm").hidden = false; $("group-delete-yes").focus();
+});
+$("group-delete-no").addEventListener("click", () => { pendingGroupDelete = null; $("group-confirm").hidden = true; $("group-delete").focus(); });
+$("group-delete-yes").addEventListener("click", () => {
+  const action = pendingGroupDelete; if (!action) return;
+  changeGroup(async () => {
+    await client.request(`/api/admin/v1/groups/${action.id}`, {method: "DELETE", body: {config_revision: action.config_revision}});
+    groups = groups.filter(group => group.id !== action.id); selectGroup();
+    await refreshNodes(true); notice("分组已删除，成员节点仍保留。");
+  });
+});
 $("settings-form").addEventListener("input", () => { settingsDirty = true; $("settings-status").textContent = "有未保存的修改。"; });
 $("settings-form").addEventListener("submit", event => {
   event.preventDefault(); const id = selectedID; if (!id) return;
