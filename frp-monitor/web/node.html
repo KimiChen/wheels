@@ -53,11 +53,21 @@
         <div><dt>进程</dt><dd data-value="processes">—</dd></div>
         <div><dt>TCP / UDP</dt><dd><span data-value="tcp">—</span> / <span data-value="udp">—</span></dd></div>
       </dl>
-      <details class="fm-node-accounting"><summary>流量与套餐明细</summary><dl class="fm-node-overview">
-        <div class="wsk-panel fm-node-info"><dt>今日流量</dt><dd class="fm-capacities"><span><small>↓ 接收</small><b data-value="traffic-rx">—</b></span><span><small>↑ 发送</small><b data-value="traffic-tx">—</b></span></dd><dd class="fm-node-info-note" id="traffic-note">等待今日统计</dd></div>
-        <div class="wsk-panel fm-node-info" id="node-plan"><dt>套餐已用 / 额度</dt><dd data-value="plan-usage">—</dd><dd class="fm-node-info-note" data-value="plan-remaining">—</dd><dd class="fm-node-info-note" data-value="plan-note">—</dd><dd class="fm-node-info-note" data-value="plan-period">—</dd></div>
-        <div class="wsk-panel fm-node-info" id="node-billing"><dt>费用与到期</dt><dd data-value="billing">—</dd><dd class="fm-node-info-note" data-value="renewal-note">—</dd></div>
-      </dl></details>
+      <dl class="fm-node-facts" aria-label="今日流量">
+        <div><dt>今日接收</dt><dd data-value="traffic-rx">—</dd></div>
+        <div><dt>今日发送</dt><dd data-value="traffic-tx">—</dd></div>
+        <div><dt>统计口径</dt><dd id="traffic-note">等待今日统计</dd></div>
+      </dl>
+      <dl class="fm-node-facts" id="node-plan" aria-label="流量套餐">
+        <div><dt>套餐已用 / 额度</dt><dd data-value="plan-usage">—</dd></div>
+        <div><dt>套餐剩余 / 使用率</dt><dd data-value="plan-remaining">—</dd></div>
+        <div><dt>套餐规则</dt><dd data-value="plan-note">—</dd></div>
+        <div><dt>套餐周期</dt><dd data-value="plan-period">—</dd></div>
+      </dl>
+      <dl class="fm-node-facts" id="node-billing" aria-label="费用与到期">
+        <div><dt>费用与到期</dt><dd data-value="billing">—</dd></div>
+        <div><dt>续费说明</dt><dd data-value="renewal-note">—</dd></div>
+      </dl>
       <p class="fm-node-sampling"><span data-value="sample-time">尚未收到资源报告</span><span class="fm-data-state" data-value="freshness"></span><span data-value="scope">等待资源报告</span><span data-value="interval">—</span></p>
       <p id="node-public-note" class="fm-node-public-note" hidden></p>
       <section class="fm-node-history" aria-label="节点资源与网络趋势"><div id="node-history"></div></section>
