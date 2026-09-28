@@ -39,6 +39,7 @@ var publicFiles = map[string]string{
 	"/src/format.mjs":            "src/format.mjs",
 	"/src/store.mjs":             "src/store.mjs",
 	"/src/transport.mjs":         "src/transport.mjs",
+	"/src/connection-status.mjs": "src/connection-status.mjs",
 	"/src/history-data.mjs":      "src/history-data.mjs",
 	"/src/history-transport.mjs": "src/history-transport.mjs",
 	"/src/history-view.mjs":      "src/history-view.mjs",

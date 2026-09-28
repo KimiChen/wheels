@@ -1,8 +1,9 @@
 import {UNKNOWN, bytes, capacity, decimal, percent, percentage, ratio, quality, loadText, uptime, timeText, sessionLabels, freshnessLabels} from "./format.mjs";
 import {select, overview, groupOptions, resolveGroupSelection, ALL_GROUPS, UNGROUPED} from "./store.mjs";
 import {connect} from "./transport.mjs";
+import {createConnectionStatus} from "./connection-status.mjs";
 import {planText} from "./node-settings.mjs";
-import {nodeURL, hardwareText, cpuLabel, groupText} from "./node-data.mjs";
+import {nodeURL, hardwareText, cpuLabel, groupText, nodeBadgeText} from "./node-data.mjs";
 
 const byID = id => document.getElementById(id);
 const write = (element, text) => { const next = String(text ?? UNKNOWN); if (element.textContent !== next) element.textContent = next; };
@@ -10,6 +11,7 @@ const put = (id, text) => write(byID(id), text);
 const list = byID("node-list"), table = byID("table-view"), rows = byID("node-table-body"), cards = new Map();
 const search = byID("node-search"), viewButtons = [...document.querySelectorAll("[data-fm-view]")];
 const groupBar = byID("node-group-filter"), groupButtons = new Map(), groupStorageKey = "frp-monitor-public-group";
+const connectionStatus = createConnectionStatus({status: byID("stream-status"), label: byID("stream-label"), notice: byID("connection-notice")});
 let current = null, view = "cards", selectedGroup = ALL_GROUPS;
 try { if (localStorage.getItem("frp-monitor-view") === "table") view = "table"; } catch { /* Storage is optional. */ }
 try { selectedGroup = sessionStorage.getItem(groupStorageKey) ?? ALL_GROUPS; } catch { /* Storage is optional. */ }
@@ -73,7 +75,8 @@ function patchCard(card, node) {
   const hardware = hardwareText(node.hardware);
   for (const label of card.labels.get("hardware")) label.title = hardware;
   card.element.dataset.state = node.session;
-  text("session", sessionLabels[node.session]); state("session", node.session);
+  text("session", nodeBadgeText(node)); state("session", node.session);
+  for (const label of card.labels.get("session")) label.title = sessionLabels[node.session];
   text("freshness", freshnessLabels[node.freshness]); state("freshness", node.freshness);
   const cpu = percent(metric.cpu), mem = ratio(metric.mem_used, metric.mem_total), disk = ratio(metric.disk_used, metric.disk_total);
   text("cpu", percentage(cpu)); text("mem", percentage(mem)); text("disk", percentage(disk));
@@ -133,13 +136,8 @@ function render() {
   put("list-summary", `显示 ${shown.length} / ${nodes.length} 个节点`);
 }
 function onState(next) {
-  byID("stream-status").dataset.state = next;
-  put("stream-label", ({loading: "正在同步", live: "已连接", disconnected: "实时连接中断", error: "暂时无法同步"})[next]);
-  const notice = byID("connection-notice");
-  notice.hidden = next === "live";
-  if (next === "loading") write(notice, current ? "正在重新获取快照并连接实时更新，当前显示最近一次数据。" : "正在获取监控快照…");
-  else if (next !== "live") write(notice, current ? "浏览器实时连接已中断，正在自动重连。以下为最近一次快照，不代表节点的当前状态。" : "暂时无法连接监控服务，正在自动重试。尚未获取节点状态。");
-  if (!current && next === "error") { put("empty-title", "暂时无法读取节点"); put("empty-copy", "监控服务恢复后页面会自动重新同步，也可以点击刷新重试。"); }
+  connectionStatus.update(next, current ? "浏览器实时连接已中断，正在自动重连。以下为最近一次快照，不代表节点的当前状态。" : "暂时无法连接监控服务，正在自动重试。尚未获取节点状态。");
+  if (!current && next === "error") { byID("empty-state").hidden = false; put("empty-title", "暂时无法读取节点"); put("empty-copy", "监控服务恢复后页面会自动重新同步，也可以点击刷新重试。"); }
 }
 search.addEventListener("input", render);
 for (const button of viewButtons) button.addEventListener("click", () => {
@@ -150,5 +148,5 @@ for (const button of viewButtons) button.addEventListener("click", () => {
 syncView();
 const connection = connect({onSnapshot(data) { current = data; render(); }, onState});
 byID("retry").addEventListener("click", () => connection.refresh());
-window.addEventListener("pagehide", () => connection.stop());
+window.addEventListener("pagehide", () => { connection.stop(); connectionStatus.stop(); });
 window.addEventListener("pageshow", event => { if (event.persisted) window.location.reload(); });

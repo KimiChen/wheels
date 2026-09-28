@@ -24,7 +24,7 @@ function createChart(spec) {
   if (spec.key) element.dataset.metric = spec.key;
   const current = el("strong", "fm-chart-current", UNKNOWN), liveNote = el("p", "fm-chart-live-note", "等待实时采样");
   current.hidden = !spec.key; liveNote.hidden = !spec.key;
-  const range = el("span", "fm-chart-range"); heading.append(el("span", "", spec.title), current);
+  heading.append(el("span", "", spec.title), current);
   const plotWrap = el("div", "fm-chart-plot"), axis = el("div", "fm-chart-axis");
   axis.setAttribute("aria-hidden", "true");
   const plot = svg("svg", {viewBox: "0 0 450 130", role: "img", preserveAspectRatio: "none"});
@@ -42,12 +42,9 @@ function createChart(spec) {
   plot.append(drawing);
   const empty = el("p", "wsk-empty-state fm-chart-empty", "暂无有效采样"), labels = el("div", "fm-chart-times");
   const from = el("time"), to = el("time"); labels.append(from, to);
-  const summaries = el("ul", "fm-chart-summary"), summaryRows = spec.series.map((_, index) => el("li", `fm-series-label-${index}`));
-  summaries.append(...summaryRows);
   const legend = el("ul", "fm-chart-legend"); legend.hidden = spec.series.length < 2;
   spec.series.forEach((series, index) => legend.append(el("li", `fm-series-label-${index}`, series.name)));
-  const details = el("details", "fm-chart-details"); details.append(el("summary", "", "采样详情"), range, summaries);
-  element.append(heading, liveNote, plotWrap, empty, labels, legend, details);
+  element.append(heading, liveNote, plotWrap, empty, labels, legend);
   return {element, live(value, note) { write(current, value); write(liveNote, note); }, update(rows, data) {
     const result = chart(rows, spec.series, {window: data.window, generatedAt: data.generated_at, step: data.step_seconds, ceiling: spec.ceiling});
     plotWrap.hidden = result.empty;
@@ -55,14 +52,12 @@ function createChart(spec) {
     const ceiling = result.empty ? UNKNOWN : spec.series[0].format(result.maximum);
     const maximum = result.maximum, middle = typeof maximum === "bigint" ? maximum / 2n : maximum / 2, zero = typeof maximum === "bigint" ? 0n : 0;
     [maximum, middle, zero].forEach((value, index) => { ticks[index].textContent = result.empty ? UNKNOWN : spec.series[0].format(value); });
-    write(range, result.empty ? UNKNOWN : `0 – ${ceiling}`);
     title.textContent = `${spec.title}，纵轴 0 至 ${ceiling}`;
     desc.textContent = `${windows[data.window]}。${result.summaries.join("；")}。缺失时间段留白，不补零。`;
     for (let i = 0; i < paths.length; i++) {
       paths[i].replaceChildren(svg("path", {d: result.paths[i].path}));
       // A lone valid bucket must remain visible even when no line can be drawn.
       for (const point of result.paths[i].dots) paths[i].append(svg("circle", {cx: point.x, cy: point.y, r: 1.7}));
-      write(summaryRows[i], result.summaries[i]);
     }
     write(from, dateText(result.start)); from.dateTime = result.start;
     write(to, dateText(result.end)); to.dateTime = result.end;

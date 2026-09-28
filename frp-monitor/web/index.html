@@ -39,7 +39,7 @@
     </div>
   </div></header>
   <main id="main" tabindex="-1">
-    <div id="connection-notice" class="wsk-alert wsk-warning fm-notice" role="status">正在获取监控快照…</div>
+    <div id="connection-notice" class="wsk-alert wsk-warning fm-notice" role="status" hidden></div>
     <noscript><div class="wsk-alert wsk-warning fm-notice">此页面需要 JavaScript 获取监控数据。当前未显示实时状态。</div></noscript>
     <section id="nodes" class="fm-nodes" aria-labelledby="nodes-title">
       <div class="wsk-panel fm-fleet-panel">
@@ -51,19 +51,22 @@
       <div id="table-view" class="wsk-table-wrap fm-table-wrap" role="region" aria-label="节点资源表，可横向滚动" tabindex="0" hidden>
         <table class="wsk-table fm-table"><caption class="wsk-sr-only">节点实时资源与连接状态</caption><thead><tr><th scope="col">节点</th><th scope="col">状态</th><th scope="col">CPU</th><th scope="col">内存</th><th scope="col">磁盘</th><th scope="col">发送 / 接收</th><th scope="col">负载</th><th scope="col">运行时间</th><th scope="col">详情</th></tr></thead><tbody id="node-table-body"></tbody></table>
       </div>
-      <div id="empty-state" class="wsk-empty-state fm-empty"><span class="wsk-empty-icon fm-empty-icon"><svg class="wsk-icon" aria-hidden="true"><use href="#server"/></svg></span><h2 id="empty-title">正在读取节点</h2><p id="empty-copy">获取服务端快照后，将在这里显示节点资源。</p></div>
+      <div id="empty-state" class="wsk-empty-state fm-empty" hidden><span class="wsk-empty-icon fm-empty-icon"><svg class="wsk-icon" aria-hidden="true"><use href="#server"/></svg></span><h2 id="empty-title"></h2><p id="empty-copy"></p></div>
       <div class="fm-list-footer"><span id="list-summary">等待数据</span><span>— 表示暂无有效采样</span></div>
     </section>
   </main>
   <footer class="fm-footer"><div class="fm-footer-inner"><div class="fm-footer-live">
-    <span class="fm-stream" data-state="loading" id="stream-status" role="status"><i></i><span id="stream-label">正在连接</span></span>
+    <span class="fm-stream" data-state="pending" id="stream-status" role="status"><i></i><span id="stream-label"></span></span>
     <span class="fm-snapshot">快照 <time id="snapshot-at">—</time></span>
     <span id="stat-cpu-note">均 CPU <b id="stat-cpu">—</b></span>
     <span id="stat-network-note"><span title="节点发送总速率">↑ <b id="stat-tx">—</b></span><span title="节点接收总速率">↓ <b id="stat-rx">—</b></span></span>
   </div><span class="fm-footer-brand">FRP Monitor <span class="fm-footer-separator">/</span> 公开 · 只读</span></div></footer>
 
   <template id="node-template"><article class="wsk-panel fm-node-card">
-    <header class="fm-card-header"><div class="fm-node-identity"><div><h2><a class="fm-node-link" data-value="name"></a></h2><p data-value="hardware">系统信息待上报</p><p class="fm-node-groups" data-value="groups"></p></div></div><div class="fm-card-status"><span class="wsk-badge fm-badge" data-value="session"></span><small data-value="uptime">—</small></div></header>
+    <header class="fm-card-header fm-node-identity">
+      <div class="fm-card-heading"><h2><a class="fm-node-link" data-value="name"></a></h2><span class="wsk-badge fm-badge" data-value="session"></span></div>
+      <div class="fm-card-summary"><p data-value="hardware">系统信息待上报</p><small data-value="uptime">—</small></div>
+    </header>
     <div class="wsk-progress-list fm-resource-grid">
       <div class="fm-resource"><div class="fm-resource-usage"><span class="fm-resource-label" data-value="cpu-label">CPU</span><strong data-value="cpu">—</strong><progress max="100" data-meter="cpu" aria-label="CPU 使用率" hidden></progress></div></div>
       <div class="fm-resource"><div class="fm-resource-usage"><span class="fm-resource-label" data-value="mem-label">内存 —</span><strong data-value="mem">—</strong><progress max="100" data-meter="mem" aria-label="内存使用率" hidden></progress></div></div>

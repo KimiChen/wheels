@@ -10,6 +10,9 @@ export function nodeGroups(node) {
   });
 }
 export function groupText(node) { return nodeGroups(node).map(group => group.name).join(" · "); }
+export function nodeBadgeText(node) {
+  return groupText(node) || ({online: "在线", waiting: "等待", offline: "离线"})[node?.session] || UNKNOWN;
+}
 export function nodeID(pathname) {
   const match = /^\/node\/([^/]+)\/?$/.exec(pathname);
   if (!match) return null;

@@ -28,46 +28,61 @@
     <div class="fm-top-actions"><a href="/" class="fm-back" aria-label="返回节点列表"><svg class="wsk-icon" aria-hidden="true"><use href="#arrow-left"/></svg><span>返回节点列表</span></a><button class="wsk-icon-button fm-theme" data-theme-toggle data-js-only type="button" aria-label="切换主题"><svg class="wsk-icon" aria-hidden="true"><use href="#theme"/></svg></button><a class="wsk-button wsk-secondary fm-admin" href="/admin/" aria-label="管理工作台" title="管理工作台"><svg class="wsk-icon" aria-hidden="true"><use href="#settings"/></svg><span>管理</span></a></div>
   </div></header>
   <main id="main" tabindex="-1">
-    <div id="connection-notice" class="wsk-alert wsk-warning fm-notice" role="status">正在获取节点快照…</div>
+    <div id="connection-notice" class="wsk-alert wsk-warning fm-notice" role="status" hidden></div>
     <noscript><div class="wsk-alert wsk-warning fm-notice">此页面需要 JavaScript 获取节点状态和历史趋势。</div></noscript>
-    <section id="node-empty" class="wsk-empty-state fm-empty" aria-labelledby="empty-title"><span class="wsk-empty-icon fm-empty-icon"><svg class="wsk-icon" aria-hidden="true"><use href="#server"/></svg></span><h1 id="empty-title">正在读取节点</h1><p id="empty-copy">同步当前节点的资源、系统信息与历史记录。</p><button id="retry-empty" class="wsk-secondary wsk-button fm-refresh" type="button" data-js-only>重新同步</button></section>
+    <section id="node-empty" class="wsk-empty-state fm-empty" aria-labelledby="empty-title" hidden><span class="wsk-empty-icon fm-empty-icon"><svg class="wsk-icon" aria-hidden="true"><use href="#server"/></svg></span><h1 id="empty-title"></h1><p id="empty-copy"></p><button id="retry-empty" class="wsk-secondary wsk-button fm-refresh" type="button" data-js-only>重新同步</button></section>
     <article id="node-detail" hidden>
-      <header class="fm-node-heading"><div class="fm-node-title"><a class="wsk-icon-button fm-node-back" href="/" aria-label="返回节点列表"><svg class="wsk-icon" aria-hidden="true"><use href="#arrow-left"/></svg></a><h1 data-value="name">—</h1></div><button id="retry" class="wsk-secondary wsk-button fm-refresh" type="button" data-js-only><svg class="wsk-icon" aria-hidden="true"><use href="#refresh"/></svg>刷新</button></header>
-      <dl class="fm-node-facts">
-        <div><dt>状态</dt><dd><span class="wsk-badge fm-badge" data-value="session"></span></dd></div>
-        <div><dt>分组</dt><dd class="fm-node-groups" data-value="groups"></dd></div>
-        <div><dt>运行时间</dt><dd data-value="uptime">—</dd></div>
-        <div><dt>系统环境</dt><dd data-value="environment">—</dd></div>
-        <div><dt>内存</dt><dd data-value="memory-total">—</dd></div>
-        <div><dt>硬盘</dt><dd data-value="disk-total">—</dd></div>
-      </dl>
-      <dl class="fm-node-facts">
-        <div><dt>操作系统</dt><dd data-value="os">—</dd></div>
-        <div><dt>CPU</dt><dd data-value="cpu-model">—</dd></div>
-        <div><dt>Agent</dt><dd data-value="agent">—</dd></div>
-      </dl>
-      <dl class="fm-node-facts">
-        <div><dt>Load · 1 / 5 / 15 分钟</dt><dd data-value="load">—</dd></div>
-        <div><dt>系统累计接收</dt><dd data-value="system-rx">—</dd></div>
-        <div><dt>系统累计发送</dt><dd data-value="system-tx">—</dd></div>
-        <div><dt>进程</dt><dd data-value="processes">—</dd></div>
-        <div><dt>TCP / UDP</dt><dd><span data-value="tcp">—</span> / <span data-value="udp">—</span></dd></div>
-      </dl>
-      <dl class="fm-node-facts" aria-label="今日流量与套餐">
-        <div><dt>今日接收</dt><dd data-value="traffic-rx">—</dd></div>
-        <div><dt>今日发送</dt><dd data-value="traffic-tx">—</dd></div>
-        <div data-plan-field><dt>套餐已用 / 额度</dt><dd data-value="plan-usage">—</dd></div>
-        <div data-plan-field><dt>套餐详情</dt><dd data-value="plan-period">—</dd></div>
-      </dl>
-      <dl class="fm-node-facts" id="node-billing" aria-label="费用与到期">
-        <div><dt>费用与到期</dt><dd data-value="billing">—</dd></div>
-        <div><dt>续费说明</dt><dd data-value="renewal-note">—</dd></div>
-      </dl>
-      <p class="fm-node-sampling"><span data-value="sample-time">尚未收到资源报告</span><span class="fm-data-state" data-value="freshness"></span><span data-value="interval">—</span></p>
-      <p id="node-public-note" class="fm-node-public-note" hidden></p>
+      <header class="fm-node-heading">
+        <div class="fm-node-title">
+          <a class="wsk-icon-button fm-node-back" href="/" aria-label="返回节点列表"><svg class="wsk-icon" aria-hidden="true"><use href="#arrow-left"/></svg></a>
+          <div class="fm-node-identity">
+            <div class="fm-node-name"><h1 data-value="name">—</h1><span class="wsk-badge fm-badge" data-value="session"></span></div>
+          </div>
+        </div>
+        <button id="retry" class="wsk-secondary wsk-button fm-refresh" type="button" data-js-only><svg class="wsk-icon" aria-hidden="true"><use href="#refresh"/></svg>刷新</button>
+      </header>
+      <div class="wsk-panel fm-node-overview">
+        <div class="fm-node-sections">
+          <section class="fm-node-section fm-node-system" aria-labelledby="node-system-title">
+            <h2 id="node-system-title"><svg class="wsk-icon" aria-hidden="true"><use href="#server"/></svg>系统配置</h2>
+            <dl class="fm-node-facts">
+              <div class="fm-node-fact-wide"><dt>操作系统</dt><dd data-value="os">—</dd></div>
+              <div class="fm-node-fact-wide"><dt>CPU</dt><dd data-value="cpu-model">—</dd></div>
+              <div><dt>内存</dt><dd data-value="memory-total">—</dd></div>
+              <div><dt>硬盘</dt><dd data-value="disk-total">—</dd></div>
+            </dl>
+          </section>
+          <section class="fm-node-section fm-node-runtime" aria-labelledby="node-runtime-title">
+            <h2 id="node-runtime-title"><svg class="wsk-icon" aria-hidden="true"><use href="#pulse"/></svg>运行状态</h2>
+            <dl class="fm-node-facts">
+              <div class="fm-node-fact-wide"><dt>运行时间</dt><dd data-value="uptime">—</dd></div>
+              <div class="fm-node-fact-wide"><dt>Load · 1 / 5 / 15 分钟</dt><dd data-value="load">—</dd></div>
+              <div><dt>进程</dt><dd data-value="processes">—</dd></div>
+              <div><dt>TCP / UDP</dt><dd><span data-value="tcp">—</span> / <span data-value="udp">—</span></dd></div>
+            </dl>
+          </section>
+          <section class="fm-node-section fm-node-traffic" aria-labelledby="node-traffic-title">
+            <h2 id="node-traffic-title"><svg class="wsk-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M7 3v18m-4-4 4 4 4-4M17 21V3m-4 4 4-4 4 4"/></svg>流量与套餐</h2>
+            <dl class="fm-node-facts" aria-label="今日流量与系统累计">
+              <div class="fm-node-traffic-today"><dt>今日接收 <span aria-hidden="true">↓</span></dt><dd data-value="traffic-rx">—</dd></div>
+              <div class="fm-node-traffic-today"><dt>今日发送 <span aria-hidden="true">↑</span></dt><dd data-value="traffic-tx">—</dd></div>
+              <div><dt>系统累计接收</dt><dd data-value="system-rx">—</dd></div>
+              <div><dt>系统累计发送</dt><dd data-value="system-tx">—</dd></div>
+            </dl>
+            <dl class="fm-node-facts fm-node-plan" aria-label="当前套餐" data-plan-field hidden>
+              <div class="fm-node-fact-wide"><dt>套餐详情</dt><dd class="fm-node-plan-details"><span data-value="plan-usage">—</span><span data-value="plan-period">—</span></dd></div>
+            </dl>
+          </section>
+        </div>
+        <dl class="fm-node-facts fm-node-billing" id="node-billing" aria-label="费用与到期" hidden>
+          <div><dt>费用与到期</dt><dd data-value="billing">—</dd></div>
+          <div><dt>续费说明</dt><dd data-value="renewal-note">—</dd></div>
+        </dl>
+        <p id="node-public-note" class="fm-node-public-note" aria-label="节点备注" hidden></p>
+      </div>
       <section class="fm-node-history" aria-label="节点资源与网络趋势"><div id="node-history"></div></section>
     </article>
   </main>
-  <footer class="fm-footer"><div class="fm-footer-inner"><div class="fm-footer-live"><span class="fm-stream" data-state="loading" id="stream-status" role="status"><i></i><span id="stream-label">正在连接</span></span><span class="fm-snapshot">快照 <time id="snapshot-at">—</time></span><span class="fm-node-footer-sample" id="footer-sample">等待节点数据</span></div><span class="fm-footer-brand">FRP Monitor <span class="fm-footer-separator">/</span> 公开 · 只读</span></div></footer>
+  <footer class="fm-footer"><div class="fm-footer-inner"><div class="fm-footer-live"><span class="fm-stream" data-state="pending" id="stream-status" role="status"><i></i><span id="stream-label"></span></span><span class="fm-snapshot">快照 <time id="snapshot-at">—</time></span><span class="fm-node-footer-sample" id="footer-sample">等待节点数据</span></div><span class="fm-footer-brand">FRP Monitor <span class="fm-footer-separator">/</span> 公开 · 只读</span></div></footer>
 </body>
 </html>
