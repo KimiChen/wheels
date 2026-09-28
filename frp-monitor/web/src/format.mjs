@@ -51,9 +51,9 @@ export function uptime(field) {
   return `${seconds / 60n} 分钟`;
 }
 export function onlineUptime(field, session) {
-  const duration = uptime(field);
-  if (duration === UNKNOWN) return UNKNOWN;
-  return `${session === "online" ? "在线" : "运行"} ${duration}`;
+  const seconds = decimal(field);
+  if (seconds === null) return UNKNOWN;
+  return `${session === "online" ? "在线" : "运行"} ${seconds / 86400n} 天 ${seconds % 86400n / 3600n} 小时`;
 }
 export function timeText(raw) {
   if (typeof raw !== "string") return UNKNOWN;
