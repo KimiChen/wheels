@@ -27,6 +27,7 @@ var publicFiles = map[string]string{
 	"/src/admin.mjs":             "src/admin.mjs",
 	"/src/admin-data.mjs":        "src/admin-data.mjs",
 	"/src/admin-overview.mjs":    "src/admin-overview.mjs",
+	"/src/admin-directory.mjs":   "src/admin-directory.mjs",
 	"/assets/style.css":          "assets/style.css",
 	"/assets/script.js":          "assets/script.js",
 	"/assets/app.css":            "assets/app.css",

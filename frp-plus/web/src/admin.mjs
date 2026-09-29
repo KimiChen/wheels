@@ -2,6 +2,7 @@ import {adminClient, adminSnapshot, groupDocument, groupDraft, groupDraftState, 
 import {settingsRequest, priceInput, gibInput, localDateInput, todayText, planText, dateTime} from "./node-settings.mjs";
 import {sessionLabels, freshnessLabels, frpLabel, bytes, decimal, percent, percentage, capacity, timeText} from "./format.mjs";
 import {overview, filterAdminNodes, expiryCalendar, localDayKey} from "./admin-overview.mjs";
+import {directoryRow} from "./admin-directory.mjs";
 
 const $ = id => document.getElementById(id);
 const client = adminClient({onExpired: () => locked("管理会话已失效，请重新登录。")});
@@ -37,10 +38,12 @@ function locked(message = "请使用 GitHub 登录。", disabled = false) {
   clearSecret(); cards.clear(); $("node-list").replaceChildren(); $("node-details").replaceChildren(); $("server-registry").replaceChildren(); $("probe-rows").replaceChildren();
   $("binding-form").reset(); $("settings-form").reset(); settingsRevision = null; settingsDirty = false; $("create-form").reset(); $("node-search").value = "";
   $("node-filter").value = "all"; $("node-group").replaceChildren(new Option("全部分组", "all"), new Option("未分组", "ungrouped"));
+  syncDirectoryFilters();
   for (const id of ["attention-list", "calendar-days", "calendar-events"]) $(id).replaceChildren();
   for (const count of document.querySelectorAll("[data-overview-count]")) count.textContent = "—";
   for (const id of ["nav-node-count", "node-filter-count", "overview-updated", "attention-count", "expiry-task-copy", "review-task-copy", "calendar-caption", "calendar-month"]) $(id).textContent = "";
   calendarDay = null;
+  $("expired-shortcut").hidden = true; $("expired-shortcut").textContent = "已到期";
   $("node-title").textContent = ""; $("node-id").textContent = ""; $("node-session").textContent = "";
   for (const id of ["settings-current", "settings-status", "snapshot-at", "node-count", "confirm-copy"]) $(id).textContent = "";
   $("node-panel").hidden = true; $("confirm-action").hidden = true; $("workspace").hidden = true; $("logout").hidden = true; $("login-panel").hidden = false; $("github-login").hidden = disabled;
@@ -95,17 +98,22 @@ function renderNodes() {
       cards.set(node.id, row); $("node-list").append(row);
     }
     const put = (key, value) => { row.querySelector(`[data-cell="${key}"]`).textContent = value; };
-    const settings = node.settings ?? {}, plan = planText(node.traffic_plan), price = priceInput(settings.price_minor, settings.currency);
-    put("name", node.name); put("id", `#${node.id}`);
-    put("groups", snapshot.groups.filter(group => group.node_ids.includes(node.id)).map(group => group.name).join(" · ") || "未分组");
-    for (const family of ["ipv4", "ipv6"]) {
-      const value = node.facts?.[family]; put(family, value?.quality === "ok" && typeof value.value === "string" ? value.value : "—");
-    }
-    put("session", sessionLabels[node.session]); row.querySelector('[data-cell="session"]').dataset.state = node.session;
-    put("visibility", `${settings.is_public === true ? "公开" : settings.is_public === false ? "不公开" : "—"} · ${freshnessLabels[node.freshness]}`);
-    put("used", plan.used); put("quota", `/ ${plan.quota}`);
-    put("price", price === "" ? "未设置" : `${price} ${settings.currency}`); put("cycle", settings.billing_cycle || "—");
-    put("expires", settings.expires_at_ms == null ? "未设置" : dateTime(settings.expires_at_ms));
+    const data = directoryRow(node, snapshot.groups);
+    put("name", node.name); put("summary", data.summary);
+    const groupCell = row.querySelector('[data-cell="groups"]');
+    groupCell.replaceChildren(...(data.groups.length ? data.groups.map(name => el("span", name, "wsk-badge")) : [el("span", "未分组", "fa-muted")]));
+    for (const family of ["ipv4", "ipv6"]) put(family, data[family]);
+    put("session", data.session);
+    const session = row.querySelector('[data-cell="session"]'); session.dataset.state = node.session;
+    session.title = `${sessionLabels[node.session]} · ${freshnessLabels[node.freshness]}`;
+    put("plan", data.plan.text); row.querySelector('[data-cell="plan"]').title = data.plan.title;
+    const meter = row.querySelector("[data-plan-meter]");
+    meter.max = 100; meter.hidden = data.plan.meter === null; meter.title = data.plan.title;
+    meter.setAttribute("aria-label", `${node.name} · 套餐用量`);
+    if (data.plan.meter === null) { meter.removeAttribute("value"); meter.removeAttribute("aria-valuetext"); }
+    else { meter.value = data.plan.meter; meter.setAttribute("aria-valuetext", data.plan.text); }
+    put("expires", data.expires.text);
+    const expires = row.querySelector('[data-cell="expires"]'); expires.title = data.expires.title; expires.dataset.state = data.expires.state;
     for (const button of row.querySelectorAll("button")) {
       button.disabled = busy;
       if (button.title) button.setAttribute("aria-label", `${node.name} · ${button.title}`);
@@ -128,9 +136,18 @@ function renderNodeFilters() {
 function filterNodes() {
   const visible = new Set(filterAdminNodes(snapshot, {query: $("node-search").value, state: $("node-filter").value, group: $("node-group").value}).map(node => node.id)), count = visible.size;
   for (const [id, row] of cards) row.hidden = !visible.has(id);
-  $("node-filter-count").textContent = `显示 ${count} / ${snapshot?.nodes.length ?? 0} 个节点`;
+  $("node-filter-count").textContent = `${count} / ${snapshot?.nodes.length ?? 0} 台节点`;
+  syncDirectoryFilters();
   $("nodes-empty").hidden = count > 0;
   $("nodes-empty").textContent = $("node-filter").value === "review" && snapshot?.frp?.state !== "ready" ? "服务端快照暂不可用，请前往 FRP 对账页查看状态。" : snapshot?.nodes.length ? "没有匹配的节点，请调整状态、分组或搜索条件。" : "尚无节点，创建凭据后即可接入。";
+}
+function syncDirectoryFilters() {
+  const current = $("node-filter").value;
+  for (const button of document.querySelectorAll("[data-directory-filter]")) {
+    const selected = button.dataset.directoryFilter === current;
+    button.setAttribute("aria-pressed", String(selected));
+    button.hidden = ["expired", "review"].includes(button.dataset.directoryFilter) && !selected;
+  }
 }
 function openNodeFilter(state) {
   $("node-filter").value = state; $("node-group").value = "all"; $("node-search").value = "";
@@ -153,6 +170,8 @@ function renderOverview() {
   for (const count of document.querySelectorAll("[data-overview-count]")) count.textContent = counts[count.dataset.overviewCount] ?? "—";
   $("overview-updated").textContent = `更新于 ${timeText(snapshot.generated_at)} · 每 10 秒同步`;
   $("expiry-task-copy").textContent = counts.expired ? `另有 ${counts.expired} 个已到期，见下方需关注列表` : "检查续费时间";
+  $("expired-shortcut").hidden = counts.expired === 0;
+  $("expired-shortcut").textContent = `已到期 ${counts.expired}`;
   $("review-task-copy").textContent = summary.reviewAvailable ? "检查绑定与服务端登记" : "服务端快照暂不可用，查看对账页";
   $("attention-count").textContent = `${summary.attention.length} 个节点`;
   const labels = {expired: "已到期", due: "7 天内到期", offline: "监控离线", review: "FRP 需核对"};
@@ -490,6 +509,7 @@ $("refresh").addEventListener("click", () => refreshNodes());
 for (const button of document.querySelectorAll("[data-refresh]")) button.addEventListener("click", () => refreshNodes());
 for (const button of document.querySelectorAll("#add-node, [data-add-node]")) button.addEventListener("click", () => { openDialog("create-dialog"); $("node-name").focus(); });
 for (const button of document.querySelectorAll("[data-node-filter]")) button.addEventListener("click", () => openNodeFilter(button.dataset.nodeFilter));
+for (const button of document.querySelectorAll("[data-directory-filter]")) button.addEventListener("click", () => { $("node-filter").value = button.dataset.directoryFilter; filterNodes(); });
 $("review-shortcut").addEventListener("click", () => { if (snapshot?.frp?.state === "ready") openNodeFilter("review"); else { location.hash = "frp"; showView(); } });
 for (const [id, delta] of [["calendar-prev", -1], ["calendar-next", 1]]) $(id).addEventListener("click", () => {
   calendarMonth = new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() + delta, 1); calendarDay = null; renderCalendar();
