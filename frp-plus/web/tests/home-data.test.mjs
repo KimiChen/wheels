@@ -54,74 +54,91 @@ test("existing metric ordering keeps BigInt precision and missing samples last",
   assert.deepEqual(sortHomeNodes(nodes, "default"), nodes);
 });
 
-test("row runtime uses system uptime and last valid counters without rounding or relabeling them as active connections", () => {
-  const details = homeRowDetails({session: "offline", freshness: "stale", metrics: {
-    uptime: ok("90061"), load: ok([0, 1.2, 2.34]), tcp: ok("9007199254740993"), udp: ok("0"), procs: ok("0"),
+test("row rates convert bytes per second to decimal Mbps with exact two-place rounding", () => {
+  const rate = raw => homeRowDetails({metrics: {net_rx: ok(raw)}}).values;
+  for (const [raw, number] of [["0", "0.00"], ["624", "0.00"], ["625", "0.01"], ["123456", "0.99"], ["125000", "1.00"], ["10000000", "80.00"]]) {
+    assert.equal(rate(raw)["row-rx-rate"], number);
+    assert.equal(rate(raw)["row-rx-rate-unit"], "Mbps");
+  }
+  const directions = homeRowDetails({metrics: {net_rx: ok("125000"), net_tx: ok("250000")}});
+  assert.equal(directions.values["row-rx-rate"], "1.00");
+  assert.equal(directions.values["row-tx-rate"], "2.00");
+  assert.equal(directions.values["row-tx-rate-unit"], "Mbps");
+});
+
+test("row network conversion retains uint64 precision without floating point intermediates", () => {
+  const details = homeRowDetails({metrics: {
+    net_rx: ok("18446744073709551615"), net_tx: ok("9007199254740993"),
+    net_rx_total: ok("18446744073709551615"), net_tx_total: ok("9007199254740993"),
   }});
-  assert.equal(details.values["runtime-uptime"], "1 天 1 小时");
-  assert.equal(details.values["runtime-load"], "0.00 / 1.20 / 2.34");
-  assert.equal(details.values["runtime-connections"], "9007199254740993 / 0");
-  assert.equal(details.values["runtime-processes"], "0");
-  assert.match(details.titles["runtime-connections"], /最近有效采样/);
-  assert.doesNotMatch(details.titles["runtime-connections"], /active|活跃/);
+  assert.equal(details.values["row-rx-rate"], "147573952589676.41");
+  assert.equal(details.values["row-tx-rate"], "72057594037.93");
+  assert.equal(details.values["row-rx-total"], "18.4");
+  assert.equal(details.values["row-rx-total-unit"], "EB");
+  assert.equal(details.values["row-tx-total"], "9.0");
+  assert.equal(details.values["row-tx-total-unit"], "PB");
 });
 
-test("row detail keeps missing or invalid samples unknown while displaying genuine zero and partial daily totals", () => {
-  for (const value of [undefined, null, {}, {metrics: {uptime: ok(0), load: ok([0, 1]), tcp: ok("-1"), udp: {quality: "unavailable", value: "0"}, procs: ok("18446744073709551616")}}]) {
+test("row transfer totals use decimal units and carry rounded boundaries without confusing GB with GiB", () => {
+  for (const [raw, number, unit] of [["0", "0", "B"], ["999", "999", "B"], ["1000", "1.0", "KB"],
+    ["1234", "1.2", "KB"], ["999950", "1.0", "MB"], ["1000000000", "1.0", "GB"],
+    ["1073741824", "1.1", "GB"], ["1000000000000", "1.0", "TB"]]) {
+    const details = homeRowDetails({metrics: {net_rx_total: ok(raw)}});
+    assert.equal(details.values["row-rx-total"], number);
+    assert.equal(details.values["row-rx-total-unit"], unit);
+  }
+});
+
+test("row network values preserve unknown samples and genuine zero without using unrelated counters", () => {
+  const fields = ["net_rx", "net_tx", "net_rx_total", "net_tx_total"];
+  const keys = ["row-rx-rate", "row-tx-rate", "row-rx-total", "row-tx-total"];
+  for (const field of [undefined, null, ok(null), ok(0), ok("-1"), ok("18446744073709551616"), {quality: "unavailable", value: "0"}]) {
+    const details = homeRowDetails({metrics: Object.fromEntries(fields.map(key => [key, field]))});
+    for (const key of keys) {
+      assert.equal(details.values[key], "—");
+      assert.equal(details.values[`${key}-unit`], "");
+    }
+  }
+  for (const value of [undefined, null, {}, {metrics: {net_in_transfer: ok("1000"), net_out_transfer: ok("2000")}, traffic_today: {rx_bytes: "3000", tx_bytes: "4000"}, traffic_plan: {used_bytes: "5000"}}]) {
     const details = homeRowDetails(value);
-    for (const key of ["runtime-uptime", "runtime-load", "runtime-connections", "runtime-processes", "row-today"]) assert.equal(details.values[key], "—");
+    for (const key of keys) assert.equal(details.values[key], "—");
+    assert.equal(details.values["row-uptime"], "—");
+    assert.equal(details.values["row-expiry"], "—");
   }
-  const partial = homeRowDetails({metrics: {tcp: ok("0")}, traffic_today: {day: "2026-09-30", timezone: "Asia/Shanghai", rx_bytes: "0", tx_bytes: "1073741824", partial: true}});
-  assert.equal(partial.values["runtime-connections"], "0 / —");
-  assert.equal(partial.values["row-today"], "0 B / 1.0 GiB");
-  assert.equal(partial.titles["row-today"], "2026-09-30 · 统计日时区：Asia/Shanghai");
-  assert.equal(homeRowDetails({traffic_today: {rx_bytes: 0, tx_bytes: "0"}}).values["row-today"], "— / 0 B");
+  const zeros = homeRowDetails({metrics: Object.fromEntries([...fields, "uptime"].map(key => [key, ok("0")]))});
+  assert.equal(zeros.values["row-rx-rate"], "0.00");
+  assert.equal(zeros.values["row-tx-total"], "0");
+  assert.equal(zeros.values["row-uptime"], "0 分钟");
 });
 
-test("row quota balances preserve one-byte differences beyond Number precision and distinguish zero from unlimited", () => {
-  const remaining = (used, quota) => homeRowDetails({traffic_plan: {used_bytes: used, quota_bytes: quota}}).values["row-plan-remaining"];
-  assert.equal(remaining("9007199254740992", "9007199254740993"), "剩余 1 B");
-  assert.equal(remaining("9007199254740993", "9007199254740992"), "超出 1 B");
-  assert.equal(remaining("0", "0"), "剩余 0 B");
-  assert.equal(remaining("1", "0"), "超出 1 B");
-  assert.equal(remaining("0", null), "无限流量");
-  assert.equal(remaining(undefined, null), "无限流量");
-  for (const quota of [undefined, "bad", 0]) assert.equal(remaining("0", quota), "—");
-  assert.equal(remaining(undefined, "1"), "—");
-  assert.equal(homeRowDetails({traffic_plan: {used_bytes: "0", quota_bytes: null}}).values["row-plan-usage"], "0 B / ∞");
+test("row totals and uptime retain last valid offline samples with accurate descriptions", () => {
+  const details = homeRowDetails({session: "offline", freshness: "stale", metrics: {
+    net_rx: ok("125000"), net_rx_total: ok("1000"), net_tx_total: ok("2000"), uptime: ok("90061"),
+  }});
+  assert.equal(details.values["row-rx-rate"], "1.00");
+  assert.equal(details.values["row-rx-total"], "1.0");
+  assert.equal(details.values["row-tx-total"], "2.0");
+  assert.equal(details.values["row-uptime"], "1 天 1 小时");
+  assert.match(details.titles["row-rx-rate"], /最近有效采样/);
+  assert.match(details.titles["row-rx-total"], /系统累计接收.*重启可能归零/);
+  assert.match(details.titles["row-tx-total"], /系统累计发送.*重启可能归零/);
+  assert.match(details.titles["row-uptime"], /最近有效采样.*不代表监控连续在线/);
 });
 
-test("row plan uses known mode mappings and the server reset boundary, with manual reset taking precedence", () => {
-  for (const [mode, label] of [["max", "收发取较大值"], ["total", "双向合计"], ["rx", "仅接收"], ["tx", "仅发送"], ["__proto__", "—"], [undefined, "—"]]) {
-    assert.equal(homeRowDetails({traffic_plan: {mode}}).values["row-plan-mode"], label);
-  }
-  const details = homeRowDetails({traffic_plan: {reset_mode: "monthly", period_end_at_ms: now, reset_timezone: "America/New_York"}});
-  assert.equal(details.values["row-plan-reset"], dateTime(now));
-  assert.match(details.titles["row-plan-reset"], /浏览器本地时区/);
-  assert.doesNotMatch(details.titles["row-plan-reset"], /America\/New_York/);
+test("row expiry uses only public billing, local dates and exact expired or seven-day urgency boundaries", () => {
   const localBoundary = new Date(2026, 0, 2, 0, 30, 15).getTime();
-  const compact = homeRowDetails({traffic_plan: {reset_mode: "monthly", period_end_at_ms: localBoundary}});
-  assert.equal(compact.values["row-plan-reset-short"], "2026-01-02");
-  assert.equal(compact.titles["row-plan-reset-short"], `下次重置：${dateTime(localBoundary)}（浏览器本地时区）`);
-  assert.equal(compact.titles["row-plan-reset-short"], compact.titles["row-plan-reset"]);
-  for (const value of [undefined, null, "0", NaN, Infinity, Number.MAX_SAFE_INTEGER]) {
-    assert.equal(homeRowDetails({traffic_plan: {reset_mode: "monthly", period_end_at_ms: value}}).values["row-plan-reset"], "—");
-    assert.equal(homeRowDetails({traffic_plan: {reset_mode: "monthly", period_end_at_ms: value}}).values["row-plan-reset-short"], "—");
-    assert.equal(homeRowDetails({traffic_plan: {reset_mode: "manual", period_end_at_ms: value}}).values["row-plan-reset"], "手动重置");
-    assert.equal(homeRowDetails({traffic_plan: {reset_mode: "manual", period_end_at_ms: value}}).values["row-plan-reset-short"], "手动重置");
+  const local = homeRowDetails({billing: {expires_at_ms: localBoundary}}, localBoundary - 1);
+  assert.equal(local.values["row-expiry"], "2026-01-02");
+  assert.equal(local.titles["row-expiry"], `到期时间：${dateTime(localBoundary)}（浏览器本地时区） · 1 天后到期`);
+  for (const expires of [now - day, now, now + 1, now + 7 * day]) {
+    const details = homeRowDetails({billing: {expires_at_ms: expires}}, now);
+    assert.equal(details.expiryUrgent, true);
+    assert.match(details.titles["row-expiry"], expires <= now ? /已到期/ : /天后到期/);
   }
-  assert.equal(homeRowDetails({traffic_plan: {reset_mode: "manual", period_end_at_ms: now}}).values["row-plan-reset"], "手动重置");
-  assert.equal(homeRowDetails({traffic_plan: {reset_mode: "invalid", period_end_at_ms: now}}).values["row-plan-reset"], "—");
-  assert.equal(homeRowDetails({traffic_plan: {reset_mode: "invalid", period_end_at_ms: now}}).values["row-plan-reset-short"], "—");
-});
-
-test("unpublished row plans do not infer public data from private fields or hide independent daily traffic", () => {
-  for (const traffic_plan of [undefined, null, false, "hidden", []]) {
-    const details = homeRowDetails({traffic_plan, traffic_quota_bytes: null, traffic_used_bytes: "0", private_traffic_plan: {used_bytes: "0", quota_bytes: null}, traffic_today: {rx_bytes: "0", tx_bytes: "0"}});
-    assert.equal(details.planPublished, false);
-    for (const key of ["row-plan-usage", "row-plan-remaining", "row-plan-mode", "row-plan-reset", "row-plan-reset-short"]) assert.equal(details.values[key], "—");
-    assert.equal(details.titles["row-plan-usage"], "套餐未公开");
-    assert.equal(details.values["row-today"], "0 B / 0 B");
+  assert.equal(homeRowDetails({billing: {expires_at_ms: now + 7 * day + 1}}, now).expiryUrgent, false);
+  for (const expires of [undefined, null, "0", NaN, Infinity, Number.MAX_SAFE_INTEGER]) {
+    const details = homeRowDetails({billing: {expires_at_ms: expires}, expires_at_ms: now, private_billing: {expires_at_ms: now}}, now);
+    assert.equal(details.values["row-expiry"], "—");
+    assert.equal(details.expiryUrgent, false);
   }
-  assert.equal(homeRowDetails({traffic_plan: {}}).planPublished, true);
 });

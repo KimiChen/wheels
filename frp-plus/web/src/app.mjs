@@ -108,7 +108,7 @@ function createCard(node) {
   for (const el of element.querySelectorAll("[data-meter]")) meters.set(el.dataset.meter, [...(meters.get(el.dataset.meter) ?? []), el]);
   const links = [...element.querySelectorAll("a")], url = nodeURL(node.id);
   for (const link of links) if (url) link.href = url;
-  return {element, labels, meters, links, planRows: [...element.querySelectorAll("[data-row-plan]")], unpublishedPlan: [...element.querySelectorAll("[data-row-plan-unpublished]")]};
+  return {element, labels, meters, links};
 }
 function patchCard(card, node, now) {
   const labels = key => card.labels.get(key) ?? [];
@@ -154,11 +154,10 @@ function patchCard(card, node, now) {
   text("uptime", onlineUptime(metric.uptime, node.session)); state("uptime", node.session);
   title("freshness", node.metrics_at ? `资源采样于 ${timeText(node.metrics_at)}` : "尚未收到资源报告");
   title("uptime", "系统运行时间，不代表监控连续在线时长");
-  const details = homeRowDetails(node);
+  const details = homeRowDetails(node, now);
   for (const [key, value] of Object.entries(details.values)) text(key, value);
   for (const [key, value] of Object.entries(details.titles)) title(key, value);
-  for (const row of card.planRows) row.hidden = !details.planPublished;
-  for (const message of card.unpublishedPlan) message.hidden = details.planPublished;
+  for (const label of labels("row-expiry")) label.dataset.urgent = String(details.expiryUrgent);
 }
 function render() {
   if (!current) return;
