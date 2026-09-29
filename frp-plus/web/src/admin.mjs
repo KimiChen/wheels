@@ -3,6 +3,7 @@ import {settingsRequest, priceInput, gibInput, localDateInput, todayText, planTe
 import {sessionLabels, freshnessLabels, frpLabel, bytes, decimal, percent, percentage, capacity, timeText} from "./format.mjs";
 import {overview, filterAdminNodes, expiryCalendar, localDayKey} from "./admin-overview.mjs";
 import {directoryRow} from "./admin-directory.mjs";
+import {membershipDraft, membershipChanges, saveNodeChanges, retainAcknowledgedSettings} from "./admin-editor.mjs";
 
 const $ = id => document.getElementById(id);
 const client = adminClient({onExpired: () => locked("管理会话已失效，请重新登录。")});
@@ -11,6 +12,8 @@ const cards = new Map();
 let groups = [], groupsReady = false, groupsEpoch = 0, draft = groupDraft(), groupDirty = false, groupMessage = "", pendingGroupDelete = null;
 const groupRows = new Map(), groupMembers = new Map();
 let calendarMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1), calendarDay = null;
+let editorMembership = null, settingsNeedsReload = false, editorSettingsSaved = false, bindingBaseline = null, bindingDirty = false;
+const acknowledgedSettings = new Map();
 const el = (tag, text, className) => { const node = document.createElement(tag); if (text !== undefined) node.textContent = text; if (className) node.className = className; return node; };
 const safe = raw => typeof raw === "string" || (typeof raw === "number" && Number.isFinite(raw)) ? String(raw) : "—";
 function notice(text, state = "ready") {
@@ -23,7 +26,7 @@ function openDialog(id) { const dialog = $(id); dialog.hidden = false; if (!dial
 function clearSecret() { $("secret-id").value = ""; $("secret-token").value = ""; $("credential-result").close(); $("credential-result").hidden = true; }
 function showSecret(data) {
   if (!data || typeof data.id !== "string" || typeof data.token !== "string" || data.token.length < 32 || data.token.length > 512) throw new Error("invalid_credential");
-  $("node-panel").close();
+  closeNodeEditor();
   $("secret-id").value = data.id; $("secret-token").value = data.token; openDialog("credential-result");
   $("secret-token").focus(); $("secret-token").select();
 }
@@ -37,6 +40,8 @@ function locked(message = "请使用 GitHub 登录。", disabled = false) {
   for (const id of ["group-count", "group-member-count", "group-status", "group-confirm-copy"]) $(id).textContent = "";
   clearSecret(); cards.clear(); $("node-list").replaceChildren(); $("node-details").replaceChildren(); $("server-registry").replaceChildren(); $("probe-rows").replaceChildren();
   $("binding-form").reset(); $("settings-form").reset(); settingsRevision = null; settingsDirty = false; $("create-form").reset(); $("node-search").value = "";
+  editorMembership = null; settingsNeedsReload = false; editorSettingsSaved = false; bindingBaseline = null; bindingDirty = false; acknowledgedSettings.clear();
+  $("node-editor-groups").replaceChildren(); $("node-editor-groups-status").textContent = ""; $("node-editor-groups-status").hidden = true;
   $("node-filter").value = "all"; $("node-group").replaceChildren(new Option("全部分组", "all"), new Option("未分组", "ungrouped"));
   syncDirectoryFilters();
   for (const id of ["attention-list", "calendar-days", "calendar-events"]) $(id).replaceChildren();
@@ -44,7 +49,7 @@ function locked(message = "请使用 GitHub 登录。", disabled = false) {
   for (const id of ["nav-node-count", "node-filter-count", "overview-updated", "attention-count", "expiry-task-copy", "review-task-copy", "calendar-caption", "calendar-month"]) $(id).textContent = "";
   calendarDay = null;
   $("expired-shortcut").hidden = true; $("expired-shortcut").textContent = "已到期";
-  $("node-title").textContent = ""; $("node-id").textContent = ""; $("node-session").textContent = "";
+  $("node-name-label").textContent = ""; $("node-id").textContent = ""; $("node-session").textContent = ""; $("binding-summary").textContent = "—";
   for (const id of ["settings-current", "settings-status", "snapshot-at", "node-count", "confirm-copy"]) $(id).textContent = "";
   $("node-panel").hidden = true; $("confirm-action").hidden = true; $("workspace").hidden = true; $("logout").hidden = true; $("login-panel").hidden = false; $("github-login").hidden = disabled;
   notice(message, disabled ? "error" : "ready");
@@ -59,7 +64,7 @@ async function refreshNodes(force = false) {
   const generation = ++snapshotEpoch, groupGeneration = groupsEpoch;
   refreshing = true; clearTimeout(poll);
   try {
-    const next = adminSnapshot(await client.request("/api/admin/v1/nodes"));
+    const next = retainAcknowledgedSettings(adminSnapshot(await client.request("/api/admin/v1/nodes")), acknowledgedSettings);
     if (!loggedIn || generation !== snapshotEpoch) return;
     snapshot = next; renderNodes(); renderRegistry();
     if (groupGeneration === groupsEpoch) { groups = next.groups; groupsReady = next.groups_state === "ready"; }
@@ -67,6 +72,7 @@ async function refreshNodes(force = false) {
     $("probe-health").hidden = next.probes_state !== "degraded";
     if (next.credentials_state === "degraded") notice("节点配置暂不可用，请检查服务端后再操作。", "error");
     else if (!document.querySelector("dialog[open]")) notice("");
+    return next;
   } catch (error) { if (loggedIn && generation === snapshotEpoch) notice(`${errorText(error)}${snapshot ? " 当前显示上次成功快照。" : " 尚无可用快照。"}`, "error"); }
   finally { if (generation === snapshotEpoch) { refreshing = false; if (loggedIn) poll = setTimeout(refreshNodes, 10000); } }
 }
@@ -220,20 +226,37 @@ function selectNode(id, pane = "settings") {
   selectedID = id; pendingAction = null; $("confirm-action").hidden = true;
   const node = snapshot?.nodes.find(item => item.id === id);
   $("node-panel").hidden = !node;
-  if (!node) { $("node-panel").close(); $("node-details").replaceChildren(); loadSettings(null); $("binding-form").reset(); return; }
+  if (!node) { closeNodeEditor(); return; }
   if (changed || !settingsDirty) loadSettings(node);
-  if (changed) {
-    $("binding-form").reset();
-    for (const key of ["server_id", "user", "raw_client_id"]) $("binding-form").elements[key].value = node.frp_binding?.[key] ?? "";
-  }
+  if (changed || !bindingDirty) loadBinding(node);
   renderDetail(); showEditorPane(pane); openDialog("node-panel");
 }
+function discardNodeEditor() {
+  selectedID = null; pendingAction = null; editorMembership = null; settingsRevision = null; settingsDirty = false;
+  settingsNeedsReload = false; editorSettingsSaved = false; bindingBaseline = null; bindingDirty = false;
+  $("settings-form").reset(); $("binding-form").reset(); $("node-editor-groups").replaceChildren(); $("node-details").replaceChildren();
+  for (const id of ["node-name-label", "node-id", "node-session", "settings-current", "settings-status", "node-editor-groups-status", "confirm-copy"]) $(id).textContent = "";
+  $("node-editor-groups-status").hidden = true; $("binding-summary").textContent = "—"; $("confirm-action").hidden = true;
+  $("node-panel").hidden = true;
+  for (const details of $("node-panel").querySelectorAll("details")) details.open = false;
+}
+function closeNodeEditor() { $("node-panel").close(); discardNodeEditor(); }
+function loadBinding(node) {
+  bindingBaseline = Object.fromEntries(["server_id", "user", "raw_client_id"].map(key => [key, node.frp_binding?.[key] ?? ""]));
+  bindingDirty = false;
+  for (const [key, value] of Object.entries(bindingBaseline)) $("binding-form").elements[key].value = value;
+}
 function showEditorPane(pane) {
-  for (const panel of document.querySelectorAll("[data-editor-panel]")) panel.hidden = panel.dataset.editorPanel !== pane;
+  const settingsPane = pane === "settings" || pane === "plan";
+  for (const panel of document.querySelectorAll("[data-editor-panel]")) panel.hidden = panel.dataset.editorPanel !== (settingsPane ? "settings" : pane);
+  for (const fieldset of document.querySelectorAll("[data-settings-pane]")) fieldset.hidden = fieldset.dataset.settingsPane !== pane;
   for (const button of document.querySelectorAll("[data-editor-pane]")) {
     const selected = button.dataset.editorPane === pane;
     button.setAttribute("aria-pressed", String(selected)); button.classList.toggle("wsk-is-active", selected);
   }
+  $("editor-save").hidden = !settingsPane && pane !== "binding";
+  $("editor-save").setAttribute("form", pane === "binding" ? "binding-form" : "settings-form");
+  $("editor-save").textContent = "保存修改";
 }
 function showView() {
   const key = ["dashboard", "nodes", "groups", "probes", "frp", "access"].includes(location.hash.slice(1)) ? location.hash.slice(1) : "dashboard";
@@ -246,10 +269,10 @@ function showView() {
 }
 function renderDetail() {
   const node = snapshot?.nodes.find(item => item.id === selectedID); if (!node) return;
-  $("node-title").textContent = node.name; $("node-id").textContent = node.id;
+  $("node-name-label").textContent = node.name; $("node-id").textContent = node.id;
   $("node-session").textContent = sessionLabels[node.session]; $("node-session").dataset.state = node.session;
   const today = todayText(node.traffic_today), plan = planText(node.traffic_plan);
-  $("settings-current").textContent = `当前套餐：已用 ${plan.used} / ${plan.quota} · ${plan.note}；今日：↓ ${today.rx} / ↑ ${today.tx}。校准只影响套餐用量。`;
+  $("settings-current").textContent = `${plan.used} / ${plan.quota} · ${plan.note}`;
   if (node.settings?.config_revision !== settingsRevision) $("settings-status").textContent = "设置已被其他操作更新，请重新读取后保存。";
   const box = $("node-details"); box.replaceChildren();
   box.append(rowList([["今日接收 / 发送", `${today.rx} / ${today.tx}`], ["今日统计范围", today.note], ["套餐已用 / 额度", `${plan.used} / ${plan.quota}`], ["套餐计费", plan.note]]));
@@ -261,6 +284,7 @@ function renderDetail() {
   else box.append(el("p", "主机详情将在节点首次报告后显示。", "fa-muted"));
   const section = el("section", undefined, "fa-section"); section.append(el("h3", "FRP 隧道对账"));
   const rec = snapshot.frp?.nodes?.find(item => item.id === node.id);
+  $("binding-summary").textContent = reconciliationLabels[rec?.state] ?? "等待服务端快照";
   section.append(rowList([["核对结果", reconciliationLabels[rec?.state] ?? "等待服务端快照"], ["服务端控制连接", rec?.server_online === true ? "在线" : rec?.server_online === false ? "离线" : "未知"], ["可信绑定", node.frp_binding ? `${node.frp_binding.server_id} / ${node.frp_binding.user || "（空用户）"} / ${node.frp_binding.raw_client_id}` : "未设置"], ["节点自报关联", node.frp ? `${node.frp.association?.server_id ?? "—"} / ${node.frp.association?.user || "（空用户）"} / ${node.frp.association?.raw_client_id ?? "无稳定 ID"}` : "尚未报告"]]));
   section.append(el("p", "FRP 流量按服务端本地日统计。接收为公网访客 → frpc，发送为 frpc → 公网访客；与上方主机网卡速率和流量分别计算。", "fa-detail-note"));
   if (rec && Array.isArray(rec.proxies)) {
@@ -286,7 +310,7 @@ function setBusy(value) {
 async function mutation(action, success) {
   if (busy) return; setBusy(true); clearTimeout(poll);
   try { await action(); if (loggedIn && success) notice(success); }
-  catch (error) { if (loggedIn) notice(errorText(error), "error"); }
+  catch (error) { if (loggedIn) notice(error.userMessage || errorText(error), "error"); }
   finally { setBusy(false); clearTimeout(poll); if (loggedIn) poll = setTimeout(refreshNodes, 10000); }
 }
 function renderGroups() {
@@ -412,7 +436,9 @@ function requestConfirmation(kind) {
 function loadSettings(node) {
   const form = $("settings-form"); form.reset(); settingsDirty = false;
   const settings = node?.settings; settingsRevision = settings?.config_revision ?? null;
-  $("settings-status").textContent = settings ? "修改后点击保存。套餐重置只清空当前套餐用量，今日统计继续保留。" : "暂无节点设置。";
+  settingsNeedsReload = false; editorSettingsSaved = false;
+  editorMembership = node && snapshot?.groups_state === "ready" ? membershipDraft(node.id, snapshot.groups) : null;
+  renderEditorGroups(); $("settings-status").textContent = "";
   if (!settings) return;
   for (const key of ["name", "public_note", "private_note", "billing_cycle", "renewal_note", "traffic_mode", "traffic_reset_mode", "traffic_reset_day", "traffic_reset_timezone"]) form.elements[key].value = settings[key] ?? "";
   for (const key of ["is_public", "publish_billing", "publish_traffic_plan"]) form.elements[key].checked = settings[key] === true;
@@ -421,6 +447,89 @@ function loadSettings(node) {
   form.elements.expires_at_ms.value = localDateInput(settings.expires_at_ms);
   form.elements.traffic_quota.value = gibInput(settings.traffic_quota_bytes);
   form.elements.traffic_used.value = "";
+}
+function renderEditorGroups() {
+  const box = $("node-editor-groups"), message = $("node-editor-groups-status"); box.replaceChildren();
+  for (const group of editorMembership?.base ?? []) {
+    const label = el("label", undefined, "wsk-choice"), input = el("input");
+    input.type = "checkbox"; input.value = group.id; input.dataset.editorGroup = "";
+    input.checked = editorMembership.selected.includes(group.id); input.defaultChecked = input.checked; input.disabled = busy;
+    label.append(input, document.createTextNode(group.name)); box.append(label);
+  }
+  message.textContent = !editorMembership ? "分组暂不可用，重新读取后可编辑。" : !editorMembership.base.length ? "尚无分组，可先在分组管理中创建。" : "";
+  message.hidden = !message.textContent;
+}
+function acceptEditorSettings(id, saved) {
+  acknowledgedSettings.set(id, saved);
+  const node = snapshot?.nodes.find(item => item.id === id);
+  if (node) { node.settings = saved; node.name = saved.name; }
+  settingsRevision = saved.config_revision; settingsDirty = false; settingsNeedsReload = false; editorSettingsSaved = true;
+  $("settings-form").elements.traffic_used.value = "";
+  $("settings-form").elements.name.value = saved.name;
+  $("settings-status").textContent = "节点设置已保存。";
+  if (snapshot) renderNodes();
+}
+function revealInvalid(control, pane) {
+  showEditorPane(control.closest("[data-settings-pane]")?.dataset.settingsPane || pane);
+  for (let parent = control.parentElement; parent; parent = parent.parentElement) if (parent.tagName === "DETAILS") parent.open = true;
+  control.focus(); control.reportValidity();
+}
+function validateEditorForm(form, pane) {
+  const invalid = [...form.elements].find(control => control.willValidate && !control.validity.valid);
+  if (!invalid) return true;
+  revealInvalid(invalid, pane); return false;
+}
+function submitNodeEditor(event) {
+  event.preventDefault(); const id = selectedID;
+  if (!id || busy) return;
+  if (settingsNeedsReload || editorMembership?.blocked) { $("settings-status").textContent = "配置已变更或上次保存结果待确认，请重新读取后再编辑。"; return; }
+  if (!validateEditorForm($("settings-form"), "settings") || bindingDirty && !validateEditorForm($("binding-form"), "binding")) return;
+  let body = null;
+  try {
+    if (settingsDirty) {
+      const values = Object.fromEntries([...$("settings-form").elements].filter(field => field.name).map(field => [field.name, field.type === "checkbox" ? field.checked : field.value]));
+      body = settingsRequest(values, settingsRevision);
+    }
+  } catch (error) {
+    showEditorPane(error.message.includes("节点名称") ? "settings" : "plan");
+    if ($("settings-form").elements.traffic_used.value.trim()) $("settings-plan").querySelector("details").open = true;
+    $("settings-status").textContent = error.message; return;
+  }
+  const binding = bindingDirty ? Object.fromEntries(["server_id", "user", "raw_client_id"].map(key => [key, $("binding-form").elements[key].value.trim()])) : null;
+  const membership = editorMembership;
+  mutation(async () => {
+    groupsEpoch++;
+    try {
+      await saveNodeChanges({nodeID: id, membership, settings: body, binding, settingsAlreadySaved: editorSettingsSaved, request: (path, options) => client.request(path, options),
+        onGroupSaved: group => {
+          if (!loggedIn || selectedID !== id) return;
+          groups = [...groups.filter(item => item.id !== group.id), group];
+          if (snapshot) snapshot.groups = [...snapshot.groups.filter(item => item.id !== group.id), group];
+          renderGroups();
+          $("node-editor-groups-status").textContent = `已保存 ${membership.savedIDs.length} 个分组，继续保存其余修改…`;
+          $("node-editor-groups-status").hidden = false;
+        },
+        onSettingsSaved: saved => { if (loggedIn && selectedID === id) acceptEditorSettings(id, saved); },
+        onBindingSaved: saved => {
+          if (!loggedIn || selectedID !== id) return;
+          bindingBaseline = {...saved}; bindingDirty = false;
+          const node = snapshot?.nodes.find(item => item.id === id); if (node) node.frp_binding = {...saved};
+        }
+      });
+      if (!loggedIn || selectedID !== id) return;
+      closeNodeEditor();
+      const refreshed = await refreshNodes(true);
+      if (loggedIn) notice(refreshed ? "节点修改已保存。" : "节点修改已保存；列表刷新失败，请稍后重新读取。", refreshed ? "ready" : "error");
+    } catch (error) {
+      if (loggedIn && selectedID === id) {
+        if (error.stage === "settings" && error.needsReload) settingsNeedsReload = true;
+        $("settings-status").textContent = error.userMessage || errorText(error);
+        if (error.stage === "groups") { $("node-editor-groups-status").textContent = error.userMessage; $("node-editor-groups-status").hidden = false; showEditorPane("settings"); }
+        if (error.stage === "binding") showEditorPane("binding");
+      }
+      throw error;
+    }
+  });
 }
 $("group-new").addEventListener("click", () => { selectGroup(); $("group-name").focus(); });
 $("groups-reload").addEventListener("click", () => mutation(reloadGroups, "已重新读取分组；未保存的编辑已放弃。"));
@@ -459,19 +568,34 @@ $("group-delete-yes").addEventListener("click", () => {
     await refreshNodes(true); notice("分组已删除，成员节点仍保留。");
   });
 });
-$("settings-form").addEventListener("input", () => { settingsDirty = true; $("settings-status").textContent = "有未保存的修改。"; });
-$("settings-form").addEventListener("submit", event => {
-  event.preventDefault(); const id = selectedID; if (!id) return;
-  let body;
-  try { const values = Object.fromEntries([...$("settings-form").elements].filter(field => field.name).map(field => [field.name, field.type === "checkbox" ? field.checked : field.value])); body = settingsRequest(values, settingsRevision); }
-  catch (error) { $("settings-status").textContent = error.message; return; }
-  mutation(async () => { await client.request(`/api/admin/v1/nodes/${id}/settings`, {method: "PATCH", body}); await refreshNodes(true); loadSettings(snapshot?.nodes.find(node => node.id === id)); }, "节点设置已保存，已应用到当前周期。");
+$("settings-form").addEventListener("input", () => {
+  settingsDirty = true;
+  if (editorMembership) editorMembership.selected = [...$("node-editor-groups").querySelectorAll("input:checked")].map(input => input.value);
+  $("settings-status").textContent = "有未保存的修改。";
 });
-$("settings-reload").addEventListener("click", () => mutation(async () => { await refreshNodes(true); loadSettings(snapshot?.nodes.find(node => node.id === selectedID)); }, "已重新读取节点设置。"));
+$("settings-form").addEventListener("submit", submitNodeEditor);
+$("binding-form").noValidate = true;
+$("binding-form").addEventListener("input", () => {
+  bindingDirty = ["server_id", "user", "raw_client_id"].some(key => $("binding-form").elements[key].value.trim() !== (bindingBaseline?.[key] ?? ""));
+  $("settings-status").textContent = settingsDirty || bindingDirty ? "有未保存的修改。" : "";
+});
+$("binding-form").addEventListener("submit", submitNodeEditor);
+$("settings-reload").addEventListener("click", () => mutation(async () => {
+  const id = selectedID, next = await refreshNodes(true);
+  if (!loggedIn || selectedID !== id) return;
+  const node = next?.nodes.find(item => item.id === id);
+  if (!node?.settings || next.credentials_state !== "ready" || next.groups_state !== "ready") throw Object.assign(new Error("reload_failed"), {userMessage: "重新读取未完成，编辑内容已保留，请稍后重试。"});
+  loadSettings(node); loadBinding(node); renderDetail();
+}, "已重新读取，未保存的编辑已放弃。"));
 $("traffic-reset").addEventListener("click", () => {
   const id = selectedID; if (!id) return;
   if (settingsDirty) { $("settings-status").textContent = "请先保存或重新读取设置，再重置套餐周期。"; return; }
-  mutation(async () => { await client.request(`/api/admin/v1/nodes/${id}/reset-traffic`, {method: "POST", body: {config_revision: settingsRevision}}); await refreshNodes(true); loadSettings(snapshot?.nodes.find(node => node.id === id)); }, "当前套餐周期已重置，今日与系统累计流量保留。");
+  if (settingsNeedsReload) { $("settings-status").textContent = "请先重新读取设置，再重置套餐周期。"; return; }
+  mutation(async () => {
+    const saved = await client.request(`/api/admin/v1/nodes/${id}/reset-traffic`, {method: "POST", body: {config_revision: settingsRevision}});
+    if (loggedIn && selectedID === id) acceptEditorSettings(id, saved);
+    await refreshNodes(true);
+  }, "当前套餐周期已重置，今日与系统累计流量保留。");
 });
 $("logout").addEventListener("click", async () => {
   if (busy) return; setBusy(true); let message = "已退出管理工作台。";
@@ -482,12 +606,18 @@ $("create-form").addEventListener("submit", event => {
   event.preventDefault(); const name = $("node-name").value.trim(); if (!name) return;
   mutation(async () => { clearSecret(); const result = await client.request("/api/admin/v1/nodes", {method: "POST", body: {name}}); $("create-dialog").close(); showSecret(result); $("create-form").reset(); await refreshNodes(true); }, "节点已创建。请保存一次性令牌。");
 });
-$("binding-form").addEventListener("submit", event => {
-  event.preventDefault(); const id = selectedID, form = $("binding-form"); if (!id) return;
-  const body = Object.fromEntries(["server_id", "user", "raw_client_id"].map(key => [key, form.elements[key].value.trim()]));
-  mutation(async () => { await client.request(`/api/admin/v1/nodes/${encodeURIComponent(id)}/binding`, {method: "PUT", body}); await refreshNodes(true); }, "可信绑定已保存。请查看 FRP 核对结果。");
+$("binding-clear").addEventListener("click", () => {
+  const id = selectedID; if (!id) return;
+  if (settingsDirty || settingsNeedsReload || membershipChanges(editorMembership).length) { $("settings-status").textContent = "请先保存或重新读取基本信息与套餐修改，再解除绑定。"; return; }
+  mutation(async () => {
+    await client.request(`/api/admin/v1/nodes/${encodeURIComponent(id)}/binding`, {method: "DELETE"});
+    if (!loggedIn || selectedID !== id) return;
+    loadBinding({frp_binding: null});
+    const next = await refreshNodes(true), node = next?.nodes.find(item => item.id === id);
+    if (node?.settings && next.credentials_state === "ready") loadSettings(node);
+    else { settingsNeedsReload = true; $("settings-status").textContent = "绑定已解除；请重新读取节点设置后继续编辑。"; }
+  }, "已解除可信绑定。");
 });
-$("binding-clear").addEventListener("click", () => { const id = selectedID; if (!id) return; mutation(async () => { await client.request(`/api/admin/v1/nodes/${encodeURIComponent(id)}/binding`, {method: "DELETE"}); $("binding-form").reset(); await refreshNodes(true); }, "已解除可信绑定。"); });
 $("rotate").addEventListener("click", () => requestConfirmation("rotate"));
 $("revoke").addEventListener("click", () => requestConfirmation("revoke"));
 $("confirm-no").addEventListener("click", () => { pendingAction = null; $("confirm-action").hidden = true; $("rotate").focus(); });
@@ -515,8 +645,9 @@ for (const [id, delta] of [["calendar-prev", -1], ["calendar-next", 1]]) $(id).a
   calendarMonth = new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() + delta, 1); calendarDay = null; renderCalendar();
 });
 $("calendar-today").addEventListener("click", () => { const now = new Date(); calendarMonth = new Date(now.getFullYear(), now.getMonth(), 1); calendarDay = null; renderCalendar(); });
-for (const button of document.querySelectorAll("[data-close-dialog]")) button.addEventListener("click", () => { if (!busy) button.closest("dialog").close(); });
-for (const dialog of document.querySelectorAll("dialog")) dialog.addEventListener("cancel", event => { if (busy) event.preventDefault(); });
+for (const button of document.querySelectorAll("[data-close-dialog]")) button.addEventListener("click", () => { if (!busy) { const dialog = button.closest("dialog"); if (dialog.id === "node-panel") closeNodeEditor(); else dialog.close(); } });
+for (const dialog of document.querySelectorAll("dialog")) dialog.addEventListener("cancel", event => { if (busy) event.preventDefault(); else if (dialog.id === "node-panel") { event.preventDefault(); closeNodeEditor(); } });
+$("node-panel").addEventListener("close", () => { if (!$("node-panel").open) discardNodeEditor(); });
 $("credential-result").addEventListener("close", () => { $("secret-id").value = ""; $("secret-token").value = ""; });
 for (const button of document.querySelectorAll("[data-editor-pane]")) button.addEventListener("click", () => showEditorPane(button.dataset.editorPane));
 window.addEventListener("hashchange", showView); showView();
