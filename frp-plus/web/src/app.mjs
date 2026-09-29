@@ -1,15 +1,15 @@
-import {UNKNOWN, bytes, capacity, decimal, percent, percentage, ratio, quality, loadText, onlineUptime, timeText, sessionLabels, freshnessLabels} from "./format.mjs";
+import {UNKNOWN, bytes, decimal, percent, percentage, ratio, onlineUptime, timeText, sessionLabels, freshnessLabels} from "./format.mjs";
 import {overview, groupOptions, resolveGroupSelection, ALL_GROUPS, UNGROUPED} from "./store.mjs";
 import {homeSortOptions, normalizeHomeFilters, expiresSoon, filterHomeNodes, sortHomeNodes} from "./home-data.mjs";
 import {connect} from "./transport.mjs";
 import {createConnectionStatus} from "./connection-status.mjs";
 import {planText, expiryText, dateTime} from "./node-settings.mjs";
-import {nodeURL, hardwareText, cardHardwareText, cpuCores, groupText} from "./node-data.mjs";
+import {nodeURL, cardHardwareText, cpuCores, groupText} from "./node-data.mjs";
 
 const byID = id => document.getElementById(id);
 const write = (element, text) => { const next = String(text ?? UNKNOWN); if (element.textContent !== next) element.textContent = next; };
 const put = (id, text) => write(byID(id), text);
-const list = byID("node-list"), table = byID("table-view"), rows = byID("node-table-body"), cards = new Map();
+const list = byID("node-list"), cards = new Map();
 const search = byID("node-search"), viewButtons = [...document.querySelectorAll("[data-fm-view]")];
 const quickSearch = byID("node-quick-search"), statusButtons = [...document.querySelectorAll("[data-status-filter]")];
 const expiryFilter = byID("expiry-filter"), filterStorageKey = "frp-monitor-public-filters";
@@ -62,8 +62,7 @@ function syncGroups(nodes) {
   });
 }
 function syncView() {
-  list.hidden = view !== "cards";
-  table.hidden = view !== "table" || !current?.nodes.length;
+  list.dataset.fmLayout = view;
   for (const button of viewButtons) {
     const selected = button.dataset.fmView === view;
     button.setAttribute("aria-pressed", String(selected)); button.classList.toggle("wsk-is-active", selected);
@@ -101,61 +100,54 @@ function openSearch() {
 }
 function createCard(node) {
   const element = byID("node-template").content.firstElementChild.cloneNode(true);
-  const row = byID("row-template").content.firstElementChild.cloneNode(true);
   const labels = new Map(), meters = new Map();
-  for (const root of [element, row]) {
-    for (const el of root.querySelectorAll("[data-value]")) labels.set(el.dataset.value, [...(labels.get(el.dataset.value) ?? []), el]);
-    for (const el of root.querySelectorAll("[data-meter]")) meters.set(el.dataset.meter, [...(meters.get(el.dataset.meter) ?? []), el]);
-    for (const link of root.querySelectorAll("a")) { const url = nodeURL(node.id); if (url) link.href = url; }
-  }
-  return {element, row, labels, meters};
+  for (const el of element.querySelectorAll("[data-value]")) labels.set(el.dataset.value, [...(labels.get(el.dataset.value) ?? []), el]);
+  for (const el of element.querySelectorAll("[data-meter]")) meters.set(el.dataset.meter, [...(meters.get(el.dataset.meter) ?? []), el]);
+  const links = [...element.querySelectorAll("a")], url = nodeURL(node.id);
+  for (const link of links) if (url) link.href = url;
+  return {element, labels, meters, links};
 }
 function patchCard(card, node, now) {
-  const text = (key, next) => { for (const el of card.labels.get(key) ?? []) write(el, next); };
-  const state = (key, next) => { for (const el of card.labels.get(key) ?? []) el.dataset.state = next; };
+  const labels = key => card.labels.get(key) ?? [];
+  const text = (key, next) => { for (const el of labels(key)) write(el, next); };
+  const state = (key, next) => { for (const el of labels(key)) el.dataset.state = next; };
+  const title = (key, next) => { for (const el of labels(key)) el.title = next; };
   const metric = node.metrics ?? {};
   const meter = (key, n) => { for (const el of card.meters.get(key) ?? []) { el.hidden = n === null; if (n !== null && el.value !== n) el.value = n; } };
   text("name", node.name);
   const groups = groupText(node);
   text("groups", groups);
-  for (const label of card.labels.get("groups")) label.hidden = !groups;
-  for (const link of [card.element.querySelector(".fm-open-node"), card.row.lastElementChild.querySelector("a")]) link.setAttribute("aria-label", `${node.name} · 节点详情`);
-  for (const [key, value] of [["hardware", hardwareText(node.hardware)], ["hardware-short", cardHardwareText(node.hardware)]]) {
-    text(key, value);
-    for (const label of card.labels.get(key) ?? []) label.title = value;
-  }
+  for (const label of labels("groups")) label.hidden = !groups;
+  for (const link of card.links) link.setAttribute("aria-label", `${node.name} · 节点详情`);
+  const hardware = cardHardwareText(node.hardware);
+  text("hardware-short", hardware); title("hardware-short", hardware);
   const cores = cpuCores(node.hardware);
   text("cpu-capacity", cores === null ? UNKNOWN : `${cores} 核`);
   card.element.dataset.state = node.session;
   text("status", sessionLabels[node.session]); state("status", node.session);
-  text("session", sessionLabels[node.session]); state("session", node.session);
-  for (const label of card.labels.get("session")) label.title = sessionLabels[node.session];
+  title("status", sessionLabels[node.session]);
   text("freshness", freshnessLabels[node.freshness]); state("freshness", node.freshness);
   const cpu = percent(metric.cpu), mem = ratio(metric.mem_used, metric.mem_total), disk = ratio(metric.disk_used, metric.disk_total);
   text("cpu", percentage(cpu)); text("mem", percentage(mem)); text("disk", percentage(disk));
   meter("cpu", cpu); meter("mem", mem); meter("disk", disk);
   text("mem-capacity", bytes(decimal(metric.mem_total)));
   text("disk-capacity", bytes(decimal(metric.disk_total)));
-  text("cpu-note", cpu === null ? quality(metric.cpu) : "CPU 使用率");
-  text("mem-note", capacity(metric.mem_used, metric.mem_total));
-  text("disk-note", capacity(metric.disk_used, metric.disk_total));
   text("rx", bytes(decimal(metric.net_rx), true)); text("tx", bytes(decimal(metric.net_tx), true));
   const plan = planText(node.traffic_plan);
   text("traffic-capacity", plan.quota); text("traffic", plan.percent); meter("traffic", plan.meter);
-  card.element.querySelector('[data-value="traffic"]').title = node.traffic_plan ? `周期已用 ${plan.used} / ${plan.quota} · ${plan.note}` : "套餐未公开";
+  text("traffic-usage", node.traffic_plan ? `${plan.used} / ${plan.quota}` : UNKNOWN);
+  const planTitle = node.traffic_plan ? `周期已用 ${plan.used} / ${plan.quota} · ${plan.note}` : "套餐未公开";
+  for (const key of ["traffic", "traffic-capacity", "traffic-usage"]) title(key, planTitle);
   const expiry = expiryText(node.billing?.expires_at_ms, now);
   text("expiry", expiry);
-  for (const label of card.labels.get("expiry") ?? []) {
+  for (const label of labels("expiry")) {
     label.hidden = !expiry;
     label.title = expiry ? `到期时间：${dateTime(node.billing.expires_at_ms)}` : "";
     label.dataset.urgent = String(Boolean(expiry) && (node.billing.expires_at_ms <= now || expiresSoon(node, now)));
   }
-  text("load", loadText(metric.load)); text("uptime", onlineUptime(metric.uptime, node.session));
-  text("sample-time", node.metrics_at ? `采样于 ${timeText(node.metrics_at)}${node.freshness === "stale" ? " · 已过期" : ""}` : "尚未收到资源报告");
-  text("interval", Number.isFinite(node.interval_seconds) && node.interval_seconds > 0 ? `${node.interval_seconds} 秒 / 次` : UNKNOWN);
-  for (const el of card.labels.get("freshness")) el.title = node.metrics_at ? `资源采样于 ${timeText(node.metrics_at)}` : "尚未收到资源报告";
-  card.element.querySelector("[data-value=uptime]").dataset.state = node.session;
-  card.element.querySelector("[data-value=uptime]").title = "系统运行时间，不代表监控连续在线时长";
+  text("uptime", onlineUptime(metric.uptime, node.session)); state("uptime", node.session);
+  title("freshness", node.metrics_at ? `资源采样于 ${timeText(node.metrics_at)}` : "尚未收到资源报告");
+  title("uptime", "系统运行时间，不代表监控连续在线时长");
 }
 function render() {
   if (!current) return;
@@ -175,9 +167,10 @@ function render() {
   put("stat-rx-total", bytes(summary.rxTotal.value)); put("stat-tx-total", bytes(summary.txTotal.value));
   byID("fleet-network-totals").title = `系统累计流量（节点重启可能归零），含离线节点最后有效采样：上传 ${summary.txTotal.count} / 下载 ${summary.rxTotal.count} 个节点`;
 
+  const focused = list.contains(document.activeElement) ? document.activeElement : null;
   const existing = new Set(nodes.map(n => n.id));
   for (const [id, card] of cards) if (!existing.has(id)) {
-    card.element.remove(); card.row.remove(); cards.delete(id);
+    card.element.remove(); cards.delete(id);
   }
   for (const node of nodes) {
     if (!cards.has(node.id)) cards.set(node.id, createCard(node));
@@ -185,19 +178,14 @@ function render() {
   }
   const ordered = sortHomeNodes(nodes, sort.value), shown = filterHomeNodes(ordered, {query: search.value, group: selectedGroup, ...filters}, now), visible = new Set(shown.map(n => n.id));
   syncSearch(shown);
-  for (const [id, card] of cards) {
-    card.element.hidden = !visible.has(id); card.row.hidden = !visible.has(id);
-  }
-  // Stable card and row identities preserve keyboard focus across live snapshots.
+  for (const [id, card] of cards) card.element.hidden = !visible.has(id);
+  // Both layouts share stable elements; restore focus when sorting moves a card.
   ordered.forEach((node, index) => {
-    const card = cards.get(node.id);
-    for (const [parent, element] of [[list, card.element], [rows, card.row]]) {
-      const before = parent.children[index] ?? null;
-      if (before !== element) parent.insertBefore(element, before);
-    }
+    const element = cards.get(node.id).element, before = list.children[index] ?? null;
+    if (before !== element) list.insertBefore(element, before);
   });
+  if (focused?.isConnected && !focused.closest(".fm-node-card")?.hidden && document.activeElement !== focused) focused.focus({preventScroll: true});
   syncView();
-  table.hidden = view !== "table" || !shown.length;
   byID("empty-state").hidden = shown.length !== 0;
   if (!nodes.length) { put("empty-title", "还没有监控节点"); put("empty-copy", "节点接入后，资源和连接状态会自动出现在这里。"); }
   else { put("empty-title", "没有匹配的节点"); put("empty-copy", "请调整名称、分组、状态或到期筛选，也可以重置筛选查看全部节点。"); }
