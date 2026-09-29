@@ -188,3 +188,121 @@ main { max-width: 1500px; margin: 0 auto; padding: var(--space-24) var(--space-3
   .fm-resource progress { border: 1px solid CanvasText; }
   .wsk-view-switch .wsk-is-active { outline: 1px solid Highlight; }
 }
+
+/* Public overview. Shared node/admin component rules above stay independent. */
+.fm-home-page { --fm-home-canvas: light-dark(#f5f6f9,#0d1220); --fm-home-meter: light-dark(#798391,#a9b4c7); background: var(--fm-home-canvas); }
+.fm-home-page::before { display: none; }
+.fm-home-page .fm-topbar { background: var(--surface); }
+.fm-home-page .fm-topbar-inner, .fm-home-page .fm-footer-inner, .fm-home-page main { max-width: 1344px; }
+.fm-home-page .fm-brand { font-weight: 500; }
+.fm-home-page .fm-brand-mark { width: 28px; height: 28px; border-radius: 8px; background: var(--text); color: var(--surface); box-shadow: none; }
+.fm-home-page .fm-home-title { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 22px; }
+.fm-home-page .fm-eyebrow { margin-bottom: 5px; color: var(--muted-soft); font-size: 10px; letter-spacing: .1em; }
+.fm-home-page .fm-home-title h1 { margin: 0; font-size: 24px; line-height: 1.4; font-weight: 500; letter-spacing: -.02em; }
+.fm-home-page .fm-home-description { margin-top: 6px; color: var(--muted); font-size: 12px; }
+.fm-home-page .fm-refresh-cadence { flex-shrink: 0; color: var(--muted-soft); font-size: 11px; }
+.fm-home-page .fm-home-summary { display: grid; grid-template-columns: 1.04fr 1fr; gap: 14px; margin-bottom: 20px; }
+.fm-home-page .fm-overview-panel, .fm-home-page .fm-node-card { border: 1px solid var(--border); border-radius: 12px; background: var(--surface); box-shadow: 0 2px 6px light-dark(#1c294005,#00000012); }
+.fm-home-page .fm-overview-panel { min-width: 0; padding: 16px 18px; }
+.fm-home-page .fm-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 28px; }
+.fm-home-page .fm-section-heading h2 { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 500; }
+.fm-home-page .fm-section-heading h2 svg { width: 16px; height: 16px; color: var(--muted-soft); }
+.fm-home-page .fm-section-heading small { color: var(--muted-soft); font-size: 11px; white-space: nowrap; }
+.fm-home-page .fm-expiry-filter { min-height: 28px; gap: 6px; padding: 3px 8px; border: 1px solid transparent; border-radius: 6px; color: var(--muted); background: var(--surface-soft); font-size: 11px; white-space: nowrap; }
+.fm-home-page .fm-expiry-filter b { font-weight: 500; }
+.fm-home-page .fm-expiry-filter[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+.fm-home-page .fm-status-counts { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 8px; margin-top: 12px; }
+.fm-home-page .fm-status-filter { display: flex; flex-direction: column; align-items: start; gap: 5px; min-width: 0; padding: 5px 8px; border: 1px solid transparent; border-radius: 6px; background: transparent; text-align: left; }
+.fm-home-page .fm-status-filter:hover { background: var(--surface-soft); }
+.fm-home-page .fm-status-filter[aria-pressed="true"] { background: var(--surface-soft); border-color: var(--border); }
+.fm-home-page .fm-status-filter strong { font-size: 27px; font-weight: 400; line-height: 1.2; letter-spacing: -.04em; font-variant-numeric: tabular-nums; }
+.fm-home-page .fm-status-filter > span { display: flex; align-items: center; gap: 5px; color: var(--muted); font-size: 11px; white-space: nowrap; }
+.fm-home-page .fm-state-dot, .fm-home-page .fm-card-status::before { width: 6px; height: 6px; flex-shrink: 0; border-radius: 50%; background: var(--muted-soft); }
+.fm-home-page .fm-state-dot[data-state="online"], .fm-home-page .fm-card-status[data-state="online"]::before { background: var(--success); }
+.fm-home-page .fm-state-dot[data-state="offline"], .fm-home-page .fm-card-status[data-state="offline"]::before { background: var(--danger); }
+.fm-home-page .fm-state-dot[data-state="waiting"], .fm-home-page .fm-card-status[data-state="waiting"]::before { background: var(--warning); }
+.fm-home-page .fm-network-overview, .fm-home-page .fm-network-cumulative { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 16px; }
+.fm-home-page .fm-network-overview { margin-top: 14px; }
+.fm-home-page .fm-network-overview > div { display: flex; flex-direction: column; min-width: 0; gap: 5px; }
+.fm-home-page .fm-network-overview span { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 11px; }
+.fm-home-page .fm-network-overview svg { width: 12px; height: 12px; }
+.fm-home-page .fm-network-overview strong { font-size: 23px; line-height: 1.25; font-weight: 400; letter-spacing: -.03em; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.fm-home-page .fm-network-cumulative { margin-top: 4px; color: var(--muted-soft); font-size: 11px; }
+.fm-home-page .fm-network-cumulative b { font-weight: 400; font-variant-numeric: tabular-nums; }
+.fm-home-page .fm-toolbar { gap: 10px 12px; margin-bottom: 10px; }
+.fm-home-page .fm-group-filter { border: 1px solid var(--border); border-radius: 8px; padding: 3px; background: var(--surface); }
+.fm-home-page .fm-group-button { min-height: 30px; padding: 5px 11px; border-radius: 5px; font-size: 12px; }
+.fm-home-page .fm-group-button[aria-pressed="true"] { color: var(--surface); background: var(--text); box-shadow: none; }
+.fm-home-page .fm-list-controls { flex-wrap: nowrap; }
+.fm-home-page .fm-quick-search { width: 180px; }
+.fm-home-page .fm-quick-search input { min-height: 36px; padding-block: 6px; border-radius: 7px; font-size: 12px; background: var(--surface); }
+.fm-home-page .fm-sort { min-height: 36px; border-radius: 7px; box-shadow: none; }
+.fm-home-page .fm-sort > span { padding-right: 8px; margin-left: 10px; font-size: 11px; }
+.fm-home-page .fm-sort .wsk-select { min-height: 34px; width: 7.2rem; border-radius: 7px; font-size: 12px; padding: 6px 10px; }
+.fm-home-page .fm-refresh { min-height: 36px; width: 36px; }
+.fm-home-page .fm-list-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 28px; margin-bottom: 8px; color: var(--muted-soft); font-size: 11px; }
+.fm-home-page .fm-clear-filters { padding: 2px 0; min-height: 24px; color: var(--accent); font-size: 11px; }
+.fm-home-page .fm-node-grid { grid-template-columns: repeat(3,minmax(0,1fr)); gap: 14px; }
+.fm-home-page .fm-node-card { padding: 15px 16px 11px; }
+.fm-home-page .fm-card-header { padding: 0; border: 0; }
+.fm-home-page .fm-card-heading { gap: 8px; }
+.fm-home-page .fm-card-heading h2 { font-size: 14px; font-weight: 500; }
+.fm-home-page .fm-card-status { display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0; color: var(--muted); font-size: 11px; white-space: nowrap; }
+.fm-home-page .fm-card-status::before { content: ""; }
+.fm-home-page .fm-card-summary { align-items: center; gap: 8px; min-height: 20px; margin-top: 5px; }
+.fm-home-page .fm-card-summary > p { margin: 0; font-size: 11px; }
+.fm-home-page .fm-card-group { max-width: 45%; padding: 1px 5px; border: 1px solid var(--border); border-radius: 4px; color: var(--muted-soft); font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }
+.fm-home-page .fm-resource-grid { padding: 14px 0 0; gap: 13px 16px; }
+.fm-home-page .fm-resource { gap: 4px; color: var(--text); }
+.fm-home-page .fm-resource-label { color: var(--muted); font-size: 11px; }
+.fm-home-page .fm-resource > .fm-resource-usage { grid-template-columns: minmax(0,1fr) auto; row-gap: 6px; column-gap: 4px; }
+.fm-home-page .fm-resource-usage strong { text-align: left; font-size: 12px; font-weight: 400; }
+.fm-home-page .fm-resource-usage small { color: var(--muted-soft); font-size: 11px; font-variant-numeric: tabular-nums; text-align: right; }
+.fm-home-page .fm-resource progress { height: 3px; color: var(--fm-home-meter); border-radius: 3px; background: var(--surface-soft); }
+.fm-home-page .fm-resource progress::-webkit-progress-value { background: var(--fm-home-meter); }
+.fm-home-page .fm-resource progress::-moz-progress-bar { background: var(--fm-home-meter); }
+.fm-home-page .fm-network { margin: 14px 0 0; padding-top: 10px; border: 0; border-top: 1px solid var(--border); border-radius: 0; background: transparent; gap: 16px; }
+.fm-home-page .fm-network > div { display: flex; gap: 6px; padding: 0; border: 0; }
+.fm-home-page .fm-network span { font-size: 10px; }
+.fm-home-page .fm-network svg { color: var(--muted-soft); }
+.fm-home-page .fm-network strong { font-size: 12px; font-weight: 400; }
+.fm-home-page .fm-card-footer { gap: 8px; padding: 11px 0 0; border: 0; font-size: 10px; }
+.fm-home-page .fm-card-footnote { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.fm-home-page .fm-card-footnote small { font-size: inherit; }
+.fm-home-page [data-value="expiry"][data-urgent="true"] { color: var(--warning); }
+.fm-home-page .fm-card-footnote .fm-data-state { color: var(--muted-soft); }
+.fm-home-page .fm-card-footnote .fm-data-state[data-state="stale"] { color: var(--warning); }
+.fm-home-page .fm-open-node { color: var(--muted); font-size: 10px; }
+.fm-home-page .fm-open-node:hover { color: var(--accent); }
+.fm-home-page .fm-table-wrap { border-radius: 12px; }
+.fm-home-page .fm-table th, .fm-home-page .fm-table td { padding-block: 13px; }
+.fm-home-page .fm-table-row .fm-resource strong { font-weight: 400; }
+.fm-home-page .fm-list-footer { margin-top: 18px; font-size: 11px; }
+@media (max-width: 1000px) {
+  .fm-home-page .fm-node-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .fm-home-page .fm-overview-panel { padding: 14px; }
+  .fm-home-page .fm-status-counts { gap: 3px; }
+  .fm-home-page .fm-status-filter { padding-inline: 5px; }
+  .fm-home-page .fm-network-overview strong { font-size: 20px; }
+}
+@media (max-width: 680px) {
+  .fm-home-page .fm-home-title { align-items: start; margin-bottom: 16px; }
+  .fm-home-page .fm-home-title h1 { font-size: 22px; }
+  .fm-home-page .fm-home-description { font-size: 11px; }
+  .fm-home-page .fm-refresh-cadence { margin-top: 4px; font-size: 10px; }
+  .fm-home-page .fm-home-summary { grid-template-columns: minmax(0,1fr); gap: 12px; margin-bottom: 16px; }
+  .fm-home-page .fm-list-controls { width: 100%; margin-left: 0; gap: 6px; }
+  .fm-home-page .fm-quick-search { flex: 1; width: auto; }
+  .fm-home-page .fm-sort > span { display: none; }
+  .fm-home-page .fm-sort .wsk-select { width: 6.5rem; }
+  .fm-home-page .fm-node-grid { grid-template-columns: minmax(0,1fr); gap: 12px; }
+  .fm-home-page .fm-card-heading h2 { font-size: 14px; }
+}
+@media (pointer: coarse) {
+  .fm-home-page .fm-status-filter, .fm-home-page .fm-group-button, .fm-home-page .fm-expiry-filter { min-height: 42px; }
+  .fm-home-page .fm-quick-search input { font-size: 16px; }
+}
+@media (forced-colors: active) {
+  .fm-home-page .fm-status-filter[aria-pressed="true"], .fm-home-page .fm-expiry-filter[aria-pressed="true"] { outline: 2px solid Highlight; }
+  .fm-home-page .fm-state-dot, .fm-home-page .fm-card-status::before { border: 1px solid CanvasText; }
+}

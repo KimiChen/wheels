@@ -1,5 +1,5 @@
-import {UNKNOWN, bytes, decimal, percent, percentage, loadText, uptime, timeText, sessionLabels} from "./format.mjs";
-import {nodeID, hardwareValue, cpuModel, nodeBadgeText} from "./node-data.mjs";
+import {UNKNOWN, bytes, decimal, percent, percentage, ratio, capacity, loadText, uptime, timeText, sessionLabels, freshnessLabels} from "./format.mjs";
+import {nodeID, hardwareValue, cpuModel, cpuCores, cardHardwareText, groupText} from "./node-data.mjs";
 import {billingText, todayText, planText, trafficModes, dateOnly} from "./node-settings.mjs";
 import {connect, SNAPSHOT_REFRESH_SECONDS} from "./transport.mjs";
 import {createConnectionStatus} from "./connection-status.mjs";
@@ -8,6 +8,7 @@ import {createHistoryPanel} from "./history-view.mjs";
 const byID = id => document.getElementById(id);
 const write = (element, value) => { const next = String(value ?? UNKNOWN); if (element.textContent !== next) element.textContent = next; };
 const labels = new Map([...document.querySelectorAll("[data-value]")].map(element => [element.dataset.value, element]));
+const meters = new Map([...document.querySelectorAll("[data-meter]")].map(element => [element.dataset.meter, element]));
 const put = (key, value) => write(labels.get(key), value);
 const id = nodeID(window.location.pathname), detail = byID("node-detail"), empty = byID("node-empty"), historyHost = byID("node-history");
 const connectionStatus = createConnectionStatus({status: byID("stream-status"), label: byID("stream-label"), notice: byID("connection-notice")});
@@ -21,6 +22,7 @@ function showEmpty(title, copy) {
 function clearNode() {
   panel?.stop(); panel = null; historyHost.replaceChildren();
   for (const element of labels.values()) { write(element, UNKNOWN); element.removeAttribute("data-state"); element.removeAttribute("title"); }
+  for (const element of meters.values()) { element.hidden = true; element.removeAttribute("value"); }
   byID("node-public-note").hidden = true; write(byID("node-public-note"), "");
   write(byID("footer-sample"), "无可显示的节点数据");
   document.title = "FRP Plus · 节点详情";
@@ -29,8 +31,23 @@ function patchNode(node) {
   detail.hidden = false; empty.hidden = true;
   const metrics = node.metrics ?? {}, hardware = node.hardware;
   document.title = `${node.name} · FRP Plus`;
-  put("name", node.name); put("session", nodeBadgeText(node));
+  put("name", node.name); put("session", sessionLabels[node.session] ?? UNKNOWN);
   labels.get("session").dataset.state = node.session; labels.get("session").title = sessionLabels[node.session];
+  put("hardware-summary", cardHardwareText(hardware));
+  const groups = groupText(node);
+  put("groups", groups); labels.get("groups").hidden = !groups;
+  put("freshness", freshnessLabels[node.freshness] ?? UNKNOWN); labels.get("freshness").dataset.state = node.freshness;
+  labels.get("freshness").title = node.metrics_at ? `资源采样于 ${timeText(node.metrics_at)}` : "尚未收到资源报告";
+  const usage = {cpu: percent(metrics.cpu), memory: ratio(metrics.mem_used, metrics.mem_total), disk: ratio(metrics.disk_used, metrics.disk_total)};
+  for (const [key, value] of Object.entries(usage)) {
+    put(`${key}-current`, percentage(value));
+    const meter = meters.get(key); meter.hidden = value === null;
+    if (value === null) meter.removeAttribute("value"); else meter.value = value;
+  }
+  const cores = cpuCores(hardware);
+  put("cpu-capacity", cores === null ? "逻辑核心数未知" : `${cores} 个逻辑核心`);
+  put("memory-capacity", capacity(metrics.mem_used, metrics.mem_total)); put("disk-capacity", capacity(metrics.disk_used, metrics.disk_total));
+  put("network-rx", bytes(decimal(metrics.net_rx), true)); put("network-tx", bytes(decimal(metrics.net_tx), true));
   put("uptime", uptime(metrics.uptime));
   const system = ["os", "arch", "virt"].map(key => hardwareValue(hardware?.[key])).filter(value => value !== UNKNOWN);
   put("os", system.length ? system.join(" · ") : UNKNOWN);

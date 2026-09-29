@@ -1,6 +1,7 @@
 import {adminClient, adminSnapshot, groupDocument, groupDraft, groupDraftState, groupRequest, probeDocument, nextProbeDocument, errorText, fieldText, byteText, reconciliationLabels, proxyLabels, clientProxyLabels} from "./admin-data.mjs";
 import {settingsRequest, priceInput, gibInput, localDateInput, todayText, planText, dateTime} from "./node-settings.mjs";
 import {sessionLabels, freshnessLabels, frpLabel, bytes, decimal, percent, percentage, capacity, timeText} from "./format.mjs";
+import {overview, filterAdminNodes, expiryCalendar, localDayKey} from "./admin-overview.mjs";
 
 const $ = id => document.getElementById(id);
 const client = adminClient({onExpired: () => locked("管理会话已失效，请重新登录。")});
@@ -8,6 +9,7 @@ let loggedIn = false, busy = false, snapshot = null, selectedID = null, poll = n
 const cards = new Map();
 let groups = [], groupsReady = false, groupsEpoch = 0, draft = groupDraft(), groupDirty = false, groupMessage = "", pendingGroupDelete = null;
 const groupRows = new Map(), groupMembers = new Map();
+let calendarMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1), calendarDay = null;
 const el = (tag, text, className) => { const node = document.createElement(tag); if (text !== undefined) node.textContent = text; if (className) node.className = className; return node; };
 const safe = raw => typeof raw === "string" || (typeof raw === "number" && Number.isFinite(raw)) ? String(raw) : "—";
 function notice(text, state = "ready") {
@@ -34,6 +36,11 @@ function locked(message = "请使用 GitHub 登录。", disabled = false) {
   for (const id of ["group-count", "group-member-count", "group-status", "group-confirm-copy"]) $(id).textContent = "";
   clearSecret(); cards.clear(); $("node-list").replaceChildren(); $("node-details").replaceChildren(); $("server-registry").replaceChildren(); $("probe-rows").replaceChildren();
   $("binding-form").reset(); $("settings-form").reset(); settingsRevision = null; settingsDirty = false; $("create-form").reset(); $("node-search").value = "";
+  $("node-filter").value = "all"; $("node-group").replaceChildren(new Option("全部分组", "all"), new Option("未分组", "ungrouped"));
+  for (const id of ["attention-list", "calendar-days", "calendar-events"]) $(id).replaceChildren();
+  for (const count of document.querySelectorAll("[data-overview-count]")) count.textContent = "—";
+  for (const id of ["nav-node-count", "node-filter-count", "overview-updated", "attention-count", "expiry-task-copy", "review-task-copy", "calendar-caption", "calendar-month"]) $(id).textContent = "";
+  calendarDay = null;
   $("node-title").textContent = ""; $("node-id").textContent = ""; $("node-session").textContent = "";
   for (const id of ["settings-current", "settings-status", "snapshot-at", "node-count", "confirm-copy"]) $(id).textContent = "";
   $("node-panel").hidden = true; $("confirm-action").hidden = true; $("workspace").hidden = true; $("logout").hidden = true; $("login-panel").hidden = false; $("github-login").hidden = disabled;
@@ -90,6 +97,7 @@ function renderNodes() {
     const put = (key, value) => { row.querySelector(`[data-cell="${key}"]`).textContent = value; };
     const settings = node.settings ?? {}, plan = planText(node.traffic_plan), price = priceInput(settings.price_minor, settings.currency);
     put("name", node.name); put("id", `#${node.id}`);
+    put("groups", snapshot.groups.filter(group => group.node_ids.includes(node.id)).map(group => group.name).join(" · ") || "未分组");
     for (const family of ["ipv4", "ipv6"]) {
       const value = node.facts?.[family]; put(family, value?.quality === "ok" && typeof value.value === "string" ? value.value : "—");
     }
@@ -104,15 +112,89 @@ function renderNodes() {
     }
   }
   $("node-count").textContent = nodes.length;
+  $("nav-node-count").textContent = nodes.length;
   $("snapshot-at").textContent = `更新于 ${timeText(snapshot.generated_at)} · 每 10 秒同步`;
   if (selectedID && !known.has(selectedID)) selectNode(null); else renderDetail();
-  filterNodes();
+  renderNodeFilters(); filterNodes(); renderOverview();
+}
+function renderNodeFilters() {
+  const select = $("node-group"), selected = select.value;
+  const options = [["all", "全部分组"], ["ungrouped", "未分组"], ...snapshot.groups.map(group => [group.id, group.name])];
+  if (JSON.stringify([...select.options].map(option => [option.value, option.text])) !== JSON.stringify(options)) {
+    select.replaceChildren(...options.map(([value, text]) => new Option(text, value)));
+    select.value = options.some(([value]) => value === selected) ? selected : "all";
+  }
 }
 function filterNodes() {
-  const query = $("node-search").value.trim().toLocaleLowerCase(); let count = 0;
-  for (const node of snapshot?.nodes ?? []) { const card = cards.get(node.id); card.hidden = !`${node.name} ${node.id}`.toLocaleLowerCase().includes(query); if (!card.hidden) count++; }
+  const visible = new Set(filterAdminNodes(snapshot, {query: $("node-search").value, state: $("node-filter").value, group: $("node-group").value}).map(node => node.id)), count = visible.size;
+  for (const [id, row] of cards) row.hidden = !visible.has(id);
+  $("node-filter-count").textContent = `显示 ${count} / ${snapshot?.nodes.length ?? 0} 个节点`;
   $("nodes-empty").hidden = count > 0;
-  $("nodes-empty").textContent = snapshot?.nodes.length ? "没有匹配的节点。" : "尚无节点，创建凭据后即可接入。";
+  $("nodes-empty").textContent = $("node-filter").value === "review" && snapshot?.frp?.state !== "ready" ? "服务端快照暂不可用，请前往 FRP 对账页查看状态。" : snapshot?.nodes.length ? "没有匹配的节点，请调整状态、分组或搜索条件。" : "尚无节点，创建凭据后即可接入。";
+}
+function openNodeFilter(state) {
+  $("node-filter").value = state; $("node-group").value = "all"; $("node-search").value = "";
+  filterNodes(); location.hash = "nodes"; showView();
+}
+function replaceList(box, children) {
+  const focusKey = box.contains(document.activeElement) ? document.activeElement.dataset.focusKey : null;
+  const scrollTop = box.scrollTop;
+  box.replaceChildren(...children); box.scrollTop = scrollTop;
+  if (focusKey) [...box.querySelectorAll("[data-focus-key]")].find(button => button.dataset.focusKey === focusKey)?.focus({preventScroll: true});
+}
+function nodeButton(node, pane = "settings", text = node.name, className = "fa-name") {
+  const button = el("button", text, className); button.type = "button"; button.disabled = busy;
+  button.dataset.focusKey = `${node.id}-${pane}`;
+  button.addEventListener("click", () => selectNode(node.id, pane)); return button;
+}
+function renderOverview() {
+  if (!snapshot) return;
+  const summary = overview(snapshot), {counts} = summary;
+  for (const count of document.querySelectorAll("[data-overview-count]")) count.textContent = counts[count.dataset.overviewCount] ?? "—";
+  $("overview-updated").textContent = `更新于 ${timeText(snapshot.generated_at)} · 每 10 秒同步`;
+  $("expiry-task-copy").textContent = counts.expired ? `另有 ${counts.expired} 个已到期，见下方需关注列表` : "检查续费时间";
+  $("review-task-copy").textContent = summary.reviewAvailable ? "检查绑定与服务端登记" : "服务端快照暂不可用，查看对账页";
+  $("attention-count").textContent = `${summary.attention.length} 个节点`;
+  const labels = {expired: "已到期", due: "7 天内到期", offline: "监控离线", review: "FRP 需核对"};
+  replaceList($("attention-list"), summary.attention.map(({node, reasons, record}) => {
+    const row = el("div", undefined, "fa-attention-row"), content = el("div", undefined, "fa-attention-summary");
+    content.append(nodeButton(node, "resources"));
+    const details = [];
+    if (reasons.includes("expired") || reasons.includes("due")) details.push(`${dateTime(node.settings.expires_at_ms)} 到期`);
+    if (reasons.includes("review")) details.push(record?.state === "matched" ? "检查 FRP 连接与隧道" : reconciliationLabels[record?.state] ?? "等待核对");
+    if (!details.length) details.push(`最近活动 ${node.last_seen ? new Date(node.last_seen).toLocaleString("zh-CN", {hour12: false}) : "尚无报告"}`);
+    content.append(el("small", details.join(" · ")));
+    const badges = el("div", undefined, "fa-attention-reasons");
+    for (const reason of reasons) { const badge = el("span", labels[reason], "wsk-badge"); badge.dataset.reason = reason; badges.append(badge); }
+    content.append(badges); row.append(content, nodeButton(node, reasons.length === 1 && reasons[0] === "review" ? "binding" : "settings", "查看", "wsk-button wsk-secondary fa-small-button"));
+    return row;
+  }));
+  $("attention-empty").hidden = summary.attention.length > 0;
+  $("attention-empty").textContent = counts.total === 0 ? "添加首个节点，开始查看运行状态与续费时间。" : summary.reviewAvailable ? "当前没有离线、临近到期或需要核对的节点。" : "暂无离线或临近到期节点；FRP 状态仍待确认。";
+  renderCalendar();
+}
+function renderCalendar() {
+  if (!snapshot) return;
+  const year = calendarMonth.getFullYear(), month = calendarMonth.getMonth(), calendar = expiryCalendar(snapshot.nodes, year, month);
+  const today = localDayKey(Date.now()), cells = [];
+  $("calendar-month").textContent = `${year} 年 ${month + 1} 月`;
+  for (let index = 0; index < calendar.offset; index++) cells.push(el("span"));
+  for (const day of calendar.days) {
+    const button = el("button", day.day, "fa-calendar-day"); button.type = "button"; button.disabled = busy;
+    button.dataset.events = String(day.nodes.length > 0); button.dataset.focusKey = day.key;
+    button.setAttribute("aria-label", `${year} 年 ${month + 1} 月 ${day.day} 日，${day.nodes.length} 个节点到期`);
+    button.setAttribute("aria-pressed", String(calendarDay === day.key));
+    if (day.key === today) button.setAttribute("aria-current", "date");
+    button.addEventListener("click", () => { calendarDay = calendarDay === day.key ? null : day.key; renderCalendar(); }); cells.push(button);
+  }
+  replaceList($("calendar-days"), cells);
+  const days = calendarDay ? calendar.days.filter(day => day.key === calendarDay) : calendar.days;
+  const nodes = days.flatMap(day => day.nodes);
+  $("calendar-caption").textContent = `${calendarDay ? `${Number(calendarDay.slice(-2))} 日` : "本月"} ${nodes.length} 个节点到期 · 浏览器时区`;
+  replaceList($("calendar-events"), nodes.length ? nodes.map(node => {
+    const row = el("div", undefined, "fa-calendar-event");
+    row.append(nodeButton(node), el("small", new Date(node.settings.expires_at_ms).toLocaleString("zh-CN", {month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false}))); return row;
+  }) : [el("p", calendarDay ? "这一天没有已设置的到期时间。" : "本月没有已设置的到期时间。", "fa-muted")]);
 }
 function selectNode(id, pane = "settings") {
   const changed = selectedID !== id;
@@ -135,7 +217,7 @@ function showEditorPane(pane) {
   }
 }
 function showView() {
-  const key = ["nodes", "groups", "probes", "frp"].includes(location.hash.slice(1)) ? location.hash.slice(1) : "nodes";
+  const key = ["dashboard", "nodes", "groups", "probes", "frp", "access"].includes(location.hash.slice(1)) ? location.hash.slice(1) : "dashboard";
   for (const panel of document.querySelectorAll("[data-admin-panel]")) panel.hidden = panel.dataset.adminPanel !== key;
   for (const link of document.querySelectorAll("[data-admin-view]")) {
     const selected = link.dataset.adminView === key;
@@ -405,13 +487,22 @@ $("secret-copy").addEventListener("click", async () => {
   catch { $("secret-token").focus(); $("secret-token").select(); notice("浏览器不允许自动复制，请复制已选中的令牌。", "error"); }
 });
 $("refresh").addEventListener("click", () => refreshNodes());
-$("add-node").addEventListener("click", () => { openDialog("create-dialog"); $("node-name").focus(); });
+for (const button of document.querySelectorAll("[data-refresh]")) button.addEventListener("click", () => refreshNodes());
+for (const button of document.querySelectorAll("#add-node, [data-add-node]")) button.addEventListener("click", () => { openDialog("create-dialog"); $("node-name").focus(); });
+for (const button of document.querySelectorAll("[data-node-filter]")) button.addEventListener("click", () => openNodeFilter(button.dataset.nodeFilter));
+$("review-shortcut").addEventListener("click", () => { if (snapshot?.frp?.state === "ready") openNodeFilter("review"); else { location.hash = "frp"; showView(); } });
+for (const [id, delta] of [["calendar-prev", -1], ["calendar-next", 1]]) $(id).addEventListener("click", () => {
+  calendarMonth = new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() + delta, 1); calendarDay = null; renderCalendar();
+});
+$("calendar-today").addEventListener("click", () => { const now = new Date(); calendarMonth = new Date(now.getFullYear(), now.getMonth(), 1); calendarDay = null; renderCalendar(); });
 for (const button of document.querySelectorAll("[data-close-dialog]")) button.addEventListener("click", () => { if (!busy) button.closest("dialog").close(); });
 for (const dialog of document.querySelectorAll("dialog")) dialog.addEventListener("cancel", event => { if (busy) event.preventDefault(); });
 $("credential-result").addEventListener("close", () => { $("secret-id").value = ""; $("secret-token").value = ""; });
 for (const button of document.querySelectorAll("[data-editor-pane]")) button.addEventListener("click", () => showEditorPane(button.dataset.editorPane));
 window.addEventListener("hashchange", showView); showView();
 $("node-search").addEventListener("input", filterNodes);
+$("node-filter").addEventListener("change", filterNodes);
+$("node-group").addEventListener("change", filterNodes);
 $("probes-reload").addEventListener("click", () => mutation(loadProbes));
 $("probe-add").addEventListener("click", () => { const row = addProbe(); row.querySelector("input").focus(); });
 $("probes-form").addEventListener("submit", event => {

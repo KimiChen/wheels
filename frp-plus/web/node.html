@@ -22,6 +22,10 @@
     <symbol id="settings" viewBox="0 0 24 24"><path d="m9 3-1 3-3 1 1 3-2 2 2 2-1 3 3 1 1 3h6l1-3 3-1-1-3 2-2-2-2 1-3-3-1-1-3Z"/><circle cx="12" cy="12" r="3"/></symbol>
     <symbol id="arrow-left" viewBox="0 0 24 24"><path d="M20 12H4m6-6-6 6 6 6"/></symbol>
     <symbol id="refresh" viewBox="0 0 24 24"><path d="M20 8a8 8 0 1 0 1 7M20 3v5h-5"/></symbol>
+    <symbol id="cpu" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2"/><rect x="9" y="9" width="6" height="6" rx="1"/><path d="M9 2v3m6-3v3M9 19v3m6-3v3M2 9h3m-3 6h3m14-6h3m-3 6h3"/></symbol>
+    <symbol id="memory" viewBox="0 0 24 24"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10v4m5-4v4m5-4v4M7 18v3m5-3v3m5-3v3"/></symbol>
+    <symbol id="disk" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 14h18m-5 3h2m-11 0h.01"/></symbol>
+    <symbol id="network" viewBox="0 0 24 24"><path d="M7 3v18m-4-4 4 4 4-4M17 21V3m-4 4 4-4 4 4"/></symbol>
   </defs></svg>
   <header class="wsk-topbar fm-topbar"><div class="fm-topbar-inner">
     <a class="wsk-brand fm-brand" href="/" aria-label="FRP Plus 首页"><span class="wsk-brand-mark fm-brand-mark"><svg class="wsk-icon" aria-hidden="true"><use href="#pulse"/></svg></span><span>FRP <b>Plus</b></span></a>
@@ -37,10 +41,18 @@
           <a class="wsk-icon-button fm-node-back" href="/" aria-label="返回节点列表"><svg class="wsk-icon" aria-hidden="true"><use href="#arrow-left"/></svg></a>
           <div class="fm-node-identity">
             <div class="fm-node-name"><h1 data-value="name">—</h1><span class="wsk-badge fm-badge" data-value="session"></span></div>
+            <div class="fm-node-subtitle"><span data-value="hardware-summary">—</span><span data-value="groups" hidden></span><span class="fm-node-sample" data-value="freshness">等待报告</span></div>
           </div>
         </div>
         <p class="fm-refresh-info" data-js-only><strong><span id="snapshot-refresh-seconds">—</span> 秒</strong>刷新</p>
       </header>
+      <section class="fm-node-metrics" aria-label="最新资源采样">
+        <section class="wsk-panel fm-node-metric" data-metric="cpu"><h2><svg class="wsk-icon" aria-hidden="true"><use href="#cpu"/></svg>CPU</h2><strong class="fm-metric-value" data-value="cpu-current">—</strong><p data-value="cpu-capacity">—</p><div class="wsk-progress-list fm-metric-meter"><progress max="100" data-meter="cpu" aria-label="当前 CPU 使用率" hidden></progress></div></section>
+        <section class="wsk-panel fm-node-metric" data-metric="memory"><h2><svg class="wsk-icon" aria-hidden="true"><use href="#memory"/></svg>内存</h2><strong class="fm-metric-value" data-value="memory-current">—</strong><p data-value="memory-capacity">—</p><div class="wsk-progress-list fm-metric-meter"><progress max="100" data-meter="memory" aria-label="当前内存使用率" hidden></progress></div></section>
+        <section class="wsk-panel fm-node-metric" data-metric="disk"><h2><svg class="wsk-icon" aria-hidden="true"><use href="#disk"/></svg>存储</h2><strong class="fm-metric-value" data-value="disk-current">—</strong><p data-value="disk-capacity">—</p><div class="wsk-progress-list fm-metric-meter"><progress max="100" data-meter="disk" aria-label="当前存储使用率" hidden></progress></div></section>
+        <section class="wsk-panel fm-node-metric" data-metric="network"><h2><svg class="wsk-icon" aria-hidden="true"><use href="#network"/></svg>网络速率</h2><div class="fm-metric-network"><span>↓ 接收</span><strong data-value="network-rx">—</strong><span>↑ 发送</span><strong data-value="network-tx">—</strong></div><p>双向实时速率</p></section>
+      </section>
+      <section class="fm-node-history" aria-label="节点资源与网络趋势"><div id="node-history"></div></section>
       <div class="wsk-panel fm-node-overview">
         <div class="fm-node-sections">
           <section class="fm-node-section fm-node-system" aria-labelledby="node-system-title">
@@ -80,7 +92,6 @@
         </dl>
         <p id="node-public-note" class="fm-node-public-note" aria-label="节点备注" hidden></p>
       </div>
-      <section class="fm-node-history" aria-label="节点资源与网络趋势"><div id="node-history"></div></section>
     </article>
   </main>
   <footer class="fm-footer"><div class="fm-footer-inner"><div class="fm-footer-live"><span class="fm-stream" data-state="pending" id="stream-status" role="status"><i></i><span id="stream-label"></span></span><span class="fm-snapshot">快照 <time id="snapshot-at">—</time></span><span class="fm-node-footer-sample" id="footer-sample">等待节点数据</span></div><span class="fm-footer-brand">FRP Plus <span class="fm-footer-separator">/</span> 公开 · 只读</span></div></footer>

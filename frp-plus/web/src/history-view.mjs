@@ -86,12 +86,13 @@ export function createHistoryPanel(body, nodeID) {
   refreshInfo.append(el("strong", "", `${HISTORY_REFRESH_SECONDS} 秒`), "刷新");
   refreshInfo.title = "页面可见期间自动刷新历史数据";
   const sections = el("div", "fm-history-sections"), sectionSwitch = el("div", "wsk-view-switch"), rangeSwitch = el("div", "wsk-view-switch fm-history-ranges");
+  sections.append(el("h2", "fm-history-title", "历史趋势"));
   sections.append(sectionSwitch);
   sectionSwitch.setAttribute("role", "group"); sectionSwitch.setAttribute("aria-label", "历史图表内容");
   rangeSwitch.setAttribute("role", "group"); rangeSwitch.setAttribute("aria-label", "历史时间范围");
   let section = "resources", selected = "1h", last = null, stopped = false;
   const sectionButtons = new Map(), rangeButtons = new Map();
-  for (const [key, name] of [["resources", "详情"], ["network", "网络"]]) {
+  for (const [key, name] of [["resources", "资源趋势"], ["network", "TCP 探测"]]) {
     const button = el("button", "fm-history-tab", name); button.type = "button";
     button.setAttribute("aria-pressed", String(section === key)); sectionSwitch.append(button); sectionButtons.set(key, button);
     button.addEventListener("click", () => { section = key; applySection(); });

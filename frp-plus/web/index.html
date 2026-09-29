@@ -12,7 +12,7 @@
   <script defer src="/assets/script.js"></script>
   <script type="module" src="/src/app.mjs"></script>
 </head>
-<body>
+<body class="fm-home-page">
   <a class="wsk-skip-link" href="#main">跳到主要内容</a>
   <svg class="wsk-icon-sprite fm-symbols" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><defs>
     <symbol id="pulse" viewBox="0 0 24 24"><path d="M2 13h5l3-9 4 16 3-7h5"/></symbol>
@@ -44,27 +44,37 @@
     <div id="connection-notice" class="wsk-alert wsk-warning fm-notice" role="status" hidden></div>
     <noscript><div class="wsk-alert wsk-warning fm-notice">此页面需要 JavaScript 获取监控数据。当前未显示实时状态。</div></noscript>
     <section id="nodes" class="fm-nodes" aria-labelledby="nodes-title">
-      <h1 id="nodes-title" class="wsk-sr-only">节点群</h1>
-      <div class="fm-fleet-stats" aria-label="全部公开节点统计">
-        <section class="wsk-panel fm-stat-card" data-stat="total"><h2>服务器总数</h2><div class="fm-stat-value"><i aria-hidden="true"></i><strong id="stat-total">—</strong><small id="stat-waiting-note" hidden><b id="stat-waiting">—</b> 等待接入</small></div></section>
-        <section class="wsk-panel fm-stat-card" data-stat="online"><h2>在线服务器</h2><div class="fm-stat-value"><i aria-hidden="true"></i><strong id="stat-online">—</strong></div></section>
-        <section class="wsk-panel fm-stat-card" data-stat="offline"><h2>离线服务器</h2><div class="fm-stat-value"><i aria-hidden="true"></i><strong id="stat-offline">—</strong></div></section>
-        <section class="wsk-panel fm-stat-card fm-stat-network"><h2>网络</h2><div class="fm-stat-totals" id="fleet-network-totals"><span class="fm-upload" aria-label="系统累计上传">↑ <b id="stat-tx-total">—</b></span><span class="fm-download" aria-label="系统累计下载">↓ <b id="stat-rx-total">—</b></span></div><div class="fm-stat-rates" id="fleet-network-rates"><span aria-label="当前上传速率"><svg class="wsk-icon" aria-hidden="true"><use href="#arrow-up"/></svg><b id="fleet-tx">—</b></span><span aria-label="当前下载速率"><svg class="wsk-icon" aria-hidden="true"><use href="#arrow-down"/></svg><b id="fleet-rx">—</b></span></div></section>
+      <div class="fm-home-title"><div><p class="fm-eyebrow">INFRASTRUCTURE / OVERVIEW</p><h1 id="nodes-title">节点总览</h1><p class="fm-home-description">查看主机资源、连接状态与流量使用情况。</p></div><span class="fm-refresh-cadence">每 2 秒刷新</span></div>
+      <div class="fm-home-summary" aria-label="全部公开节点统计">
+        <section class="wsk-panel fm-overview-panel"><div class="fm-section-heading"><h2><svg class="wsk-icon" aria-hidden="true"><use href="#server"/></svg>节点情况</h2><button id="expiry-filter" class="wsk-button wsk-quiet fm-expiry-filter" type="button" aria-pressed="false" title="只查看未来 7 天内到期且已公开到期时间的节点" data-js-only>7 天内到期 <b id="stat-expiring">—</b><span aria-hidden="true">›</span></button></div>
+          <div class="fm-status-counts" role="group" aria-label="按连接状态查看">
+            <button class="fm-status-filter" type="button" data-status-filter="all" aria-pressed="true"><strong id="stat-total">—</strong><span>全部节点</span></button>
+            <button class="fm-status-filter" type="button" data-status-filter="online" aria-pressed="false"><strong id="stat-online">—</strong><span><i class="fm-state-dot" data-state="online" aria-hidden="true"></i>在线</span></button>
+            <button class="fm-status-filter" type="button" data-status-filter="offline" aria-pressed="false"><strong id="stat-offline">—</strong><span><i class="fm-state-dot" data-state="offline" aria-hidden="true"></i>离线</span></button>
+            <button class="fm-status-filter" type="button" data-status-filter="waiting" aria-pressed="false"><strong id="stat-waiting">—</strong><span><i class="fm-state-dot" data-state="waiting" aria-hidden="true"></i>等待接入</span></button>
+          </div>
+        </section>
+        <section class="wsk-panel fm-overview-panel"><div class="fm-section-heading"><h2><svg class="wsk-icon" aria-hidden="true"><use href="#pulse"/></svg>网络情况</h2><small>全部公开节点</small></div>
+          <div class="fm-network-overview" id="fleet-network-rates"><div><span><svg class="wsk-icon" aria-hidden="true"><use href="#arrow-down"/></svg>当前接收</span><strong id="fleet-rx">—</strong></div><div><span><svg class="wsk-icon" aria-hidden="true"><use href="#arrow-up"/></svg>当前发送</span><strong id="fleet-tx">—</strong></div></div>
+          <div class="fm-network-cumulative" id="fleet-network-totals"><span>系统累计 <b id="stat-rx-total">—</b></span><span>系统累计 <b id="stat-tx-total">—</b></span></div>
+        </section>
       </div>
       <div class="fm-toolbar" data-js-only>
         <div id="node-group-filter" class="fm-group-filter" role="group" aria-label="按节点分组查看" data-js-only></div>
         <button id="clear-search" class="wsk-button wsk-secondary fm-search-filter" type="button" aria-label="清除名称搜索" hidden><span id="search-filter-label"></span><svg class="wsk-icon" aria-hidden="true"><use href="#close"/></svg></button>
         <div class="fm-list-controls">
-          <label class="fm-sort"><span aria-hidden="true"><svg class="wsk-icon" viewBox="0 0 24 24"><path d="M7 3v18m-4-4 4 4 4-4M17 21V3m-4 4 4-4 4 4"/></svg>Sort</span><select id="node-sort" class="wsk-select" aria-label="节点排序方式" title="名称和系统按升序，指标按降序；缺失指标排在最后"><option value="default">默认</option></select></label>
+          <label class="fm-search fm-quick-search"><svg class="wsk-icon" aria-hidden="true"><use href="#search"/></svg><input id="node-quick-search" class="wsk-control" type="search" placeholder="搜索节点" aria-label="按节点名称筛选" autocomplete="off"></label>
+          <label class="fm-sort"><span aria-hidden="true"><svg class="wsk-icon" viewBox="0 0 24 24"><path d="M7 3v18m-4-4 4 4 4-4M17 21V3m-4 4 4-4 4 4"/></svg>排序</span><select id="node-sort" class="wsk-select" aria-label="节点排序方式" title="名称、系统和到期按升序，指标按降序；缺失数据排在最后"><option value="default">默认</option></select></label>
           <button id="retry" class="wsk-icon-button fm-refresh" type="button" aria-label="刷新节点" title="刷新节点"><svg class="wsk-icon" aria-hidden="true"><use href="#refresh"/></svg></button>
         </div>
       </div>
+      <div class="fm-list-meta"><span id="list-summary" role="status">等待数据</span><button id="clear-filters" class="wsk-button wsk-quiet fm-clear-filters" type="button" hidden>重置筛选</button></div>
       <div id="node-list" class="fm-node-grid"></div>
       <div id="table-view" class="wsk-table-wrap fm-table-wrap" role="region" aria-label="节点资源表，可横向滚动" tabindex="0" hidden>
         <table class="wsk-table fm-table"><caption class="wsk-sr-only">节点实时资源与连接状态</caption><thead><tr><th scope="col">节点</th><th scope="col">状态</th><th scope="col">CPU</th><th scope="col">内存</th><th scope="col">存储</th><th scope="col">发送 / 接收</th><th scope="col">负载</th><th scope="col">运行时间</th><th scope="col">详情</th></tr></thead><tbody id="node-table-body"></tbody></table>
       </div>
       <div id="empty-state" class="wsk-empty-state fm-empty" hidden><span class="wsk-empty-icon fm-empty-icon"><svg class="wsk-icon" aria-hidden="true"><use href="#server"/></svg></span><h2 id="empty-title"></h2><p id="empty-copy"></p></div>
-      <div class="fm-list-footer"><span id="list-summary">等待数据</span><span>— 表示暂无有效采样</span></div>
+      <div class="fm-list-footer"><span>仅显示已公开的节点信息</span><span>— 表示暂无有效采样</span></div>
     </section>
   </main>
   <dialog id="node-search-dialog" class="wsk-dialog fm-search-dialog" aria-labelledby="search-title">
@@ -84,17 +94,17 @@
 
   <template id="node-template"><article class="wsk-panel fm-node-card">
     <header class="fm-card-header fm-node-identity">
-      <div class="fm-card-heading"><h2><a class="fm-node-link" data-value="name"></a></h2><span class="fm-uptime-badge" data-value="uptime">—</span></div>
-      <div class="fm-card-summary"><p data-value="hardware-short">系统信息待上报</p><small data-value="expiry" hidden></small></div>
+      <div class="fm-card-heading"><h2><a class="fm-node-link" data-value="name"></a></h2><span class="fm-card-status" data-value="status">—</span></div>
+      <div class="fm-card-summary"><p data-value="hardware-short">系统信息待上报</p><span class="fm-card-group" data-value="groups" hidden></span></div>
     </header>
     <div class="wsk-progress-list fm-resource-grid">
-      <div class="fm-resource"><div class="fm-resource-usage"><span class="fm-resource-label" data-value="cpu-label">CPU</span><strong data-value="cpu">—</strong><progress max="100" data-meter="cpu" aria-label="CPU 使用率" hidden></progress></div></div>
-      <div class="fm-resource"><div class="fm-resource-usage"><span class="fm-resource-label" data-value="mem-label">内存 —</span><strong data-value="mem">—</strong><progress max="100" data-meter="mem" aria-label="内存使用率" hidden></progress></div></div>
-      <div class="fm-resource"><div class="fm-resource-usage"><span class="fm-resource-label" data-value="disk-label">存储 —</span><strong data-value="disk">—</strong><progress max="100" data-meter="disk" aria-label="存储使用率" hidden></progress></div></div>
-      <div class="fm-resource"><div class="fm-resource-usage"><span class="fm-resource-label" data-value="traffic-label">流量 —</span><strong data-value="traffic">—</strong><progress max="100" data-meter="traffic" aria-label="周期流量使用率" hidden></progress></div></div>
+      <div class="fm-resource"><span class="fm-resource-label">CPU</span><div class="fm-resource-usage"><strong data-value="cpu">—</strong><small data-value="cpu-capacity">—</small><progress max="100" data-meter="cpu" aria-label="CPU 使用率" hidden></progress></div></div>
+      <div class="fm-resource"><span class="fm-resource-label">内存</span><div class="fm-resource-usage"><strong data-value="mem">—</strong><small data-value="mem-capacity">—</small><progress max="100" data-meter="mem" aria-label="内存使用率" hidden></progress></div></div>
+      <div class="fm-resource"><span class="fm-resource-label">存储</span><div class="fm-resource-usage"><strong data-value="disk">—</strong><small data-value="disk-capacity">—</small><progress max="100" data-meter="disk" aria-label="存储使用率" hidden></progress></div></div>
+      <div class="fm-resource"><span class="fm-resource-label">套餐流量</span><div class="fm-resource-usage"><strong data-value="traffic">—</strong><small data-value="traffic-capacity">—</small><progress max="100" data-meter="traffic" aria-label="周期流量使用率" hidden></progress></div></div>
     </div>
     <div class="fm-network"><div><span><svg class="wsk-icon" aria-hidden="true"><use href="#arrow-down"/></svg>接收</span><strong data-value="rx">—</strong></div><div><span><svg class="wsk-icon" aria-hidden="true"><use href="#arrow-up"/></svg>发送</span><strong data-value="tx">—</strong></div></div>
-    <footer class="fm-card-footer"><span class="fm-data-state" data-value="freshness"></span><a class="fm-node-link fm-open-node">详情 →</a></footer>
+    <footer class="fm-card-footer"><span class="fm-card-footnote"><small data-value="expiry" hidden></small><span class="fm-data-state" data-value="freshness"></span></span><a class="fm-node-link fm-open-node"><span data-value="uptime">—</span><span aria-hidden="true"> ›</span></a></footer>
   </article></template>
   <template id="row-template"><tr class="fm-table-row">
     <th scope="row"><a class="wsk-button wsk-quiet fm-detail-link" data-value="name"></a><small data-value="hardware"></small><small class="fm-node-groups" data-value="groups"></small></th>
