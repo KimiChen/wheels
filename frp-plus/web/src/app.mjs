@@ -1,6 +1,6 @@
 import {UNKNOWN, bytes, decimal, percent, percentage, ratio, onlineUptime, timeText, sessionLabels, freshnessLabels} from "./format.mjs";
 import {overview, groupOptions, resolveGroupSelection, ALL_GROUPS, UNGROUPED} from "./store.mjs";
-import {homeSortOptions, normalizeHomeFilters, expiresSoon, filterHomeNodes, sortHomeNodes} from "./home-data.mjs";
+import {homeSortOptions, normalizeHomeFilters, expiresSoon, filterHomeNodes, sortHomeNodes, homeRowDetails} from "./home-data.mjs";
 import {connect} from "./transport.mjs";
 import {createConnectionStatus} from "./connection-status.mjs";
 import {planText, expiryText, dateTime} from "./node-settings.mjs";
@@ -63,6 +63,9 @@ function syncGroups(nodes) {
 }
 function syncView() {
   list.dataset.fmLayout = view;
+  list.setAttribute("aria-label", view === "table" ? "节点横向列表，可横向滚动" : "节点卡片列表");
+  if (view === "table") list.tabIndex = 0;
+  else list.removeAttribute("tabindex");
   for (const button of viewButtons) {
     const selected = button.dataset.fmView === view;
     button.setAttribute("aria-pressed", String(selected)); button.classList.toggle("wsk-is-active", selected);
@@ -105,7 +108,7 @@ function createCard(node) {
   for (const el of element.querySelectorAll("[data-meter]")) meters.set(el.dataset.meter, [...(meters.get(el.dataset.meter) ?? []), el]);
   const links = [...element.querySelectorAll("a")], url = nodeURL(node.id);
   for (const link of links) if (url) link.href = url;
-  return {element, labels, meters, links};
+  return {element, labels, meters, links, planRows: [...element.querySelectorAll("[data-row-plan]")], unpublishedPlan: [...element.querySelectorAll("[data-row-plan-unpublished]")]};
 }
 function patchCard(card, node, now) {
   const labels = key => card.labels.get(key) ?? [];
@@ -113,7 +116,11 @@ function patchCard(card, node, now) {
   const state = (key, next) => { for (const el of labels(key)) el.dataset.state = next; };
   const title = (key, next) => { for (const el of labels(key)) el.title = next; };
   const metric = node.metrics ?? {};
-  const meter = (key, n) => { for (const el of card.meters.get(key) ?? []) { el.hidden = n === null; if (n !== null && el.value !== n) el.value = n; } };
+  const meter = (key, n) => { for (const el of card.meters.get(key) ?? []) {
+    el.hidden = n === null;
+    if (n === null) el.removeAttribute("value");
+    else if (!el.hasAttribute("value") || el.value !== n) el.value = n;
+  } };
   text("name", node.name);
   const groups = groupText(node);
   text("groups", groups);
@@ -135,9 +142,8 @@ function patchCard(card, node, now) {
   text("rx", bytes(decimal(metric.net_rx), true)); text("tx", bytes(decimal(metric.net_tx), true));
   const plan = planText(node.traffic_plan);
   text("traffic-capacity", plan.quota); text("traffic", plan.percent); meter("traffic", plan.meter);
-  text("traffic-usage", node.traffic_plan ? `${plan.used} / ${plan.quota}` : UNKNOWN);
-  const planTitle = node.traffic_plan ? `周期已用 ${plan.used} / ${plan.quota} · ${plan.note}` : "套餐未公开";
-  for (const key of ["traffic", "traffic-capacity", "traffic-usage"]) title(key, planTitle);
+  const planTitle = node.traffic_plan ? `周期已用 ${plan.used} / ${plan.quota}` : "套餐未公开";
+  for (const key of ["traffic", "traffic-capacity"]) title(key, planTitle);
   const expiry = expiryText(node.billing?.expires_at_ms, now);
   text("expiry", expiry);
   for (const label of labels("expiry")) {
@@ -148,6 +154,11 @@ function patchCard(card, node, now) {
   text("uptime", onlineUptime(metric.uptime, node.session)); state("uptime", node.session);
   title("freshness", node.metrics_at ? `资源采样于 ${timeText(node.metrics_at)}` : "尚未收到资源报告");
   title("uptime", "系统运行时间，不代表监控连续在线时长");
+  const details = homeRowDetails(node);
+  for (const [key, value] of Object.entries(details.values)) text(key, value);
+  for (const [key, value] of Object.entries(details.titles)) title(key, value);
+  for (const row of card.planRows) row.hidden = !details.planPublished;
+  for (const message of card.unpublishedPlan) message.hidden = details.planPublished;
 }
 function render() {
   if (!current) return;
