@@ -171,8 +171,8 @@ func TestComposedPageDOM(t *testing.T) {
 		path string
 		ids  []string
 	}{
-		{"/", []string{"main", "search-toggle", "node-search-dialog", "node-search", "node-list", "node-template", "stream-status", "stream-label", "snapshot-at", "stat-cpu", "stat-tx", "stat-rx"}},
-		{"/node/1", []string{"main", "node-empty", "node-detail", "node-history", "stream-status", "stream-label", "snapshot-at", "footer-sample"}},
+		{"/", []string{"main", "search-toggle", "node-search-dialog", "node-search", "node-list", "node-template", "connection-notice", "fleet-rx", "fleet-tx"}},
+		{"/node/1", []string{"main", "node-empty", "node-detail", "node-history", "connection-notice"}},
 		{"/admin/", []string{"main", "notice", "login-panel", "github-login", "workspace", "logout", "snapshot-at", "node-list", "group-form", "probes-form", "server-registry", "create-form", "settings-form", "secret-token", "admin-node-row"}},
 	}
 	idAttribute := regexp.MustCompile(`\s+id="([^"]+)"`)

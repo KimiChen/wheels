@@ -19,7 +19,7 @@ const sort = byID("node-sort"), sortStorageKey = "frp-monitor-public-sort";
 sort.replaceChildren(...homeSortOptions.map(([value, name]) => {
   const option = document.createElement("option"); option.value = value; option.textContent = name; return option;
 }));
-const connectionStatus = createConnectionStatus({status: byID("stream-status"), label: byID("stream-label"), notice: byID("connection-notice")});
+const connectionStatus = createConnectionStatus({notice: byID("connection-notice")});
 let current = null, view = "cards", selectedGroup = ALL_GROUPS;
 let filters = normalizeHomeFilters(null);
 try { if (localStorage.getItem("frp-monitor-view") === "table") view = "table"; } catch { /* Storage is optional. */ }
@@ -164,16 +164,11 @@ function render() {
   const nodes = current.nodes, summary = overview(nodes), now = Date.now();
   syncGroups(nodes);
   syncFilters();
-  put("snapshot-at", timeText(current.generated_at)); byID("snapshot-at").dateTime = current.generated_at;
   put("stat-online", summary.online); put("stat-total", summary.total);
   put("stat-offline", summary.offline); put("stat-waiting", summary.waiting);
   put("stat-expiring", nodes.filter(node => expiresSoon(node, now)).length);
-  put("stat-cpu", percentage(summary.cpu.value));
-  byID("stat-cpu-note").title = `来自 ${summary.cpu.count} 个在线且新鲜的有效 CPU 样本`;
-  put("stat-rx", bytes(summary.rx.value, true)); put("stat-tx", bytes(summary.tx.value, true));
-  byID("stat-network-note").title = `仅汇总在线且新鲜的有效采样：发送 ${summary.tx.count} / 接收 ${summary.rx.count} 个节点`;
   put("fleet-rx", bytes(summary.rx.value, true)); put("fleet-tx", bytes(summary.tx.value, true));
-  byID("fleet-network-rates").title = byID("stat-network-note").title;
+  byID("fleet-network-rates").title = `仅汇总在线且新鲜的有效采样：发送 ${summary.tx.count} / 接收 ${summary.rx.count} 个节点`;
   put("stat-rx-total", bytes(summary.rxTotal.value)); put("stat-tx-total", bytes(summary.txTotal.value));
   byID("fleet-network-totals").title = `系统累计流量（节点重启可能归零），含离线节点最后有效采样：上传 ${summary.txTotal.count} / 下载 ${summary.rxTotal.count} 个节点`;
 
@@ -247,5 +242,5 @@ for (const button of viewButtons) button.addEventListener("click", () => {
 syncView(); syncFilters();
 const connection = connect({onSnapshot(data) { current = data; render(); }, onState});
 byID("retry").addEventListener("click", () => connection.refresh());
-window.addEventListener("pagehide", () => { connection.stop(); connectionStatus.stop(); });
+window.addEventListener("pagehide", () => connection.stop());
 window.addEventListener("pageshow", event => { if (event.persisted) window.location.reload(); });
