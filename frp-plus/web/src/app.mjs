@@ -1,6 +1,6 @@
 import {UNKNOWN, bytes, decimal, percent, percentage, ratio, onlineUptime, timeText, sessionLabels, freshnessLabels} from "./format.mjs";
 import {overview, groupOptions, resolveGroupSelection, ALL_GROUPS, UNGROUPED} from "./store.mjs";
-import {homeSortOptions, normalizeHomeFilters, expiresSoon, filterHomeNodes, sortHomeNodes, homeRowDetails} from "./home-data.mjs";
+import {normalizeHomeFilters, expiresSoon, filterHomeNodes, homeRowDetails} from "./home-data.mjs";
 import {connect, SNAPSHOT_REFRESH_SECONDS} from "./transport.mjs";
 import {createConnectionStatus} from "./connection-status.mjs";
 import {planText, expiryText, dateTime} from "./node-settings.mjs";
@@ -12,20 +12,15 @@ const put = (id, text) => write(byID(id), text);
 put("snapshot-refresh-seconds", SNAPSHOT_REFRESH_SECONDS);
 const list = byID("node-list"), cards = new Map();
 const search = byID("node-search"), viewButtons = [...document.querySelectorAll("[data-fm-view]")];
-const quickSearch = byID("node-quick-search"), statusButtons = [...document.querySelectorAll("[data-status-filter]")];
+const statusButtons = [...document.querySelectorAll("[data-status-filter]")];
 const expiryFilter = byID("expiry-filter"), filterStorageKey = "frp-monitor-public-filters";
 const searchDialog = byID("node-search-dialog"), searchToggle = byID("search-toggle"), searchResults = byID("search-results"), searchItems = new Map();
 const groupBar = byID("node-group-filter"), groupButtons = new Map(), groupStorageKey = "frp-monitor-public-group";
-const sort = byID("node-sort"), sortStorageKey = "frp-monitor-public-sort";
-sort.replaceChildren(...homeSortOptions.map(([value, name]) => {
-  const option = document.createElement("option"); option.value = value; option.textContent = name; return option;
-}));
 const connectionStatus = createConnectionStatus({notice: byID("connection-notice")});
 let current = null, view = "cards", selectedGroup = ALL_GROUPS;
 let filters = normalizeHomeFilters(null);
 try { if (localStorage.getItem("frp-monitor-view") === "table") view = "table"; } catch { /* Storage is optional. */ }
 try { selectedGroup = sessionStorage.getItem(groupStorageKey) ?? ALL_GROUPS; } catch { /* Storage is optional. */ }
-try { const saved = sessionStorage.getItem(sortStorageKey); if (homeSortOptions.some(([key]) => key === saved)) sort.value = saved; } catch { /* Storage is optional. */ }
 try { filters = normalizeHomeFilters(JSON.parse(sessionStorage.getItem(filterStorageKey))); } catch { /* Storage is optional. */ }
 function rememberFilters() {
   try { sessionStorage.setItem(filterStorageKey, JSON.stringify(filters)); } catch { /* Storage is optional. */ }
@@ -182,11 +177,11 @@ function render() {
     if (!cards.has(node.id)) cards.set(node.id, createCard(node));
     patchCard(cards.get(node.id), node, now);
   }
-  const ordered = sortHomeNodes(nodes, sort.value), shown = filterHomeNodes(ordered, {query: search.value, group: selectedGroup, ...filters}, now), visible = new Set(shown.map(n => n.id));
+  const shown = filterHomeNodes(nodes, {query: search.value, group: selectedGroup, ...filters}, now), visible = new Set(shown.map(n => n.id));
   syncSearch(shown);
   for (const [id, card] of cards) card.element.hidden = !visible.has(id);
-  // Both layouts share stable elements; restore focus when sorting moves a card.
-  ordered.forEach((node, index) => {
+  // Both layouts follow snapshot order and preserve focus when nodes move.
+  nodes.forEach((node, index) => {
     const element = cards.get(node.id).element, before = list.children[index] ?? null;
     if (before !== element) list.insertBefore(element, before);
   });
@@ -201,11 +196,10 @@ function onState(next) {
   connectionStatus.update(next, current ? "浏览器实时连接已中断，正在自动重连。以下为最近一次快照，不代表节点的当前状态。" : "暂时无法连接监控服务，正在自动重试。尚未获取节点状态。");
   if (!current && next === "error") { byID("empty-state").hidden = false; put("empty-title", "暂时无法读取节点"); put("empty-copy", "监控服务恢复后页面会自动重新同步，也可以点击刷新重试。"); }
 }
-search.addEventListener("input", () => { quickSearch.value = search.value; render(); });
-quickSearch.addEventListener("input", () => { search.value = quickSearch.value; render(); });
+search.addEventListener("input", render);
 searchToggle.addEventListener("click", openSearch);
 searchDialog.addEventListener("close", () => { searchToggle.setAttribute("aria-expanded", "false"); searchToggle.focus(); });
-byID("clear-search").addEventListener("click", () => { search.value = ""; quickSearch.value = ""; render(); quickSearch.focus(); });
+byID("clear-search").addEventListener("click", () => { search.value = ""; render(); searchToggle.focus(); });
 for (const button of statusButtons) button.addEventListener("click", () => {
   filters.status = button.dataset.statusFilter; rememberFilters(); syncFilters(); render();
 });
@@ -213,8 +207,8 @@ expiryFilter.addEventListener("click", () => {
   filters.expiring = !filters.expiring; rememberFilters(); syncFilters(); render();
 });
 byID("clear-filters").addEventListener("click", () => {
-  search.value = ""; quickSearch.value = ""; selectedGroup = ALL_GROUPS; filters = normalizeHomeFilters(null);
-  rememberGroup(); rememberFilters(); syncFilters(); render(); quickSearch.focus();
+  search.value = ""; selectedGroup = ALL_GROUPS; filters = normalizeHomeFilters(null);
+  rememberGroup(); rememberFilters(); syncFilters(); render(); searchToggle.focus();
 });
 document.addEventListener("keydown", event => {
   if (!event.isComposing && (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") { event.preventDefault(); openSearch(); }
@@ -230,10 +224,6 @@ searchDialog.addEventListener("keydown", event => {
   } else if (event.key === "Enter" && event.target === search && links.length) {
     event.preventDefault(); links[0].click();
   }
-});
-sort.addEventListener("change", () => {
-  try { sessionStorage.setItem(sortStorageKey, sort.value); } catch { /* Storage is optional. */ }
-  render();
 });
 for (const button of viewButtons) button.addEventListener("click", () => {
   view = button.dataset.fmView;

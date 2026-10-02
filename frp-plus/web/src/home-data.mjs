@@ -1,8 +1,7 @@
-import {select, sortNodes, sortOptions} from "./store.mjs";
+import {select} from "./store.mjs";
 import {UNKNOWN, decimal, uptime} from "./format.mjs";
 import {dateTime, expiryText} from "./node-settings.mjs";
 
-export const homeSortOptions = [...sortOptions, ["expiry", "到期时间"]];
 export const statusFilters = ["all", "online", "offline", "waiting"];
 const week = 7 * 86400000;
 
@@ -26,15 +25,6 @@ export function filterHomeNodes(nodes, {query = "", group = "all", status = "all
   const filters = normalizeHomeFilters({status, expiring});
   return select(nodes, query, group).filter(node =>
     (filters.status === "all" || node.session === filters.status) && (!filters.expiring || expiresSoon(node, now)));
-}
-
-export function sortHomeNodes(nodes, order = "default") {
-  if (order !== "expiry") return sortNodes(nodes, order);
-  return [...nodes].sort((a, b) => {
-    const left = expiration(a), right = expiration(b);
-    if (left === null || right === null) return left === right ? 0 : left === null ? 1 : -1;
-    return left < right ? -1 : left > right ? 1 : 0;
-  });
 }
 
 function megabits(field) {

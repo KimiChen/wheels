@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {expiresSoon, normalizeHomeFilters, filterHomeNodes, sortHomeNodes, homeRowDetails} from "../src/home-data.mjs";
+import {expiresSoon, normalizeHomeFilters, filterHomeNodes, homeRowDetails} from "../src/home-data.mjs";
 import {overview} from "../src/store.mjs";
 import {dateTime} from "../src/node-settings.mjs";
 
@@ -38,20 +38,6 @@ test("stored filter values are limited to supported states and actual booleans",
     assert.deepEqual(normalizeHomeFilters(value), {status: "all", expiring: false});
   }
   assert.deepEqual(normalizeHomeFilters({status: "waiting", expiring: true, group: "private"}), {status: "waiting", expiring: true});
-});
-
-test("expiry order is stable, includes expired nodes, and leaves unpublished dates last", () => {
-  const nodes = [node("1", "online"), node("2", "online", now + day), node("3", "offline", now - day),
-    node("4", "online", now + day), node("5", "online", "invalid")];
-  assert.deepEqual(sortHomeNodes(nodes, "expiry").map(n => n.id), ["3", "2", "4", "1", "5"]);
-  assert.deepEqual(nodes.map(n => n.id), ["1", "2", "3", "4", "5"]);
-});
-
-test("existing metric ordering keeps BigInt precision and missing samples last", () => {
-  const nodes = [node("1", "online"), {...node("2", "online"), metrics: {net_rx_total: ok("9007199254740992")}},
-    {...node("3", "online"), metrics: {net_rx_total: ok("9007199254740993")}}];
-  assert.deepEqual(sortHomeNodes(nodes, "download-total").map(n => n.id), ["3", "2", "1"]);
-  assert.deepEqual(sortHomeNodes(nodes, "default"), nodes);
 });
 
 test("row rates convert bytes per second to decimal Mbps with exact two-place rounding", () => {

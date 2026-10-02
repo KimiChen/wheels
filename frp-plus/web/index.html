@@ -59,8 +59,6 @@
         <div id="node-group-filter" class="fm-group-filter" role="group" aria-label="按节点分组查看" data-js-only></div>
         <button id="clear-search" class="wsk-button wsk-secondary fm-search-filter" type="button" aria-label="清除名称搜索" hidden><span id="search-filter-label"></span><svg class="wsk-icon" aria-hidden="true"><use href="#close"/></svg></button>
         <div class="fm-list-controls">
-          <label class="fm-search fm-quick-search"><svg class="wsk-icon" aria-hidden="true"><use href="#search"/></svg><input id="node-quick-search" class="wsk-control" type="search" placeholder="搜索节点" aria-label="按节点名称筛选" autocomplete="off"></label>
-          <label class="fm-sort"><span aria-hidden="true"><svg class="wsk-icon" viewBox="0 0 24 24"><path d="M7 3v18m-4-4 4 4 4-4M17 21V3m-4 4 4-4 4 4"/></svg>排序</span><select id="node-sort" class="wsk-select" aria-label="节点排序方式" title="名称、系统和到期按升序，指标按降序；缺失数据排在最后"><option value="default">默认</option></select></label>
           <div class="wsk-view-switch fm-view-switch" role="group" aria-label="展示方式" data-js-only>
             <button class="fm-view-button" data-fm-view="cards" type="button" aria-label="卡片" aria-pressed="true" title="卡片视图"><svg class="wsk-icon" aria-hidden="true"><use href="#grid"/></svg>卡片</button>
             <button class="fm-view-button" data-fm-view="table" type="button" aria-label="表格" aria-pressed="false" title="表格视图"><svg class="wsk-icon" aria-hidden="true"><use href="#table"/></svg>表格</button>
@@ -71,7 +69,6 @@
       <div class="fm-list-meta"><span id="list-summary" role="status">等待数据</span><button id="clear-filters" class="wsk-button wsk-quiet fm-clear-filters" type="button" hidden>重置筛选</button></div>
       <div id="node-list" class="fm-node-grid" data-fm-layout="cards" role="region" aria-label="节点卡片列表"></div>
       <div id="empty-state" class="wsk-empty-state fm-empty" hidden><span class="wsk-empty-icon fm-empty-icon"><svg class="wsk-icon" aria-hidden="true"><use href="#server"/></svg></span><h2 id="empty-title"></h2><p id="empty-copy"></p></div>
-      <div class="fm-list-footer"><span>仅显示已公开的节点信息</span><span>— 表示暂无有效采样</span></div>
     </section>
   </main>
   <dialog id="node-search-dialog" class="wsk-dialog fm-search-dialog" aria-labelledby="search-title">
