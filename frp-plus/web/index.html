@@ -40,7 +40,7 @@
     <div id="connection-notice" class="wsk-alert wsk-warning fm-notice" role="status" hidden></div>
     <noscript><div class="wsk-alert wsk-warning fm-notice">此页面需要 JavaScript 获取监控数据。当前未显示实时状态。</div></noscript>
     <section id="nodes" class="fm-nodes" aria-labelledby="nodes-title">
-      <div class="fm-home-title"><div><p class="fm-eyebrow">INFRASTRUCTURE / OVERVIEW</p><h1 id="nodes-title">节点总览</h1><p class="fm-home-description">查看主机资源、连接状态与流量使用情况。</p></div><span class="fm-refresh-cadence">每 2 秒刷新</span></div>
+      <h1 id="nodes-title" class="wsk-sr-only">节点总览</h1>
       <div class="fm-home-summary" aria-label="全部公开节点统计">
         <section class="wsk-panel fm-overview-panel"><div class="fm-section-heading"><h2><svg class="wsk-icon" aria-hidden="true"><use href="#server"/></svg>节点情况</h2><button id="expiry-filter" class="wsk-button wsk-quiet fm-expiry-filter" type="button" aria-pressed="false" title="只查看未来 7 天内到期且已公开到期时间的节点" data-js-only>7 天内到期 <b id="stat-expiring">—</b><span aria-hidden="true">›</span></button></div>
           <div class="fm-status-counts" role="group" aria-label="按连接状态查看">
@@ -50,7 +50,7 @@
             <button class="fm-status-filter" type="button" data-status-filter="waiting" aria-pressed="false"><strong id="stat-waiting">—</strong><span><i class="fm-state-dot" data-state="waiting" aria-hidden="true"></i>等待接入</span></button>
           </div>
         </section>
-        <section class="wsk-panel fm-overview-panel"><div class="fm-section-heading"><h2><svg class="wsk-icon" aria-hidden="true"><use href="#pulse"/></svg>网络情况</h2><small>全部公开节点</small></div>
+        <section class="wsk-panel fm-overview-panel"><div class="fm-section-heading"><h2><svg class="wsk-icon" aria-hidden="true"><use href="#pulse"/></svg>网络情况</h2><small data-js-only><span id="snapshot-refresh-seconds">—</span> 秒刷新</small></div>
           <div class="fm-network-overview" id="fleet-network-rates"><div><span><svg class="wsk-icon" aria-hidden="true"><use href="#arrow-down"/></svg>当前接收</span><strong id="fleet-rx">—</strong></div><div><span><svg class="wsk-icon" aria-hidden="true"><use href="#arrow-up"/></svg>当前发送</span><strong id="fleet-tx">—</strong></div></div>
           <div class="fm-network-cumulative" id="fleet-network-totals"><span>系统累计 <b id="stat-rx-total">—</b></span><span>系统累计 <b id="stat-tx-total">—</b></span></div>
         </section>

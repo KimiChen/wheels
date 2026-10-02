@@ -1,7 +1,7 @@
 import {UNKNOWN, bytes, decimal, percent, percentage, ratio, onlineUptime, timeText, sessionLabels, freshnessLabels} from "./format.mjs";
 import {overview, groupOptions, resolveGroupSelection, ALL_GROUPS, UNGROUPED} from "./store.mjs";
 import {homeSortOptions, normalizeHomeFilters, expiresSoon, filterHomeNodes, sortHomeNodes, homeRowDetails} from "./home-data.mjs";
-import {connect} from "./transport.mjs";
+import {connect, SNAPSHOT_REFRESH_SECONDS} from "./transport.mjs";
 import {createConnectionStatus} from "./connection-status.mjs";
 import {planText, expiryText, dateTime} from "./node-settings.mjs";
 import {nodeURL, cardHardwareText, cpuCores, groupText} from "./node-data.mjs";
@@ -9,6 +9,7 @@ import {nodeURL, cardHardwareText, cpuCores, groupText} from "./node-data.mjs";
 const byID = id => document.getElementById(id);
 const write = (element, text) => { const next = String(text ?? UNKNOWN); if (element.textContent !== next) element.textContent = next; };
 const put = (id, text) => write(byID(id), text);
+put("snapshot-refresh-seconds", SNAPSHOT_REFRESH_SECONDS);
 const list = byID("node-list"), cards = new Map();
 const search = byID("node-search"), viewButtons = [...document.querySelectorAll("[data-fm-view]")];
 const quickSearch = byID("node-quick-search"), statusButtons = [...document.querySelectorAll("[data-status-filter]")];
