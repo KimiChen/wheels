@@ -1,17 +1,13 @@
 /* Admin layout and business states; component appearance comes from Web Standard Kit. */
 .fa-body { min-width: 280px; background: light-dark(#f5f6f9,#0d1220); }
 .fa-body::before { display: none; }
-.fa-body .fm-brand-mark, .fa-body .fa-login-icon { background: var(--text); color: var(--surface); box-shadow: none; }
-.fa-topbar { display: block; padding: 0; }
-.fa-topbar-inner { max-width: 1600px; margin: auto; min-height: 64px; padding: var(--space-12) var(--space-24); display: flex; gap: var(--space-16); align-items: center; }
-.fa-top-label { color: var(--muted-soft); font-size: var(--type-xs); }
-.fa-topbar .fa-actions { margin-left: auto; }
+.fa-body .fa-login-icon { background: var(--text); color: var(--surface); box-shadow: none; }
 .fa-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-8); }
 .fa-actions a { color: var(--muted); text-decoration: none; font-size: var(--type-xs); margin-right: var(--space-6); }
 .fa-actions a:hover { color: var(--accent); }
-.fa-main { max-width: 1600px; margin: auto; padding: 0; }
+.fa-main { display: flex; flex-direction: column; max-width: 1600px; margin: 0 auto; padding: 0; }
 .fa-main > .fa-notice { margin: var(--space-20) var(--space-24); }
-#workspace:not([hidden]) { display: grid; grid-template-columns: 192px minmax(0,1fr); min-height: calc(100dvh - 142px); }
+#workspace:not([hidden]) { display: grid; flex: 1 0 auto; grid-template-columns: 192px minmax(0,1fr); }
 .fa-sidebar { display: flex; flex-direction: column; align-self: stretch; padding: var(--space-24) var(--space-12); border-width: 0 1px 0 0; border-radius: 0; box-shadow: none; }
 .fa-nav-heading { margin: 0 var(--space-12) var(--space-16); color: var(--muted-soft); font-size: var(--type-2xs); letter-spacing: .04em; }
 .fa-navigation { display: grid; align-content: start; gap: var(--space-6); }
@@ -22,7 +18,7 @@
 .fa-nav-count { margin-left: auto; padding: 1px var(--space-6); border-radius: var(--radius-xs); font-size: var(--type-2xs); background: var(--surface-soft); font-variant-numeric: tabular-nums; }
 .fa-sidebar-note { display: flex; align-items: center; gap: var(--space-8); margin: auto var(--space-8) 0; padding-top: var(--space-24); font-size: var(--type-2xs); color: var(--muted); }
 .fa-sidebar-note small { display: block; margin-top: var(--space-4); color: var(--muted-soft); }
-.fa-content { min-width: 0; min-height: 65vh; padding: var(--space-24); }
+.fa-content { min-width: 0; padding: var(--space-24); }
 .fa-page-heading { display: flex; justify-content: space-between; align-items: center; gap: var(--space-16); margin-bottom: var(--space-24); }
 .fa-page-heading h1 { font-size: var(--type-2xl); margin: 0 0 var(--space-8); }
 .fa-page-heading p { margin: 0; font-size: var(--type-sm); color: var(--muted-soft); line-height: 1.7; }
@@ -41,7 +37,7 @@
 .fa-main select.wsk-control { appearance: auto; }
 .fa-main textarea[rows="1"] { min-height: 64px; }
 .fa-main :is(button,input,select,textarea):disabled { cursor: wait; }
-.fa-login { max-width: 380px; margin: 75px auto 100px; padding: var(--space-24); text-align: center; }
+.fa-login { width: calc(100% - var(--space-32)); max-width: 380px; margin: 75px auto 100px; padding: var(--space-24); text-align: center; }
 .fa-login-icon { width: 48px; height: 48px; margin: 0 auto var(--space-20); }
 .fa-login h1 { margin: 0 0 var(--space-12); font-size: var(--type-2xl); }
 .fa-login p { color: var(--muted); font-size: var(--type-sm); line-height: 1.8; }
@@ -148,7 +144,6 @@
 .fa-probe-rows { display: grid; gap: var(--space-16); margin-bottom: var(--space-20); }
 .fa-probe-row { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: var(--space-12); align-items: end; padding: var(--space-16); }
 .fa-form-note { margin: var(--space-20) 0 0; }
-.fa-footer { display: flex; justify-content: space-between; gap: var(--space-16); padding: var(--space-20) var(--space-24); border-top: 1px solid var(--border); color: var(--muted-soft); font-size: var(--type-2xs); }
 .fa-overview-stats { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: var(--space-16); margin-bottom: var(--space-16); }
 .fa-stat { display: flex; align-items: center; justify-content: space-between; gap: var(--space-8); text-align: left; padding: var(--space-20); font: inherit; color: var(--muted); cursor: pointer; }
 .fa-stat > span { font-size: var(--type-xs); }
@@ -273,16 +268,13 @@
   .fa-dashboard-grid { grid-template-columns: minmax(0,1fr) 280px; }
 }
 @media (max-width: 900px) {
-  #workspace:not([hidden]) { grid-template-columns: minmax(0,1fr); }
+  #workspace:not([hidden]) { grid-template-columns: minmax(0,1fr); grid-template-rows: auto 1fr; }
   .fa-sidebar { padding: var(--space-8) var(--space-16); border-width: 0 0 1px; display: block; }
   .fa-navigation { display: flex; overflow-x: auto; gap: var(--space-4); }
   .fa-navigation a { font-size: var(--type-xs); padding: var(--space-10); }
   .fa-nav-heading, .fa-sidebar-note { display: none; }
 }
 @media (max-width: 600px) {
-  .fa-topbar-inner { padding-inline: var(--space-16); gap: var(--space-8); }
-  .fa-topbar .fm-brand { font-size: var(--type-base); }
-  .fa-top-label { display: none; }
   .fa-actions a { font-size: var(--type-2xs); margin-right: 0; }
   .fa-content { padding: var(--space-20) var(--space-16); }
   .fa-navigation a { gap: var(--space-6); }

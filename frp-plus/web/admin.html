@@ -7,9 +7,11 @@
   <link rel="stylesheet" href="/assets/style.css"><link rel="stylesheet" href="/assets/app.css"><link rel="stylesheet" href="/assets/admin.css">
   <script defer src="/assets/script.js"></script><script type="module" src="/src/admin.mjs"></script>
 </head>
-<body class="fa-body">
+<body class="fm-page fa-body">
   <a class="wsk-skip-link" href="#main">跳到主要内容</a>
   <svg class="wsk-icon-sprite fm-symbols" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><defs>
+    <symbol id="pulse" viewBox="0 0 24 24"><path d="M2 13h5l3-9 4 16 3-7h5"/></symbol>
+    <symbol id="arrow-left" viewBox="0 0 24 24"><path d="M20 12H4m6-6-6 6 6 6"/></symbol>
     <symbol id="server" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="7" rx="2"/><path d="M7 6.5h.01M7 17.5h.01M12 6.5h5M12 17.5h5"/></symbol>
     <symbol id="dashboard" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="11" rx="1"/><rect x="14" y="3" width="7" height="6" rx="1"/><rect x="14" y="13" width="7" height="8" rx="1"/><rect x="3" y="18" width="7" height="3" rx="1"/></symbol>
     <symbol id="calendar" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M7 3v4M17 3v4M3 11h18M8 15h2M14 15h2"/></symbol>
@@ -25,7 +27,10 @@
     <symbol id="theme" viewBox="0 0 24 24"><path d="M20.7 13.5A9 9 0 0 1 10.5 3.3 9 9 0 1 0 20.7 13.5Z"/></symbol>
     <symbol id="exit" viewBox="0 0 24 24"><path d="M9 4H4v16h5m5-13 5 5-5 5m-5-5h10"/></symbol>
   </defs></svg>
-  <header class="wsk-topbar fa-topbar"><div class="fa-topbar-inner"><a class="wsk-brand fm-brand" href="/"><span class="wsk-brand-mark fm-brand-mark"><svg class="wsk-icon" aria-hidden="true"><use href="#server"/></svg></span><span>FRP <b>Plus</b></span></a><span class="fa-top-label">后台</span><div class="fa-actions"><a href="/">状态面板 ↗</a><button class="wsk-icon-button fa-icon" data-theme-toggle data-js-only type="button" aria-label="切换主题"><svg class="wsk-icon" aria-hidden="true"><use href="#theme"/></svg></button><button class="wsk-icon-button fa-icon" id="logout" type="button" aria-label="退出管理" title="退出管理" hidden><svg class="wsk-icon" aria-hidden="true"><use href="#exit"/></svg></button></div></div></header>
+  <header class="wsk-topbar fm-topbar"><div class="fm-topbar-inner">
+    <div class="fm-top-brand"><a class="wsk-brand fm-brand" href="/" aria-label="FRP Plus 首页"><span class="wsk-brand-mark fm-brand-mark"><svg class="wsk-icon" aria-hidden="true"><use href="#pulse"/></svg></span><span>FRP <b>Plus</b></span></a><span class="fm-top-label">后台</span></div>
+    <div class="fm-top-actions"><a class="fm-top-link" href="/" aria-label="状态面板" title="状态面板"><svg class="wsk-icon" aria-hidden="true"><use href="#arrow-left"/></svg><span>状态面板</span></a><button class="wsk-icon-button fm-theme" data-theme-toggle data-js-only type="button" aria-label="切换主题"><svg class="wsk-icon" aria-hidden="true"><use href="#theme"/></svg></button><button class="wsk-icon-button fm-logout" id="logout" type="button" aria-label="退出管理" title="退出管理" hidden><svg class="wsk-icon" aria-hidden="true"><use href="#exit"/></svg></button></div>
+  </div></header>
   <main id="main" class="fa-main" tabindex="-1">
     <div id="notice" class="wsk-alert wsk-info fa-notice" role="status" aria-live="polite">正在检查管理会话…</div>
     <noscript><p class="wsk-alert wsk-info fa-notice">请启用 JavaScript 使用管理工作台。</p></noscript>
@@ -147,8 +152,8 @@
         <footer class="fa-editor-footer"><div id="editor-tools" class="fa-editor-tools"><button class="wsk-button wsk-quiet" type="button" data-editor-pane="resources" aria-controls="editor-resources" aria-pressed="false">资源详情</button><button class="wsk-button wsk-quiet" type="button" data-editor-pane="access" aria-controls="editor-access" aria-pressed="false">接入凭据</button><button id="settings-reload" class="wsk-button wsk-quiet" type="button">重新读取</button></div><div class="fa-editor-actions"><button id="editor-cancel" class="wsk-button wsk-secondary" type="button" data-close-dialog>取消</button><button id="editor-save" class="wsk-button fa-primary" type="submit" form="settings-form">保存修改</button></div></footer>
       </dialog>
     </div>
-    <footer class="fa-footer">FRP Plus <span>管理工作台</span></footer>
   </main>
+  <footer class="fm-footer"><div class="fm-footer-inner"><span class="fm-footer-brand">FRP Plus <span class="fm-footer-separator">/</span> 管理工作台</span></div></footer>
   <template id="admin-node-row"><tr>
     <th scope="row"><button class="fa-name" type="button" data-node-action="settings" data-cell="name"></button><small class="fa-node-summary" data-cell="summary"></small></th>
     <td><div class="fa-node-groups" data-cell="groups"></div></td>
