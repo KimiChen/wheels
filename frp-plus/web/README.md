@@ -52,6 +52,34 @@ CPU、内存、存储和套餐的缺失值保持未知，有效零仍显示零�
 快照时退避重连，重连先 GET，迟到响应不能覆盖新连接。列表刷新复用已有 DOM，
 不重置搜索输入；离开页面时取消计时器和请求。应用不生成演示节点或随机实时数据。
 
+## HTML 入口与片段
+
+`index.html`、`node.html`、`admin.html` 是页面入口，使用 Go `html/template` 引用以下独立文件：
+
+| 文件（相对 `web/partials/`） | 职责 |
+| --- | --- |
+| `header.html`、`footer.html` | 三页共用公共栏，按固定页面类型保留各自操作和实时信息 |
+| `admin/dashboard.html` | 工作台统计、关注列表与到期日历 |
+| `admin/nodes.html` | 节点管理、搜索筛选及目录 |
+| `admin/groups.html` | 分组管理与成员表单 |
+| `admin/probes.html` | TCP 探测任务 |
+| `admin/frp.html` | FRP 注册表与对账 |
+| `admin/access.html` | 节点接入说明 |
+| `admin/login-panel.html`、`admin/sidebar.html` | 登录面板与管理导航 |
+| `admin/create-dialog.html`、`admin/credential-result.html` | 新建节点与一次性凭据展示 |
+| `admin/node-panel.html`、`admin/admin-node-row.html` | 节点编辑弹窗与目录行模板 |
+
+`handler.go` 在启动时解析嵌入的模板，组合三页并缓存结果；浏览器首次响应即包含完整 DOM。
+不需要前端片段加载器、额外请求或新依赖，ES Modules 与套件挂载顺序保持原状。
+片段使用明确的 `define` 名称，例如 `admin/nodes.html`，通过 `template` 引用；
+新增片段时保持现有 ID、表单关联、初始 hidden 状态和事件属性，避免重复 ID。
+后台继续使用 `/admin/#nodes` 等页内导航，片段自身不是新路由。
+
+源码构建会递归包含 `partials/`。公开资源仍使用显式白名单，片段路径返回 404，
+管理入口仍为 `no-store`；HTML ETag 根据组合后的实际响应计算。
+预览需经过 Web Handler，直接用文件或普通静态服务器打开入口无法展开模板。
+部署时应将相同构建的 Handler 输出作为 HTML 哈希基准，CSS/JS 继续与源文件比对。
+
 ## 固定套件与业务文件
 
 `assets/style.css` 与 `assets/script.js` 完整复制且不修改，来源为本仓库提交

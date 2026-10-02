@@ -1,0 +1,23 @@
+{{define "admin/nodes.html"}}
+<section data-admin-panel="nodes" aria-labelledby="nodes-title" hidden>
+  <div class="fa-page-heading fa-node-heading"><div><h1 id="nodes-title">节点管理</h1><p><span id="node-count">—</span> 台节点 · 配置、公开策略与套餐</p></div><button id="add-node" class="wsk-button fa-primary" type="button"><svg class="wsk-icon" aria-hidden="true"><use href="#plus"/></svg>新增节点</button></div>
+  <div class="fa-node-toolbar">
+    <div class="fa-node-filters" role="group" aria-label="节点状态筛选">
+      <button class="wsk-button wsk-quiet fa-filter-chip" type="button" data-directory-filter="all" aria-pressed="true">全部</button>
+      <button class="wsk-button wsk-quiet fa-filter-chip" type="button" data-directory-filter="online" aria-pressed="false">在线</button>
+      <button class="wsk-button wsk-quiet fa-filter-chip" type="button" data-directory-filter="offline" aria-pressed="false">离线</button>
+      <button class="wsk-button wsk-quiet fa-filter-chip" type="button" data-directory-filter="waiting" aria-pressed="false">等待</button>
+      <button class="wsk-button wsk-quiet fa-filter-chip" type="button" data-directory-filter="due" aria-pressed="false">7 天内到期</button>
+      <button class="wsk-button wsk-quiet fa-filter-chip" type="button" data-directory-filter="expired" aria-pressed="false" hidden>已到期</button>
+      <button class="wsk-button wsk-quiet fa-filter-chip" type="button" data-directory-filter="review" aria-pressed="false" hidden>FRP 需核对</button>
+    </div>
+    <select id="node-filter" aria-label="筛选节点状态" hidden><option value="all">全部状态</option><option value="online">监控在线</option><option value="offline">监控离线</option><option value="waiting">等待接入</option><option value="due">7 天内到期</option><option value="expired">已到期</option><option value="review">FRP 需核对</option></select>
+    <label class="fa-node-search"><svg class="wsk-icon" aria-hidden="true" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="7.5"/><path d="m16 16 5 5"/></svg><span class="wsk-sr-only">搜索节点</span><input class="wsk-control" id="node-search" type="search" placeholder="搜索节点" title="搜索名称、节点 ID 或 IP 地址" autocomplete="off"></label>
+    <label class="wsk-field fa-node-group-filter"><span class="wsk-sr-only">筛选节点分组</span><select id="node-group" class="wsk-control"><option value="all">全部分组</option><option value="ungrouped">未分组</option></select></label>
+  </div>
+  <div class="fa-directory">
+    <div class="wsk-table-wrap fa-directory-scroll" role="region" aria-label="节点管理表，可横向滚动" tabindex="0"><table class="wsk-table fa-table fa-node-table"><caption class="wsk-sr-only">节点、分组、状态、IP 地址、套餐与到期</caption><thead><tr><th scope="col">节点</th><th scope="col">分组</th><th scope="col">状态</th><th scope="col">IP 地址</th><th scope="col">套餐</th><th scope="col">到期</th><th scope="col">操作</th></tr></thead><tbody id="node-list"></tbody></table><p id="nodes-empty" class="fa-empty">等待节点快照…</p></div>
+    <div class="fa-directory-footer"><span id="node-filter-count" aria-live="polite">— / — 台节点</span><div><span id="snapshot-at">—</span><button id="refresh" class="wsk-icon-button fa-refresh" type="button" aria-label="刷新节点列表" title="刷新节点列表"><svg class="wsk-icon" aria-hidden="true"><use href="#icon-refresh"/></svg></button></div></div>
+  </div>
+</section>
+{{end}}

@@ -1,0 +1,43 @@
+{{define "admin/node-panel.html"}}
+<dialog id="node-panel" class="wsk-dialog fa-dialog fa-node-editor" aria-labelledby="node-title" hidden>
+  <header class="wsk-dialog-head fa-dialog-header"><div><h2 id="node-title">编辑节点</h2><p class="fa-node-id">#<span id="node-id"></span> · <span id="node-name-label"></span><span id="node-session" class="wsk-badge fm-badge"></span></p></div><button class="wsk-icon-button fa-icon" type="button" data-close-dialog aria-label="关闭节点窗口"><svg class="wsk-icon" aria-hidden="true"><use href="#close"/></svg></button></header>
+  <div class="wsk-dialog-body fa-editor-body">
+    <nav class="fa-editor-tabs" aria-label="节点管理内容"><button class="wsk-button wsk-quiet" type="button" data-editor-pane="settings" aria-controls="settings-basic" aria-pressed="true">基本信息</button><button class="wsk-button wsk-quiet" type="button" data-editor-pane="plan" aria-controls="settings-plan" aria-pressed="false">费用与套餐</button><button class="wsk-button wsk-quiet" type="button" data-editor-pane="binding" aria-controls="editor-binding" aria-pressed="false">FRP 绑定</button></nav>
+    <p data-dialog-notice class="wsk-alert wsk-info fa-notice" role="status" hidden></p>
+    <section id="editor-settings" data-editor-panel="settings" aria-label="节点设置"><form id="settings-form" novalidate>
+      <fieldset id="settings-basic" data-settings-pane="settings"><legend class="wsk-sr-only">基本信息</legend><div class="fa-settings-grid">
+        <label class="wsk-field fa-settings-wide"><span class="wsk-label">节点名称</span><input class="wsk-control" name="name" required maxlength="128" autocomplete="off"></label>
+        <div class="wsk-field fa-settings-wide"><span class="wsk-label" id="node-editor-groups-label">所属分组</span><div id="node-editor-groups" class="wsk-choice-row fa-checks" role="group" aria-labelledby="node-editor-groups-label"></div><small id="node-editor-groups-status" class="fa-muted" role="status" hidden></small></div>
+        <div class="wsk-field fa-settings-wide"><span class="wsk-label" id="node-editor-visibility-label">公开策略</span><div class="wsk-choice-row fa-checks" role="group" aria-labelledby="node-editor-visibility-label"><label class="wsk-choice"><input name="is_public" type="checkbox">公开此节点</label><label class="wsk-choice"><input name="publish_traffic_plan" type="checkbox">公开套餐用量</label><label class="wsk-choice"><input name="publish_billing" type="checkbox">公开费用和到期</label></div></div>
+        <label class="wsk-field fa-settings-wide"><span class="wsk-label">公开备注</span><textarea class="wsk-textarea" name="public_note" rows="3" maxlength="4096" placeholder="在公开节点页面显示"></textarea></label>
+        <label class="wsk-field fa-settings-wide"><span class="wsk-label">私有备注</span><textarea class="wsk-textarea" name="private_note" rows="1" maxlength="4096" placeholder="仅管理员可见"></textarea></label>
+      </div></fieldset>
+      <fieldset id="settings-plan" data-settings-pane="plan" hidden><legend class="wsk-sr-only">费用与套餐</legend><div class="fa-settings-grid">
+        <div class="wsk-field"><label class="wsk-label" for="node-price">费用金额</label><div class="fa-plan-amount"><input id="node-price" class="wsk-control" name="price" inputmode="decimal" placeholder="未设置" autocomplete="off"><label><span class="wsk-sr-only">币种</span><input class="wsk-control" name="currency" maxlength="3" placeholder="CNY" autocomplete="off"></label></div></div>
+        <label class="wsk-field"><span class="wsk-label">到期时间</span><input class="wsk-control" name="expires_at_ms" type="datetime-local" step="1" title="按浏览器时区显示"></label>
+        <label class="wsk-field"><span class="wsk-label">周期额度（GiB）</span><input class="wsk-control" name="traffic_quota" inputmode="decimal" placeholder="留空表示无限流量" autocomplete="off"></label>
+        <label class="wsk-field"><span class="wsk-label">计费类型</span><select class="wsk-control" name="traffic_mode"><option value="max">收发取较大值</option><option value="total">双向合计</option><option value="rx">仅接收</option><option value="tx">仅发送</option></select></label>
+        <label class="wsk-field"><span class="wsk-label">每月重置日</span><input class="wsk-control" name="traffic_reset_day" type="number" min="1" max="31" step="1" required></label>
+        <label class="wsk-field"><span class="wsk-label">套餐时区</span><input class="wsk-control" name="traffic_reset_timezone" required maxlength="64" placeholder="UTC 或 Asia/Shanghai" autocomplete="off"></label>
+        <div class="wsk-field fa-settings-wide"><span class="wsk-label">本周期已用</span><p id="settings-current" class="fa-editor-summary"></p></div>
+      </div>
+      <details class="fa-editor-advanced"><summary>更多套餐设置</summary><div class="fa-settings-grid">
+        <label class="wsk-field"><span class="wsk-label">付费周期</span><input class="wsk-control" name="billing_cycle" maxlength="64" placeholder="月付、年付、一次性等" autocomplete="off"></label>
+        <label class="wsk-field"><span class="wsk-label">重置方式</span><select class="wsk-control" name="traffic_reset_mode"><option value="monthly">每月固定日期</option><option value="manual">仅手动重置</option></select></label>
+        <label class="wsk-field fa-settings-wide"><span class="wsk-label">校准本周期已用（GiB）</span><input class="wsk-control" name="traffic_used" inputmode="decimal" placeholder="留空保持当前累计" autocomplete="off"></label>
+        <label class="wsk-field fa-settings-wide"><span class="wsk-label">续费说明</span><textarea class="wsk-textarea" name="renewal_note" rows="2" maxlength="4096" placeholder="人工维护，不会自动续费"></textarea></label>
+      </div><button id="traffic-reset" class="wsk-secondary wsk-button" type="button">重置套餐周期</button><p class="fa-muted fa-reset-note">仅重置当前套餐用量，今日与系统累计流量保留。</p></details></fieldset>
+    </form></section>
+    <section id="editor-resources" data-editor-panel="resources" aria-label="节点资源" hidden><div id="node-details"></div></section>
+    <section id="editor-binding" data-editor-panel="binding" aria-labelledby="binding-title" hidden><h3 id="binding-title" class="wsk-sr-only">FRP 可信绑定</h3><p class="fa-editor-summary">绑定只决定关联关系，不远程修改 FRP 配置。</p><form id="binding-form"><div class="fa-form-grid">
+      <label class="wsk-field"><span class="wsk-label">服务端标识</span><input class="wsk-control" name="server_id" required maxlength="128" autocomplete="off" placeholder="frps-main"></label>
+      <label class="wsk-field"><span class="wsk-label">FRP 用户（可留空）</span><input class="wsk-control" name="user" maxlength="128" autocomplete="off" placeholder="未设置 user 时留空"></label>
+      <label class="wsk-field"><span class="wsk-label">稳定客户端标识</span><input class="wsk-control" name="raw_client_id" required maxlength="128" autocomplete="off" placeholder="节点的稳定客户端 ID"></label>
+      <div class="wsk-field"><span class="wsk-label">当前核对结果</span><strong id="binding-summary">—</strong></div>
+    </div><button id="binding-clear" class="wsk-button wsk-quiet fa-unbind" type="button">解除绑定</button></form></section>
+    <section id="editor-access" data-editor-panel="access" aria-labelledby="access-title" hidden><h3 id="access-title">接入凭据</h3><p>轮换会立即使旧令牌失效，需要更新节点令牌文件。撤销后该节点无法继续上报。</p><div class="fa-actions"><button id="rotate" class="wsk-secondary wsk-button" type="button">轮换令牌</button><button id="revoke" class="wsk-danger wsk-button fa-danger" type="button">撤销节点</button></div><div id="confirm-action" class="wsk-alert wsk-warning fa-confirm" hidden><p id="confirm-copy"></p><div class="fa-actions"><button id="confirm-no" class="wsk-secondary wsk-button" type="button">取消</button><button id="confirm-yes" class="wsk-danger wsk-button fa-danger" type="button"></button></div></div></section>
+    <p id="settings-status" class="fa-muted fa-editor-status" role="status"></p>
+  </div>
+  <footer class="fa-editor-footer"><div id="editor-tools" class="fa-editor-tools"><button class="wsk-button wsk-quiet" type="button" data-editor-pane="resources" aria-controls="editor-resources" aria-pressed="false">资源详情</button><button class="wsk-button wsk-quiet" type="button" data-editor-pane="access" aria-controls="editor-access" aria-pressed="false">接入凭据</button><button id="settings-reload" class="wsk-button wsk-quiet" type="button">重新读取</button></div><div class="fa-editor-actions"><button id="editor-cancel" class="wsk-button wsk-secondary" type="button" data-close-dialog>取消</button><button id="editor-save" class="wsk-button fa-primary" type="submit" form="settings-form">保存修改</button></div></footer>
+</dialog>
+{{end}}

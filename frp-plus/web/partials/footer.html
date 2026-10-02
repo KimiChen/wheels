@@ -1,0 +1,17 @@
+{{define "footer.html"}}
+<footer class="fm-footer"><div class="fm-footer-inner">
+  {{if ne .Page "admin"}}
+  <div class="fm-footer-live">
+    <span class="fm-stream" data-state="pending" id="stream-status" role="status"><i></i><span id="stream-label"></span></span>
+    <span class="fm-snapshot">快照 <time id="snapshot-at">—</time></span>
+    {{if eq .Page "home"}}
+    <span id="stat-cpu-note">均 CPU <b id="stat-cpu">—</b></span>
+    <span id="stat-network-note"><span title="节点发送总速率">↑ <b id="stat-tx">—</b></span><span title="节点接收总速率">↓ <b id="stat-rx">—</b></span></span>
+    {{else if eq .Page "node"}}
+    <span class="fm-node-footer-sample" id="footer-sample">等待节点数据</span>
+    {{end}}
+  </div>
+  {{end}}
+  <span class="fm-footer-brand">FRP Plus <span class="fm-footer-separator">/</span> {{if eq .Page "admin"}}管理工作台{{else}}公开 · 只读{{end}}</span>
+</div></footer>
+{{end}}

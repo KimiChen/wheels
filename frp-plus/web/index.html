@@ -36,18 +36,7 @@
     <symbol id="clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
   </defs></svg>
 
-  <header class="wsk-topbar fm-topbar"><div class="fm-topbar-inner">
-    <div class="fm-top-brand"><a class="wsk-brand fm-brand" href="/" aria-label="FRP Plus 首页"><span class="wsk-brand-mark fm-brand-mark"><svg class="wsk-icon" aria-hidden="true"><use href="#pulse"/></svg></span><span>FRP <b>Plus</b></span></a></div>
-    <div class="fm-top-actions">
-      <div class="wsk-view-switch fm-view-switch" role="group" aria-label="展示方式" data-js-only>
-        <button class="fm-view-button" data-fm-view="cards" type="button" aria-label="卡片" aria-pressed="true"><svg class="wsk-icon" aria-hidden="true"><use href="#grid"/></svg>卡片</button>
-        <button class="fm-view-button" data-fm-view="table" type="button" aria-label="表格" aria-pressed="false"><svg class="wsk-icon" aria-hidden="true"><use href="#table"/></svg>表格</button>
-      </div>
-      <button id="search-toggle" class="wsk-icon-button fm-search-toggle" data-js-only type="button" aria-label="搜索节点" aria-haspopup="dialog" aria-controls="node-search-dialog" aria-expanded="false" title="搜索节点（⌘ / Ctrl K）"><svg class="wsk-icon" aria-hidden="true"><use href="#search"/></svg></button>
-      <button class="wsk-icon-button fm-theme" data-theme-toggle data-js-only type="button" aria-label="切换主题"><svg class="wsk-icon" aria-hidden="true"><use href="#theme"/></svg></button>
-      <a class="wsk-button wsk-secondary fm-admin" href="/admin/" aria-label="管理工作台" title="管理工作台"><svg class="wsk-icon" aria-hidden="true"><use href="#settings"/></svg><span>管理</span></a>
-    </div>
-  </div></header>
+  {{template "header.html" .}}
   <main id="main" tabindex="-1">
     <div id="connection-notice" class="wsk-alert wsk-warning fm-notice" role="status" hidden></div>
     <noscript><div class="wsk-alert wsk-warning fm-notice">此页面需要 JavaScript 获取监控数据。当前未显示实时状态。</div></noscript>
@@ -90,12 +79,7 @@
       <footer class="wsk-dialog-foot fm-search-foot"><span>↑ ↓ 选择 · Enter 打开 · Esc 关闭</span><button class="wsk-button wsk-quiet" type="button" data-dialog-close>查看筛选结果</button></footer>
     </div>
   </dialog>
-  <footer class="fm-footer"><div class="fm-footer-inner"><div class="fm-footer-live">
-    <span class="fm-stream" data-state="pending" id="stream-status" role="status"><i></i><span id="stream-label"></span></span>
-    <span class="fm-snapshot">快照 <time id="snapshot-at">—</time></span>
-    <span id="stat-cpu-note">均 CPU <b id="stat-cpu">—</b></span>
-    <span id="stat-network-note"><span title="节点发送总速率">↑ <b id="stat-tx">—</b></span><span title="节点接收总速率">↓ <b id="stat-rx">—</b></span></span>
-  </div><span class="fm-footer-brand">FRP Plus <span class="fm-footer-separator">/</span> 公开 · 只读</span></div></footer>
+  {{template "footer.html" .}}
 
   <template id="node-template"><article class="wsk-panel fm-node-card">
     <header class="fm-card-header fm-node-identity">

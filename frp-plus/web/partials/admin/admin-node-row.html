@@ -1,0 +1,11 @@
+{{define "admin/admin-node-row.html"}}
+<template id="admin-node-row"><tr>
+  <th scope="row"><button class="fa-name" type="button" data-node-action="settings" data-cell="name"></button><small class="fa-node-summary" data-cell="summary"></small></th>
+  <td><div class="fa-node-groups" data-cell="groups"></div></td>
+  <td><span class="fa-node-state" data-cell="session"></span></td>
+  <td class="fa-address"><span data-cell="ipv4"></span><small data-cell="ipv6"></small></td>
+  <td class="fa-node-plan"><span data-cell="plan"></span><progress max="100" data-plan-meter aria-label="套餐使用率" hidden></progress></td>
+  <td class="fa-node-expiry" data-cell="expires"></td>
+  <td><button class="wsk-button wsk-quiet fa-edit-node" type="button" data-node-action="settings" aria-label="编辑节点" title="编辑节点"><svg class="wsk-icon" aria-hidden="true"><use href="#edit"/></svg>编辑</button></td>
+</tr></template>
+{{end}}

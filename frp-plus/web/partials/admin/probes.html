@@ -1,0 +1,7 @@
+{{define "admin/probes.html"}}
+<section data-admin-panel="probes" aria-labelledby="probes-title" hidden>
+  <div class="fa-page-heading"><div><h1 id="probes-title">网络探测</h1><p>为节点配置 TCP 建连延迟监控。</p></div><button id="probes-reload" class="wsk-secondary wsk-button" type="button">重新读取</button></div>
+  <p id="probe-health" class="wsk-alert wsk-info fa-notice" hidden>探测配置读取异常，正在使用上次有效清单。</p><p id="probe-status" class="fa-muted" role="status">正在读取任务配置…</p>
+  <form id="probes-form" class="wsk-panel fa-panel" hidden><div id="probe-rows" class="fa-probe-rows"></div><div class="fa-actions"><button id="probe-add" class="wsk-secondary wsk-button" type="button">添加任务</button><button class="wsk-button fa-primary" type="submit">保存任务</button></div><p class="fa-muted fa-form-note">目标地址仅管理员可见，名称在公开趋势页显示。保存会替换整份清单，删除行后保存即可停止该任务。</p></form>
+</section>
+{{end}}

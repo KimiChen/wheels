@@ -1,0 +1,10 @@
+{{define "admin/sidebar.html"}}
+<aside class="wsk-panel fa-sidebar"><p class="fa-nav-heading">管理工作台</p><nav class="fa-navigation" aria-label="管理导航">
+    <a href="#dashboard" data-admin-view="dashboard" aria-current="page"><svg class="wsk-icon" aria-hidden="true"><use href="#dashboard"/></svg>工作台</a>
+    <a href="#nodes" data-admin-view="nodes"><svg class="wsk-icon" aria-hidden="true"><use href="#server"/></svg>节点管理<span id="nav-node-count" class="fa-nav-count">—</span></a>
+    <a href="#groups" data-admin-view="groups"><svg class="wsk-icon" aria-hidden="true"><use href="#groups"/></svg>分组管理</a>
+    <a href="#probes" data-admin-view="probes"><svg class="wsk-icon" aria-hidden="true"><use href="#activity"/></svg>TCP 探测</a>
+    <a href="#frp" data-admin-view="frp"><svg class="wsk-icon" aria-hidden="true"><use href="#link"/></svg>FRP 对账</a>
+    <a href="#access" data-admin-view="access"><svg class="wsk-icon" aria-hidden="true"><use href="#key"/></svg>接入信息</a>
+</nav><div class="fa-sidebar-note"><span class="fa-status-dot" aria-hidden="true"></span><span>GitHub 授权会话<small>私有管理空间</small></span></div></aside>
+{{end}}

@@ -6,6 +6,9 @@ import (
 	"crypto/sha256"
 	"embed"
 	"encoding/hex"
+	"fmt"
+	"html/template"
+	"io/fs"
 	"net/http"
 	"path"
 	"regexp"
@@ -14,8 +17,44 @@ import (
 	"time"
 )
 
-//go:embed index.html node.html admin.html assets src
+//go:embed index.html node.html admin.html partials assets src
 var content embed.FS
+
+// Compose the static shells once, before serving requests. The browser receives
+// a complete document, so modules can bind to every control immediately.
+// Only these fixed page contexts reach templates; private API data stays in JS.
+func renderPages(source fs.FS) (map[string][]byte, error) {
+	templates, err := template.ParseFS(source, "index.html", "node.html", "admin.html", "partials/*.html", "partials/admin/*.html")
+	if err != nil {
+		return nil, fmt.Errorf("parse web pages: %w", err)
+	}
+	pages := make(map[string][]byte, 3)
+	for _, page := range []struct{ name, kind string }{
+		{"index.html", "home"}, {"node.html", "node"}, {"admin.html", "admin"},
+	} {
+		var body bytes.Buffer
+		if err := templates.ExecuteTemplate(&body, page.name, struct{ Page string }{page.kind}); err != nil {
+			return nil, fmt.Errorf("render %s: %w", page.name, err)
+		}
+		pages[page.name] = body.Bytes()
+	}
+	return pages, nil
+}
+
+var pages = func() map[string][]byte {
+	pages, err := renderPages(content)
+	if err != nil {
+		panic(err)
+	}
+	return pages
+}()
+
+func readAsset(name string) ([]byte, error) {
+	if data, ok := pages[name]; ok {
+		return data, nil
+	}
+	return content.ReadFile(name)
+}
 
 // This list is intentionally explicit: adding documentation, tests, or Go source
 // beside an asset must never make that file publicly accessible.
@@ -53,9 +92,10 @@ var publicFiles = map[string]string{
 // Do not turn arbitrary paths into a catch-all application route.
 var nodePagePath = regexp.MustCompile(`^/node/[1-9][0-9]{0,18}/?$`)
 
-// ETags are strong validators derived from embedded content, which is immutable
-// for the lifetime of the process; Cache-Control: no-cache clients revalidate
-// with them and receive 304 instead of the unchanged body.
+// ETags are strong validators derived from the complete response, including
+// shared HTML fragments. Assets stay immutable for the lifetime of the process;
+// Cache-Control: no-cache clients revalidate with them and receive 304 instead
+// of the unchanged body.
 var etags = func() map[string]string {
 	names := make(map[string]struct{}, len(publicFiles)+1)
 	for _, name := range publicFiles {
@@ -64,7 +104,7 @@ var etags = func() map[string]string {
 	names["node.html"] = struct{}{}
 	result := make(map[string]string, len(names))
 	for name := range names {
-		data, err := content.ReadFile(name)
+		data, err := readAsset(name)
 		if err != nil {
 			continue
 		}
@@ -118,7 +158,7 @@ func Handler() http.Handler {
 				return
 			}
 		}
-		data, err := content.ReadFile(name)
+		data, err := readAsset(name)
 		if err != nil {
 			http.NotFound(w, r)
 			return

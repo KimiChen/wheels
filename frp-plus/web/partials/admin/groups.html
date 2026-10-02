@@ -1,0 +1,18 @@
+{{define "admin/groups.html"}}
+<section data-admin-panel="groups" aria-labelledby="groups-title" hidden>
+  <div class="fa-page-heading fa-groups-heading"><div><h1 id="groups-title">节点分组</h1><p>一个节点可以加入多个分组，也可以保留空分组。</p></div><button id="group-new" class="wsk-button fa-primary" type="button"><svg class="wsk-icon" aria-hidden="true"><use href="#plus"/></svg>新建分组</button></div>
+  <p id="groups-health" class="wsk-alert wsk-info fa-notice" role="status" hidden>分组配置暂不可用，已保留当前编辑内容。请重新读取后再保存。</p>
+  <div class="fa-groups-layout">
+    <div class="wsk-panel fa-group-directory"><h2>已有分组 <span id="group-count" class="fa-muted">—</span></h2><ul id="group-list" class="fa-group-list" aria-label="选择要编辑的分组"></ul><p id="groups-empty" class="fa-empty">等待分组快照…</p></div>
+    <form id="group-form" class="wsk-panel fa-panel fa-group-form" aria-labelledby="group-editor-title">
+      <h2 id="group-editor-title">新建分组</h2>
+      <label class="wsk-field"><span class="wsk-label">分组名称</span><input id="group-name" class="wsk-control" name="name" required maxlength="128" autocomplete="off" aria-describedby="group-name-help" placeholder="例如：亚洲、生产环境"><small id="group-name-help" class="fa-muted">最多 128 字节。名称会随公开节点显示在公开页面。</small></label>
+      <fieldset class="fa-group-members-field"><legend>成员节点 <span id="group-member-count" class="fa-muted">0 个已选</span></legend><div id="group-members" class="fa-group-members"></div><p id="group-members-empty" class="fa-muted">尚无节点，可以先保存空分组。</p></fieldset>
+      <p class="fa-muted">可同时勾选多个节点；节点原有的其他分组不受影响。未加入任何分组的节点归为「未分组」。</p>
+      <p id="group-status" class="fa-muted" role="status" aria-live="polite">读取后即可创建分组。</p>
+      <div class="fa-group-actions"><button id="group-delete" class="wsk-danger wsk-button fa-danger" type="button" hidden>删除分组</button><div class="fa-actions"><button id="groups-reload" class="wsk-secondary wsk-button" type="button">重新读取</button><button id="group-save" class="wsk-button fa-primary" type="submit">创建分组</button></div></div>
+      <div id="group-confirm" class="wsk-alert wsk-warning fa-confirm" hidden><p id="group-confirm-copy"></p><div class="fa-actions"><button id="group-delete-no" class="wsk-secondary wsk-button" type="button">取消</button><button id="group-delete-yes" class="wsk-danger wsk-button fa-danger" type="button">确认删除分组</button></div></div>
+    </form>
+  </div>
+</section>
+{{end}}
