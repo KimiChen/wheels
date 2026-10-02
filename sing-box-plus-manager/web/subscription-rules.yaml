@@ -285,7 +285,6 @@ rules:
   # ========== 自有域名直连 ==========
   - DOMAIN-SUFFIX,paoyou.work,DIRECT
   - DOMAIN-SUFFIX,paoyou.com,DIRECT
-  - DOMAIN-SUFFIX,pick.art,DIRECT
   - DOMAIN-SUFFIX,kimi.pub,DIRECT
   - DOMAIN-SUFFIX,cocos.com,DIRECT
 

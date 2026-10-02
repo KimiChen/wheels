@@ -1252,6 +1252,9 @@ sing-box-plus-manager/
 避免产生拒绝响应；客户端切换到 TCP 的时间取决于客户端超时策略。
 `web/subscription-head.yaml` 的两个 DNS 上游还分别禁用 SVCB（TYPE64）和 HTTPS（TYPE65）
 记录的返回。`IN-TYPE,HTTPS` 匹配入站类型，不能用于阻断 DNS HTTPS 记录。
+订阅模板使用 DoH 的 `nameserver` 与 `proxy-server-nameserver`，两者都保留 TYPE64/65
+过滤；TUN 同时接管 UDP/TCP 53。`profile.store-fake-ip: true` 在单台设备重启后保留映射，
+不负责跨设备同步。Clash Verge 与 OpenClash 各自管理最终的 TUN 开关、协议栈和 DNS 监听端口。
 
 ## 7. 工作分解与里程碑
 
