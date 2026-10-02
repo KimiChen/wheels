@@ -3,10 +3,6 @@
   <div class="fm-top-brand"><a class="wsk-brand fm-brand" href="/" aria-label="FRP Plus 首页"><span class="wsk-brand-mark fm-brand-mark"><svg class="wsk-icon" aria-hidden="true"><use href="#pulse"/></svg></span><span>FRP <b>Plus</b></span></a>{{if eq .Page "admin"}}<span class="fm-top-label">后台</span>{{end}}</div>
   <div class="fm-top-actions">
     {{if eq .Page "home"}}
-    <div class="wsk-view-switch fm-view-switch" role="group" aria-label="展示方式" data-js-only>
-      <button class="fm-view-button" data-fm-view="cards" type="button" aria-label="卡片" aria-pressed="true"><svg class="wsk-icon" aria-hidden="true"><use href="#grid"/></svg>卡片</button>
-      <button class="fm-view-button" data-fm-view="table" type="button" aria-label="表格" aria-pressed="false"><svg class="wsk-icon" aria-hidden="true"><use href="#table"/></svg>表格</button>
-    </div>
     <button id="search-toggle" class="wsk-icon-button fm-search-toggle" data-js-only type="button" aria-label="搜索节点" aria-haspopup="dialog" aria-controls="node-search-dialog" aria-expanded="false" title="搜索节点（⌘ / Ctrl K）"><svg class="wsk-icon" aria-hidden="true"><use href="#search"/></svg></button>
     {{else if eq .Page "node"}}
     <a href="/" class="fm-top-link" aria-label="返回节点列表" title="返回节点列表"><svg class="wsk-icon" aria-hidden="true"><use href="#arrow-left"/></svg><span>返回节点列表</span></a>
@@ -17,7 +13,7 @@
     {{if eq .Page "admin"}}
     <button class="wsk-icon-button fm-logout" id="logout" type="button" aria-label="退出管理" title="退出管理" hidden><svg class="wsk-icon" aria-hidden="true"><use href="#exit"/></svg></button>
     {{else}}
-    <a class="wsk-button wsk-secondary fm-admin" href="/admin/" aria-label="管理工作台" title="管理工作台"><svg class="wsk-icon" aria-hidden="true"><use href="#settings"/></svg><span>管理</span></a>
+    <a class="wsk-icon-button fm-admin" href="/admin/" aria-label="管理工作台" title="管理工作台"><svg class="wsk-icon" aria-hidden="true"><use href="#settings"/></svg></a>
     {{end}}
   </div>
 </div></header>

@@ -1,11 +1,11 @@
 /* Monitoring layout and data states. Components and theme come from @layer wsk. */
-html { scroll-padding-top: 88px; scrollbar-gutter: stable; }
+html { scroll-padding-top: var(--space-16); scrollbar-gutter: stable; }
 body { font-size: var(--type-base); }
 .fm-page { display: flex; flex-direction: column; min-height: 100vh; min-height: 100dvh; }
 .fm-page > main { flex: 1 0 auto; min-width: 0; width: 100%; }
-.fm-topbar { display: block; flex-shrink: 0; padding: 0; background: var(--surface); }
+.fm-topbar { position: static; top: auto; z-index: auto; display: block; flex-shrink: 0; min-height: 0; padding: 0; background: var(--surface); }
 .fm-topbar-inner, .fm-footer-inner { width: 100%; max-width: 1344px; margin: 0 auto; padding-inline: var(--space-32); display: flex; align-items: center; justify-content: space-between; gap: var(--space-20); }
-.fm-topbar-inner { min-height: 64px; }
+.fm-topbar-inner { min-height: 48px; }
 .fm-brand { text-decoration: none; font-size: var(--type-lg); font-weight: 500; white-space: nowrap; }
 .fm-brand b { font-weight: 500; }
 .fm-brand-mark { flex-shrink: 0; width: 28px; height: 28px; border-radius: 8px; background: var(--text); color: var(--surface); box-shadow: none; }
@@ -13,8 +13,10 @@ body { font-size: var(--type-base); }
 .fm-top-brand { display: flex; align-items: center; gap: var(--space-16); }
 .fm-top-label { color: var(--muted-soft); font-size: var(--type-xs); }
 .fm-top-actions { display: flex; align-items: center; gap: var(--space-8); }
+.fm-top-actions > .wsk-icon-button { flex-shrink: 0; width: 36px; min-width: 36px; height: 36px; text-decoration: none; }
 .fm-top-link { display: inline-flex; align-items: center; gap: var(--space-6); color: var(--muted); text-decoration: none; font-size: var(--type-xs); white-space: nowrap; }
 .fm-top-link:hover { color: var(--accent); }
+.fm-view-switch { flex-shrink: 0; width: auto; }
 .fm-view-button { gap: var(--space-6); }
 .fm-refresh, .fm-admin { white-space: nowrap; }
 :where(.fm-page) > main { max-width: 1500px; margin: 0 auto; padding: var(--space-24) var(--space-32); }
@@ -138,11 +140,10 @@ body { font-size: var(--type-base); }
   .fm-topbar-inner, .fm-footer-inner { padding-inline: var(--space-16); gap: var(--space-8); }
   .fm-brand { gap: var(--space-8); font-size: var(--type-sm); }
   .fm-top-actions { gap: var(--space-6); }
-  .fm-admin span, .fm-top-link span, .fm-top-label { display: none; }
-  .fm-top-link { justify-content: center; width: 36px; min-height: 40px; }
+  .fm-top-link span, .fm-top-label { display: none; }
+  .fm-top-link { justify-content: center; width: 36px; min-height: 36px; }
   .fm-view-button svg { display: block; width: 16px; height: 16px; }
   .fm-view-switch button { min-width: 32px; padding-inline: var(--space-8); gap: 0; font-size: 0; }
-  .fm-theme, .fm-admin, .fm-search-toggle, .fm-logout { width: 36px; min-width: 36px; padding: 0; }
   :where(.fm-page) > main { padding: var(--space-16); }
   .fm-fleet-stats { gap: var(--space-12); margin-bottom: var(--space-16); }
   .fm-stat-card { padding: var(--space-12) var(--space-16); }
@@ -218,7 +219,7 @@ body { font-size: var(--type-base); }
 .fm-home-page .fm-sort { min-height: 36px; border-radius: 7px; box-shadow: none; }
 .fm-home-page .fm-sort > span { padding-right: 8px; margin-left: 10px; font-size: 11px; }
 .fm-home-page .fm-sort .wsk-select { min-height: 34px; width: 7.2rem; border-radius: 7px; font-size: 12px; padding: 6px 10px; }
-.fm-home-page .fm-refresh { min-height: 36px; width: 36px; }
+.fm-home-page .fm-refresh { flex-shrink: 0; height: 36px; min-height: 36px; width: 36px; }
 .fm-home-page .fm-list-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 28px; margin-bottom: 8px; color: var(--muted-soft); font-size: 11px; }
 .fm-home-page .fm-clear-filters { padding: 2px 0; min-height: 24px; color: var(--accent); font-size: 11px; }
 .fm-home-page .fm-node-grid { grid-template-columns: repeat(3,minmax(0,1fr)); gap: 14px; }
@@ -321,8 +322,9 @@ body { font-size: var(--type-base); }
   .fm-home-page .fm-home-description { font-size: 11px; }
   .fm-home-page .fm-refresh-cadence { margin-top: 4px; font-size: 10px; }
   .fm-home-page .fm-home-summary { grid-template-columns: minmax(0,1fr); gap: 12px; margin-bottom: 16px; }
-  .fm-home-page .fm-list-controls { width: 100%; margin-left: 0; gap: 6px; }
-  .fm-home-page .fm-quick-search { flex: 1; width: auto; }
+  .fm-home-page .fm-list-controls { flex-wrap: wrap; width: 100%; margin-left: 0; gap: 6px; }
+  .fm-home-page .fm-quick-search { flex: 1 0 100%; width: auto; }
+  .fm-home-page .fm-sort { margin-right: auto; }
   .fm-home-page .fm-sort > span { display: none; }
   .fm-home-page .fm-sort .wsk-select { width: 6.5rem; }
   .fm-home-page .fm-node-grid { grid-template-columns: minmax(0,1fr); gap: 12px; }

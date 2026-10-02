@@ -62,6 +62,10 @@
         <div class="fm-list-controls">
           <label class="fm-search fm-quick-search"><svg class="wsk-icon" aria-hidden="true"><use href="#search"/></svg><input id="node-quick-search" class="wsk-control" type="search" placeholder="搜索节点" aria-label="按节点名称筛选" autocomplete="off"></label>
           <label class="fm-sort"><span aria-hidden="true"><svg class="wsk-icon" viewBox="0 0 24 24"><path d="M7 3v18m-4-4 4 4 4-4M17 21V3m-4 4 4-4 4 4"/></svg>排序</span><select id="node-sort" class="wsk-select" aria-label="节点排序方式" title="名称、系统和到期按升序，指标按降序；缺失数据排在最后"><option value="default">默认</option></select></label>
+          <div class="wsk-view-switch fm-view-switch" role="group" aria-label="展示方式" data-js-only>
+            <button class="fm-view-button" data-fm-view="cards" type="button" aria-label="卡片" aria-pressed="true" title="卡片视图"><svg class="wsk-icon" aria-hidden="true"><use href="#grid"/></svg>卡片</button>
+            <button class="fm-view-button" data-fm-view="table" type="button" aria-label="表格" aria-pressed="false" title="表格视图"><svg class="wsk-icon" aria-hidden="true"><use href="#table"/></svg>表格</button>
+          </div>
           <button id="retry" class="wsk-icon-button fm-refresh" type="button" aria-label="刷新节点" title="刷新节点"><svg class="wsk-icon" aria-hidden="true"><use href="#refresh"/></svg></button>
         </div>
       </div>
