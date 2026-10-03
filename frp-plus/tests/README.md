@@ -19,6 +19,8 @@ python3 scripts/frp.py build --native
 transport、插件、原生 frpc 子命令、完整 `client/...`（含 Proxy/Visitor）、`server/...`
 及所有监控扩展测试。采集的 17 组脱敏向量保存在
 [fixtures/collect](fixtures/collect/README.md)，入口自动设置其路径。
+当前候选使用 `patches/series` 的完整 12 条补丁构建；下文单独提及补丁编号是能力来源，
+不表示只应用该补丁。控制库当前为 schema12，升级与恢复验证覆盖受支持的旧库范围。
 对并发/生命周期改动，在准备目录运行相关包的 `go test -race`；扩展包同时运行 `go vet`。
 `nginx_test.py` 另需本机 nginx 与 openssl；缺少时明确跳过。它在临时回环端口启动隔离反代，
 检查随包模板的来源限流、SSE 配额、OAuth 回调和 WSS 握手，不接触现有服务。
@@ -64,6 +66,11 @@ python3 tests/frp_detail_smoke.py \
 `monitor_smoke.py` 验证当前 SQLite、数字节点、公开 JSON/SSE、四种流量边界、历史目录
 开关和重启恢复；并覆盖 FRP 与监控连接的故障隔离、节点凭据变更以及真实探测任务生命周期。
 运行时业务变更使用临时库与主控刷新，不绕过或替代 Go 测试中的管理端认证。
+
+历史存储要求所在文件系统至少保留 1 GiB 可用空间。Linux 的 `/tmp` 若是较小的
+tmpfs，`--history` 会正确返回存储降级，不能据此认定二进制不兼容。此时先在磁盘上
+创建由测试用户拥有的 0700 私有临时目录，通过 `TMPDIR` 指定给测试进程；
+仍保留存储空间保护，不修改线上历史目录或降低测试断言。
 
 `frp_detail_smoke.py` 对 wire v1/v2 使用真实增强二进制和透明回环 WebSocket 中继，
 观察实际 `frp.detail` 帧：file/include/Store 来源与覆盖顺序、动态 TCP 请求和真实分配端口、
@@ -173,7 +180,8 @@ Node/Playwright/Chromium 参数，并将 `FRP_AUDIT_BROWSER_HELPER` 指向
 `monitor/config_restore_native_test.go` 在真实配置联合测试后保留一个 prepared 事务，
 强杀 Agent，通过原生 `managed-maintenance` 创建私有检查点并原地恢复，验证 Service
 身份更换、启动日志恢复、写入门禁、Admin 接管、第二次离线确认和 TCP/STCP Visitor。
-未接管不能离线确认；接管不会自动开放编辑。测试使用补丁 0008 的 Agent：
+未接管不能离线确认；接管不会自动开放编辑。恢复能力自补丁 0008 接入，
+以下测试使用当前完整 12 条补丁构建的 Agent：
 
 ```sh
 export FRP_CONFIG_RESTORE_E2E_AGENT="$PWD/dist/darwin-arm64/frp-plus-agent"
@@ -192,6 +200,40 @@ go test -race -mod=readonly ./extension/frpmonitor/monitor \
 `ops_managed_test.py` 单独验证归档清单、路径/大小/解压预算、损坏拒绝、helper 调用
 及格式边界；Go 的 managed/configuration 测试负责文件锁、写入中断、上下文漂移和
 恢复状态机。模拟 helper 的 Python 单测不替代上述真实原生流程。
+
+## 依赖检查点与停机完整归档
+
+format2 保留旧生成安装范围；无 Store、无托管根的旧 Agent 使用新版 Python 工具即可
+备份，不要求旧二进制提供 helper。format3 保留单 Agent 检查点 v1；format4 使用固定
+编号 USTAR 成员封装检查点 v2，或保存停机主控的 SQLite 与完整 TSDB。
+
+- `ops_checkpoint_test.py` 验证 format4 编号、摘要、长 UTF-8 路径、闭合清单、容量、
+  链接/穿越/PAX 拒绝及原生 helper 边界。
+- `ops_history_test.py` 验证主控 DB/WAL 一致副本、TSDB 文件和空目录、运行中锁拒绝、
+  来源漂移、同路径恢复、重算摘要后仍缺配置引用的拒绝，以及旧 Agent 的 format2 分派。
+  恢复父目录覆盖可信所有者的 0755 权限；staging/目标仍私有，拒绝不可信所有者、可写父目录、
+  链接和目录替换。此测试不代表普通用户可以写入 root 持有的 `/var/lib`。
+- `agent/configuration` 的 BackupGraph/Checkpoint 测试和 `agent/managed` 的
+  Checkpoint/Restore 测试验证 sealed 来源、includes、旧/新 Store 的依赖闭包、安装恢复计划、
+  门禁与 CAS；过期 journal 只归档幂等记录，不重新带回残余快照或回退能力。
+
+```sh
+python3 -m unittest discover -s tests -p 'ops_*test.py'
+# 在 scripts/frp.py 已准备的固定源码目录执行：
+cd .cache/upstream/worktree
+go test -race -mod=readonly ./extension/frpmonitor/agent/managed \
+  ./extension/frpmonitor/agent/configuration -run 'Checkpoint|Restore|BackupGraph' -count=1
+```
+
+2026-10-03 的最终 12 补丁本机验收使用真实 Agent/frps：wire v1/v2 均完成 mTLS、
+Token 文件、include 和 `https2http` 插件证书的 format4 备份、依赖破坏、同路径恢复与
+再次 HTTPS 转发；核对精确字节/纳秒 mtime、原锁 inode、身份轮换、幂等恢复 epoch，
+未接管时离线确认仍被拒绝。主控真实恢复核对旧 v6 及新 schema12，后者包含恢复完成记录；
+SQLite 校准、host/probe 历史保留，重启 Agent 后新样本继续增加。最终候选另通过 0755
+原父目录下的私有目标恢复；46 项 ops 测试通过。这些是隔离恢复证据，不是生产组备份完成证明。
+
+目前完整依赖恢复限同安装根、同路径；模板、外部映射和跨目录仍未开放。摘要校验不提供
+归档来源签名，真实归档、凭据与路径必须保存在私有环境。
 
 ## 明确失败与回退故障修复
 
@@ -281,13 +323,28 @@ python3 tests/linux_acceptance.py \
 
 ## 部署与持续负载
 
-以下结果需要在实际环境另行取得，不由本地单元测试或旧部署数字代替：
+2026-10-03，当前完整 12 补丁 Linux amd64 候选已在主控宿主机以服务用户运行隔离测试：
+`smoke.py` 的原生 wire v1/v2 和 `monitor_smoke.py --history` 通过。测试仅使用回环端口、
+临时配置与随机凭据，并将 `TMPDIR` 指向具备足够空间的私有磁盘目录；未使用生产凭据。
+隔离结果只证明该宿主机上的必要二进制流程，不替代生产数据或真实账号 OAuth 验收。
+
+同日首批生产替换另行通过：1 主控与 10 Agent 均运行已核验候选；替换前 11 份停机归档
+下载到本机并校验，旧程序/BUILD/unit 随组保留。独立验收核对 schema v6→v12、节点
+身份/凭据/分组/套餐/账本保留、10 节点旧历史共同桶摘要相同及新增持久样本；3 个独立
+原生 frps 的进程和程序未变。历史对比按相同 24h 桶起点读取，新样本使用 1h UTC 分钟桶。
+私有部署证据与公开产物摘要见根 README 和 todo；此结果不包含后续检查点 v3。
+
+以下范围仍需单独取得证据，不由本地单元测试或旧部署数字代替：
 
 - 真实 GitHub OAuth App、允许/拒绝账号、注销和反向代理部署。
-- Linux 双架构采样、systemd TERM/SIGKILL、备份恢复及切换。
+- Linux ARM64 运行、复杂 NAT/P2P，以及生产整组故障后的实际回退演练；本次停机、
+  整组备份与替换已通过，同组恢复路径及真实备份恢复另在隔离环境验证。
 - 长时历史保留、慢盘、队列背压、故障时实时监控和隧道独立性。
 - 按当前 schema 测量 100/500 节点持续 CPU、内存、磁盘及浏览器开销；这些是测试档位，
   不是容量承诺。容量工具应直接复用当前初始化与协议，不能查询已移除的历史表。
+
+本次授权范围是 1 个主控和 10 个 Agent 的 Linux amd64 一次性替换；ARM64、复杂 NAT、
+长时容量与稳定性验证不作为此次上线前置。必要的功能验证、完整备份和失败回退仍须完成。
 
 浏览器检查覆盖卡片、详情、管理编辑、浅/深主题、390px 窄屏、键盘及实时更新中的焦点保持。
 测试方法在本文件维护，配置与架构细节分别见根 README 和相应模块说明。
