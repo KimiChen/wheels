@@ -26,7 +26,7 @@ class LocalTests(unittest.TestCase):
             with closing(sqlite3.connect(folder / "control.sqlite")) as database:
                 database.row_factory = sqlite3.Row
                 credentials = dict(database.execute("SELECT * FROM nodes").fetchone())
-                self.assertEqual(database.execute("PRAGMA user_version").fetchone()[0], 6)
+                self.assertEqual(database.execute("PRAGMA user_version").fetchone()[0], 8)
                 self.assertEqual(database.execute("SELECT count(*) FROM node_groups").fetchone()[0], 0)
                 self.assertEqual(database.execute("SELECT count(*) FROM node_group_members").fetchone()[0], 0)
             agent = tomllib.loads((folder / "agent.toml").read_text())
@@ -44,6 +44,9 @@ class LocalTests(unittest.TestCase):
                 self.assertFalse((folder / old).exists())
             self.assertTrue(agent["telemetry"]["allowInsecureLoopback"])
             self.assertFalse(agent["telemetry"]["probeEnabled"])
+            self.assertNotIn("configManagement", agent["telemetry"])
+            self.assertNotIn("store", agent)
+            self.assertFalse((folder / "managed").exists())
             self.assertEqual(server["monitor"]["retentionDays"], 7)
             self.assertEqual(server["monitor"]["databaseFile"], str(folder / "control.sqlite"))
             self.assertNotIn(token, (folder / "agent.toml").read_text())
@@ -79,6 +82,44 @@ class LocalTests(unittest.TestCase):
             tasks = document["nodes"][0]["tasks"]
             self.assertEqual(document["nodes"][0]["agent_id"], "1")
             self.assertEqual(tasks[0]["target"], "127.0.0.1:17000")
+
+    def test_managed_store_is_explicit_private_and_cli_can_override_env(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            config = local.settings(root, {"FRP_CONFIG_MANAGEMENT_ENABLED": "true"})
+            for index, override, expected in ((0, None, True), (1, False, False), (2, True, True)):
+                folder = root / str(index)
+                local.initialize(folder, plain_http=True, config=config, manage_config=override)
+                agent = tomllib.loads((folder / "agent.toml").read_text())
+                managed = folder / "managed"
+                self.assertEqual(managed.exists(), expected)
+                if expected:
+                    self.assertEqual(agent["store"]["path"], str(managed / "store.json"))
+                    self.assertEqual(agent["telemetry"]["configManagement"], {"enabled": True, "root": str(managed)})
+                    self.assertEqual(managed.stat().st_mode & 0o777, 0o700)
+                    self.assertEqual((managed / "store.json").stat().st_mode & 0o777, 0o600)
+                    self.assertEqual(json.loads((managed / "store.json").read_text()), {"proxies": [], "visitors": []})
+                else:
+                    self.assertNotIn("store", agent)
+                    self.assertNotIn("configManagement", agent["telemetry"])
+            for invalid in ("yes", "1", "", "false "):
+                with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                    local.settings(root, {"FRP_CONFIG_MANAGEMENT_ENABLED": invalid})
+            with self.assertRaises(ValueError):
+                local._history_directory("managed", root / "demo")
+
+    def test_managed_init_failure_cleans_its_private_nested_staging(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            config = local.settings(root, {})
+            original = local.private
+            def fail_last(path, text):
+                if path.name == "installation.json":
+                    raise OSError("injected")
+                return original(path, text)
+            with mock.patch.object(local, "private", side_effect=fail_last), self.assertRaises(OSError):
+                local.initialize(root / "demo", plain_http=True, config=config, manage_config=True)
+            self.assertEqual(list(root.iterdir()), [])
 
     def test_env_size_limit_preserves_boundary_and_regular_parsing(self):
         with tempfile.TemporaryDirectory() as temporary:

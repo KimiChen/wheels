@@ -11,6 +11,7 @@ from pathlib import Path
 import platform
 import secrets
 import signal
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -22,13 +23,15 @@ from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 KEYS = {"FRP_MONITOR_PORT", "FRP_SERVER_PORT", "FRP_MONITOR_INTERVAL_SECONDS", "FRP_MONITOR_RETENTION_DAYS", "FRP_AGENT_NAME", "FRP_AGENT_IFACE", "FRP_MONITOR_HISTORY_DATA_PATH", "FRP_GITHUB_CLIENT_ID", "FRP_GITHUB_CLIENT_SECRET_FILE", "FRP_GITHUB_CALLBACK_URL", "FRP_GITHUB_ADMIN_USERS"}
+KEYS.add("FRP_CONFIG_MANAGEMENT_ENABLED")
 
 
 def settings(root=ROOT, environment=None):
     env = os.environ if environment is None else environment
     values = {"FRP_MONITOR_PORT": "17401", "FRP_SERVER_PORT": "17000", "FRP_MONITOR_INTERVAL_SECONDS": "1",
               "FRP_MONITOR_RETENTION_DAYS": "7", "FRP_AGENT_NAME": "本地演示节点", "FRP_AGENT_IFACE": "", "FRP_MONITOR_HISTORY_DATA_PATH": "",
-              "FRP_GITHUB_CLIENT_ID": "", "FRP_GITHUB_CLIENT_SECRET_FILE": "", "FRP_GITHUB_CALLBACK_URL": "", "FRP_GITHUB_ADMIN_USERS": ""}
+              "FRP_GITHUB_CLIENT_ID": "", "FRP_GITHUB_CLIENT_SECRET_FILE": "", "FRP_GITHUB_CALLBACK_URL": "", "FRP_GITHUB_ADMIN_USERS": "",
+              "FRP_CONFIG_MANAGEMENT_ENABLED": "false"}
     path = root / ".env"
     if path.exists() or path.is_symlink():
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -58,6 +61,10 @@ def settings(root=ROOT, environment=None):
     values.update({key: env[key] for key in KEYS if key in env})
     if any("$" in v or "`" in v or any(ord(c) < 32 for c in v) for v in values.values()):
         raise ValueError("configuration must use literal values without control characters")
+    enabled = values["FRP_CONFIG_MANAGEMENT_ENABLED"].lower()
+    if enabled not in ("true", "false"):
+        raise ValueError("FRP_CONFIG_MANAGEMENT_ENABLED must be true or false")
+    values["FRP_CONFIG_MANAGEMENT_ENABLED"] = enabled == "true"
     for key in ("FRP_MONITOR_PORT", "FRP_SERVER_PORT", "FRP_MONITOR_INTERVAL_SECONDS", "FRP_MONITOR_RETENTION_DAYS"):
         values[key] = int(values[key])
         maximum = 365 if key.endswith("DAYS") else 3600 if key.endswith("SECONDS") else 65535
@@ -142,7 +149,7 @@ def _history_directory(value, destination, *, check_files=True):
     relative = path.relative_to(destination)
     reserved = {"server.toml", "agent.toml", "control.sqlite", "control.sqlite-wal", "control.sqlite-shm",
                 "installation.json", "local.json", "github.secret", "agent.token", "frp.token",
-                "tls.crt", "tls.key", "local.crt", "local.key", "ca.crt"}
+                "tls.crt", "tls.key", "local.crt", "local.key", "ca.crt", "managed"}
     if relative.parts[0] in reserved:
         raise ValueError("history directory conflicts with a managed runtime file")
     current = path
@@ -206,6 +213,16 @@ def render_auth(directory):
             f'auth.tokenSource.file.path = {toml_value(str(directory / "frp.token"))}\n')
 
 
+def initialize_managed_store(staging, destination, enabled):
+    """Opt in only for a new installation; never import or overwrite native files."""
+    if not enabled:
+        return ""
+    root = staging / "managed"
+    root.mkdir(mode=0o700)
+    private(root / "store.json", '{"proxies":[],"visitors":[]}\n')
+    return f'store.path = {toml_value(str(destination / "managed/store.json"))}\n'
+
+
 def render_monitor(config, directory, *, bind, server_id, cert_file="", key_file="", oauth=""):
     q = lambda name: toml_value(str(directory / name))
     return ('\n[monitor]\nenabled = true\n'
@@ -217,17 +234,21 @@ def render_monitor(config, directory, *, bind, server_id, cert_file="", key_file
 
 
 def render_telemetry(config, directory, *, endpoint, server_id, ca_file="", probes=False,
-                     allow_private_probes=False, allow_insecure_loopback=False):
+                     allow_private_probes=False, allow_insecure_loopback=False, manage_config=False):
     q = lambda name: toml_value(str(directory / name))
     return ('\n[telemetry]\nenabled = true\n'
             f'endpoint = {toml_value(endpoint)}\nserverID = {toml_value(server_id)}\n'
             f'tokenFile = {q("agent.token")}\nintervalSeconds = {config["FRP_MONITOR_INTERVAL_SECONDS"]}\niface = {toml_value(config["FRP_AGENT_IFACE"])}\n'
             f'allowInsecureLoopback = {str(allow_insecure_loopback).lower()}\nprobeEnabled = {str(probes).lower()}\nprobeAllowPrivate = {str(allow_private_probes).lower()}\n'
-            + (f'caFile = {q(ca_file)}\n' if ca_file else ''))
+            + (f'caFile = {q(ca_file)}\n' if ca_file else '')
+            + ('\n[telemetry.configManagement]\nenabled = true\n'
+               f'root = {q("managed")}\n' if manage_config else ''))
 
 
-def initialize(destination: Path, *, plain_http=False, probes=False, config=None):
+def initialize(destination: Path, *, plain_http=False, probes=False, config=None, manage_config=None):
     c = settings() if config is None else config
+    if manage_config is None:
+        manage_config = c.get("FRP_CONFIG_MANAGEMENT_ENABLED", False)
     if destination.exists():
         raise ValueError("demo directory exists; use it or select another --directory")
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -256,19 +277,18 @@ def initialize(destination: Path, *, plain_http=False, probes=False, config=None
             + auth + render_monitor(c, destination, bind="127.0.0.1", server_id="local",
                 cert_file="" if plain_http else "local.crt", key_file="" if plain_http else "local.key", oauth=oauth))
         scheme = "ws" if plain_http else "wss"
+        managed_store = initialize_managed_store(staging, destination, manage_config)
         private(staging / "agent.toml", f'serverAddr = "127.0.0.1"\nserverPort = {c["FRP_SERVER_PORT"]}\nclientID = "{node_id}"\nloginFailExit = false\n'
-            + auth + render_telemetry(c, destination, endpoint=f'{scheme}://127.0.0.1:{c["FRP_MONITOR_PORT"]}/agent/v1/ws',
+            + managed_store + auth + render_telemetry(c, destination, endpoint=f'{scheme}://127.0.0.1:{c["FRP_MONITOR_PORT"]}/agent/v1/ws',
                 server_id="local", ca_file="" if plain_http else "local.crt", probes=probes,
-                allow_private_probes=probes, allow_insecure_loopback=plain_http))
+                allow_private_probes=probes, allow_insecure_loopback=plain_http, manage_config=manage_config))
         private(staging / "local.json", json.dumps({"url": f'{"http" if plain_http else "https"}://127.0.0.1:{c["FRP_MONITOR_PORT"]}/', "id": node_id}) + "\n")
         private(staging / "installation.json", json.dumps({"format": 2, "roles": ["server", "agent"]}) + "\n")
         os.rename(staging, destination)
     finally:
         # Remove only files created by this failed initialization, never an existing installation.
         if staging.exists():
-            for entry in staging.iterdir():
-                entry.unlink()
-            staging.rmdir()
+            shutil.rmtree(staging)
     return destination
 
 
@@ -349,14 +369,16 @@ def main():
     parser.add_argument("--directory", default="data/local")
     parser.add_argument("--http", action="store_true", help="init only: explicit plaintext loopback demonstration")
     parser.add_argument("--probes", action="store_true", help="init only: enable a TCP probe to this demonstration's loopback FRP port")
+    parser.add_argument("--manage-config", action=argparse.BooleanOptionalAction, default=None,
+                        help="init only: opt in to managed Store configuration (default: .env or disabled)")
     args = parser.parse_args()
     path = directory(args.directory)
     if args.action == "init":
-        initialize(path, plain_http=args.http, probes=args.probes)
+        initialize(path, plain_http=args.http, probes=args.probes, manage_config=args.manage_config)
         print(f"Initialized private local configuration: {path}")
     else:
-        if args.http or args.probes:
-            parser.error("--http and --probes apply only to init")
+        if args.http or args.probes or args.manage_config is not None:
+            parser.error("--http, --probes and --manage-config/--no-manage-config apply only to init")
         run_demo(path)
 
 

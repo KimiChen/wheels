@@ -91,7 +91,12 @@ CREATE TABLE config_operation_events (
  UNIQUE(operation_id,version)
 );
 CREATE INDEX config_operation_events_operation ON config_operation_events(operation_id,event_id);
+-- Configuration observations (schema v8).
+ALTER TABLE config_operations ADD COLUMN agent_result_json TEXT CHECK (agent_result_json IS NULL OR (length(agent_result_json)<=8192 AND json_valid(agent_result_json) AND json_type(agent_result_json)='object'));
+ALTER TABLE config_operations ADD COLUMN agent_observed_at_ms INTEGER;
+ALTER TABLE config_operation_events ADD COLUMN actor TEXT NOT NULL DEFAULT '';
+UPDATE config_operation_events SET actor=(SELECT creator FROM config_operations WHERE operation_id=config_operation_events.operation_id);
 -- Database identity; must match the restore check in scripts/ops.py
 -- and the startup check in monitor/control/store.go.
 PRAGMA application_id=1179798836;
-PRAGMA user_version=7;
+PRAGMA user_version=8;

@@ -63,7 +63,7 @@ func TestConfigOperationIdempotencyAndDatabaseActiveUniqueness(t *testing.T) {
 		t.Fatal("multiple active node operations accepted", err)
 	}
 	// Exercise the DB invariant directly, independently of application checks.
-	if _, err := f.s.db.Exec("INSERT INTO config_operations SELECT ?,node_id,'other-service',base_revision,candidate_digest,creator,deadline_at_ms,?,request_digest,state,version,created_at_ms,updated_at_ms FROM config_operations WHERE operation_id=?", configOperationID(3), configOperationID(1003), created.OperationID); err == nil {
+	if _, err := f.s.db.Exec("INSERT INTO config_operations SELECT ?,node_id,'other-service',base_revision,candidate_digest,creator,deadline_at_ms,?,request_digest,state,version,created_at_ms,updated_at_ms,agent_result_json,agent_observed_at_ms FROM config_operations WHERE operation_id=?", configOperationID(3), configOperationID(1003), created.OperationID); err == nil {
 		t.Fatal("database lacks active-operation uniqueness")
 	}
 	events, err := f.s.ListConfigOperationEvents(context.Background(), created.OperationID)
@@ -82,7 +82,7 @@ func TestConfigOperationDatabaseActiveStatesMatchProtocol(t *testing.T) {
 		if _, err := f.s.db.Exec("UPDATE config_operations SET state=? WHERE operation_id=?", state, o.OperationID); err != nil {
 			t.Fatal(err)
 		}
-		_, err := f.s.db.Exec("INSERT INTO config_operations SELECT ?,node_id,'other-service',base_revision,candidate_digest,creator,deadline_at_ms,?,request_digest,'draft',1,created_at_ms,updated_at_ms FROM config_operations WHERE operation_id=?", configOperationID(2), configOperationID(1002), o.OperationID)
+		_, err := f.s.db.Exec("INSERT INTO config_operations SELECT ?,node_id,'other-service',base_revision,candidate_digest,creator,deadline_at_ms,?,request_digest,'draft',1,created_at_ms,updated_at_ms,agent_result_json,agent_observed_at_ms FROM config_operations WHERE operation_id=?", configOperationID(2), configOperationID(1002), o.OperationID)
 		if shared.ConfigOperationActive(state) {
 			if err == nil {
 				t.Fatalf("active state %s did not reserve the node in SQLite", state)
@@ -364,7 +364,7 @@ func TestConfigOperationMigrationBacksUpCommittedWALBeforeV7(t *testing.T) {
 	if err := saved.QueryRow("SELECT count(*) FROM sqlite_master WHERE name='config_operations'").Scan(&operations); err != nil || operations != 0 {
 		t.Fatal("backup was created after migration", operations, err)
 	}
-	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 7 {
+	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 8 {
 		t.Fatal("v7 migration did not complete", version, err)
 	}
 	if err := s.Close(); err != nil {
@@ -399,5 +399,128 @@ func TestConfigOperationMigrationBackupFailurePreventsDDL(t *testing.T) {
 	}
 	if err := db.QueryRow("SELECT count(*) FROM sqlite_master WHERE name='config_operations'").Scan(&operations); err != nil || operations != 0 {
 		t.Fatal("failed backup created partial tables", operations, err)
+	}
+}
+
+func TestConfigOperationV8FactsActorAndActiveKeyset(t *testing.T) {
+	f := setup(t, utc("2026-10-03T12:00:00Z"), time.UTC)
+	first := f.create(DefaultNodeConfig("first"))
+	second := f.create(DefaultNodeConfig("second"))
+	o := createOperation(t, f.s, operationRequest(f, first.ID, 1))
+	old := o
+	view := &shared.ConfigOperationView{OperationID: o.OperationID, BaseRevision: o.BaseRevision, ContextRevision: strings.Repeat("c", 64), OldDigest: strings.Repeat("d", 64), CandidateDigest: strings.Repeat("b", 64), State: "prepared", CreatedAtMS: o.CreatedAtMS, UpdatedAtMS: o.CreatedAtMS, DeadlineAtMS: o.DeadlineAtMS}
+	var err error
+	o, err = f.s.TransitionConfigOperation(context.Background(), o.OperationID, ConfigOperationTransition{ExpectedVersion: o.Version, NextState: "validated", Code: "validated", Actor: "reviewer", CandidateDigest: view.CandidateDigest, Agent: view, AgentReceivedAtMS: f.clock.Load()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	view.ContextRevision = strings.Repeat("e", 64)
+	if o.Agent.ContextRevision == view.ContextRevision {
+		t.Fatal("caller retained observation ownership")
+	}
+	if _, err = f.s.TransitionConfigOperation(context.Background(), o.OperationID, ConfigOperationTransition{ExpectedVersion: old.Version, NextState: "failed", Code: "failed", Actor: "intruder"}); !errors.Is(err, ErrConflict) {
+		t.Fatal("stale CAS", err)
+	}
+	o = transitionOperation(t, f.s, o, "prepared", "prepared")
+	o = transitionOperation(t, f.s, o, "applying", "applying")
+	confirmed := *o.Agent
+	confirmed.State = "confirmed"
+	confirmed.StorePersisted = true
+	confirmed.RuntimeApplied = true
+	confirmed.RuntimeLoaded = true
+	confirmed.ResourcesReady = true
+	confirmed.BusinessChecked = true
+	o, err = f.s.TransitionConfigOperation(context.Background(), o.OperationID, ConfigOperationTransition{ExpectedVersion: o.Version, NextState: "verifying", Code: "verifying", Actor: "applier", Agent: &confirmed, AgentReceivedAtMS: f.clock.Load()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	o = transitionOperation(t, f.s, o, "confirmed", "confirmed")
+	other := createOperation(t, f.s, operationRequest(f, second.ID, 2))
+	active, err := f.s.ListActiveConfigOperations(context.Background(), "", 1)
+	if err != nil || len(active) != 1 || active[0].OperationID != other.OperationID {
+		t.Fatal("active scan", active, err)
+	}
+	active, err = f.s.ListActiveConfigOperations(context.Background(), other.OperationID, 1)
+	if err != nil || len(active) != 0 {
+		t.Fatal("keyset repeated", active, err)
+	}
+	path := f.s.cfg.Path
+	cfg := f.s.cfg
+	if err = f.s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	saved, err := reopened.GetConfigOperation(context.Background(), o.OperationID)
+	if err != nil || saved.Agent == nil || !saved.Agent.StorePersisted || !saved.Agent.RuntimeApplied || !saved.Agent.RuntimeLoaded || !saved.Agent.ResourcesReady || !saved.Agent.BusinessChecked {
+		t.Fatal("facts lost after restart", saved, err)
+	}
+	events, err := reopened.ListConfigOperationEvents(context.Background(), o.OperationID)
+	if err != nil || events[1].Actor != "reviewer" || events[4].Actor != "applier" {
+		t.Fatal("actor not atomic", events, err)
+	}
+	b, _ := os.ReadFile(path)
+	if strings.Contains(string(b), "intruder") {
+		t.Fatal("failed CAS appended audit")
+	}
+}
+
+func TestConfigOperationV7MigrationBacksUpAuditAndAddsActors(t *testing.T) {
+	path, db := versionSixDatabase(t)
+	operations, err := schemaSection(operationSchemaMarker, observationSchemaMarker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(operations + "PRAGMA user_version=7;"); err != nil {
+		t.Fatal(err)
+	}
+	id := configOperationID(1)
+	_, err = db.Exec("INSERT INTO config_operations(operation_id,node_id,service_id,base_revision,candidate_digest,creator,deadline_at_ms,idempotency_key,request_digest,state,version,created_at_ms,updated_at_ms) VALUES(?,1,'primary',?,'','original-actor',900000,?,?,'draft',1,1,1)", id, strings.Repeat("a", 64), configOperationID(2), strings.Repeat("b", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec("INSERT INTO config_operation_events(operation_id,version,state,code,changes_json,created_at_ms) VALUES(?,1,'draft','created','[]',1)", id); err != nil {
+		t.Fatal(err)
+	}
+	migrated, err := Open(Config{Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer migrated.Close()
+	events, err := migrated.ListConfigOperationEvents(context.Background(), id)
+	if err != nil || len(events) != 1 || events[0].Actor != "original-actor" {
+		t.Fatal("v7 audit not preserved/backfilled", events, err)
+	}
+	saved, err := sql.Open("sqlite", migrated.MigrationBackupPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer saved.Close()
+	var version, count int
+	if err = saved.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 7 {
+		t.Fatal("backup not v7", version, err)
+	}
+	if err = saved.QueryRow("SELECT count(*) FROM config_operation_events").Scan(&count); err != nil || count != 1 {
+		t.Fatal("backup omitted WAL audit", count, err)
+	}
+}
+
+func TestConfigOperationCloneSummaryPreservesSourceAndRejectsInvalidSource(t *testing.T) {
+	f := setup(t, utc("2026-10-03T12:00:00Z"), time.UTC)
+	node := f.create(DefaultNodeConfig("clone"))
+	input := operationRequest(f, node.ID, 1)
+	input.Changes = []ConfigOperationChange{{Kind: "proxy", Name: "new-object", Action: "create", CloneFrom: "original-object", Fields: []string{}}}
+	operation := createOperation(t, f.s, input)
+	events, err := f.s.ListConfigOperationEvents(context.Background(), operation.OperationID)
+	if err != nil || len(events) != 1 || events[0].Changes[0].CloneFrom != "original-object" {
+		t.Fatal("clone source missing from audit", events, err)
+	}
+	for _, change := range []ConfigOperationChange{{Kind: "proxy", Name: "new", Action: "update", CloneFrom: "old"}, {Kind: "proxy", Name: "same", Action: "create", CloneFrom: "same"}, {Kind: "proxy", Name: "new", Action: "create", CloneFrom: "bad\nsource"}, {Kind: "proxy", Name: "new", Action: "create", CloneFrom: strings.Repeat("x", 257)}} {
+		if _, err = operationChanges([]ConfigOperationChange{change}); !errors.Is(err, ErrInvalid) {
+			t.Fatal("invalid clone audit accepted", err)
+		}
 	}
 }

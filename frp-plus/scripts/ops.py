@@ -23,7 +23,8 @@ import tomllib
 from urllib.parse import urlsplit
 
 from local import (private, read_private, settings, control_database, github_config,
-                   _history_directory, toml_value, render_auth, render_monitor, render_telemetry)
+                   _history_directory, toml_value, render_auth, render_monitor, render_telemetry,
+                   initialize_managed_store)
 
 FILES = frozenset(('server.toml', 'agent.toml', 'github.secret', 'frp.token', 'agent.token',
                    'local.crt', 'local.key', 'tls.crt', 'tls.key', 'ca.crt', 'local.json',
@@ -97,6 +98,9 @@ def server_init(args):
 
 def agent_init(args):
     config = settings()
+    manage_config = getattr(args, 'manage_config', None)
+    if manage_config is None:
+        manage_config = config.get('FRP_CONFIG_MANAGEMENT_ENABLED', False)
     literal(args.monitor_url, 'monitor URL', maximum=2048)
     endpoint = urlsplit(args.monitor_url)
     if (endpoint.scheme != 'wss' or not endpoint.hostname or endpoint.path != '/agent/v1/ws'
@@ -116,11 +120,12 @@ def agent_init(args):
     def write(stage, final):
         private(stage / 'agent.token', token + '\n')
         private(stage / 'frp.token', frp + '\n')
+        managed_store = initialize_managed_store(stage, final, manage_config)
         private(stage / 'agent.toml', f'serverAddr = {toml_value(args.server_addr)}\nserverPort = {config["FRP_SERVER_PORT"]}\n'
                 f'clientID = {toml_value(args.client_id)}\nuser = {toml_value(args.user)}\nloginFailExit = false\n'
-                + render_auth(final) + render_telemetry(config, final, endpoint=args.monitor_url,
+                + managed_store + render_auth(final) + render_telemetry(config, final, endpoint=args.monitor_url,
                     server_id=args.server_id, ca_file="ca.crt" if ca else "", probes=args.probes,
-                    allow_private_probes=args.allow_private_probes))
+                    allow_private_probes=args.allow_private_probes, manage_config=manage_config))
         if ca:
             private(stage / 'ca.crt', ca.decode('utf-8'))
         private(stage / 'installation.json', '{"format":2,"roles":["agent"]}\n')
@@ -327,7 +332,7 @@ def restore(archive_path, directory):
                 integrity_check(connection, time.monotonic() + 30)
                 # Database identity constants; must match monitor/control/schema.sql
                 # and the startup check in monitor/control/store.go.
-                if connection.execute('PRAGMA application_id').fetchone() != (1179798836,) or connection.execute('PRAGMA user_version').fetchone()[0] not in (4, 5, 6, 7):
+                if connection.execute('PRAGMA application_id').fetchone() != (1179798836,) or connection.execute('PRAGMA user_version').fetchone()[0] not in (4, 5, 6, 7, 8):
                     raise ValueError('unsupported control database schema')
         # Generated TOML uses JSON-compatible quoted strings for file paths.
         for name in ('server.toml', 'agent.toml'):
@@ -405,6 +410,8 @@ def main():
     agent.add_argument('--ca')
     agent.add_argument('--probes', action='store_true')
     agent.add_argument('--allow-private-probes', action='store_true')
+    agent.add_argument('--manage-config', action=argparse.BooleanOptionalAction, default=None,
+                       help='opt in to managed Store configuration (default: .env or disabled)')
     save = commands.add_parser('backup')
     save.add_argument('--directory', required=True)
     save.add_argument('--output', required=True)

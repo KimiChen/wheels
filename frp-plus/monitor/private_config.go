@@ -26,6 +26,28 @@ func strictJSON(data []byte, target any) error {
 		if err != nil {
 			return err
 		}
+		// Only typed configuration patch values use RawMessage. Keep objects and
+		// nested containers outside the HTTP boundary; the field validator checks
+		// primitive type, array contents and limits after decoding.
+		if t == reflect.TypeOf(json.RawMessage{}) {
+			if delim, ok := tok.(json.Delim); ok {
+				if delim != json.Delim('[') {
+					return errors.New("unexpected patch structure")
+				}
+				for d.More() {
+					item, e := d.Token()
+					if e != nil {
+						return e
+					}
+					if _, nested := item.(json.Delim); nested {
+						return errors.New("nested patch structure")
+					}
+				}
+				_, err = d.Token()
+				return err
+			}
+			return nil
+		}
 		if t.Kind() == reflect.Pointer {
 			if tok == nil {
 				return nil

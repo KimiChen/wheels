@@ -21,7 +21,7 @@ func dialDetail(t *testing.T, s *Service, token, session string) *websocket.Conn
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { c.Close() })
-	if response.Header.Get(shared.CapabilitiesHeader) != shared.FRPDetailCapability {
+	if !hasCapability(strings.Split(response.Header.Get(shared.CapabilitiesHeader), ", "), shared.FRPDetailCapability) {
 		t.Fatal("authenticated upgrade did not advertise detail capability")
 	}
 	hello := fixture(t, "hello").Hello

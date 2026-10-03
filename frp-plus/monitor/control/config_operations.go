@@ -18,19 +18,21 @@ import (
 // ConfigOperation holds coordination metadata only. Neither candidate
 // configuration nor native secret values belong in the control database.
 type ConfigOperation struct {
-	OperationID     string `json:"operation_id"`
-	NodeID          string `json:"node_id"`
-	ServiceID       string `json:"service_id"`
-	BaseRevision    string `json:"base_revision"`
-	CandidateDigest string `json:"candidate_digest"`
-	Creator         string `json:"creator"`
-	DeadlineAtMS    int64  `json:"deadline_at_ms"`
-	IdempotencyKey  string `json:"idempotency_key"`
-	RequestDigest   string `json:"request_digest"`
-	State           string `json:"state"`
-	Version         int64  `json:"version"`
-	CreatedAtMS     int64  `json:"created_at_ms"`
-	UpdatedAtMS     int64  `json:"updated_at_ms"`
+	OperationID       string                      `json:"operation_id"`
+	NodeID            string                      `json:"node_id"`
+	ServiceID         string                      `json:"service_id"`
+	BaseRevision      string                      `json:"base_revision"`
+	CandidateDigest   string                      `json:"candidate_digest"`
+	Creator           string                      `json:"creator"`
+	DeadlineAtMS      int64                       `json:"deadline_at_ms"`
+	IdempotencyKey    string                      `json:"idempotency_key"`
+	RequestDigest     string                      `json:"request_digest"`
+	State             string                      `json:"state"`
+	Version           int64                       `json:"version"`
+	CreatedAtMS       int64                       `json:"created_at_ms"`
+	UpdatedAtMS       int64                       `json:"updated_at_ms"`
+	Agent             *shared.ConfigOperationView `json:"-"`
+	AgentReceivedAtMS int64                       `json:"-"`
 }
 
 type CreateConfigOperationRequest struct {
@@ -48,21 +50,26 @@ type CreateConfigOperationRequest struct {
 
 // ConfigOperationChange describes object/field names, never before/after values.
 type ConfigOperationChange struct {
-	Kind   string   `json:"kind"`
-	Name   string   `json:"name"`
-	Action string   `json:"action"`
-	Fields []string `json:"fields"`
+	CloneFrom string   `json:"clone_from,omitempty"`
+	Kind      string   `json:"kind"`
+	Name      string   `json:"name"`
+	Action    string   `json:"action"`
+	Fields    []string `json:"fields"`
 }
 
 type ConfigOperationTransition struct {
-	ExpectedVersion int64
-	NextState       string
-	Code            string
-	CandidateDigest string
-	Changes         []ConfigOperationChange
+	Actor             string
+	Agent             *shared.ConfigOperationView
+	AgentReceivedAtMS int64
+	ExpectedVersion   int64
+	NextState         string
+	Code              string
+	CandidateDigest   string
+	Changes           []ConfigOperationChange
 }
 
 type ConfigOperationEvent struct {
+	Actor       string                  `json:"actor"`
 	EventID     int64                   `json:"event_id"`
 	OperationID string                  `json:"operation_id"`
 	Version     int64                   `json:"version"`
@@ -72,16 +79,25 @@ type ConfigOperationEvent struct {
 	CreatedAtMS int64                   `json:"created_at_ms"`
 }
 
-const operationColumns = "operation_id,node_id,service_id,base_revision,candidate_digest,creator,deadline_at_ms,idempotency_key,request_digest,state,version,created_at_ms,updated_at_ms"
+const operationColumns = "operation_id,node_id,service_id,base_revision,candidate_digest,creator,deadline_at_ms,idempotency_key,request_digest,state,version,created_at_ms,updated_at_ms,agent_result_json,agent_observed_at_ms"
 
 func scanConfigOperation(row interface{ Scan(...any) error }) (*ConfigOperation, error) {
 	o := new(ConfigOperation)
-	err := row.Scan(&o.OperationID, &o.NodeID, &o.ServiceID, &o.BaseRevision, &o.CandidateDigest, &o.Creator, &o.DeadlineAtMS, &o.IdempotencyKey, &o.RequestDigest, &o.State, &o.Version, &o.CreatedAtMS, &o.UpdatedAtMS)
+	var agent sql.NullString
+	var received sql.NullInt64
+	err := row.Scan(&o.OperationID, &o.NodeID, &o.ServiceID, &o.BaseRevision, &o.CandidateDigest, &o.Creator, &o.DeadlineAtMS, &o.IdempotencyKey, &o.RequestDigest, &o.State, &o.Version, &o.CreatedAtMS, &o.UpdatedAtMS, &agent, &received)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, err
+	}
+	if agent.Valid {
+		var view shared.ConfigOperationView
+		if json.Unmarshal([]byte(agent.String), &view) != nil || view.Validate() != nil || view.OperationID != o.OperationID || view.BaseRevision != o.BaseRevision || view.CandidateDigest != o.CandidateDigest {
+			return nil, errors.New("invalid persisted configuration observation")
+		}
+		o.Agent, o.AgentReceivedAtMS = &view, received.Int64
 	}
 	return o, nil
 }
@@ -99,7 +115,7 @@ func operationChanges(input []ConfigOperationChange) ([]byte, error) {
 	}
 	seen := make(map[string]bool, len(input))
 	for _, c := range input {
-		if (c.Kind != "proxy" && c.Kind != "visitor") || !operationText(c.Name, 256) || !operationAction(c.Action) || len(c.Fields) > 64 {
+		if (c.CloneFrom != "" && (c.Action != "create" || !operationText(c.CloneFrom, 256) || c.CloneFrom == c.Name)) || (c.Kind != "proxy" && c.Kind != "visitor") || !operationText(c.Name, 256) || !operationAction(c.Action) || len(c.Fields) > 64 {
 			return nil, fmt.Errorf("%w: configuration change summary", ErrInvalid)
 		}
 		key := c.Kind + "\x00" + c.Name
@@ -140,8 +156,8 @@ func operationField(value string) bool {
 	return false
 }
 
-func appendConfigOperationEvent(tx *sql.Tx, o *ConfigOperation, code string, changes []byte, now int64) error {
-	_, err := tx.Exec("INSERT INTO config_operation_events(operation_id,version,state,code,changes_json,created_at_ms) VALUES(?,?,?,?,?,?)", o.OperationID, o.Version, o.State, code, string(changes), now)
+func appendConfigOperationEvent(tx *sql.Tx, o *ConfigOperation, code string, changes []byte, now int64, actor string) error {
+	_, err := tx.Exec("INSERT INTO config_operation_events(operation_id,version,state,code,changes_json,created_at_ms,actor) VALUES(?,?,?,?,?,?,?)", o.OperationID, o.Version, o.State, code, string(changes), now, actor)
 	return err
 }
 
@@ -183,11 +199,11 @@ func (s *Store) CreateConfigOperation(ctx context.Context, input CreateConfigOpe
 			return err
 		}
 		result = &ConfigOperation{OperationID: input.OperationID, NodeID: input.NodeID, ServiceID: input.ServiceID, BaseRevision: input.BaseRevision, CandidateDigest: input.CandidateDigest, Creator: input.Creator, DeadlineAtMS: input.DeadlineAtMS, IdempotencyKey: input.IdempotencyKey, RequestDigest: input.RequestDigest, State: "draft", Version: 1, CreatedAtMS: now, UpdatedAtMS: now}
-		_, err = tx.Exec("INSERT INTO config_operations("+operationColumns+") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", result.OperationID, result.NodeID, result.ServiceID, result.BaseRevision, result.CandidateDigest, result.Creator, result.DeadlineAtMS, result.IdempotencyKey, result.RequestDigest, result.State, result.Version, result.CreatedAtMS, result.UpdatedAtMS)
+		_, err = tx.Exec("INSERT INTO config_operations("+operationColumns+") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", result.OperationID, result.NodeID, result.ServiceID, result.BaseRevision, result.CandidateDigest, result.Creator, result.DeadlineAtMS, result.IdempotencyKey, result.RequestDigest, result.State, result.Version, result.CreatedAtMS, result.UpdatedAtMS, nil, nil)
 		if err != nil {
 			return err
 		}
-		return appendConfigOperationEvent(tx, result, "created", changes, now)
+		return appendConfigOperationEvent(tx, result, "created", changes, now, result.Creator)
 	})
 	if err != nil {
 		return nil, false, err
@@ -252,17 +268,34 @@ func (s *Store) TransitionConfigOperation(ctx context.Context, id string, input 
 	if err != nil {
 		return nil, err
 	}
+	if input.Actor != "" && !operationText(input.Actor, 128) {
+		return nil, ErrInvalid
+	}
+	var agentJSON any
+	if input.Agent != nil {
+		if input.Agent.Validate() != nil || input.Agent.OperationID != id || input.AgentReceivedAtMS <= 0 {
+			return nil, ErrInvalid
+		}
+		b, e := json.Marshal(input.Agent)
+		if e != nil || len(b) > 8192 {
+			return nil, ErrInvalid
+		}
+		agentJSON = string(b)
+		detached := new(shared.ConfigOperationView)
+		_ = json.Unmarshal(b, detached)
+		input.Agent = detached
+	}
 	var result *ConfigOperation
 	err = s.call(ctx, func(tx *sql.Tx) error {
 		o, err := scanConfigOperation(tx.QueryRow("SELECT "+operationColumns+" FROM config_operations WHERE operation_id=?", id))
 		if err != nil {
 			return err
 		}
-		if o.Version != input.ExpectedVersion || o.Version == math.MaxInt64 || !shared.ConfigOperationTransitionAllowed(o.State, input.NextState) {
+		if (o.State == input.NextState && input.Agent == nil && input.Code != "secret_stored" && input.Code != "outcome_unknown") || o.Version != input.ExpectedVersion || o.Version == math.MaxInt64 || (o.State != input.NextState && !shared.ConfigOperationTransitionAllowed(o.State, input.NextState)) {
 			return ErrConflict
 		}
 		now := s.cfg.Now().UnixMilli()
-		if (input.NextState == "validated" || input.NextState == "prepared" || input.NextState == "applying") && now >= o.DeadlineAtMS {
+		if o.State != input.NextState && (input.NextState == "validated" || input.NextState == "prepared" || input.NextState == "applying") && now >= o.DeadlineAtMS {
 			return ErrConflict
 		}
 		if input.CandidateDigest != "" {
@@ -281,8 +314,18 @@ func (s *Store) TransitionConfigOperation(ctx context.Context, id string, input 
 		if o.CandidateDigest == "" && (input.NextState == "validated" || input.NextState == "prepared" || input.NextState == "applying" || input.NextState == "verifying" || input.NextState == "confirmed" || input.NextState == "rolling_back" || input.NextState == "rolled_back") {
 			return fmt.Errorf("%w: validated candidate digest required", ErrInvalid)
 		}
+		if input.Agent != nil {
+			if input.Agent.BaseRevision != o.BaseRevision || input.Agent.CandidateDigest != o.CandidateDigest || (o.Agent != nil && (o.Agent.ContextRevision != input.Agent.ContextRevision || o.Agent.OldDigest != input.Agent.OldDigest || o.Agent.CreatedAtMS != input.Agent.CreatedAtMS || o.Agent.UpdatedAtMS > input.Agent.UpdatedAtMS)) {
+				return ErrConflict
+			}
+			o.Agent, o.AgentReceivedAtMS = input.Agent, input.AgentReceivedAtMS
+		}
+		actor := input.Actor
+		if actor == "" {
+			actor = o.Creator
+		}
 		o.State, o.Version, o.UpdatedAtMS = input.NextState, o.Version+1, now
-		updated, err := tx.Exec("UPDATE config_operations SET state=?,version=?,candidate_digest=?,updated_at_ms=? WHERE operation_id=? AND version=?", o.State, o.Version, o.CandidateDigest, o.UpdatedAtMS, id, input.ExpectedVersion)
+		updated, err := tx.Exec("UPDATE config_operations SET state=?,version=?,candidate_digest=?,updated_at_ms=?,agent_result_json=COALESCE(?,agent_result_json),agent_observed_at_ms=CASE WHEN ? IS NULL THEN agent_observed_at_ms ELSE ? END WHERE operation_id=? AND version=?", o.State, o.Version, o.CandidateDigest, o.UpdatedAtMS, agentJSON, agentJSON, input.AgentReceivedAtMS, id, input.ExpectedVersion)
 		if err != nil {
 			return err
 		}
@@ -293,7 +336,7 @@ func (s *Store) TransitionConfigOperation(ctx context.Context, id string, input 
 		if n != 1 {
 			return ErrConflict
 		}
-		if err = appendConfigOperationEvent(tx, o, input.Code, changes, now); err != nil {
+		if err = appendConfigOperationEvent(tx, o, input.Code, changes, now, actor); err != nil {
 			return err
 		}
 		result = o
@@ -306,6 +349,18 @@ func (s *Store) TransitionConfigOperation(ctx context.Context, id string, input 
 }
 
 func (s *Store) ListConfigOperationEvents(ctx context.Context, id string) ([]ConfigOperationEvent, error) {
+	return s.listConfigOperationEvents(ctx, id, 0)
+}
+
+// ListRecentConfigOperationEvents bounds administrative response size while
+// preserving the complete append-only history in the database.
+func (s *Store) ListRecentConfigOperationEvents(ctx context.Context, id string, limit int) ([]ConfigOperationEvent, error) {
+	if limit < 1 || limit > 256 {
+		return nil, ErrInvalid
+	}
+	return s.listConfigOperationEvents(ctx, id, limit)
+}
+func (s *Store) listConfigOperationEvents(ctx context.Context, id string, limit int) ([]ConfigOperationEvent, error) {
 	if !shared.ValidConfigOperationID(id) {
 		return nil, fmt.Errorf("%w: configuration operation ID", ErrInvalid)
 	}
@@ -314,7 +369,13 @@ func (s *Store) ListConfigOperationEvents(ctx context.Context, id string) ([]Con
 		if _, err := scanConfigOperation(tx.QueryRow("SELECT "+operationColumns+" FROM config_operations WHERE operation_id=?", id)); err != nil {
 			return err
 		}
-		rows, err := tx.Query("SELECT event_id,operation_id,version,state,code,changes_json,created_at_ms FROM config_operation_events WHERE operation_id=? ORDER BY event_id", id)
+		query := "SELECT event_id,operation_id,version,state,code,changes_json,created_at_ms,actor FROM config_operation_events WHERE operation_id=? ORDER BY event_id"
+		args := []any{id}
+		if limit > 0 {
+			query += " DESC LIMIT ?"
+			args = append(args, limit)
+		}
+		rows, err := tx.Query(query, args...)
 		if err != nil {
 			return err
 		}
@@ -322,7 +383,7 @@ func (s *Store) ListConfigOperationEvents(ctx context.Context, id string) ([]Con
 		for rows.Next() {
 			var e ConfigOperationEvent
 			var changes string
-			if err := rows.Scan(&e.EventID, &e.OperationID, &e.Version, &e.State, &e.Code, &changes, &e.CreatedAtMS); err != nil {
+			if err := rows.Scan(&e.EventID, &e.OperationID, &e.Version, &e.State, &e.Code, &changes, &e.CreatedAtMS, &e.Actor); err != nil {
 				return err
 			}
 			if err := json.Unmarshal([]byte(changes), &e.Changes); err != nil {
@@ -335,5 +396,35 @@ func (s *Store) ListConfigOperationEvents(ctx context.Context, id string) ([]Con
 	if err != nil {
 		return nil, err
 	}
+	if limit > 0 {
+		for i, j := 0, len(result)-1; i < j; i, j = i+1, j-1 {
+			result[i], result[j] = result[j], result[i]
+		}
+	}
 	return result, nil
+}
+
+// ListActiveConfigOperations uses a stable keyset, so old active operations
+// cannot disappear behind a stream of newer completed operations.
+func (s *Store) ListActiveConfigOperations(ctx context.Context, after string, limit int) ([]ConfigOperation, error) {
+	if (after != "" && !shared.ValidConfigOperationID(after)) || limit < 1 || limit > 100 {
+		return nil, ErrInvalid
+	}
+	result := []ConfigOperation{}
+	err := s.call(ctx, func(tx *sql.Tx) error {
+		rows, err := tx.Query("SELECT "+operationColumns+" FROM config_operations WHERE state IN ('draft','validated','prepared','applying','verifying','outcome_unknown','rolling_back','rollback_failed') AND operation_id>? ORDER BY operation_id LIMIT ?", after, limit)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			o, e := scanConfigOperation(rows)
+			if e != nil {
+				return e
+			}
+			result = append(result, *o)
+		}
+		return rows.Err()
+	})
+	return result, err
 }

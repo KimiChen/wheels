@@ -52,6 +52,7 @@ type node struct {
 	frpDetailAt         time.Time
 	frpDetailEnabled    bool
 	probeEnabled        bool
+	configLink          *configLink
 }
 
 type Service struct {
@@ -64,38 +65,39 @@ type Service struct {
 	listener net.Listener
 	// location is the accounting calendar timezone shared with the control
 	// store, used by the today-traffic DTO for day boundaries.
-	location        *time.Location
-	mu              sync.Mutex
-	nodes           map[string]*node
-	connections     map[*websocket.Conn]credential
-	wg              sync.WaitGroup
-	closeOnce       sync.Once
-	done            chan struct{}
-	handshakes      chan struct{}
-	streamsPublic   chan struct{}
-	streamsAdmin    chan struct{}
-	rateMu          sync.Mutex
-	rateTokens      float64
-	rateAt          time.Time
-	public          atomic.Pointer[PublicSnapshot]
-	publicJSON      atomic.Pointer[[]byte]
-	publishMu       sync.Mutex
-	adminPublishMu  sync.Mutex
-	adminGeneration atomic.Uint64
-	adminJSON       atomic.Pointer[adminEncodedSnapshot]
-	control         *control.Store
-	configs         atomic.Pointer[nodeConfigs]
-	groups          atomic.Pointer[groupBook]
-	store           *store.Store
-	storeFailed     bool
-	tasks           atomic.Pointer[probeBook]
-	taskError       atomic.Bool
-	queries         chan struct{}
-	configMu        sync.Mutex
-	credentialError atomic.Bool
-	admin           *adminState
-	serverProvider  shared.ServerProvider
-	serverSnapshot  atomic.Pointer[shared.ServerSnapshot]
+	location          *time.Location
+	mu                sync.Mutex
+	nodes             map[string]*node
+	connections       map[*websocket.Conn]credential
+	wg                sync.WaitGroup
+	closeOnce         sync.Once
+	done              chan struct{}
+	handshakes        chan struct{}
+	streamsPublic     chan struct{}
+	streamsAdmin      chan struct{}
+	rateMu            sync.Mutex
+	rateTokens        float64
+	rateAt            time.Time
+	public            atomic.Pointer[PublicSnapshot]
+	publicJSON        atomic.Pointer[[]byte]
+	publishMu         sync.Mutex
+	adminPublishMu    sync.Mutex
+	adminGeneration   atomic.Uint64
+	adminJSON         atomic.Pointer[adminEncodedSnapshot]
+	control           *control.Store
+	configs           atomic.Pointer[nodeConfigs]
+	groups            atomic.Pointer[groupBook]
+	store             *store.Store
+	storeFailed       bool
+	tasks             atomic.Pointer[probeBook]
+	taskError         atomic.Bool
+	queries           chan struct{}
+	configMu          sync.Mutex
+	credentialError   atomic.Bool
+	admin             *adminState
+	configCoordinator *configCoordinator
+	serverProvider    shared.ServerProvider
+	serverSnapshot    atomic.Pointer[shared.ServerSnapshot]
 }
 
 func Start(ctx context.Context, cfg shared.MonitorConfig, providers ...shared.ServerProvider) (*Service, error) {
@@ -169,7 +171,9 @@ func Start(ctx context.Context, cfg shared.MonitorConfig, providers ...shared.Se
 	}
 	s.publishSnapshot(time.Now())
 	s.publishAdminSnapshot()
-	s.wg.Add(4)
+	s.configCoordinator = newConfigCoordinator(s)
+	s.wg.Add(5)
+	go s.configReconcileLoop()
 	go s.serverLoop()
 	go s.taskLoop()
 	go func() {
@@ -328,7 +332,7 @@ func (s *Service) handleWS(w http.ResponseWriter, r *http.Request) {
 	up := websocket.Upgrader{HandshakeTimeout: 5 * time.Second, ReadBufferSize: 4096, WriteBufferSize: 4096, CheckOrigin: func(r *http.Request) bool { return r.Header.Get("Origin") == "" }}
 	// Old servers reject unknown hello capabilities. Advertising on this
 	// authenticated upgrade lets new agents keep their first frame compatible.
-	c, err := up.Upgrade(w, r, http.Header{shared.CapabilitiesHeader: []string{shared.FRPDetailCapability}})
+	c, err := up.Upgrade(w, r, configCapabilitiesHeader())
 	if err != nil {
 		return
 	}
@@ -356,6 +360,8 @@ func (s *Service) handleWS(w http.ResponseWriter, r *http.Request) {
 		n := s.nodes[id]
 		if n != nil && n.conn == c {
 			n.conn = nil
+			n.configLink.stop()
+			n.configLink = nil
 		}
 		s.mu.Unlock()
 	}()
@@ -380,6 +386,15 @@ func (s *Service) handleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	old := n.conn
+	n.configLink.stop()
+	var link *configLink
+	var commands <-chan shared.ConfigCommand
+	if hasCapability(hello.Capabilities, shared.ConfigManageCapability) {
+		link = newConfigLink()
+		commands = link.commands
+	}
+	n.configLink = link
+	defer link.stop()
 	n.conn = c
 	n.sessionID = hello.SessionID
 	n.sequence = 1
@@ -458,6 +473,11 @@ func (s *Service) handleWS(w http.ResponseWriter, r *http.Request) {
 				return
 			case <-s.ctx.Done():
 				return
+			case command := <-commands:
+				if !s.sendConfigCommand(id, c, link, command, &sequence) {
+					c.Close()
+					return
+				}
 			case <-updates.C:
 				if !pushTasks() {
 					c.Close()
@@ -473,8 +493,8 @@ func (s *Service) handleWS(w http.ResponseWriter, r *http.Request) {
 	}()
 	tokens, last := float64(8), time.Now()
 	rate, burst := float64(2), float64(8)
-	if hasCapability(hello.Capabilities, shared.FRPDetailCapability) {
-		rate, burst, tokens = 4, 12, 12
+	if hasCapability(hello.Capabilities, shared.FRPDetailCapability) || hasCapability(hello.Capabilities, shared.ConfigManageCapability) {
+		rate, burst, tokens = 6, 16, 16
 	}
 	if hasCapability(hello.Capabilities, "ping.v1") {
 		rate, burst, tokens = 40, 80, 80
@@ -500,9 +520,16 @@ func (s *Service) handleWS(w http.ResponseWriter, r *http.Request) {
 		}
 		tokens--
 		frame, err = shared.DecodeFrame(data)
-		if err != nil || (frame.Report == nil && frame.PingResult == nil && frame.FRPDetail == nil) {
+		if err != nil || (frame.Report == nil && frame.PingResult == nil && frame.FRPDetail == nil && frame.ConfigResult == nil) {
 			closeProtocol(c)
 			return
+		}
+		if frame.ConfigResult != nil {
+			if !s.acceptConfigResult(id, c, now, *frame.ConfigResult) {
+				closeProtocol(c)
+				return
+			}
+			continue
 		}
 		if frame.PingResult != nil {
 			if !hasCapability(hello.Capabilities, "ping.v1") || !s.acceptProbe(id, c, now, *frame.PingResult) {
@@ -559,7 +586,7 @@ func supportedCapabilities(offered []string) []string {
 	accepted := make([]string, 0, len(offered))
 	for _, capability := range offered {
 		switch capability {
-		case "metrics.v1", "frp.v1", "ping.v1", shared.FRPDetailCapability:
+		case "metrics.v1", "frp.v1", "ping.v1", shared.FRPDetailCapability, shared.ConfigManageCapability:
 			accepted = append(accepted, capability)
 		}
 	}
