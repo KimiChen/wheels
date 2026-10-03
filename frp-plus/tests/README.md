@@ -19,7 +19,7 @@ python3 scripts/frp.py build --native
 transport、插件、原生 frpc 子命令、完整 `client/...`（含 Proxy/Visitor）、`server/...`
 及所有监控扩展测试。采集的 17 组脱敏向量保存在
 [fixtures/collect](fixtures/collect/README.md)，入口自动设置其路径。
-当前候选使用 `patches/series` 的完整 12 条补丁构建；下文单独提及补丁编号是能力来源，
+当前候选使用 `patches/series` 的完整 15 条补丁构建；下文单独提及补丁编号是能力来源，
 不表示只应用该补丁。控制库当前为 schema12，升级与恢复验证覆盖受支持的旧库范围。
 对并发/生命周期改动，在准备目录运行相关包的 `go test -race`；扩展包同时运行 `go vet`。
 `nginx_test.py` 另需本机 nginx 与 openssl；缺少时明确跳过。它在临时回环端口启动隔离反代，
@@ -181,7 +181,7 @@ Node/Playwright/Chromium 参数，并将 `FRP_AUDIT_BROWSER_HELPER` 指向
 强杀 Agent，通过原生 `managed-maintenance` 创建私有检查点并原地恢复，验证 Service
 身份更换、启动日志恢复、写入门禁、Admin 接管、第二次离线确认和 TCP/STCP Visitor。
 未接管不能离线确认；接管不会自动开放编辑。恢复能力自补丁 0008 接入，
-以下测试使用当前完整 12 条补丁构建的 Agent：
+以下测试使用当前完整补丁链构建的 Agent：
 
 ```sh
 export FRP_CONFIG_RESTORE_E2E_AGENT="$PWD/dist/darwin-arm64/frp-plus-agent"
@@ -232,8 +232,9 @@ Token 文件、include 和 `https2http` 插件证书的 format4 备份、依赖�
 SQLite 校准、host/probe 历史保留，重启 Agent 后新样本继续增加。最终候选另通过 0755
 原父目录下的私有目标恢复；46 项 ops 测试通过。这些是隔离恢复证据，不是生产组备份完成证明。
 
-目前完整依赖恢复限同安装根、同路径；模板、外部映射和跨目录仍未开放。摘要校验不提供
-归档来源签名，真实归档、凭据与路径必须保存在私有环境。
+上述 12 补丁记录限同安装根、同路径；当前 Agent 检查点 v3 和主控 server manifest v2
+已增加显式模板、外部映射与跨目录能力，专项入口见本文末尾。摘要校验不提供归档来源签名，
+真实归档、凭据与路径必须保存在私有环境。
 
 ## 明确失败与回退故障修复
 
@@ -323,7 +324,7 @@ python3 tests/linux_acceptance.py \
 
 ## 部署与持续负载
 
-2026-10-03，当前完整 12 补丁 Linux amd64 候选已在主控宿主机以服务用户运行隔离测试：
+2026-10-03，首批完整 12 补丁 Linux amd64 候选已在主控宿主机以服务用户运行隔离测试：
 `smoke.py` 的原生 wire v1/v2 和 `monitor_smoke.py --history` 通过。测试仅使用回环端口、
 临时配置与随机凭据，并将 `TMPDIR` 指向具备足够空间的私有磁盘目录；未使用生产凭据。
 隔离结果只证明该宿主机上的必要二进制流程，不替代生产数据或真实账号 OAuth 验收。
@@ -377,3 +378,39 @@ frps/frpc、独立WSS和TCP业务，删除全部源后异地
 恢复外部配置依赖/数据库/TSDB，验证原模板与ENV秘密边界、WAL提交保留、旧host/probe样本
 与新样本续写、门禁确认重启和再备份。本机首次通过12.507秒；未测试Dashboard密码登录、
 逐桶历史等价或复杂NAT，不能据此声称这些场景已验证。未提供binary时会明确跳过。
+
+## 最终 15 补丁版本的验收记录
+
+2026-10-04，产品固定为 `1f9cb5b`，测试工具另固定 `ba9de07`。完整 15 补丁构建的
+Darwin arm64 Agent/Server 执行全 monitor race，启用本文全部原生与浏览器 helper，
+126.930 秒通过。managed 全包 race 17.946 秒、原生 client 全包 race 2.023 秒通过。
+源码和 Linux amd64 产品摘要见根 todo；不能将未提供二进制或浏览器时的 skip 算成验收。
+
+人工退出托管使用普通 `FRP_CONFIG_E2E_AGENT` / `FRP_CONFIG_E2E_SERVER` 参数：
+
+```sh
+# 从子项目根目录执行；Linux 测试需改用对应平台的同批产物。
+export FRP_CONFIG_E2E_AGENT="$PWD/dist/darwin-arm64/frp-plus-agent"
+export FRP_CONFIG_E2E_SERVER="$PWD/dist/darwin-arm64/frp-plus-server"
+cd .cache/upstream/worktree
+go test -race ./extension/frpmonitor/monitor -run '^TestConfigNativeExitManagementEndToEnd$' -count=1 -v
+```
+
+它先确认操作终态且无活动事务，实际停止进程并创建/校验封存检查点，只改本地 enabled
+标志后重启；检查身份、journal、秘密引用与快照保留，有鉴权的原生 Store 增删读、文件
+PUT、同值 reload 恢复，TCP/STCP Visitor 继续转发。启动参数实际变化仍须重启。
+
+最终 Linux amd64 产物以服务用户在隔离目录执行 `smoke.py`、`monitor_smoke.py --history`、
+不带 history 的 `monitor_smoke.py` 和 `ops_server_native_test.py`：四项整体通过，
+原生主控恢复实际执行且无跳过。覆盖双 wire、历史开关、独立通道失联、凭据撤销和跨目录
+完整恢复；没有使用线上空 Proxy/Visitor 列表代替业务转发验收。
+
+首轮 TCP smoke 失败原因未确定，原失败与保留原判定的诊断日志保留。`ba9de07` 区分
+有效前缀尚未完整与实际错误字节，仅就绪等待可重试前者，持续业务仍立即失败。22 项
+工具回归通过。完整主控恢复另曾因专用 staging 祖先目录不可读取失败；只修正测试环境
+权限后，原 worker 四项整体重跑通过，产品权限检查与断言未变。
+
+未受最终管理修复影响的扩展协议证据仍标注 `5a2cdf1`：控制传输/TLS 22 项、OIDC 12 项、
+双 wire 11 类型配置、原生分组/健康检查/限速/客户端插件、76 项 ops 无跳过与 136 项前端。
+XTCP 证明实际 STCP fallback，复杂 Linux NAT/P2P 仍未验收；Linux ARM64 仅编译。
+生产整组核验与真实运行摘要单独见根 README/todo，不从这些隔离结果推断。
