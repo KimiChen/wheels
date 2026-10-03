@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import argparse
 import base64
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 import copy
 from datetime import datetime, timezone
 import hashlib
@@ -35,7 +35,7 @@ import uuid
 
 from frp_detail_smoke import MAX_FRAME, replace_private, echo_tick
 from frp_smoke import HTTPPayload, UDPEcho, http_matches, local_server, udp_matches
-from smoke import (LOOPBACK, SmokeFailure, child, child_environment,
+from smoke import (LOOPBACK, PAYLOAD, SmokeFailure, child, child_environment,
                    echo_matches, interrupted, port_open,
                    positive_timeout, reserve_port, verify, wait_for, write_private)
 
@@ -44,6 +44,10 @@ CAPABILITIES = ["metrics.v1", "frp.v1", "frp.detail.v1", "config.manage.v1"]
 MAX_PENDING = 16
 MAX_HEADER = 16384
 EMPTY_STORE = '{"proxies":[],"visitors":[]}\n'
+TLS_NAME = "smoke.invalid"
+MUX_NAME = "mux.smoke.invalid"
+SOAK_RSS_LIMIT_KIB = 512 * 1024
+SOAK_REPORT_GAP = 8.0
 
 
 class PersistentEcho(socketserver.BaseRequestHandler):
@@ -56,6 +60,89 @@ class PersistentEcho(socketserver.BaseRequestHandler):
                 self.request.sendall(data)
         except OSError:
             pass
+
+
+@contextmanager
+def tls_backend(certificate, key):
+    """Terminate actual HTTPS only behind the native SNI passthrough proxy."""
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context.load_cert_chain(certificate, key)
+    names = set()
+    lock = threading.Lock()
+
+    def observe(_connection, name, _context):
+        with lock:
+            names.add(name)
+
+    def received_name():
+        with lock:
+            return TLS_NAME in names
+
+    context.set_servername_callback(observe)
+    with ThreadingHTTPServer((LOOPBACK, 0), HTTPPayload) as server:
+        server.daemon_threads = True
+        server.socket = context.wrap_socket(server.socket, server_side=True)
+        thread = threading.Thread(target=server.serve_forever,
+                                  kwargs={"poll_interval": .05}, daemon=True)
+        thread.start()
+        try:
+            yield server.server_address[1], received_name
+        finally:
+            server.shutdown()
+            thread.join(timeout=2)
+            if thread.is_alive():
+                raise SmokeFailure("local TLS target did not stop")
+
+
+def https_matches(port, certificate, hostname=TLS_NAME):
+    # Connect to loopback directly: the reserved hostname is TLS SNI and a
+    # verified certificate identity, never a DNS lookup or external endpoint.
+    context = ssl.create_default_context(cafile=str(certificate))
+    try:
+        with socket.create_connection((LOOPBACK, port), timeout=.8) as raw:
+            with context.wrap_socket(raw, server_hostname=hostname) as connection:
+                connection.sendall((f"GET /payload HTTP/1.1\r\nHost: {hostname}\r\n"
+                                    "Connection: close\r\n\r\n").encode())
+                with http.client.HTTPResponse(connection) as response:
+                    response.begin()
+                    data = response.read(len(PAYLOAD) + 1)
+                    if response.status != 200:
+                        return False
+                    if data != PAYLOAD:
+                        raise SmokeFailure("HTTPS tunnel altered the response payload")
+                    return True
+    except (OSError, http.client.HTTPException):
+        return False
+
+
+def connect_matches(port, hostname=MUX_NAME):
+    try:
+        with socket.create_connection((LOOPBACK, port), timeout=.8) as connection:
+            connection.sendall((f"CONNECT {hostname}:443 HTTP/1.1\r\n"
+                                f"Host: {hostname}:443\r\n\r\n").encode())
+            header = bytearray()
+            while not header.endswith(b"\r\n\r\n"):
+                value = connection.recv(1)
+                if not value:
+                    return False
+                header.extend(value)
+                if len(header) > MAX_HEADER:
+                    raise SmokeFailure("CONNECT response header exceeded limit")
+            if not bytes(header).split(b"\r\n", 1)[0].startswith(b"HTTP/1.1 200 "):
+                return False
+            connection.sendall(PAYLOAD)
+            data = bytearray()
+            while len(data) < len(PAYLOAD):
+                value = connection.recv(min(16384, len(PAYLOAD) - len(data)))
+                if not value:
+                    return False
+                data.extend(value)
+            if data != PAYLOAD:
+                raise SmokeFailure("CONNECT tunnel altered the echoed payload")
+            return True
+    except OSError:
+        return False
 
 
 def ws_frame(payload: bytes, opcode: int = 1) -> bytes:
@@ -169,6 +256,7 @@ class Controller:
         self.enabled, self.stopped, self.fault = True, False, None
         self.session, self.sequence, self.down_sequence = None, 0, 1
         self.sessions, self.reports, self.results_seen = 0, 0, 0
+        self.last_report_at, self.pending_peak = 0.0, 0
         self.detail, self.pending = None, {}
         self.last_sent = 0.0
         self.thread = threading.Thread(target=self._accept, daemon=True)
@@ -205,6 +293,7 @@ class Controller:
                 if not isinstance(params.get("metrics"), dict):
                     raise SmokeFailure("native host metrics stopped carrying measurements")
                 self.reports += 1
+                self.last_report_at = time.monotonic()
             elif method == "frp.detail":
                 if not isinstance(params.get("detail"), dict):
                     raise SmokeFailure("native detail payload is invalid")
@@ -286,7 +375,9 @@ class Controller:
             if self.fault:
                 raise SmokeFailure(self.fault)
             return {"session": self.session, "sessions": self.sessions, "reports": self.reports,
-                    "results": self.results_seen, "detail": copy.deepcopy(self.detail)}
+                    "results": self.results_seen, "detail": copy.deepcopy(self.detail),
+                    "sequence": self.sequence, "last_report_at": self.last_report_at,
+                    "pending": len(self.pending), "pending_peak": self.pending_peak}
 
     def send(self, action, service_id="", *, command_seconds=10, **fields):
         # Agent downlink is a token bucket of 1 command/s, burst 4. Pacing makes
@@ -305,6 +396,7 @@ class Controller:
                                    command_seconds=command_seconds, **fields)
             request = command["request_id"]
             self.pending[request] = None
+            self.pending_peak = max(self.pending_peak, len(self.pending))
             try:
                 self._write(self.connection, json.dumps({"jsonrpc": "2.0", "method": "config.command", "params": command}).encode())
             except OSError as exc:
@@ -397,7 +489,7 @@ def tls_material(root: Path):
     write_private(certificate, "")
     write_private(key, "")
     result = subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
-                             "-subj", "/CN=frp-plus-config-smoke", "-addext", "subjectAltName=IP:127.0.0.1",
+                             "-subj", "/CN=frp-plus-config-smoke", "-addext", "subjectAltName=IP:127.0.0.1,DNS:smoke.invalid",
                              "-keyout", str(key), "-out", str(certificate)], cwd=root, env=child_environment(),
                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                             timeout=30, check=False)
@@ -423,17 +515,48 @@ def reject_unauthenticated(controller, certificate):
         connection.close()
 
 
-def dashboard_request(port, password, method, path, body=None):
+def dashboard_request(port, password, method, path, body=None, *, json_response=False):
     connection = http.client.HTTPConnection(LOOPBACK, port, timeout=3)
     try:
         connection.request(method, path, body=body, headers={"Authorization": "Basic " + base64.b64encode(("smoke:" + password).encode()).decode(),
                            "Content-Type": "application/json"})
         response = connection.getresponse()
-        if len(response.read(MAX_FRAME + 1)) > MAX_FRAME:
+        raw = response.read(MAX_FRAME + 1)
+        if len(raw) > MAX_FRAME:
             raise SmokeFailure("native dashboard response exceeded limit")
+        if json_response:
+            if response.status != 200:
+                raise SmokeFailure("native dashboard status request failed")
+            return json.loads(raw)
         return response.status
     finally:
         connection.close()
+
+
+def process_stopped(pid):
+    result = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=2,
+                            env=child_environment(), check=False)
+    state = result.stdout.strip()
+    if result.returncode or not state:
+        raise SmokeFailure("native server suspension could not be observed")
+    return state.startswith(b"T")
+
+
+@contextmanager
+def suspended_server(service):
+    """Hold registration replies without manufacturing a native start error."""
+    if os.name != "posix" or not hasattr(signal, "SIGSTOP"):
+        raise SmokeFailure("deadline acceptance requires local process suspension support")
+    service.ensure_running()
+    try:
+        service._signal(signal.SIGSTOP)
+        wait_for("observed native server suspension", lambda: process_stopped(service.process.pid), (service,), 3)
+        yield
+    finally:
+        # Resume before Child.stop sends TERM, including setup/body failures.
+        # These are process groups created only for this disposable fixture.
+        service._signal(signal.SIGCONT)
 
 
 def journal_state(root, operation_id):
@@ -463,7 +586,132 @@ def verify_private_tree(root):
             raise SmokeFailure("managed transaction material permissions are not private")
 
 
-def run(agent: Path, server: Path, wire: str, timeout: float):
+def soak_duration(value):
+    try:
+        seconds = int(value)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError("soak duration must be 0 or 30..3600 whole seconds") from exc
+    if seconds != 0 and not 30 <= seconds <= 3600:
+        raise argparse.ArgumentTypeError("soak duration must be 0 or 30..3600 whole seconds")
+    return seconds
+
+
+def process_rss_kib(pid):
+    # Both macOS and Linux ps report RSS in KiB. Never request argv/environment,
+    # and fail explicitly if this test host cannot provide a numeric sample.
+    try:
+        result = subprocess.run(["ps", "-o", "rss=", "-p", str(pid)],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, timeout=2,
+                                env=child_environment(), check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise SmokeFailure("soak Agent RSS sampling unavailable") from exc
+    raw = result.stdout.strip()
+    if result.returncode or not raw.isdigit() or len(raw) > 12 or int(raw) <= 0:
+        raise SmokeFailure("soak Agent RSS sampling unavailable")
+    return int(raw)
+
+
+class SoakWitness:
+    """One never-reconnected TCP stream and a separately sampled health gate."""
+
+    def __init__(self, port, controller, processes, agent_pid):
+        self.controller, self.processes, self.agent_pid = controller, processes, agent_pid
+        self.initial = controller.snapshot()
+        if not self.initial["session"]:
+            raise SmokeFailure("soak requires an authenticated monitoring session")
+        self.started = time.monotonic()
+        self.stop_event, self.lock = threading.Event(), threading.Lock()
+        self.fault, self.ticks, self.rss_peak_kib = None, 0, 0
+        self.connection = socket.create_connection((LOOPBACK, port), timeout=1)
+        self.connection.settimeout(1)
+        self.threads = [threading.Thread(target=self._echo, daemon=True),
+                        threading.Thread(target=self._health, daemon=True)]
+        for thread in self.threads:
+            thread.start()
+
+    def _fail(self, message):
+        with self.lock:
+            if self.fault is None:
+                self.fault = message
+        self.stop_event.set()
+
+    def _echo(self):
+        next_tick = time.monotonic()
+        while not self.stop_event.is_set():
+            try:
+                echo_tick(self.connection)
+                with self.lock:
+                    self.ticks += 1
+            except (OSError, SmokeFailure):
+                if not self.stop_event.is_set():
+                    self._fail("soak unedited TCP stream was interrupted or corrupted")
+                return
+            next_tick += .2
+            # Avoid a burst after scheduler delay; the goal is sustained traffic.
+            next_tick = max(next_tick, time.monotonic())
+            self.stop_event.wait(max(0, next_tick - time.monotonic()))
+
+    def _health(self):
+        while not self.stop_event.is_set():
+            try:
+                for process in self.processes:
+                    process.ensure_running()
+                state = self.controller.snapshot()
+                if state["session"] != self.initial["session"] or state["sessions"] != self.initial["sessions"]:
+                    raise SmokeFailure("soak monitoring session changed")
+                if time.monotonic() - state["last_report_at"] > SOAK_REPORT_GAP:
+                    raise SmokeFailure("soak monitoring reports stopped advancing")
+                if state["pending"] > 1 or state["pending_peak"] > 1:
+                    raise SmokeFailure("soak pending control results exceeded single-request bound")
+                rss = process_rss_kib(self.agent_pid)
+                with self.lock:
+                    self.rss_peak_kib = max(self.rss_peak_kib, rss)
+                if rss > SOAK_RSS_LIMIT_KIB:
+                    raise SmokeFailure("soak Agent RSS exceeded the test-only 512 MiB ceiling")
+            except SmokeFailure as exc:
+                self._fail(str(exc))
+                return
+            self.stop_event.wait(1)
+
+    def check(self):
+        with self.lock:
+            if self.fault:
+                raise SmokeFailure(self.fault)
+
+    def finish(self, seconds):
+        self.check()
+        state = self.controller.snapshot()
+        with self.lock:
+            ticks, rss = self.ticks, self.rss_peak_kib
+        if time.monotonic() - self.started < seconds or ticks < seconds * 2 or rss <= 0:
+            raise SmokeFailure("soak did not collect enough persistent traffic or RSS evidence")
+        if state["reports"] - self.initial["reports"] < seconds // 2 or state["sequence"] <= self.initial["sequence"]:
+            raise SmokeFailure("soak did not collect enough advancing same-session reports")
+        if state["pending"] != 0 or state["session"] != self.initial["session"] or state["sessions"] != self.initial["sessions"]:
+            raise SmokeFailure("soak ended with a pending request or changed session")
+        return {"seconds": time.monotonic() - self.started, "ticks": ticks,
+                "reports": state["reports"] - self.initial["reports"],
+                "rss_peak_kib": rss, "pending_peak": state["pending_peak"]}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.stop_event.set()
+        try:
+            self.connection.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        self.connection.close()
+        for thread in self.threads:
+            thread.join(timeout=3)
+            if thread.is_alive():
+                raise SmokeFailure("soak witness thread did not stop within its deadline")
+        self.check()
+
+
+def run(agent: Path, server: Path, wire: str, timeout: float, soak_seconds: int = 0):
     cache = Path(__file__).resolve().parents[1] / ".cache"
     cache.mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="config-smoke-", dir=cache) as temporary, ExitStack() as stack:
@@ -480,24 +728,25 @@ def run(agent: Path, server: Path, wire: str, timeout: float):
         controller = Controller(certificate, key, control_token, (control_token, frp_token, native_secret, password, str(root)))
         stack.callback(controller.stop)
         reject_unauthenticated(controller, certificate)
-        reserved = [stack.enter_context(reserve_port()) for _ in range(5)]
-        control_port, http_port, visitor_port, dashboard_port, remote_port = [item.getsockname()[1] for item in reserved]
-        udp_socket = stack.enter_context(socket.socket(socket.AF_INET, socket.SOCK_DGRAM))
-        udp_socket.bind((LOOPBACK, 0))
-        udp_port = udp_socket.getsockname()[1]
-        # A live listener is a deterministic native registration conflict.
-        occupied = stack.enter_context(reserve_port())
-        occupied.listen(1)
-        occupied_port = occupied.getsockname()[1]
+        reserved = [stack.enter_context(reserve_port()) for _ in range(8)]
+        (control_port, http_port, visitor_port, dashboard_port, remote_port,
+         https_port, mux_port, xtcp_port) = [item.getsockname()[1] for item in reserved]
+        udp_sockets = [stack.enter_context(socket.socket(socket.AF_INET, socket.SOCK_DGRAM)) for _ in range(3)]
+        for connection in udp_sockets:
+            connection.bind((LOOPBACK, 0))
+        udp_port, sudp_port, stun_port = [connection.getsockname()[1] for connection in udp_sockets]
         tcp_local = stack.enter_context(local_server(socketserver.ThreadingTCPServer, PersistentEcho))
         udp_local = stack.enter_context(local_server(socketserver.UDPServer, UDPEcho))
         http_local = stack.enter_context(local_server(ThreadingHTTPServer, HTTPPayload))
+        https_local, received_sni = stack.enter_context(tls_backend(certificate, key))
         common = f'auth.method = "token"\nauth.token = "{frp_token}"\nlog.to = "console"\nlog.level = "warn"\n'
         server_path, agent_path = root / "server.toml", root / "agent.toml"
         write_private(server_path, f'bindAddr = "{LOOPBACK}"\nproxyBindAddr = "{LOOPBACK}"\nbindPort = {control_port}\n'
-                      f'vhostHTTPPort = {http_port}\n' + common)
+                      f'vhostHTTPPort = {http_port}\nvhostHTTPSPort = {https_port}\n'
+                      f'tcpmuxHTTPConnectPort = {mux_port}\n' + common)
         main = (f'serverAddr = "{LOOPBACK}"\nserverPort = {control_port}\nclientID = "1"\nloginFailExit = false\n'
                 f'transport.protocol = "tcp"\ntransport.wireProtocol = "{wire}"\ntransport.tls.enable = true\n'
+                f'natHoleStunServer = "{LOOPBACK}:{stun_port}"\n'
                 f'store.path = {json.dumps(str(store))}\nwebServer.addr = "{LOOPBACK}"\nwebServer.port = {dashboard_port}\n'
                 f'webServer.user = "smoke"\nwebServer.password = "{password}"\n' + common +
                 f'\n[telemetry]\nenabled = true\nendpoint = "wss://{LOOPBACK}:{controller.port}/agent/v1/ws"\n'
@@ -509,9 +758,11 @@ def run(agent: Path, server: Path, wire: str, timeout: float):
             verify(binary, config, "managed smoke configuration", timeout)
         for reservation in reserved:
             reservation.close()
-        udp_socket.close()
+        for connection in udp_sockets[:2]:
+            connection.close()
         service = stack.enter_context(child("managed FRP server", [str(server), "-c", str(server_path)], root))
-        wait_for("native server listeners", lambda: port_open(control_port) and port_open(http_port), (service,), timeout)
+        wait_for("native server listeners", lambda: all(port_open(port) for port in
+                 (control_port, http_port, https_port, mux_port)), (service,), timeout)
         client = stack.enter_context(child("managed FRP agent", [str(agent), "-c", str(agent_path)], root))
         processes = (service, client)
         wait_for("authenticated management session", lambda: bool(controller.snapshot()["session"]) and port_open(dashboard_port), processes, timeout)
@@ -554,9 +805,18 @@ def run(agent: Path, server: Path, wire: str, timeout: float):
                    change("managed-udp", type_="udp", fields={"localIP": LOOPBACK, "localPort": udp_local, "remotePort": udp_port}),
                    change("managed-http", type_="http", fields={"localIP": LOOPBACK, "localPort": http_local, "customDomains": ["smoke.invalid"]}),
                    change("managed-private", type_="stcp", fields={"localIP": LOOPBACK, "localPort": tcp_local}, reference=reference),
-                   change("managed-visitor", "visitor", "stcp", {"serverName": "managed-private", "bindAddr": LOOPBACK, "bindPort": visitor_port}, reference)]
+                   change("managed-visitor", "visitor", "stcp", {"serverName": "managed-private", "bindAddr": LOOPBACK, "bindPort": visitor_port}, reference),
+                   change("managed-https", type_="https", fields={"localIP": LOOPBACK, "localPort": https_local, "customDomains": [TLS_NAME]}),
+                   change("managed-mux", type_="tcpmux", fields={"localIP": LOOPBACK, "localPort": tcp_local, "customDomains": [MUX_NAME], "multiplexer": "httpconnect"}),
+                   change("managed-datagram", type_="sudp", fields={"localIP": LOOPBACK, "localPort": udp_local}, reference=reference),
+                   change("managed-sudp-visitor", "visitor", "sudp", {"serverName": "managed-datagram", "bindAddr": LOOPBACK, "bindPort": sudp_port}, reference),
+                   change("managed-xtcp", type_="xtcp", fields={"localIP": LOOPBACK, "localPort": tcp_local}, reference=reference),
+                   change("managed-xtcp-visitor", "visitor", "xtcp", {"serverName": "absent-xtcp", "bindAddr": LOOPBACK, "bindPort": xtcp_port,
+                          "protocol": "quic", "keepTunnelOpen": False, "fallbackTo": "managed-visitor", "fallbackTimeoutMs": 200}, reference)]
         prepared, intent = prepare(changes)
-        if store_bytes(store) != old or port_open(remote_port) or port_open(visitor_port) or http_matches(http_port):
+        if (store_bytes(store) != old or any(port_open(port) for port in (remote_port, visitor_port, xtcp_port))
+                or http_matches(http_port) or https_matches(https_port, certificate)
+                or connect_matches(mux_port) or udp_matches(sudp_port)):
             raise SmokeFailure("prepare changed Store bytes or native forwarding")
         replay = request("prepare", service_id, **intent)
         if expect_operation(replay, "prepared") != prepared["operation"]:
@@ -569,7 +829,26 @@ def run(agent: Path, server: Path, wire: str, timeout: float):
         wait_for("managed UDP forwarding", lambda: udp_matches(udp_port), processes, timeout)
         wait_for("managed HTTP forwarding", lambda: http_matches(http_port), processes, timeout)
         wait_for("managed STCP visitor forwarding", lambda: echo_matches(visitor_port), processes, timeout)
-        print(f"PASS config {wire}: TLS auth, private secret reference, prepare isolation, confirmed TCP/UDP/HTTP/STCP", flush=True)
+        wait_for("managed HTTPS with verified certificate and SNI", lambda: https_matches(https_port, certificate) and received_sni(), processes, timeout)
+        wait_for("managed TCPMUX CONNECT forwarding", lambda: connect_matches(mux_port), processes, timeout)
+        wait_for("managed SUDP visitor datagram forwarding", lambda: udp_matches(sudp_port), processes, timeout)
+        # The configured XTCP proxy is registered, but the Visitor intentionally
+        # targets a different absent peer. Native PreCheck rejects it before STUN
+        # so the test can prove actual STCP fallback without claiming NAT/P2P.
+        with socket.create_connection((LOOPBACK, xtcp_port), timeout=2) as fallback:
+            fallback.settimeout(2)
+
+            def fallback_active():
+                echo_tick(fallback)
+                detail = controller.snapshot()["detail"] or {}
+                proxy = next((item for item in detail.get("proxies", []) if item["name"] == "managed-xtcp"), {})
+                visitor = next((item for item in detail.get("visitors", []) if item["name"] == "managed-xtcp-visitor"), {})
+                return (proxy.get("status") == "running" and visitor.get("fallback_state") == "active"
+                        and visitor.get("p2p_state") == "failed" and visitor.get("remote_state") == "error")
+
+            wait_for("managed XTCP registration and actual STCP fallback", fallback_active, processes, timeout)
+        print(f"PASS config {wire}: TLS auth, private secret reference, prepare isolation, confirmed 8 Proxy/3 Visitor types", flush=True)
+        print(f"PASS config {wire}: TCP/UDP/HTTP/STCP, HTTPS CA+SNI, TCPMUX CONNECT, SUDP datagrams; XTCP uses actual STCP fallback (P2P failed)", flush=True)
 
         held = stack.enter_context(socket.create_connection((LOOPBACK, remote_port), timeout=1))
         held.settimeout(1)
@@ -582,11 +861,28 @@ def run(agent: Path, server: Path, wire: str, timeout: float):
         if fingerprint != (store_bytes(store), store.stat().st_mtime_ns):
             raise SmokeFailure("completed command retry rewrote the native Store")
         inventory = inspect()
-        if len(inventory["inventory"]["objects"]) != 5 or any(not item.get("writable") or item.get("source") != "store" for item in inventory["inventory"]["objects"]):
+        if len(inventory["inventory"]["objects"]) != 11 or any(not item.get("writable") or item.get("source") != "store" for item in inventory["inventory"]["objects"]):
             raise SmokeFailure("managed native objects did not have actual Store ownership")
-        secret_objects = [item for item in inventory["inventory"]["objects"] if item["type"] == "stcp"]
-        if len(secret_objects) != 2 or any(not any(value == {"path": "secretKey", "present": True} for value in item["secrets"]) for item in secret_objects):
+        secret_objects = [item for item in inventory["inventory"]["objects"] if item["type"] in ("stcp", "sudp", "xtcp")]
+        if len(secret_objects) != 6 or any(not any(value == {"path": "secretKey", "present": True} for value in item["secrets"]) for item in secret_objects):
             raise SmokeFailure("managed inventory omitted redacted secret presence")
+
+        for valid in changes:
+            invalid = copy.deepcopy(valid)
+            invalid["name"] = "invalid-" + valid["kind"] + "-" + valid["type"]
+            invalid_path = "transport.bandwidthLimitMode" if valid["kind"] == "proxy" else "serverName"
+            invalid["fields"] = [field for field in invalid["fields"] if field["path"] != invalid_path]
+            invalid["fields"].append({"path": invalid_path, "value": "invalid-mode" if valid["kind"] == "proxy" else ""})
+            operation_id = str(uuid.uuid4())
+            rejected = request("prepare", service_id, operation_id=operation_id, idempotency_key=str(uuid.uuid4()),
+                               base_revision=inventory["inventory"]["revision"], operation_deadline_at_ms=int(time.time() * 1000) + 120000,
+                               changes=[invalid])
+            if (rejected.get("code") != "validation_failed" or rejected.get("operation")
+                    or journal_state(managed, operation_id) is not None
+                    or fingerprint != (store_bytes(store), store.stat().st_mtime_ns)):
+                raise SmokeFailure("invalid native type candidate changed Store or created a transaction")
+            echo_tick(held)
+        print(f"PASS config {wire}: all 11 native types reject invalid candidates without journal, Store write or live TCP interruption", flush=True)
 
         if dashboard_request(dashboard_port, password, "GET", "/api/status") != 200:
             raise SmokeFailure("native dashboard read API became unavailable")
@@ -610,8 +906,107 @@ def run(agent: Path, server: Path, wire: str, timeout: float):
         expect_operation(request("rollback", service_id, **operation_fields(prepared)), "rolled_back")
         if store_bytes(store) != old:
             raise SmokeFailure("explicit rollback did not restore exact original Store bytes")
-        wait_for("removed native forwarding resources", lambda: not port_open(remote_port) and not port_open(visitor_port) and not udp_matches(udp_port) and not http_matches(http_port), processes, timeout)
+        wait_for("removed native forwarding resources", lambda: not any(port_open(port) for port in
+                 (remote_port, visitor_port, xtcp_port)) and not udp_matches(udp_port) and not udp_matches(sudp_port)
+                 and not http_matches(http_port) and not https_matches(https_port, certificate)
+                 and not connect_matches(mux_port), processes, timeout)
         print(f"PASS config {wire}: idempotent retries, redacted inventory, Dashboard write exclusion, exact rollback", flush=True)
+
+        # Exercise actual edits against registered resources, with each prior
+        # byte image retained so reverse-order rollback proves exact restoration.
+        transactions = []
+
+        def apply_edit(edits):
+            before = store_bytes(store)
+            candidate, _ = prepare(edits)
+            expect_operation(request("apply", service_id, **operation_fields(candidate)), "confirmed")
+            transactions.append((candidate, before))
+            return candidate
+
+        def instruction(item, action, fields=None):
+            return {"operation": action, "kind": item["kind"], "name": item["name"], "type": "",
+                    "fields": [{"path": key, "value": value} for key, value in (fields or {}).items()], "secrets": []}
+
+        def forwarding_ready():
+            return (echo_matches(remote_port) and udp_matches(udp_port) and http_matches(http_port)
+                    and echo_matches(visitor_port) and https_matches(https_port, certificate)
+                    and connect_matches(mux_port) and udp_matches(sudp_port) and echo_matches(xtcp_port))
+
+        disabled = copy.deepcopy(changes)
+        for item in disabled:
+            item["fields"].append({"path": "enabled", "value": False})
+        apply_edit(disabled)
+        inactive = inspect()["inventory"]["objects"]
+        if len(inactive) != 11 or any(item["active"] for item in inactive):
+            raise SmokeFailure("disabled creation lost objects or reported active resources")
+        if any(port_open(port) for port in (remote_port, visitor_port, xtcp_port)) or udp_matches(sudp_port):
+            raise SmokeFailure("disabled native objects opened forwarding listeners")
+        apply_edit([instruction(item, "enable") for item in changes])
+        wait_for("all enabled native forwarding types", forwarding_ready, processes, timeout)
+        apply_edit([instruction(item, "update", {"transport.useCompression": True}) for item in changes])
+        wait_for("all edited native forwarding types", forwarding_ready, processes, timeout)
+
+
+        if soak_seconds:
+            before_soak = store_bytes(store)
+            with SoakWitness(remote_port, controller, processes, client.process.pid) as witness:
+                rounds = 0
+                while time.monotonic() - witness.started < soak_seconds or rounds < 2:
+                    witness.check()
+                    candidate, _ = prepare([instruction(next(item for item in changes if item["name"] == "managed-http"),
+                                                       "update", {"transport.useCompression": False})])
+                    if store_bytes(store) != before_soak:
+                        raise SmokeFailure("soak prepare modified the Store")
+                    expect_operation(request("apply", service_id, **operation_fields(candidate)), "confirmed")
+                    wait_for("all native business paths during soak apply", forwarding_ready, processes, timeout)
+                    witness.check()
+                    expect_operation(request("rollback", service_id, **operation_fields(candidate)), "rolled_back")
+                    if store_bytes(store) != before_soak:
+                        raise SmokeFailure("soak rollback did not restore exact Store bytes")
+                    wait_for("all native business paths after soak rollback", forwarding_ready, processes, timeout)
+                    rounds += 1
+                    witness.check()
+                stats = witness.finish(soak_seconds)
+            if store_bytes(store) != before_soak:
+                raise SmokeFailure("soak ended with an altered Store")
+            print(f"PASS config {wire}: bounded soak {stats['seconds']:.1f}s, {rounds} complete HTTP apply/rollback cycles, "
+                  f"{stats['ticks']} same-TCP echoes, {stats['reports']} same-session reports, "
+                  f"pending peak {stats['pending_peak']}; sampled Agent RSS peak {stats['rss_peak_kib']} KiB "
+                  f"<= test-only {SOAK_RSS_LIMIT_KIB} KiB (not a production capacity claim)", flush=True)
+
+        clone_socket = stack.enter_context(socket.socket(socket.AF_INET, socket.SOCK_DGRAM))
+        clone_socket.bind((LOOPBACK, 0))
+        clone_port = clone_socket.getsockname()[1]
+        clone_socket.close()
+        clones = [change("copied-datagram", type_="sudp"),
+                  change("copied-sudp-visitor", "visitor", "sudp", {"serverName": "copied-datagram", "bindPort": clone_port})]
+        for item, source in zip(clones, ("managed-datagram", "managed-sudp-visitor")):
+            item["clone_from"] = source
+        apply_edit(clones)
+        wait_for("copied SUDP secret and compressed datagram", lambda: udp_matches(clone_port), processes, timeout)
+        cloned = [item for item in inspect()["inventory"]["objects"] if item["name"].startswith("copied-")]
+        if len(cloned) != 2 or any(not any(secret == {"path": "secretKey", "present": True} for secret in item["secrets"])
+                                   or not any(field == {"path": "transport.useCompression", "value": True} for field in item["fields"])
+                                   for item in cloned):
+            raise SmokeFailure("copy lost local secret or unedited transport setting")
+        renamed = [change("renamed-datagram", type_="sudp"),
+                   change("renamed-sudp-visitor", "visitor", "sudp", {"serverName": "renamed-datagram"})]
+        for item, source in zip(renamed, ("copied-datagram", "copied-sudp-visitor")):
+            item["clone_from"] = source
+        apply_edit([instruction(item, "delete") for item in clones] + renamed)
+        wait_for("renamed SUDP preserved private datagram", lambda: udp_matches(clone_port), processes, timeout)
+        if any(item["name"].startswith("copied-") for item in inspect()["inventory"]["objects"]):
+            raise SmokeFailure("rename left old Store objects behind")
+        apply_edit([instruction(item, "delete") for item in renamed])
+        wait_for("deleted SUDP visitor listener", lambda: not udp_matches(clone_port), processes, timeout)
+        wait_for("unrelated forwarding after delete", forwarding_ready, processes, timeout)
+        for candidate, before in reversed(transactions):
+            expect_operation(request("rollback", service_id, **operation_fields(candidate)), "rolled_back")
+            if store_bytes(store) != before:
+                raise SmokeFailure("edit sequence rollback did not restore its exact prior Store bytes")
+        if store_bytes(store) != old or inspect()["inventory"]["objects"]:
+            raise SmokeFailure("edit sequence did not return to the empty original Store")
+        print(f"PASS config {wire}: all-type disable/enable/update, SUDP copy/rename/delete preserves secret, reverse rollback restores each exact Store", flush=True)
 
         inventory = inspect()
         invalid = request("prepare", service_id, operation_id=str(uuid.uuid4()), idempotency_key=str(uuid.uuid4()),
@@ -637,27 +1032,40 @@ def run(agent: Path, server: Path, wire: str, timeout: float):
             raise SmokeFailure("configuration control interrupted the existing metrics session")
         print(f"PASS config {wire}: invalid candidate, Store CAS drift and file context drift rejected before write", flush=True)
 
-        unavailable = [change("registration-blocked", fields={"localIP": LOOPBACK, "localPort": tcp_local, "remotePort": occupied_port})]
+        unavailable = [change("registration-waiting", fields={"localIP": LOOPBACK, "localPort": tcp_local, "remotePort": 0})]
+
+        def waiting_for_registration(operation):
+            if (journal_state(managed, operation["operation"]["operation_id"]) != "verifying"
+                    or store_bytes(store) == old):
+                return False
+            statuses = dashboard_request(dashboard_port, password, "GET", "/api/status", json_response=True)
+            return any(item.get("name") == "registration-waiting" and item.get("status") == "wait start"
+                       for item in statuses.get("tcp", []))
+
         timed, _ = prepare(unavailable, ttl=9)
-        controller.send("apply", service_id, command_seconds=5, **operation_fields(timed))
-        wait_for("unconfirmed native candidate", lambda: journal_state(managed, timed["operation"]["operation_id"]) == "verifying" and store_bytes(store) != old, processes, timeout)
-        controller.disconnect()
-        wait_for("Agent local watchdog rollback without controller", lambda: journal_state(managed, timed["operation"]["operation_id"]) == "rolled_back" and store_bytes(store) == old, processes, timeout)
+        with suspended_server(service):
+            reports = controller.snapshot()["reports"]
+            controller.send("apply", service_id, command_seconds=5, **operation_fields(timed))
+            wait_for("native WaitStart with independent live monitoring", lambda: waiting_for_registration(timed)
+                     and controller.snapshot()["reports"] > reports, processes, timeout)
+            controller.disconnect()
+            wait_for("Agent local watchdog rollback without controller", lambda: journal_state(managed, timed["operation"]["operation_id"]) == "rolled_back" and store_bytes(store) == old, processes, timeout)
         controller.resume()
         wait_for("management reconnection", lambda: bool(controller.snapshot()["session"]), processes, timeout)
         recovered = inspect()
         if recovered["service_id"] != service_id:
             raise SmokeFailure("service identity changed on telemetry reconnect")
         expect_operation(request("query", service_id, **operation_fields(timed)), "rolled_back")
-        print(f"PASS config {wire}: controller loss during unready apply, Agent deadline and autonomous rollback", flush=True)
+        print(f"PASS config {wire}: real native WaitStart, controller loss, Agent deadline and autonomous rollback", flush=True)
 
         killed, _ = prepare(unavailable)
-        controller.send("apply", service_id, command_seconds=5, **operation_fields(killed))
-        wait_for("durable native transaction before crash", lambda: journal_state(managed, killed["operation"]["operation_id"]) == "verifying" and store_bytes(store) != old, processes, timeout)
-        controller.disconnect()
-        client._signal(signal.SIGKILL)
-        client.process.wait(timeout=3)
-        client.stop()
+        with suspended_server(service):
+            controller.send("apply", service_id, command_seconds=5, **operation_fields(killed))
+            wait_for("durable native WaitStart before crash", lambda: waiting_for_registration(killed), processes, timeout)
+            controller.disconnect()
+            client._signal(signal.SIGKILL)
+            client.process.wait(timeout=3)
+            client.stop()
         client = stack.enter_context(child("restarted managed FRP agent", [str(agent), "-c", str(agent_path)], root))
         processes = (service, client)
         wait_for("offline startup recovery before native Store load", lambda: store_bytes(store) == old and journal_state(managed, killed["operation"]["operation_id"]) == "rolled_back" and port_open(dashboard_port), processes, timeout)
@@ -685,12 +1093,14 @@ def main(argv=None):
     parser.add_argument("--server", type=Path, required=True)
     parser.add_argument("--wire", choices=("v1", "v2"), action="append")
     parser.add_argument("--timeout", type=positive_timeout, default=35.0)
+    parser.add_argument("--soak-seconds", type=soak_duration, default=0,
+                        help="optional bounded load gate: 0 disables, 30..3600 seconds per wire")
     args = parser.parse_args(argv)
     for binary in (args.agent, args.server):
         if not binary.is_file() or not os.access(binary, os.X_OK):
             parser.error("agent and server must be existing native executables")
     for wire in dict.fromkeys(args.wire or ("v1", "v2")):
-        run(args.agent.resolve(), args.server.resolve(), wire, args.timeout)
+        run(args.agent.resolve(), args.server.resolve(), wire, args.timeout, args.soak_seconds)
     return 0
 
 

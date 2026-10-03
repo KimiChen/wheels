@@ -1,17 +1,28 @@
 """Security/boundary checks for the synthetic config controller, no FRP process."""
 
+import argparse
 import base64
 import copy
 import json
+import os
+from pathlib import Path
+import socketserver
+import subprocess
+import sys
+import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
 from frp_config_smoke import (CAPABILITIES, MAX_FRAME, MAX_HEADER, MAX_PENDING,
                               ControlFrames, Controller, authenticate_upgrade,
                               change, expect_operation, make_command, operation_fields,
-                              ws_frame)
-from smoke import SmokeFailure
+                              ws_frame, tls_backend, tls_material, https_matches,
+                              connect_matches, MUX_NAME, PersistentEcho, SoakWitness, soak_duration,
+                              process_rss_kib, SOAK_RSS_LIMIT_KIB, suspended_server, process_stopped)
+from frp_smoke import local_server
+from smoke import SmokeFailure, child, wait_for
 
 
 TOKEN = "disposable-private-controller-token"
@@ -46,6 +57,25 @@ class Sink:
         self.data.append(data)
 
 
+class ConnectTarget(socketserver.BaseRequestHandler):
+    response = b"HTTP/1.1 200 Connection Established\r\n\r\n"
+
+    def handle(self):
+        self.request.settimeout(1)
+        header = bytearray()
+        while not header.endswith(b"\r\n\r\n") and len(header) < MAX_HEADER:
+            data = self.request.recv(1)
+            if not data:
+                return
+            header.extend(data)
+        if not header.startswith(f"CONNECT {MUX_NAME}:443 HTTP/1.1\r\n".encode()):
+            return
+        self.request.sendall(self.response)
+        if self.response.startswith(b"HTTP/1.1 200 "):
+            while data := self.request.recv(16384):
+                self.request.sendall(data)
+
+
 def controller_fixture():
     controller = Controller.__new__(Controller)
     controller.lock, controller.write_lock = threading.RLock(), threading.Lock()
@@ -53,12 +83,118 @@ def controller_fixture():
     controller.connection = Sink()
     controller.session, controller.sequence, controller.down_sequence = None, 0, 1
     controller.sessions, controller.reports, controller.results_seen = 0, 0, 0
+    controller.last_report_at, controller.pending_peak = 0.0, 0
     controller.detail, controller.pending = None, {}
     controller.fault, controller.last_sent = None, 0
     return controller
 
 
 class ControllerTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "posix", "process suspension requires POSIX")
+    def test_native_wait_fixture_resumes_process_on_success_and_all_failures(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with child("disposable suspension fixture", [sys.executable, "-c", "import time; time.sleep(300)"], Path(temporary)) as service:
+                with suspended_server(service):
+                    self.assertTrue(process_stopped(service.process.pid))
+                wait_for("resumed fixture", lambda: not process_stopped(service.process.pid), (service,), 3)
+                with self.assertRaisesRegex(SmokeFailure, "body failure"), suspended_server(service):
+                    self.assertTrue(process_stopped(service.process.pid))
+                    raise SmokeFailure("body failure")
+                wait_for("resumed failed fixture", lambda: not process_stopped(service.process.pid), (service,), 3)
+                with patch("frp_config_smoke.process_stopped", side_effect=SmokeFailure("observation failure")):
+                    with self.assertRaisesRegex(SmokeFailure, "observation failure"), suspended_server(service):
+                        self.fail("suspension setup must succeed before yielding")
+                wait_for("resumed setup failure", lambda: not process_stopped(service.process.pid), (service,), 3)
+            self.assertFalse(service.forced_stop)
+
+    def test_soak_option_has_explicit_disabled_and_bounded_duration(self):
+        for value in ("0", "30", "60", "3600"):
+            self.assertEqual(soak_duration(value), int(value))
+        for value in ("-1", "1", "29", "3601", "1.5", "nan", ""):
+            with self.assertRaises(argparse.ArgumentTypeError):
+                soak_duration(value)
+
+    def test_rss_sampling_requires_positive_numeric_evidence_and_no_argv(self):
+        with patch("frp_config_smoke.subprocess.run") as runner:
+            runner.return_value = subprocess.CompletedProcess([], 0, b"  16384\n")
+            self.assertEqual(process_rss_kib(123), 16384)
+            self.assertEqual(runner.call_args.args[0], ["ps", "-o", "rss=", "-p", "123"])
+            self.assertEqual(runner.call_args.kwargs["timeout"], 2)
+            for code, raw in ((0, b""), (0, b"0"), (1, b"100"), (0, b"private invalid")):
+                runner.return_value = subprocess.CompletedProcess([], code, raw)
+                with self.assertRaisesRegex(SmokeFailure, "sampling unavailable") as caught:
+                    process_rss_kib(123)
+                self.assertNotIn("private invalid", str(caught.exception))
+
+    def test_soak_keeps_one_connection_and_collects_actual_traffic(self):
+        class CountingEcho(PersistentEcho):
+            accepted = 0
+            def handle(self):
+                CountingEcho.accepted += 1
+                super().handle()
+        controller = controller_fixture()
+        controller._observe(rpc("hello", 1, capabilities=CAPABILITIES), controller.connection)
+        controller._observe(rpc("report", 2, metrics={}), controller.connection)
+        with local_server(socketserver.ThreadingTCPServer, CountingEcho) as port:
+            with patch("frp_config_smoke.process_rss_kib", return_value=16384):
+                with SoakWitness(port, controller, (), 123) as witness:
+                    with self.assertRaisesRegex(SmokeFailure, "enough persistent traffic"):
+                        witness.finish(30)
+                    time.sleep(1.05)
+                    controller._observe(rpc("report", 3, metrics={}), controller.connection)
+                    stats = witness.finish(1)
+                    self.assertGreaterEqual(stats["ticks"], 4)
+                    self.assertEqual(stats["rss_peak_kib"], 16384)
+                    self.assertEqual(stats["reports"], 1)
+                self.assertTrue(all(not thread.is_alive() for thread in witness.threads))
+        self.assertEqual(CountingEcho.accepted, 1)
+
+    def test_soak_detects_stream_loss_and_monitor_or_resource_failures(self):
+        class ClosesEcho(socketserver.BaseRequestHandler):
+            def handle(self):
+                self.request.settimeout(1)
+                self.request.sendall(self.request.recv(16384))
+        for condition in ("stream", "report", "pending", "rss", "session"):
+            controller = controller_fixture()
+            controller._observe(rpc("hello", 1, capabilities=CAPABILITIES), controller.connection)
+            controller._observe(rpc("report", 2, metrics={}), controller.connection)
+            if condition == "report":
+                controller.last_report_at = time.monotonic() - 10
+            if condition == "pending":
+                controller.pending_peak = 2
+            handler = ClosesEcho if condition == "stream" else PersistentEcho
+            rss = SOAK_RSS_LIMIT_KIB + 1 if condition == "rss" else 16384
+            with self.subTest(condition=condition), local_server(socketserver.ThreadingTCPServer, handler) as port:
+                with patch("frp_config_smoke.process_rss_kib", return_value=rss):
+                    with self.assertRaises(SmokeFailure):
+                        with SoakWitness(port, controller, (), 123) as witness:
+                            if condition == "session":
+                                with controller.lock:
+                                    controller.session = "replacement"
+                            deadline = time.monotonic() + 2
+                            while time.monotonic() < deadline:
+                                witness.check()
+                                time.sleep(.03)
+                            self.fail("soak ignored its failing health gate")
+                    self.assertTrue(all(not thread.is_alive() for thread in witness.threads))
+
+    def test_https_probe_requires_trusted_certificate_hostname_sni_and_payload(self):
+        with tempfile.TemporaryDirectory(prefix="frp-config-tls-test-") as directory:
+            certificate, key = tls_material(Path(directory))
+            with tls_backend(certificate, key) as (port, observed_sni):
+                self.assertTrue(https_matches(port, certificate))
+                self.assertTrue(observed_sni())
+                self.assertFalse(https_matches(port, certificate, "wrong.invalid"))
+
+    def test_connect_probe_requires_success_and_actual_tunnel_echo(self):
+        with local_server(socketserver.ThreadingTCPServer, ConnectTarget) as port:
+            self.assertTrue(connect_matches(port))
+            self.assertFalse(connect_matches(port, "wrong.invalid"))
+        class Rejected(ConnectTarget):
+            response = b"HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\n\r\n"
+        with local_server(socketserver.ThreadingTCPServer, Rejected) as port:
+            self.assertFalse(connect_matches(port))
+
     def test_authentication_precedes_upgrade_and_capabilities(self):
         status, accept = authenticate_upgrade(upgrade(), TOKEN)
         self.assertEqual(status, 101)
