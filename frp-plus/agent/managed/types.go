@@ -53,6 +53,8 @@ type Options struct {
 	// operation can restore disk, and therefore before the native Store loader.
 	// It is required when recovery material contains an unfinished operation.
 	RecoveryCheck func(context.Context, Operation) error
+	// RestoreCheck validates the frozen non-Store context of a restored checkpoint.
+	RestoreCheck func(context.Context, string) error
 }
 
 // StoreSnapshot distinguishes a missing initial Store from an existing empty

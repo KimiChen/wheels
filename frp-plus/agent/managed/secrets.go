@@ -18,7 +18,7 @@ const (
 // Native FRP still stores resolved values in its private Store/snapshots; this
 // reference layer does not claim to encrypt the native configuration.
 func (e *Engine) PutSecret(ctx context.Context, reference, value string) error {
-	if !serviceIdentity.MatchString(reference) || len(value) == 0 || len(value) > MaxSecretBytes || !utf8.ValidString(value) || strings.ContainsAny(value, "\x00\r\n") {
+	if !serviceIdentity.MatchString(reference) || !validSecretValue(value) {
 		return ErrInvalid
 	}
 	if err := ctx.Err(); err != nil {
@@ -28,6 +28,9 @@ func (e *Engine) PutSecret(ctx context.Context, reference, value string) error {
 	defer e.mu.Unlock()
 	if e.closing {
 		return ErrClosed
+	}
+	if e.restoreBlocked() {
+		return ErrRecovery
 	}
 	dir, err := e.root.subdir("secrets")
 	if err != nil {
@@ -104,4 +107,8 @@ func (e *Engine) ResolveSecrets(ctx context.Context, references []string) (map[s
 		result[reference] = value
 	}
 	return result, nil
+}
+
+func validSecretValue(value string) bool {
+	return len(value) > 0 && len(value) <= MaxSecretBytes && utf8.ValidString(value) && !strings.ContainsAny(value, "\x00\r\n")
 }

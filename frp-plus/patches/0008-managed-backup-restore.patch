@@ -1,0 +1,162 @@
+diff --git a/client/managed.go b/client/managed.go
+--- a/client/managed.go
++++ b/client/managed.go
+@@ -91,6 +91,7 @@
+ 		return managed.ErrRuntime
+ 	}
+ 	svr.managedProvider = provider
++	svr.managedRestoreProvider = provider
+ 	return nil
+ }
+ func (svr *Service) closeManaged() {
+diff --git a/client/service.go b/client/service.go
+--- a/client/service.go
++++ b/client/service.go
+@@ -119,11 +119,12 @@
+ 
+ // Service is the client service that connects to frps and provides proxy services.
+ type Service struct {
+-	managedEngine    *managed.Engine
+-	managedProvider  shared.ConfigProvider
+-	managedVNetReady atomic.Bool
+-	managedClosed    atomic.Bool
+-	managedContext   atomic.Pointer[string]
++	managedEngine          *managed.Engine
++	managedProvider        shared.ConfigProvider
++	managedRestoreProvider shared.RestoreProvider
++	managedVNetReady       atomic.Bool
++	managedClosed          atomic.Bool
++	managedContext         atomic.Pointer[string]
+ 
+ 	monitorControlError atomic.Pointer[shared.FRPErrorDetail]
+ 	ctlMu               sync.RWMutex
+@@ -712,7 +713,7 @@
+ 						log.Warnf("frp-plus telemetry stopped after an internal failure")
+ 					}
+ 				}()
+-				telemetry, err := agentmonitor.StartWithProviders(svr.ctx, svr.common.Telemetry, svr.monitorSnapshot, svr.monitorDetail, svr.managedProvider)
++				telemetry, err := agentmonitor.StartWithRestoreProviders(svr.ctx, svr.common.Telemetry, svr.monitorSnapshot, svr.monitorDetail, svr.managedProvider, svr.managedRestoreProvider)
+ 				if err != nil {
+ 					log.Warnf("frp-plus telemetry initialization failed: %v", err)
+ 					return
+diff --git a/cmd/frpc/sub/managed.go b/cmd/frpc/sub/managed.go
+--- a/cmd/frpc/sub/managed.go
++++ b/cmd/frpc/sub/managed.go
+@@ -44,7 +44,16 @@
+ 		}
+ 	}
+ 	input := configuration.Input{ConfigFile: configFile, StoreFile: storePath, WorkingDir: cwd, StartupCommon: result.Common, ReloadCommon: result.Common, FileMemory: configuration.Objects{Proxies: ps, Visitors: vs}, TemplateEnv: config.GetValues().Envs, HTTPProxy: os.Getenv("http_proxy"), UnsafeFeatures: features}
+-	engine, err := managed.Open(managed.Options{Root: opt.Root, StorePath: storePath, RecoveryCheck: func(ctx context.Context, op managed.Operation) error {
++	engine, err := managed.Open(managed.Options{Root: opt.Root, StorePath: storePath, RestoreCheck: func(ctx context.Context, expected string) error {
++		if ctx.Err() != nil {
++			return ctx.Err()
++		}
++		revision, err := configuration.InspectContext(input)
++		if err != nil || revision != expected {
++			return managed.ErrConflict
++		}
++		return nil
++	}, RecoveryCheck: func(ctx context.Context, op managed.Operation) error {
+ 		if ctx.Err() != nil {
+ 			return ctx.Err()
+ 		}
+diff --git a/cmd/frpc/sub/maintenance.go b/cmd/frpc/sub/maintenance.go
+new file mode 100644
+--- /dev/null
++++ b/cmd/frpc/sub/maintenance.go
+@@ -0,0 +1,95 @@
++package sub
++
++import (
++	"encoding/json"
++	"errors"
++	"path/filepath"
++
++	"github.com/fatedier/frp/extension/frpmonitor/agent/configuration"
++	"github.com/fatedier/frp/extension/frpmonitor/agent/managed"
++	"github.com/spf13/cobra"
++)
++
++func init() { rootCmd.AddCommand(newMaintenanceCommand()) }
++func maintenanceError(err error) error {
++	if err == nil {
++		return nil
++	}
++	code := "maintenance_unavailable"
++	switch {
++	case errors.Is(err, managed.ErrLocked):
++		code = "maintenance_locked"
++	case errors.Is(err, managed.ErrUnsafePath):
++		code = "maintenance_unsafe_path"
++	case errors.Is(err, managed.ErrInvalid):
++		code = "maintenance_invalid_request"
++	case errors.Is(err, managed.ErrConflict):
++		code = "maintenance_conflict"
++	case errors.Is(err, managed.ErrRecovery):
++		code = "maintenance_recovery_required"
++	}
++	if _, ok := err.(*configuration.Error); ok {
++		code = "maintenance_unsupported_dependency"
++	}
++	return errors.New(code)
++}
++func newMaintenanceCommand() *cobra.Command {
++	command := &cobra.Command{Use: "managed-maintenance", Short: "Create or restore private offline managed checkpoints", SilenceUsage: true}
++	command.SetFlagErrorFunc(func(*cobra.Command, error) error { return errors.New("maintenance_invalid_arguments") })
++	var offline bool
++	command.PersistentFlags().BoolVar(&offline, "offline", false, "Acknowledge that the local FRP agent must be stopped")
++	args := func(*cobra.Command, []string) error { return nil }
++	var output, checkpoint, root, digest, epoch string
++	run := func(action string) func(*cobra.Command, []string) error {
++		return func(cmd *cobra.Command, values []string) error {
++			if !offline || len(values) != 0 || cfgDir != "" || !strictConfigMode || len(allowUnsafe) != 0 {
++				return errors.New("maintenance_invalid_arguments")
++			}
++			file, err := filepath.Abs(cfgFile)
++			if err != nil {
++				return errors.New("maintenance_invalid_arguments")
++			}
++			if action == "restore-install" {
++				if !filepath.IsAbs(root) || filepath.Clean(root) != root {
++					return errors.New("maintenance_invalid_arguments")
++				}
++				expected := filepath.Join(filepath.Dir(root), "agent.toml")
++				if cmd.Flags().Changed("config") && file != expected {
++					return errors.New("maintenance_invalid_arguments")
++				}
++				file = expected
++			} else {
++				root = filepath.Join(filepath.Dir(file), "managed")
++			}
++			capture := configuration.MaintenanceCapture(file)
++			options := managed.Options{Root: root, StorePath: filepath.Join(root, "store.json")}
++			var result any
++			switch action {
++			case "checkpoint":
++				result, err = managed.ExportCheckpoint(cmd.Context(), options, capture, output)
++			case "restore-install":
++				result, err = managed.InstallCheckpoint(cmd.Context(), checkpoint, root, digest, capture, configuration.ValidateMaintenanceCheckpoint)
++			case "restore-confirm":
++				result, err = managed.ConfirmRestoration(cmd.Context(), options, epoch, digest, capture)
++			}
++			if err != nil {
++				return maintenanceError(err)
++			}
++			if json.NewEncoder(cmd.OutOrStdout()).Encode(result) != nil {
++				return errors.New("maintenance_output_unavailable")
++			}
++			return nil
++		}
++	}
++	export := &cobra.Command{Use: "checkpoint", Args: args, RunE: run("checkpoint"), SilenceUsage: true}
++	export.Flags().StringVar(&output, "output", "", "New absolute private checkpoint directory")
++	install := &cobra.Command{Use: "restore-install", Args: args, RunE: run("restore-install"), SilenceUsage: true}
++	install.Flags().StringVar(&checkpoint, "checkpoint", "", "Private checkpoint directory")
++	install.Flags().StringVar(&root, "root", "", "Original absolute managed root; remapping is not supported")
++	install.Flags().StringVar(&digest, "manifest-digest", "", "Exact checkpoint manifest SHA-256")
++	confirm := &cobra.Command{Use: "restore-confirm", Args: args, RunE: run("restore-confirm"), SilenceUsage: true}
++	confirm.Flags().StringVar(&epoch, "epoch", "", "Exact restored epoch")
++	confirm.Flags().StringVar(&digest, "manifest-digest", "", "Exact checkpoint manifest SHA-256")
++	command.AddCommand(export, install, confirm)
++	return command
++}

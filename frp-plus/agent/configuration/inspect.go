@@ -37,6 +37,8 @@ type snapshot struct {
 	referencedEnv           map[string]string
 	originalStore           []byte
 	originalStoreExists     bool
+	// Staged private materials are used only by offline restore closure validation.
+	material map[string]dependency
 }
 
 func (s *snapshot) issue(code string) {
@@ -128,7 +130,20 @@ func (s *snapshot) read(path, kind string, missingOK bool) ([]byte, bool) {
 		s.issue("unsupported_dependency")
 		return nil, false
 	}
-	data, info, err := regularNoLinks(path)
+	var data []byte
+	var info os.FileInfo
+	var err error
+	if s.material != nil {
+		staged, ok := s.material[path]
+		if !ok {
+			err = os.ErrNotExist
+		} else {
+			data = append([]byte(nil), staged.Data...)
+			d.Mode, d.Modified = staged.Mode, staged.Modified
+		}
+	} else {
+		data, info, err = regularNoLinks(path)
+	}
 	if info != nil {
 		d.Mode = uint32(info.Mode())
 		d.Modified = info.ModTime().UnixNano()
@@ -313,7 +328,11 @@ func (s *snapshot) dependencies(raw map[string]json.RawMessage, common bool) {
 }
 
 func takeSnapshot(input Input, contextOnly ...bool) (*snapshot, error) {
-	s := &snapshot{in: input, deps: []dependency{}, patterns: []includeMatch{}, issues: []Issue{}, conflicts: map[string]bool{}, referencedEnv: map[string]string{}}
+	return takeSnapshotMaterials(input, nil, contextOnly...)
+}
+
+func takeSnapshotMaterials(input Input, material map[string]dependency, contextOnly ...bool) (*snapshot, error) {
+	s := &snapshot{material: material, in: input, deps: []dependency{}, patterns: []includeMatch{}, issues: []Issue{}, conflicts: map[string]bool{}, referencedEnv: map[string]string{}}
 	var err error
 	if input.WorkingDir == "" {
 		s.in.WorkingDir, err = os.Getwd()

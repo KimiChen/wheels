@@ -60,6 +60,8 @@ type Engine struct {
 	closed           chan struct{}
 	closeOnce        sync.Once
 	recoveryGate     bool
+	restore          *restoreMarker
+	restoreVerified  bool
 	// Tests inject persistence failures/crashes at named boundaries only. No
 	// production option enables this hook or exposes private data to it.
 	testHook func(string) error
@@ -90,7 +92,7 @@ func Open(options Options) (_ *Engine, resultErr error) {
 	}
 	name := filepath.Base(options.StorePath)
 	reserved := strings.ToLower(name)
-	if !safeID.MatchString(strings.TrimSuffix(name, ".json")) || strings.HasPrefix(name, ".") || reserved == "operations" || reserved == "secrets" || reserved == "identity.json" {
+	if !safeID.MatchString(strings.TrimSuffix(name, ".json")) || strings.HasPrefix(name, ".") || reserved == "operations" || reserved == "secrets" || reserved == "identity.json" || reserved == "restore.json" {
 		return nil, ErrUnsafePath
 	}
 	root, err := openPrivateDir(options.Root)
@@ -107,11 +109,18 @@ func Open(options Options) (_ *Engine, resultErr error) {
 	if err != nil {
 		return nil, err
 	}
+	marker, markerErr := readRestoreMarker(root)
+	if markerErr != nil || (marker != nil && marker.State == "installing") {
+		return nil, ErrRecovery
+	}
 	e.operations, err = root.subdir("operations")
 	if err != nil {
 		return nil, err
 	}
 	if err := e.loadIdentity(); err != nil {
+		return nil, err
+	}
+	if err := e.loadRestore(); err != nil {
 		return nil, err
 	}
 	if _, err := e.readStore(); err != nil {
@@ -324,7 +333,7 @@ func (e *Engine) Prepare(ctx context.Context, request Request) (Operation, error
 	if e.closing {
 		return Operation{}, ErrClosed
 	}
-	if e.recoveryGate {
+	if e.recoveryGate || e.restoreBlocked() {
 		return Operation{}, ErrRecovery
 	}
 	if r, ok := e.records[request.ID]; ok {
@@ -436,6 +445,7 @@ func (e *Engine) AttachRuntime(runtime Runtime) error {
 		r := e.records[e.active]
 		e.launch(r, func() error { e.rollbackWorker(r.ID, true); return nil })
 	}
+	e.scheduleRestoreVerification()
 	return nil
 }
 
@@ -490,7 +500,7 @@ func (e *Engine) Apply(ctx context.Context, id string) (Operation, error) {
 		e.mu.Unlock()
 		return Operation{}, ErrClosed
 	}
-	if e.recoveryGate {
+	if e.recoveryGate || e.restoreBlocked() {
 		e.mu.Unlock()
 		return Operation{}, ErrRecovery
 	}
@@ -552,7 +562,7 @@ func (e *Engine) Rollback(ctx context.Context, id string) (Operation, error) {
 		e.mu.Unlock()
 		return Operation{}, ErrClosed
 	}
-	if e.recoveryGate {
+	if e.recoveryGate || e.restoreBlocked() {
 		e.mu.Unlock()
 		return Operation{}, ErrRecovery
 	}

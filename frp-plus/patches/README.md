@@ -12,6 +12,7 @@
 | `0005-frp-observation.patch` | 独立私有详情适配器、file/include/Store 来源、实际服务端入口、Proxy/Visitor/控制错误与恢复事件；不修改原生转发协议 |
 | `0006-config-management.patch` | 显式 Store 托管、原生写入口屏障、装载 Store 前恢复、整集内存替换，以及实际 Proxy/Visitor 运行验证；未托管模式保留原生行为 |
 | `0007-config-migration.patch` | 原生命令 `config-migrate plan/check`：生成私有候选与来源恢复包，维护后核对磁盘完整集合；不自动改写源文件、不声称运行时或业务已验证 |
+| `0008-managed-backup-restore.patch` | 原生离线检查点/恢复/确认入口、当前启动恢复验证和独立接管 Provider；恢复期间保持写管理关闭，离线确认后再激活 |
 
 补丁只包含上游既有文件的必要改动与相关测试，不提交完整上游树，不混入无关格式化。
 独立扩展通过 Overlay 映射到 `extension/frpmonitor/`。FRP wire protocol、原生命令、

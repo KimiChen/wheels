@@ -274,3 +274,31 @@ func TestProviderContextRollbackReturnsConflictWithHistory(t *testing.T) {
 		t.Fatal("context refusal touched runtime")
 	}
 }
+
+func TestProviderInputErrorKeepsSafeBusyClassification(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		err  error
+		code string
+	}{{"busy", managed.ErrBusy, "busy"}, {"private", errors.New("synthetic-sensitive-path-and-secret"), "unavailable"}} {
+		t.Run(test.name, func(t *testing.T) {
+			f := makeBridgeFixture(t)
+			inspection := f.provider.HandleConfig(context.Background(), bridgeCommand("inspect", ""))
+			f.provider.input = func() (Input, error) { return Input{}, test.err }
+			for _, action := range []string{"inspect", "prepare"} {
+				command := bridgeCommand(action, f.engine.ServiceID())
+				if action == "prepare" {
+					command.OperationID, _ = shared.NewConfigOperationID()
+					command.IdempotencyKey, _ = shared.NewConfigOperationID()
+					command.BaseRevision = inspection.Inventory.Revision
+					command.OperationDeadlineAtMS = time.Now().Add(time.Minute).UnixMilli()
+					command.Changes = []shared.ConfigChange{{Operation: "create", Kind: "proxy", Name: "busy-check", Type: "tcp", Fields: []shared.ConfigFieldPatch{}, Secrets: []shared.ConfigSecretPatch{}}}
+				}
+				result := f.provider.HandleConfig(context.Background(), command)
+				if result.Code != test.code || result.Validate() != nil {
+					t.Fatal("input failure lost safe classification")
+				}
+			}
+		})
+	}
+}

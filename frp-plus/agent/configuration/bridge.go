@@ -58,11 +58,15 @@ func (p *Provider) HandleConfig(ctx context.Context, command shared.ConfigComman
 		result.Code = "timeout"
 		return result
 	}
+	if command.Action != "inspect" && command.Action != "query" && p.engine.ManagementWriteBlocked() {
+		result.Code = "source_read_only"
+		return result
+	}
 	switch command.Action {
 	case "inspect":
 		input, err := p.input()
 		if err != nil {
-			result.Code = "unavailable"
+			result.Code = resultCode(err)
 			break
 		}
 		inspection, err := Inspect(input)
@@ -71,6 +75,13 @@ func (p *Provider) HandleConfig(ctx context.Context, command shared.ConfigComman
 			break
 		}
 		result.Inventory = inventoryView(inspection)
+		if p.engine.ManagementWriteBlocked() {
+			result.Inventory.State = "read_only"
+			result.Inventory.Issues = append(result.Inventory.Issues, shared.ConfigIssue{Code: "source_read_only"})
+			for i := range result.Inventory.Objects {
+				result.Inventory.Objects[i].Writable = false
+			}
+		}
 	case "secret":
 		if err := p.engine.PutSecret(ctx, command.Secret.Reference, command.Secret.Value); err != nil {
 			result.Code = resultCode(err)
@@ -122,7 +133,7 @@ func (p *Provider) prepare(ctx context.Context, command shared.ConfigCommand, re
 	}
 	input, err := p.input()
 	if err != nil {
-		result.Code = "unavailable"
+		result.Code = resultCode(err)
 		return
 	}
 	references := []string{}
