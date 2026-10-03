@@ -4,6 +4,7 @@ import {sessionLabels, freshnessLabels, frpLabel, bytes, decimal, percent, perce
 import {overview, filterAdminNodes, expiryCalendar, localDayKey} from "./admin-overview.mjs";
 import {directoryRow} from "./admin-directory.mjs";
 import {membershipDraft, membershipChanges, saveNodeChanges, retainAcknowledgedSettings} from "./admin-editor.mjs";
+import {renderFRPDetail, clearFRPDetail, serverEndpointText, createFRPDetailReader, renderNativeRegistryAccess} from "./admin-frp.mjs";
 
 const $ = id => document.getElementById(id);
 const client = adminClient({onExpired: () => locked("管理会话已失效，请重新登录。")});
@@ -14,6 +15,7 @@ const groupRows = new Map(), groupMembers = new Map();
 let calendarMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1), calendarDay = null;
 let editorMembership = null, settingsNeedsReload = false, editorSettingsSaved = false, bindingBaseline = null, bindingDirty = false;
 const acknowledgedSettings = new Map();
+const frpDetails = createFRPDetailReader({request: path => client.request(path), onChange: () => renderSelectedFRPDetail()});
 const el = (tag, text, className) => { const node = document.createElement(tag); if (text !== undefined) node.textContent = text; if (className) node.className = className; return node; };
 const safe = raw => typeof raw === "string" || (typeof raw === "number" && Number.isFinite(raw)) ? String(raw) : "—";
 function notice(text, state = "ready") {
@@ -34,11 +36,13 @@ function locked(message = "请使用 GitHub 登录。", disabled = false) {
   for (const dialog of document.querySelectorAll("dialog[open]")) dialog.close();
   client.clear(); loggedIn = false; refreshing = false; clearTimeout(poll); probeEpoch++;
   snapshotEpoch++; snapshot = null; selectedID = null; probes = null; pendingAction = null;
+  frpDetails.clear();
   groupsEpoch++; groups = []; groupsReady = false; draft = groupDraft(); groupDirty = false; groupMessage = ""; pendingGroupDelete = null;
   groupRows.clear(); groupMembers.clear(); $("group-list").replaceChildren(); $("group-members").replaceChildren(); $("group-form").reset(); $("group-confirm").hidden = true;
   $("group-editor-title").textContent = "新建分组"; $("group-save").textContent = "创建分组";
   for (const id of ["group-count", "group-member-count", "group-status", "group-confirm-copy"]) $(id).textContent = "";
   clearSecret(); cards.clear(); $("node-list").replaceChildren(); $("node-details").replaceChildren(); $("server-registry").replaceChildren(); $("probe-rows").replaceChildren();
+  clearFRPDetail($("node-frp-details"));
   $("binding-form").reset(); $("settings-form").reset(); settingsRevision = null; settingsDirty = false; $("create-form").reset(); $("node-search").value = "";
   editorMembership = null; settingsNeedsReload = false; editorSettingsSaved = false; bindingBaseline = null; bindingDirty = false; acknowledgedSettings.clear();
   $("node-editor-groups").replaceChildren(); $("node-editor-groups-status").textContent = ""; $("node-editor-groups-status").hidden = true;
@@ -67,6 +71,7 @@ async function refreshNodes(force = false) {
     const next = retainAcknowledgedSettings(adminSnapshot(await client.request("/api/admin/v1/nodes")), acknowledgedSettings);
     if (!loggedIn || generation !== snapshotEpoch) return;
     snapshot = next; renderNodes(); renderRegistry();
+    if (selectedID && !$("editor-resources").hidden) void refreshSelectedFRPDetail();
     if (groupGeneration === groupsEpoch) { groups = next.groups; groupsReady = next.groups_state === "ready"; }
     renderGroups();
     $("probe-health").hidden = next.probes_state !== "degraded";
@@ -223,6 +228,7 @@ function renderCalendar() {
 }
 function selectNode(id, pane = "settings") {
   const changed = selectedID !== id;
+  if (changed) frpDetails.clear();
   selectedID = id; pendingAction = null; $("confirm-action").hidden = true;
   const node = snapshot?.nodes.find(item => item.id === id);
   $("node-panel").hidden = !node;
@@ -232,9 +238,11 @@ function selectNode(id, pane = "settings") {
   renderDetail(); showEditorPane(pane); openDialog("node-panel");
 }
 function discardNodeEditor() {
+  frpDetails.clear();
   selectedID = null; pendingAction = null; editorMembership = null; settingsRevision = null; settingsDirty = false;
   settingsNeedsReload = false; editorSettingsSaved = false; bindingBaseline = null; bindingDirty = false;
   $("settings-form").reset(); $("binding-form").reset(); $("node-editor-groups").replaceChildren(); $("node-details").replaceChildren();
+  clearFRPDetail($("node-frp-details"));
   for (const id of ["node-name-label", "node-id", "node-session", "settings-current", "settings-status", "node-editor-groups-status", "confirm-copy"]) $(id).textContent = "";
   $("node-editor-groups-status").hidden = true; $("binding-summary").textContent = "—"; $("confirm-action").hidden = true;
   $("node-panel").hidden = true;
@@ -257,6 +265,18 @@ function showEditorPane(pane) {
   $("editor-save").hidden = !settingsPane && pane !== "binding";
   $("editor-save").setAttribute("form", pane === "binding" ? "binding-form" : "settings-form");
   $("editor-save").textContent = "保存修改";
+  if (pane === "resources") void refreshSelectedFRPDetail();
+}
+
+async function refreshSelectedFRPDetail() {
+  if (!loggedIn || !selectedID || $("editor-resources").hidden) return;
+  const id = selectedID, generation = snapshotEpoch;
+  await frpDetails.load(id, () => loggedIn && selectedID === id && snapshotEpoch === generation && $("node-panel").open && !$("editor-resources").hidden);
+}
+function renderSelectedFRPDetail() {
+  const node = snapshot?.nodes.find(item => item.id === selectedID); if (!loggedIn || !node) return;
+  const rec = snapshot.frp?.nodes?.find(item => item.id === node.id);
+  renderFRPDetail($("node-frp-details"), frpDetails.view(node), rec, snapshot.native_access);
 }
 function showView() {
   const key = ["dashboard", "nodes", "groups", "probes", "frp", "access"].includes(location.hash.slice(1)) ? location.hash.slice(1) : "dashboard";
@@ -292,14 +312,19 @@ function renderDetail() {
   } else if (node.frp?.proxies?.length) section.append(table(["隧道 / 类型", "本地目标", "节点报告"], node.frp.proxies.map(proxy => [`${proxy.name} / ${proxy.type}`, proxy.local_target ?? "—", proxy.enabled ? clientProxyLabels[proxy.status] ?? "未知" : "未启用"])));
   else section.append(el("p", "暂无隧道报告。无隧道不代表 FRP 控制连接离线。", "fa-muted"));
   box.append(section);
+  renderSelectedFRPDetail();
 }
 function renderRegistry() {
-  const box = $("server-registry"), frp = snapshot.frp; box.replaceChildren();
+  const box = $("server-registry"), frp = snapshot.frp;
+  const active = box.contains(document.activeElement) ? document.activeElement.dataset.frpFocus : null;
+  box.replaceChildren();
   if (!frp) { box.append(el("p", "等待服务端注册表。", "fa-muted")); return; }
   box.append(rowList([["状态", reconciliationLabels[frp.state] ?? safe(frp.state)], ["服务端", frp.server_id], ["快照时间", timeText(frp.generated_at)]]));
+  box.append(renderNativeRegistryAccess(document, frp, snapshot.native_access));
   const name = id => snapshot.nodes.find(node => node.id === id)?.name ?? (id ? id : "未绑定监控节点");
-  box.append(el("h3", "客户端"), table(["用户 / 稳定 ID", "主机 / 地址", "FRP 版本", "连接", "监控节点"], (frp.clients ?? []).map(c => [`${c.user || "（空用户）"} / ${c.raw_client_id ?? "无稳定 ID"}`, `${c.hostname || "—"} / ${c.ip || "—"}`, c.version, c.online ? "在线" : "离线", name(c.agent_id)])));
-  box.append(el("h3", "隧道"), el("p", "FRP 服务端本地日流量：接收为公网访客 → frpc；发送为 frpc → 公网访客。", "fa-muted"), table(["隧道 / 类型", "连接", "连接数", "今日接收 / 发送", "监控节点"], (frp.proxies ?? []).map(p => [`${p.name} / ${p.type}`, p.online ? "在线" : "离线", p.connections ?? "—", `${byteText(p.today_rx_bytes)} / ${byteText(p.today_tx_bytes)}`, name(p.agent_id)])));
+  box.append(el("h3", "客户端"), table(["用户 / 稳定 ID", "主机 / 地址", "FRP 版本 / wire", "连接", "监控节点"], (frp.clients ?? []).map(c => [`${c.user || "（空用户）"} / ${c.raw_client_id ?? "无稳定 ID"}`, `${c.hostname || "—"} / ${c.ip || "—"}`, `${c.version || "—"} / ${["v1", "v2"].includes(c.wire_protocol) ? c.wire_protocol : "未知"}`, c.online ? "在线" : "离线", name(c.agent_id)])));
+  box.append(el("h3", "隧道"), el("p", "FRP 服务端本地日流量：接收为公网访客 → frpc；发送为 frpc → 公网访客。实际入口为服务端运行观察，监听地址不代表公网可达。", "fa-muted"), table(["隧道 / 类型", "实际入口", "连接", "连接数", "今日接收 / 发送", "监控节点"], (frp.proxies ?? []).map(p => [`${p.name} / ${p.type}`, serverEndpointText(p, frp.state), p.online ? "在线" : "离线", p.connections ?? "—", `${byteText(p.today_rx_bytes)} / ${byteText(p.today_tx_bytes)}`, name(p.agent_id)])));
+  if (active) [...box.querySelectorAll("[data-frp-focus]")].find(item => item.dataset.frpFocus === active)?.focus({preventScroll: true});
 }
 function setBusy(value) {
   busy = value;

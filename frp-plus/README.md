@@ -87,6 +87,53 @@ macOS 可验证连接和页面，Linux 专属采集字段显示未知。
 在独立页面切换；原有配置保存、版本冲突保护与一次性凭据流程保留。页面直接读取现有
 API/SSE，不包含设计预览中的示例节点，也不新增历史账单、告警或远程控制能力。
 
+## FRP 观察详情与原生配置入口
+
+管理页的节点“资源”区域按需读取 Proxy、Visitor、入口、传输和错误详情；FRP 对账页
+同时保留原版客户端和仅服务端可见的代理。公开 JSON/SSE 不包含这些新增私有信息。
+客户端配置期望、节点观察、服务端实际监听和管理员公布地址分别标注：动态端口以当前
+注册结果为准，通配/回环监听不会自动变成公网链接，STCP/SUDP/XTCP 使用 Visitor 访问。
+Visitor 的本地监听、远端连接、P2P 和 fallback 分开表示，没有实际连接时保持未知。
+错误只传固定错误码、阶段和发生/恢复时间，不透传可能带凭据的原生日志。
+
+详情显示 TCP/KCP/QUIC/WS/WSS、wire v1/v2、TLS、复用及代理加密/压缩。
+控制传输标注为启动配置值，不宣称已经观察到每次握手的实际协商结果。
+现代配置的主文件、include、Store 来源可区分；覆盖关系明确显示。旧 INI 来源不能
+可靠区分时显示未知。详情中的修订摘要仅用于观察有效对象及 `start` 筛选的变化，
+**不作为完整原始配置的并发写入版本**。
+
+“配置管理 · 原生维护说明”目前只读：文件/include 由节点本机维护，先执行
+`frp-plus-agent verify -c <配置文件>`；Store 通过已启用的原生 frpc Dashboard/API 维护。
+同名 Store 项禁用或删除可能重新启用文件定义，应先检查来源。frpc reload 只能重载
+其支持的对象，不替换 serverAddr、认证、TLS、telemetry、Store 路径等全部启动配置；
+frps 的监听及 monitor 配置修改需要重启。远程编辑、应用与回退仍在后续开发阶段。
+
+可在主控原生配置中显式公布访问入口（重启生效，以下均为文档占位值）：
+
+```toml
+[monitor.nativeAccess]
+serverDashboardURL = "https://frps-admin.example.invalid/"
+
+[monitor.nativeAccess.clientDashboardURLs]
+"1" = "https://frpc-admin.example.invalid/"
+
+[[monitor.nativeAccess.publishedEndpoints]]
+proxyName = "team.web"
+user = "team"
+clientID = "team.client-example"
+url = "https://service.example.invalid/"
+```
+
+`clientDashboardURLs` 的键为监控节点数字 ID；公布入口的 `proxyName/user/clientID`
+必须与当前服务端观察的完整字段精确匹配，不能用未加用户前缀的 raw client ID 代替。
+Dashboard 地址只接受 HTTPS 或字面量回环 HTTP，不允许 URL 内嵌密码、查询参数或片段；
+公布入口支持 HTTP/HTTPS 及 TCP/UDP/TCPMUX（后三者仅作为文本）。配置只提供管理页链接，
+不会开启监听、代理请求或分发 Dashboard 凭据。回环入口需要本机访问或相应的 SSH 转发。
+
+新详情能力 `frp.detail.v1` 通过握手响应头预告再协商；旧服务端没有预告时，Agent
+继续使用旧首报和旧报告。新服务端兼容旧 Agent。详情单独判断新鲜度，失效或超限隐藏
+对象列表；主机指标不因详情暂不可用而停止。滚动升级优先更新主控，再更新 Agent。
+
 ## 模块与职责
 
 | 模块 | 职责与详细说明 |

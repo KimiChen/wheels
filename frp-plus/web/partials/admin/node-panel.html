@@ -28,7 +28,7 @@
         <label class="wsk-field fa-settings-wide"><span class="wsk-label">续费说明</span><textarea class="wsk-textarea" name="renewal_note" rows="2" maxlength="4096" placeholder="人工维护，不会自动续费"></textarea></label>
       </div><button id="traffic-reset" class="wsk-secondary wsk-button" type="button">重置套餐周期</button><p class="fa-muted fa-reset-note">仅重置当前套餐用量，今日与系统累计流量保留。</p></details></fieldset>
     </form></section>
-    <section id="editor-resources" data-editor-panel="resources" aria-label="节点资源" hidden><div id="node-details"></div></section>
+    <section id="editor-resources" data-editor-panel="resources" aria-label="节点资源与隧道" hidden><div id="node-details"></div><div id="node-frp-details"></div></section>
     <section id="editor-binding" data-editor-panel="binding" aria-labelledby="binding-title" hidden><h3 id="binding-title" class="wsk-sr-only">FRP 可信绑定</h3><p class="fa-editor-summary">绑定只决定关联关系，不远程修改 FRP 配置。</p><form id="binding-form"><div class="fa-form-grid">
       <label class="wsk-field"><span class="wsk-label">服务端标识</span><input class="wsk-control" name="server_id" required maxlength="128" autocomplete="off" placeholder="frps-main"></label>
       <label class="wsk-field"><span class="wsk-label">FRP 用户（可留空）</span><input class="wsk-control" name="user" maxlength="128" autocomplete="off" placeholder="未设置 user 时留空"></label>

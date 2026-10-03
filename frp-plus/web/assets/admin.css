@@ -120,6 +120,26 @@
 .fa-detail-list dt { font-size: var(--type-xs); color: var(--muted-soft); margin-bottom: var(--space-6); }
 .fa-detail-list dd { margin: 0; font-size: var(--type-sm); color: var(--text); overflow-wrap: anywhere; line-height: 1.6; }
 .fa-detail-note { padding: var(--space-12); background: var(--surface-soft); border-radius: var(--radius-sm); }
+.fa-frp-detail { min-width: 0; }
+.fa-frp-detail h4 { margin: var(--space-20) 0 var(--space-12); font-size: var(--type-sm); }
+.fa-frp-state { font-size: var(--type-xs); color: var(--muted); overflow-wrap: anywhere; }
+.fa-frp-detail[data-state="stale"] .fa-frp-state, .fa-frp-detail[data-state="truncated"] .fa-frp-state, .fa-frp-detail[data-state="unavailable"] .fa-frp-state { color: var(--warning); }
+.fa-frp-object { min-width: 0; border: 1px solid var(--border); border-radius: var(--radius-sm); margin-bottom: var(--space-8); background: var(--surface-soft); }
+.fa-frp-object > summary { display: flex; align-items: baseline; gap: var(--space-8); cursor: pointer; padding: var(--space-12); font-size: var(--type-sm); overflow-wrap: anywhere; }
+.fa-frp-object > summary::before { content: "+"; flex: 0 0 12px; color: var(--muted); }
+.fa-frp-object[open] > summary::before { content: "−"; }
+.fa-frp-object > summary > span { flex: 1; min-width: 0; }
+.fa-frp-object > summary > small { color: var(--muted); font-size: var(--type-xs); flex-shrink: 0; }
+.fa-frp-object > summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: var(--radius-sm); }
+.fa-frp-object .fa-frp-fields { padding: var(--space-12); margin: 0; }
+.fa-frp-fields dd { white-space: pre-wrap; }
+.fa-frp-access { margin-block: var(--space-20); padding: var(--space-16); border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.fa-frp-access h3 { margin: 0 0 var(--space-12); }
+.fa-frp-access a, .fa-frp-dashboard a { color: var(--accent); text-underline-offset: 3px; overflow-wrap: anywhere; }
+.fa-frp-published { display: grid; gap: var(--space-8); margin-top: var(--space-16); font-size: var(--type-sm); overflow-wrap: anywhere; }
+.fa-frp-published strong { font-size: var(--type-xs); font-weight: 500; }
+.fa-frp-dashboard { padding: var(--space-12); }
+#server-registry td { white-space: pre-line; }
 .fa-confirm { display: block; margin-top: var(--space-20); }
 .fa-groups-heading > button { flex-shrink: 0; white-space: nowrap; }
 .fa-groups-layout { display: grid; grid-template-columns: minmax(200px,1fr) minmax(0,2fr); gap: var(--space-20); align-items: start; }
@@ -309,6 +329,7 @@
   .fa-editor-actions { margin-left: auto; }
   .fa-settings-grid { grid-template-columns: minmax(0,1fr); }
   .fa-detail-list { gap: var(--space-14); }
+  .fa-frp-fields { grid-template-columns: minmax(0,1fr); }
   .fa-probe-row { grid-template-columns: minmax(0,1fr); }
   .fa-groups-layout { grid-template-columns: minmax(0,1fr); }
   .fa-group-list { max-height: 260px; }
