@@ -3,8 +3,8 @@
 // 复制而非 import：github.com/sagernet/sing-box/cmd/sing-box 是 package main，Go 禁止导入；
 // 而本项目必须保持 run / check / format / version 的 argv 与退出码与上游兼容（README §4.7）。
 //
-// 来源：github.com/SagerNet/sing-box@0b8995879f29a9b98ee027bc17b75e101445b238（v1.14.0）
-// 复制日期：2026-09-06
+// 来源：github.com/SagerNet/sing-box@af6e64c3b69e6132ebaee0e1a3d24e93903f6709（v1.14.2）
+// 复制日期：2026-10-03
 // 本项目修改：输出改为 README §4.7 规定的固定四行。
 //   上游 commit 必须由本项目自己的 -X 变量携带，不能指望 debug.ReadBuildInfo()——
 //   vcs.revision 指向本仓库自身的 commit，且 -buildvcs=false 会把该字段整个抹掉。

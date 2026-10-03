@@ -8,8 +8,8 @@
 | 项 | 值 |
 | --- | --- |
 | 项目 | `github.com/SagerNet/sing-box` |
-| 版本 | `v1.14.0` |
-| commit | `0b8995879f29a9b98ee027bc17b75e101445b238` |
+| 版本 | `v1.14.2` |
+| commit | `af6e64c3b69e6132ebaee0e1a3d24e93903f6709` |
 | 许可证 | GPL-3.0-or-later，附「衍生作品未经同意不得使用该应用名称或暗示关联」 |
 | 版权 | Copyright (C) 2022 by nekohasekai <contact-sagernet@sekai.icu> |
 
@@ -25,17 +25,17 @@
 
 | 文件 | 上游行数 | 复制日期 | 本项目修改 |
 | --- | --- | --- | --- |
-| `cmd.go` | 74 | 2026-09-06 | 命令名改为 `sing-box-plus`；`include.Context()` 换成 `box.Context()` + 自有最小 registry 与不含 ssmapi 的 service registry |
-| `main.go` | 11 | 2026-09-06 | 仅加注释头 |
-| `cmd_run.go` | 232 | 2026-09-06 | 解码前预扫描原始配置；进入 run 循环前建立进程级 registry；每次建 Box 前对账；`box.New()` 之后、`Start()` 之前注入 tracker |
-| `cmd_check.go` | 43 | 2026-09-06 | 在 `box.New()` 之前独立校验；比对重载不变量；为独立 `check` 注入只用于校验的 registry |
-| `cmd_format.go` | 77 | 2026-09-06 | 仅加注释头 |
-| `cmd_version.go` | 64 | 2026-09-06 | 输出改为固定四行，上游 commit 由自有 `-X` 变量携带 |
-| `cmd_netns_holder.go` | 20 | 2026-09-06 | 仅加注释头 |
-| `cmd_run_userns_linux.go` | 78 | 2026-09-06 | 仅加注释头 |
-| `cmd_run_userns_other.go` | 9 | 2026-09-06 | 仅加注释头 |
+| `cmd.go` | 74 | 2026-10-03 | 命令名改为 `sing-box-plus`；`include.Context()` 换成 `box.Context()` + 自有最小 registry 与不含 ssmapi 的 service registry |
+| `main.go` | 11 | 2026-10-03 | 仅加注释头 |
+| `cmd_run.go` | 233 | 2026-10-03 | 解码前预扫描原始配置；进入 run 循环前建立进程级 registry；每次建 Box 前对账；`box.New()` 之后、`Start()` 之前注入 tracker |
+| `cmd_check.go` | 44 | 2026-10-03 | 在 `box.New()` 之前独立校验；比对重载不变量；为独立 `check` 注入只用于校验的 registry |
+| `cmd_format.go` | 77 | 2026-10-03 | 仅加注释头 |
+| `cmd_version.go` | 64 | 2026-10-03 | 输出改为固定四行，上游 commit 由自有 `-X` 变量携带 |
+| `cmd_netns_holder.go` | 20 | 2026-10-03 | 仅加注释头 |
+| `cmd_run_userns_linux.go` | 78 | 2026-10-03 | 仅加注释头 |
+| `cmd_run_userns_other.go` | 9 | 2026-10-03 | 仅加注释头 |
 
-合计 608 行。
+合计 610 行。
 
 ## 命名
 

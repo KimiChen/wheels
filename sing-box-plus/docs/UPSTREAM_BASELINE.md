@@ -5,10 +5,10 @@
 | 项 | 值 |
 | --- | --- |
 | repository | `https://github.com/SagerNet/sing-box.git` |
-| tag | `v1.14.0` |
-| commit | `0b8995879f29a9b98ee027bc17b75e101445b238` |
-| commit_date | `2026-08-31T11:28:31+08:00` |
-| prepared_tree_sha256 | `6342b9aeefec6eb9dcdf2a93b6d7b897bbc0724eccda1c0c4d09589d1051c9db` |
+| tag | `v1.14.2`（候选；发布被计费契约阻断） |
+| commit | `af6e64c3b69e6132ebaee0e1a3d24e93903f6709` |
+| commit_date | `2026-09-24T18:52:34+08:00` |
+| prepared_tree_sha256 | `8119c3fde55e4716f2afc0192a897a464eaa1960365a799ed0611d8d9dc7be9b` |
 | license | GPL-3.0-or-later（含「衍生作品不得使用该应用名称或暗示关联」的附加条款） |
 | go 最低版本 | 1.25.5（上游 `go.mod`） |
 | go 已验证版本 | 1.26.8 |
@@ -19,16 +19,16 @@
 
 ### Go 发布工具链：`go1.26.8`（2026-10-03）
 
-本轮只调整 `go_verified` 和发布门禁，不变更 Go module 依赖、上游核心基线或复制文件。
+独立工具链提交只调整 `go_verified` 和发布门禁，不变更 Go module 依赖、上游核心基线或复制文件。
 发布脚本显式设置 `GOTOOLCHAIN=local`，要求本机安装的 `go env GOVERSION` 与锁定值
 精确一致；缺失锁定值、非补丁版本、旧版或更高版本均在取源及创建输出目录前失败。
 环境中设置 `GOTOOLCHAIN=auto` 或指定其它版本不能绕过此检查。门禁测试使用隔离 Git
 夹具验证拒绝路径与成功构建路径，实际兼容性须由完整 Go 测试、Linux 专项与可复现构建验证。
 旧版工具链的历史验证和性能数据保留原记录。
 
-### Linux 网络监听依赖：`sing-tun v0.9.2`（2026-10-03）
+### 历史修复：Linux 网络监听依赖：`sing-tun v0.9.2`（2026-10-03）
 
-`go.mod` 单独固定 `github.com/sagernet/sing-tun v0.9.2`，官方 tag 对应
+0.2.2 发布时 `go.mod` 单独固定 `github.com/sagernet/sing-tun v0.9.2`，官方 tag 对应
 [`c11c2568b9dea0e60d194982946a1cd797d7f378`](https://github.com/SagerNet/sing-tun/commit/c11c2568b9dea0e60d194982946a1cd797d7f378)
 （2026-09-09，修复 netlink receive overrun 后网络监听停滞）。`sing-box v1.14.0`、
 `upstream.lock` 和复制文件保持原基线；没有 vendoring、本地源码补丁或 `go -overlay`。
@@ -52,9 +52,22 @@ TUN bypass verdict 转发修复，以及 nftables prerouting prematch 在 DNAT �
 macOS 可交叉编译后在匹配架构的隔离 Linux 测试主机运行，具体命令见 README §9.3。
 本节记录版本与验证方法；编译成功不能代替 Linux 内核专项执行结果。
 
+### 1.14.2 候选状态（2026-10-03）
+
+已按规范仓库重新核对 tag、准备源码并复算规范哈希；依赖严格采用该 tag 官方版本。
+复制 CLI 中 `cmd_run.go` / `cmd_check.go` 同步 `service.ExtendContext`，新建 Box 的服务注册
+不再污染进程上下文，其余七份仅更新来源头并重算双向锁。
+已通过提交前的 `git pull --rebase --autostash` 纳入独立安全工具链提交 `9bb67f8`，
+`upstream.lock` 的 `go_verified` 与候选实际验证均为 Go 1.26.8。
+
+**发布阻塞**：新的 Linux splice 在成功读入 pipe 后立即执行 read counter，而非目标写入后。
+本项目 uplink 由 read counter 记账，实测出现目标收到 0 字节但计费 131072 字节。
+计费合同、失败断言和完整设计评审见 [UPGRADE_1_14_2.md](UPGRADE_1_14_2.md)。
+此候选不合入生产分支，不生成 release，不部署；不能改计费定义或跳过异常写入用例放行。
+
 ## 复制文件
 
-`cmd/sing-box-plus/` 下有 9 个文件复制自上游 `cmd/sing-box/`，合计 608 行——
+`cmd/sing-box-plus/` 下有 9 个文件复制自上游 `cmd/sing-box/`，合计 610 行——
 `github.com/sagernet/sing-box/cmd/sing-box` 是 `package main`，Go 禁止导入。
 
 清单与双向哈希在 `cmd/sing-box-plus/copied-files.lock`：每行记录上游侧与 overlay 侧两个 sha256。
@@ -101,23 +114,19 @@ macOS 可交叉编译后在匹配架构的隔离 Linux 测试主机运行，具�
 
 ## 已知的上游缺陷
 
-### `route.NetworkManager` 的数据竞争
+### `route.NetworkManager` 的旧数据竞争已由候选移除
 
-`Start()`（`route/network.go:220`）写入 interface 快照字段，而 `notifyInterfaceUpdate` 起的
-goroutine 在 `updateInterface()`（`:574`）并发读同一字段，两侧无锁。
-
-- 触发条件：同进程内并发启动多个 Box 且宿主发生网络接口变更通知。
-  **macOS 与 Linux 都能复现**（Debian 13 / kernel 6.12 上实测，读写两端的栈帧全在上游，
-  本项目的帧只出现在 `Box.Start()` 的调用侧）。
-- 与本项目的关系：本项目不触碰 `NetworkManager`，零补丁形态也无法修复。
-- 处置：`tests/race-suppressions.txt` 只抑制这三个符号。为了让该文件无法掩盖本项目自身的竞争，
-  `scripts/verify.sh` 在带抑制跑完 `-race` 全量之后，会**再跑一遍不带抑制**的纯单元用例
-  （那批用例不启动 Box）。
+v1.14.0 的 `Start()` 写 `started` 与 `updateInterface()` 并发读该字段无锁。
+v1.14.2 以受 `interfaceUpdateAccess` 保护的 `startedCtx` 与 `networkResetPending` 替代，
+关闭时取消启动 context、等待 `resetRunAccess`，并注销接口更新回调。
+当前候选的 `tests/race-suppressions.txt` 已清空旧三条符号抑制；Go 1.26.8 / darwin arm64
+全量 `go test -race` **不带抑制通过**。这只确认本次测试未报告竞争，不宣称所有可能时序无竞态。
+Linux 异常写入门禁独立失败，race 通过不影响候选禁止发布的结论。
 
 ### sing-vmess 的 Vision 实现与 `checkptr` 不兼容
 
 `NewVisionConn` 用 `unsafe.Pointer(reflectPointer + field.Offset)` 直接读取 `crypto/tls.Conn`
-的私有 `input` / `rawInput` 字段（`sing-vmess@v0.2.8-0.20250909125414 vless/vision.go:87`）。
+的私有 `input` / `rawInput` 字段（`sing-vmess@v0.2.8 vless/vision.go:87`）。
 这类 uintptr 运算被 Go 的 `checkptr` 判为「指向无效分配」，而 `-race` 会一并打开 `checkptr`，
 于是整个测试进程 fatal 退出——不是竞争，`GORACE=suppressions` 也压不住（那只作用于 TSan 报告）。
 

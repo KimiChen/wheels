@@ -2,7 +2,8 @@
 
 > 目标上游：[`SagerNet/sing-box`](https://github.com/SagerNet/sing-box)
 >
-> 实施基线：[`v1.14.0`](https://github.com/SagerNet/sing-box/releases/tag/v1.14.0) / `0b899587`
+> 升级候选基线：[`v1.14.2`](https://github.com/SagerNet/sing-box/releases/tag/v1.14.2) / `af6e64c`
+> **尚不可发布**：Linux 异常写入计费契约失败；状态、复现和适配评审见 [升级验证](docs/UPGRADE_1_14_2.md)。
 > （stable 轨道）
 >
 > 参考实现：本仓库 `shadowsocks-rust-plus`（可结算契约的既有落地；本项目沿用其结算语义与
@@ -54,7 +55,7 @@ sing-box-plus/
 ├── LICENSE                       # GPL-3.0 全文 + 上游附加条款原文（§10）
 ├── THIRD_PARTY_NOTICES.md        # 9 个复制文件逐个登记修改内容与日期
 ├── .env.example / .gitignore / .gitattributes
-├── go.mod / go.sum               # require sing-box v1.14.0，与 upstream.lock 双重固定
+├── go.mod / go.sum               # require sing-box v1.14.2，与 upstream.lock 双重固定
 ├── cmd/sing-box-plus/            # 自有 main：9 个复制的 CLI 文件 + 最小 registry + tracker 注入
 │   └── copied-files.lock         # 复制文件的上游侧与 overlay 侧双向 sha256
 ├── internal/minreg/              # 最小 registry：只注册白名单类型，不注册 ssmapi
@@ -70,10 +71,10 @@ sing-box-plus/
 纪律不变：所有实现都绑定到一个已记录的上游提交，`scripts/verify.sh` 会重新准备源码树并复算
 规范哈希与复制文件的双向漂移。
 
-Linux 网络监听依赖另行固定为 **`sing-tun v0.9.2`**，对应官方提交
-[`c11c2568b9dea0e60d194982946a1cd797d7f378`](https://github.com/SagerNet/sing-tun/commit/c11c2568b9dea0e60d194982946a1cd797d7f378)
-（2026-10-03 纳入）。它修复旧版 netlink 通知 channel 关闭后持续读取零值、占满单核 CPU 的
-问题；`sing-box v1.14.0` 基线与复制文件不变。修复机制、恢复边界和 Linux 专项见 §9.3。
+当前候选使用 **`sing-box v1.14.2` 的官方依赖组合**，包括 `sing v0.9.6-0.20260922013354-87c33f17688f`、
+`sing-tun v0.9.6-0.20260924001923-ddaa4ca25e3b`、`sing-mux v0.3.8`、`sing-vmess v0.2.8`。
+先前单独固定的 `sing-tun v0.9.2` 监听器修复仍包含在其中。没有本地依赖补丁，
+但 Linux splice 的异常写入计数变化尚未满足 §4.2，**不得把编译或正常流量对账通过当作发布许可**。
 
 ## 2. 前提与约束
 
@@ -638,7 +639,7 @@ inbound 注册表给单个 inbound 加自有字段（`adapter/inbound/registry.g
 
 ### 4.7 overlay 形态：零补丁 wrapper
 
-交付物是一个独立 Go module，`go.mod` 中 `require github.com/sagernet/sing-box v1.14.0`，
+交付物是一个独立 Go module，候选 `go.mod` 中 `require github.com/sagernet/sing-box v1.14.2`，
 自有 main 位于 `cmd/sing-box-plus`，**不修改上游任何源码文件**；`go.sum` 与 `upstream.lock` 的
 commit 双重固定版本。已在 v1.14.0 / go1.26.5 上实测：自有 module 能完成
 “构造 ctx → 解码配置 → `box.New` → `AppendTracker` → `Start` → 信号循环 → `Close`”全链路，

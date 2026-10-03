@@ -3,8 +3,8 @@
 // 复制而非 import：github.com/sagernet/sing-box/cmd/sing-box 是 package main，Go 禁止导入；
 // 而本项目必须保持 run / check / format / version 的 argv 与退出码与上游兼容（README §4.7）。
 //
-// 来源：github.com/SagerNet/sing-box@0b8995879f29a9b98ee027bc17b75e101445b238（v1.14.0）
-// 复制日期：2026-09-06
+// 来源：github.com/SagerNet/sing-box@af6e64c3b69e6132ebaee0e1a3d24e93903f6709（v1.14.2）
+// 复制日期：2026-10-03
 // 本项目修改：
 //   1. readConfigAt 在解码前调用 userstats.ScanRawConfig，把「未编译 with_user_stats」与
 //      「配置含 ssm-api」两类失败替换成可读错误（§4.6 第 3 条、第 8 条第一层）；
@@ -229,7 +229,7 @@ func create(options option.Options) (*box.Box, context.CancelFunc, error) {
 		}
 		options.Log.DisableColor = true
 	}
-	ctx, cancel := context.WithCancel(globalCtx)
+	ctx, cancel := context.WithCancel(service.ExtendContext(globalCtx))
 	instance, err := box.New(box.Options{
 		Context:                    ctx,
 		Options:                    options,

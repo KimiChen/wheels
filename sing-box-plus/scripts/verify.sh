@@ -98,8 +98,8 @@ python3 scripts/release-artifact.py copied-files-check \
 #    本项目的 tracker 恒在包装链最外层这一前提，依赖「上游全部 AppendTracker 都在 box.New 体内」。
 append_sites="$(grep -rn "AppendTracker" "$source_dir" --include='*.go' | grep -v "_test.go" | grep -vc "func (r \*Router) AppendTracker\|AppendTracker(tracker" || true)"
 box_sites="$(grep -c "AppendTracker" "$source_dir/box.go" || true)"
-[[ "$box_sites" == "2" ]] || \
-  die "上游 box.go 的 AppendTracker 调用点不再是 2 处（实际 $box_sites）：§4.1 的最外层前提需重新验证"
+[[ "$append_sites" == "2" && "$box_sites" == "2" ]] || \
+  die "上游 box.go 的 AppendTracker 调用点不再是 2 处（全树实际 $append_sites，box.go 实际 $box_sites）：§4.1 的最外层前提需重新验证"
 
 # 5. 测试。三轮，缺一轮就会有一批断言从来没被执行过：
 #    (a) 不带 -race 的全量——Vision 用例只能在这一轮跑（-race 会打开 checkptr，
