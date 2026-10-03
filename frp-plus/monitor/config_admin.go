@@ -140,6 +140,10 @@ func (s *Service) handleConfigAdmin(w http.ResponseWriter, r *http.Request, path
 		}{"ok", nodeID, result.ServiceID, time.Now().UnixMilli(), result.Inventory})
 		return true
 	}
+	if parts[3] == "restore" {
+		s.handleConfigRestore(w, r, ctx, nodeID, parts, actor)
+		return true
+	}
 	if parts[3] != "operations" {
 		http.NotFound(w, r)
 		return true

@@ -1,4 +1,4 @@
--- Current control database. Schema v7 adds durable configuration operations.
+-- Current control database. Schema v9 adds durable restoration takeover receipts.
 CREATE TABLE nodes (
  id INTEGER PRIMARY KEY AUTOINCREMENT,
  name TEXT NOT NULL,
@@ -96,7 +96,27 @@ ALTER TABLE config_operations ADD COLUMN agent_result_json TEXT CHECK (agent_res
 ALTER TABLE config_operations ADD COLUMN agent_observed_at_ms INTEGER;
 ALTER TABLE config_operation_events ADD COLUMN actor TEXT NOT NULL DEFAULT '';
 UPDATE config_operation_events SET actor=(SELECT creator FROM config_operations WHERE operation_id=config_operation_events.operation_id);
+-- Configuration restoration takeovers (schema v9).
+CREATE TABLE config_restores (
+ id TEXT PRIMARY KEY,
+ node_id INTEGER NOT NULL CHECK (node_id > 0),
+ token_sha256 TEXT NOT NULL CHECK (length(token_sha256)=64 AND token_sha256 NOT GLOB '*[^0-9a-f]*'),
+ service_id TEXT NOT NULL,
+ epoch TEXT NOT NULL,
+ backup_service_id TEXT NOT NULL,
+ replaced_service_id TEXT NOT NULL DEFAULT '',
+ manifest_digest TEXT NOT NULL,
+ context_revision TEXT NOT NULL,
+ store_digest TEXT NOT NULL,
+ state TEXT NOT NULL CHECK (state IN ('pending','acknowledged')),
+ creator TEXT NOT NULL,
+ created_at_ms INTEGER NOT NULL,
+ updated_at_ms INTEGER NOT NULL,
+ version INTEGER NOT NULL CHECK (version >= 1),
+ UNIQUE(node_id,epoch)
+);
+CREATE INDEX config_restores_node ON config_restores(node_id,created_at_ms DESC);
 -- Database identity; must match the restore check in scripts/ops.py
 -- and the startup check in monitor/control/store.go.
 PRAGMA application_id=1179798836;
-PRAGMA user_version=8;
+PRAGMA user_version=9;

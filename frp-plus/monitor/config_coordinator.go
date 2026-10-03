@@ -16,14 +16,15 @@ const configReconcileActor = "system:configuration-reconcile"
 // Locks cover only configuration work. At most four entries exist and every
 // release deletes its entry; offline nodes cannot grow a permanent lock map.
 type configCoordinator struct {
-	mu      sync.Mutex
-	nodes   map[string]bool
-	slots   chan struct{}
-	command func(context.Context, string, shared.ConfigCommand) (shared.ConfigResult, error)
+	mu             sync.Mutex
+	nodes          map[string]bool
+	slots          chan struct{}
+	command        func(context.Context, string, shared.ConfigCommand) (shared.ConfigResult, error)
+	restoreCommand func(context.Context, string, shared.RestoreCommand) (shared.RestoreResult, error)
 }
 
 func newConfigCoordinator(s *Service) *configCoordinator {
-	return &configCoordinator{nodes: map[string]bool{}, slots: make(chan struct{}, 4), command: s.ConfigCommand}
+	return &configCoordinator{nodes: map[string]bool{}, slots: make(chan struct{}, 4), command: s.ConfigCommand, restoreCommand: s.RestoreCommand}
 }
 func (c *configCoordinator) acquire(node string) (func(), bool) {
 	c.mu.Lock()
@@ -113,6 +114,11 @@ func (s *Service) recordConfigResult(ctx context.Context, o *control.ConfigOpera
 				next = "validated"
 			case o.State == "applying" && target == "confirmed":
 				next = "verifying"
+			case (o.State == "rollback_failed" || o.State == "confirmed") && target == "rolled_back":
+				// Native startup may finish recovery while the controller is
+				// offline. Retain the legal recovery transition when its query
+				// observes only the final journal; do not send another rollback.
+				next = "rolling_back"
 			default:
 				next = "outcome_unknown"
 			}
@@ -216,6 +222,13 @@ func (s *Service) configReconcileLoop() {
 func (c *configCoordinator) invoke(ctx context.Context, node string, command shared.ConfigCommand) (shared.ConfigResult, error) {
 	c.mu.Lock()
 	fn := c.command
+	c.mu.Unlock()
+	return fn(ctx, node, command)
+}
+
+func (c *configCoordinator) invokeRestore(ctx context.Context, node string, command shared.RestoreCommand) (shared.RestoreResult, error) {
+	c.mu.Lock()
+	fn := c.restoreCommand
 	c.mu.Unlock()
 	return fn(ctx, node, command)
 }

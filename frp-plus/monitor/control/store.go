@@ -26,6 +26,7 @@ var Schema string
 const groupSchemaMarker = "-- Node groups (schema v5).\n"
 const operationSchemaMarker = "-- Configuration operations (schema v7).\n"
 const observationSchemaMarker = "-- Configuration observations (schema v8).\n"
+const restoreSchemaMarker = "-- Configuration restoration takeovers (schema v9).\n"
 const identitySchemaMarker = "-- Database identity;"
 
 type request struct {
@@ -113,9 +114,9 @@ func openWithMigrationBackup(cfg Config, backup func(context.Context, *sql.DB, s
 			return fail(errors.New("control database must be a new empty database"))
 		}
 		schemaChange = Schema
-	} else if application != 1179798836 || (version != 4 && version != 5 && version != 6 && version != 7 && version != 8) {
+	} else if application != 1179798836 || (version < 4 || version > 9) {
 		return fail(errors.New("unsupported control database"))
-	} else if version < 8 {
+	} else if version < 9 {
 		if version == 4 {
 			groups, e := schemaSection(groupSchemaMarker, operationSchemaMarker)
 			if e != nil {
@@ -133,11 +134,18 @@ func openWithMigrationBackup(cfg Config, backup func(context.Context, *sql.DB, s
 		if version < 7 {
 			schemaChange += operations
 		}
-		observations, e := schemaSection(observationSchemaMarker, identitySchemaMarker)
+		observations, e := schemaSection(observationSchemaMarker, restoreSchemaMarker)
 		if e != nil {
 			return fail(e)
 		}
-		schemaChange += observations + "PRAGMA user_version=8;"
+		if version < 8 {
+			schemaChange += observations
+		}
+		restores, e := schemaSection(restoreSchemaMarker, identitySchemaMarker)
+		if e != nil {
+			return fail(e)
+		}
+		schemaChange += restores + "PRAGMA user_version=9;"
 		migrationBackup, err = backup(ctx, db, path, version)
 		if err != nil {
 			return fail(fmt.Errorf("control migration backup failed: %w", err))
@@ -188,7 +196,7 @@ func (s *Store) MigrationBackupPath() string { return s.migrationBackup }
 // copying the main file would silently omit those records. Delete incomplete
 // images, and durably finish a private recovery image before running any DDL.
 func backupBeforeMigration(ctx context.Context, db *sql.DB, path string, version int) (string, error) {
-	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+fmt.Sprintf(".pre-v8-v%d-", version)+"*.sqlite")
+	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+fmt.Sprintf(".pre-v9-v%d-", version)+"*.sqlite")
 	if err != nil {
 		return "", errors.New("cannot create private migration backup")
 	}
