@@ -341,6 +341,9 @@ func (s *Store) TransitionConfigOperation(ctx context.Context, id string, input 
 		}
 		observedDrift := input.Agent != nil && input.Agent.ErrorCode == "source_drift" && (o.Agent == nil || o.Agent.ErrorCode != input.Agent.ErrorCode || o.Agent.UpdatedAtMS != input.Agent.UpdatedAtMS)
 		if input.Agent != nil {
+			if o.Agent != nil && o.Agent.MaterialsState == "context_changed" && input.Agent.MaterialsState != "context_changed" && input.Agent.MaterialsState != "expired" {
+				return ErrConflict
+			}
 			if o.Agent != nil && o.Agent.MaterialsState == "expired" && (input.Agent.MaterialsState != "expired" || input.Agent.MaterialsExpiredAtMS == nil || o.Agent.MaterialsExpiredAtMS == nil || *input.Agent.MaterialsExpiredAtMS != *o.Agent.MaterialsExpiredAtMS || input.Agent.MaterialsExpiryReason != o.Agent.MaterialsExpiryReason) {
 				return ErrConflict
 			}

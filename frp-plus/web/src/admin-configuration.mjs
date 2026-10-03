@@ -192,6 +192,7 @@ export function createConfigPanel(container, {request}) {
     const facts = element("dl", undefined, "fa-detail-list"); for (const [label, text] of resultFacts(result.agent)) row(facts, label, text); resultBox.append(facts);
     const materials = operationMaterials(result);
     if (materials.state === "expired") resultBox.append(element("p", `回退材料于 ${date(materials.expiredAt)} 按保留期限清理。操作结果与审计仍保留；需要恢复旧配置时请使用另存的完整备份并走本机恢复流程。`, "wsk-alert wsk-warning"));
+    if (materials.state === "context_changed") resultBox.append(element("p", "历史材料仍保留，但属于迁移前的配置上下文，不能在当前位置直接回退。需要恢复旧配置时，请使用迁移前检查点按原上下文恢复；下列事实仍是原操作的历史结果。", "wsk-alert wsk-warning"));
     resultBox.append(element("p", `Agent 事实记录于 ${date(result.agent_received_at_ms)}；历史成功不代表后续配置仍保持该版本。业务连通需另行实际验证。`, "fa-muted"));
     const reason = resultReason(result.agent); if (reason) resultBox.append(element("p", reason, "wsk-alert wsk-warning"));
     if (op.state === "verifying") resultBox.append(element("p", "正在等待实际登记与本地资源。本次明确注册或启动失败会触发回退；正常等待连接仍按操作期限核对，业务可达性需另行测试。", "fa-muted"));

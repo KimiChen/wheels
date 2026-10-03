@@ -184,3 +184,19 @@ test('legacy material status remains unknown and only valid expiry facts suppres
   assert.equal(canRollback(legacy),false);
   legacy.agent.materials_expired_at_ms='120000';assert.deepEqual(operationMaterials(legacy),{state:'unknown'});
 });
+
+test('relocated material context remains separate from TTL expiry and cannot dispatch rollback', async () => {
+  const calls=[],relocated={...result('confirmed'),code:'context_changed',agent:{materials_state:'context_changed'}};
+  const controller=createConfigController({request:async path=>{calls.push(path);return path.endsWith('/configuration')?inventory():path.endsWith('/operations')?{operations:[]}:relocated;}});
+  await controller.open('1',true);await controller.query(operation);await controller.action('rollback');
+  assert.equal(calls.length,3);assert.equal(controller.state.result.operation.state,'confirmed');
+  assert.deepEqual(operationMaterials(relocated),{state:'context_changed'});assert.equal(canRollback(relocated),false);
+  assert.equal(resultFacts(relocated.agent)[4][1],'保留于迁移前上下文');assert.match(controller.state.message,/迁移前检查点/);
+  relocated.agent={materials_state:'expired',materials_expired_at_ms:120000,materials_expiry_reason:'ttl'};
+  assert.deepEqual(operationMaterials(relocated),{state:'expired',expiredAt:120000});assert.equal(canRollback(relocated),false);
+});
+
+
+test("a restored identity without portable rollback authorization disables historical writes", () => {
+  assert.equal(canRollback({code:"service_mismatch", operation:{state:"confirmed"}, agent:{materials_state:"retained"}}), false);
+});

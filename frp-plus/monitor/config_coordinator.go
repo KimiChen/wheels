@@ -88,6 +88,9 @@ func configResultMatches(o *control.ConfigOperation, r shared.ConfigResult) bool
 		return false
 	}
 	v := r.Operation
+	if o.Agent != nil && o.Agent.MaterialsState == "context_changed" && v.MaterialsState != "context_changed" && v.MaterialsState != "expired" {
+		return false
+	}
 	if o.Agent != nil && o.Agent.MaterialsState == "expired" && (v.MaterialsState != "expired" || v.MaterialsExpiredAtMS == nil || o.Agent.MaterialsExpiredAtMS == nil || *v.MaterialsExpiredAtMS != *o.Agent.MaterialsExpiredAtMS || v.MaterialsExpiryReason != o.Agent.MaterialsExpiryReason) {
 		return false
 	}
@@ -163,7 +166,21 @@ func (s *Service) queryConfigOperation(ctx context.Context, o *control.ConfigOpe
 	}
 	r, err := s.configCoordinator.invoke(ctx, o.NodeID, command)
 	if err != nil {
+		if errors.Is(err, ErrConfigServiceMismatch) {
+			s.mu.Lock()
+			current := ""
+			if node := s.nodes[o.NodeID]; node != nil && node.conn != nil && node.configLink != nil && node.configLink.configEnabled {
+				current = node.configLink.serviceID
+			}
+			s.mu.Unlock()
+			if current != "" {
+				return s.queryRestoredHistory(ctx, o, current, actor)
+			}
+		}
 		return o, configFailureCode(err)
+	}
+	if r.ServiceID != o.ServiceID && r.Code == "service_mismatch" {
+		return s.queryRestoredHistory(ctx, o, r.ServiceID, actor)
 	}
 	if r.ServiceID != o.ServiceID || r.OperationID != o.OperationID {
 		return o, "service_mismatch"

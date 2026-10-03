@@ -189,7 +189,7 @@ func (s *Service) handleConfigAdmin(w http.ResponseWriter, r *http.Request, path
 			return true
 		}
 		code := "ok"
-		if shared.ConfigOperationActive(o.State) {
+		if shared.ConfigOperationActive(o.State) || o.Agent != nil {
 			if release, ok := s.configCoordinator.acquire(nodeID); ok {
 				queryCtx, done := context.WithTimeout(ctx, 2*time.Second)
 				o, code = s.queryConfigOperation(queryCtx, o, configReconcileActor)
@@ -393,8 +393,25 @@ func (s *Service) actionConfigOperation(w http.ResponseWriter, r *http.Request, 
 		configHTTPError(w, control.ErrConflict)
 		return
 	}
-	if action == "rollback" && o.Agent != nil && o.Agent.MaterialsState == "expired" {
-		response, err := s.configResponse(ctx, o, "operation_not_found", nil, false)
+	if action == "rollback" && o.State == "confirmed" && o.Agent != nil && o.Agent.MaterialsState != "expired" && o.Agent.MaterialsState != "context_changed" {
+		var code string
+		o, code = s.queryConfigOperation(ctx, o, configReconcileActor)
+		if code != "ok" || o.State != "confirmed" {
+			response, e := s.configResponse(ctx, o, code, nil, false)
+			if e != nil {
+				configHTTPError(w, e)
+			} else {
+				adminJSON(w, 200, response)
+			}
+			return
+		}
+	}
+	if action == "rollback" && o.Agent != nil && (o.Agent.MaterialsState == "expired" || o.Agent.MaterialsState == "context_changed") {
+		code := "operation_not_found"
+		if o.Agent.MaterialsState == "context_changed" {
+			code = "context_changed"
+		}
+		response, err := s.configResponse(ctx, o, code, nil, false)
 		if err != nil {
 			configHTTPError(w, err)
 		} else {

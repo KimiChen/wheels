@@ -9,6 +9,7 @@ export const configErrors = {
   unavailable: "节点配置通道暂不可用；稍后查询实际结果。", busy: "已有配置操作正在处理，请稍后核对。",
   audit_capacity: "审计记录已达到新操作准入上限，请查看配置审计的保留与容量状态；已有操作仍可查询和恢复。",
   managed_capacity: "Agent 本地快照或操作记录已达到容量上限，本次配置未应用。请在本机核对保留策略与恢复材料后重新准备。",
+  context_changed: "此操作属于迁移前的配置上下文，无法在当前位置直接回退。请使用迁移前检查点按原上下文恢复。",
   conflict: "配置版本已变化，请取消旧预览并重新读取比较。", source_drift: "原生配置来源已变化，需本机核对后重新读取。",
   ownership_conflict: "文件与 Store 存在同名对象，请先清理来源。", source_conflict: "配置来源冲突，请先在本机核对。",
   invalid_field: "字段值不符合该类型要求。", validation_failed: "原生整集校验未通过，请检查端口、引用和必填字段。",
@@ -123,16 +124,17 @@ export function makeEdit({mode, kind, type, name, source, inputs = {}, secrets =
 export function resultFacts(agent) {
   if (!agent) return [["配置已持久化", "未知"], ["运行时已加载", "未知"], ["代理登记 / Visitor 监听", "未知"], ["业务连通", "未测试"], ["回退材料", "状态未知"]];
   const yes = value => value === true ? "已确认" : "未确认";
-  return [["配置已持久化", agent.state === "rolled_back" ? "已恢复旧版本" : yes(agent.store_persisted)], ["运行时已加载", yes(agent.runtime_loaded)], ["代理登记 / Visitor 监听", yes(agent.resources_ready)], ["业务连通", agent.business_checked === true ? "已验证" : "未测试"], ["回退材料", ({retained:"观察时仍保留",expired:"已按保留期限清理",unknown:"状态未知"})[operationMaterials({agent}).state]]];
+  return [["配置已持久化", agent.state === "rolled_back" ? "已恢复旧版本" : yes(agent.store_persisted)], ["运行时已加载", yes(agent.runtime_loaded)], ["代理登记 / Visitor 监听", yes(agent.resources_ready)], ["业务连通", agent.business_checked === true ? "已验证" : "未测试"], ["回退材料", ({retained:"观察时仍保留",expired:"已按保留期限清理",context_changed:"保留于迁移前上下文",unknown:"状态未知"})[operationMaterials({agent}).state]]];
 }
 export function operationMaterials(result) {
   const agent = result?.agent;
   if (agent?.materials_state === "retained") return {state:"retained"};
   if (agent?.materials_state === "expired" && Number.isSafeInteger(agent.materials_expired_at_ms) && agent.materials_expired_at_ms > 0 && agent.materials_expiry_reason === "ttl") return {state:"expired",expiredAt:agent.materials_expired_at_ms};
+  if (agent?.materials_state === "context_changed") return {state:"context_changed"};
   return {state:"unknown"};
 }
 export function canRollback(result) {
-  return ["confirmed", "rollback_failed"].includes(result?.operation?.state) && operationMaterials(result).state !== "expired";
+  return result?.code !== "service_mismatch" && ["confirmed", "rollback_failed"].includes(result?.operation?.state) && !["expired", "context_changed"].includes(operationMaterials(result).state);
 }
 export function canApply(result, preview, now = Date.now()) {
   return result?.operation?.state === "prepared" && Number(result.operation.deadline_at_ms) > now && validDigest(preview?.candidate_digest) && preview.candidate_digest === result.operation.candidate_digest && preview.base_revision === result.operation.base_revision && validDigest(preview.context_revision);
