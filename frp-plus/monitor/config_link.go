@@ -267,5 +267,5 @@ func (s *Service) acceptConfigResult(nodeID string, conn *websocket.Conn, receiv
 // The management capability is only an upgrade advertisement; HTTP admin
 // authentication, local opt-in and current session ownership remain mandatory.
 func configCapabilitiesHeader() http.Header {
-	return http.Header{shared.CapabilitiesHeader: []string{shared.FRPDetailCapability + ", " + shared.ConfigManageCapability + ", " + shared.ConfigRestoreCapability}}
+	return http.Header{shared.CapabilitiesHeader: []string{shared.TunnelCapability + ", " + shared.FRPDetailCapability + ", " + shared.ConfigManageCapability + ", " + shared.ConfigRestoreCapability}}
 }

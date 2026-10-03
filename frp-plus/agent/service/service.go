@@ -57,6 +57,7 @@ type observation struct {
 	metrics    shared.Metrics
 	frp        *shared.FRP
 	detail     *shared.FRPDetail
+	tunnel     *shared.TunnelSnapshot
 	at         time.Time
 	generation uint64
 }
@@ -69,6 +70,9 @@ type Service struct {
 	collector       sampler
 	snapshot        func() shared.FRP
 	detailProvider  shared.DetailProvider
+	tunnelProvider  shared.TunnelProvider
+	tunnelResults   chan shared.TunnelSnapshot
+	tunnelPending   bool
 	configProvider  shared.ConfigProvider
 	restoreProvider shared.RestoreProvider
 	configJobs      chan configJob
@@ -107,6 +111,11 @@ func StartWithProviders(ctx context.Context, cfg shared.AgentConfig, snapshot fu
 
 // StartWithRestoreProviders independently negotiates the safe restore contract.
 func StartWithRestoreProviders(ctx context.Context, cfg shared.AgentConfig, snapshot func() shared.FRP, detail shared.DetailProvider, management shared.ConfigProvider, restore shared.RestoreProvider) (*Service, error) {
+	return StartWithTunnelProviders(ctx, cfg, snapshot, detail, management, restore, nil)
+}
+
+// StartWithTunnelProviders adds an independently negotiated private observation.
+func StartWithTunnelProviders(ctx context.Context, cfg shared.AgentConfig, snapshot func() shared.FRP, detail shared.DetailProvider, management shared.ConfigProvider, restore shared.RestoreProvider, tunnel shared.TunnelProvider) (*Service, error) {
 	if !cfg.Enabled {
 		return nil, nil
 	}
@@ -117,7 +126,7 @@ func StartWithRestoreProviders(ctx context.Context, cfg shared.AgentConfig, snap
 	if err != nil {
 		return nil, errors.New("telemetry collector unavailable")
 	}
-	return startWithProviders(ctx, cfg, snapshot, c, detail, management, restore)
+	return startWithAllProviders(ctx, cfg, snapshot, c, detail, management, restore, tunnel)
 }
 func start(ctx context.Context, cfg shared.AgentConfig, snapshot func() shared.FRP, c sampler, providers ...shared.DetailProvider) (*Service, error) {
 	var detail shared.DetailProvider
@@ -127,6 +136,14 @@ func start(ctx context.Context, cfg shared.AgentConfig, snapshot func() shared.F
 	return startWithProviders(ctx, cfg, snapshot, c, detail, nil)
 }
 func startWithProviders(ctx context.Context, cfg shared.AgentConfig, snapshot func() shared.FRP, c sampler, detail shared.DetailProvider, management shared.ConfigProvider, restores ...shared.RestoreProvider) (*Service, error) {
+	var restore shared.RestoreProvider
+	if len(restores) > 0 {
+		restore = restores[0]
+	}
+	return startWithAllProviders(ctx, cfg, snapshot, c, detail, management, restore, nil)
+}
+
+func startWithAllProviders(ctx context.Context, cfg shared.AgentConfig, snapshot func() shared.FRP, c sampler, detail shared.DetailProvider, management shared.ConfigProvider, restore shared.RestoreProvider, tunnel shared.TunnelProvider) (*Service, error) {
 	token, err := readToken(cfg.TokenFile)
 	if err != nil {
 		return nil, err
@@ -148,9 +165,7 @@ func startWithProviders(ctx context.Context, cfg shared.AgentConfig, snapshot fu
 	child, cancel := context.WithCancel(ctx)
 	s := &Service{ctx: child, cancel: cancel, cfg: cfg, token: token, collector: c, snapshot: snapshot, notify: make(chan struct{}, 1), intervalChanged: make(chan struct{}, 1), ready: make(chan struct{}), done: make(chan struct{}), dialer: websocket.Dialer{HandshakeTimeout: 5 * time.Second, TLSClientConfig: tlsCfg, ReadBufferSize: 4096, WriteBufferSize: 4096}}
 	s.detailProvider, s.configProvider = detail, management
-	if len(restores) != 0 {
-		s.restoreProvider = restores[0]
-	}
+	s.restoreProvider, s.tunnelProvider = restore, tunnel
 	if s.configEnabled() || s.restoreEnabled() {
 		s.configJobs = make(chan configJob, 1)
 		s.wg.Add(1)
@@ -242,7 +257,7 @@ func (s *Service) Close() {
 	}
 }
 func (s *Service) sample() {
-	value := observation{facts: s.collector.Facts(), metrics: s.collector.Metrics(), frp: s.frpSnapshot(), detail: s.frpDetailSnapshot(), at: time.Now().UTC()}
+	value := observation{facts: s.collector.Facts(), metrics: s.collector.Metrics(), frp: s.frpSnapshot(), detail: s.frpDetailSnapshot(), tunnel: s.tunnelSnapshot(), at: time.Now().UTC()}
 	if value.facts.Validate() != nil || value.metrics.Validate() != nil {
 		if s.sampleWarn.allow(time.Now(), 5*time.Minute) {
 			log.Warnf("frp-plus telemetry keeps dropping invalid local samples")
@@ -458,12 +473,16 @@ func (s *Service) connect() (bool, bool) {
 	}
 	session := hex.EncodeToString(nonce[:])
 	current := s.current()
+	tunnelOffered := s.tunnelProvider != nil && response != nil && advertisedCapability(response.Header, shared.TunnelCapability)
 	detailOffered := s.detailProvider != nil && response != nil && advertisedCapability(response.Header, shared.FRPDetailCapability)
 	restoreOffered := s.restoreEnabled() && response != nil && advertisedCapability(response.Header, shared.ConfigRestoreCapability)
 	configOffered := s.configEnabled() && response != nil && advertisedCapability(response.Header, shared.ConfigManageCapability)
 	hello := shared.Hello{Meta: shared.Meta{Schema: shared.SchemaVersion, SessionID: session, Sequence: 1, CollectedAt: current.at.Format(time.RFC3339Nano)}, Capabilities: []string{"metrics.v1", "frp.v1"}, Facts: current.facts, Extensions: extension(current.frp)}
 	if s.cfg.ProbeEnabled {
 		hello.Capabilities = append(hello.Capabilities, "ping.v1")
+	}
+	if tunnelOffered {
+		hello.Capabilities = append(hello.Capabilities, shared.TunnelCapability)
 	}
 	if detailOffered {
 		hello.Capabilities = append(hello.Capabilities, shared.FRPDetailCapability)
@@ -492,7 +511,7 @@ func (s *Service) connect() (bool, bool) {
 	}
 	decoder := json.NewDecoder(strings.NewReader(string(data)))
 	decoder.DisallowUnknownFields()
-	if decoder.Decode(&answer) != nil || decoder.Decode(new(any)) != io.EOF || answer.JSONRPC != "2.0" || answer.ID != "hello" || answer.Result.Validate() != nil || answer.Result.SessionID != session || !capabilities(answer.Result.Capabilities, s.cfg.ProbeEnabled, detailOffered, configOffered, restoreOffered) {
+	if decoder.Decode(&answer) != nil || decoder.Decode(new(any)) != io.EOF || answer.JSONRPC != "2.0" || answer.ID != "hello" || answer.Result.Validate() != nil || answer.Result.SessionID != session || !capabilities(answer.Result.Capabilities, s.cfg.ProbeEnabled, detailOffered, configOffered, restoreOffered, tunnelOffered) {
 		return false, false
 	}
 	negotiated := int64(answer.Result.ReportInterval)
@@ -508,12 +527,15 @@ func (s *Service) connect() (bool, bool) {
 	c.SetPongHandler(func(string) error { return c.SetReadDeadline(time.Now().Add(15 * time.Second)) })
 	var probes *probe.Engine
 	var results <-chan probe.Result
-	detailAccepted, configAccepted, restoreAccepted := false, false, false
+	detailAccepted, configAccepted, restoreAccepted, tunnelAccepted := false, false, false, false
 	connectionCtx, connectionCancel := context.WithCancel(s.ctx)
 	defer connectionCancel()
 	configResults := make(chan shared.ConfigResult, 4)
 	restoreResults := make(chan shared.RestoreResult, 4)
 	for _, capability := range answer.Result.Capabilities {
+		if capability == shared.TunnelCapability {
+			tunnelAccepted = true
+		}
 		if capability == shared.ConfigRestoreCapability {
 			restoreAccepted = true
 		}
@@ -613,6 +635,15 @@ func (s *Service) connect() (bool, bool) {
 				return false
 			}
 		}
+		if tunnelAccepted && latest.tunnel != nil {
+			if !nextSequence(&sequence) {
+				return false
+			}
+			report := shared.TunnelReport{Meta: shared.Meta{Schema: shared.SchemaVersion, SessionID: session, Sequence: sequence, CollectedAt: latest.at.Format(time.RFC3339Nano)}, Snapshot: *latest.tunnel}
+			if report.Validate() != nil || writeFrame(c, "frp.tunnel", "", report) != nil {
+				return false
+			}
+		}
 		if detailAccepted && latest.detail != nil {
 			if !nextSequence(&sequence) {
 				return false
@@ -701,11 +732,12 @@ func (s *Service) connect() (bool, bool) {
 func capabilities(c []string, probeEnabled, detailOffered bool, configOptions ...bool) bool {
 	configOffered := len(configOptions) != 0 && configOptions[0]
 	restoreOffered := len(configOptions) > 1 && configOptions[1]
+	tunnelOffered := len(configOptions) > 2 && configOptions[2]
 	metrics := false
 	for _, v := range c {
 		if v == "metrics.v1" {
 			metrics = true
-		} else if v != "frp.v1" && (v != "ping.v1" || !probeEnabled) && (v != shared.FRPDetailCapability || !detailOffered) && (v != shared.ConfigManageCapability || !configOffered) && (v != shared.ConfigRestoreCapability || !restoreOffered) {
+		} else if v != "frp.v1" && (v != "ping.v1" || !probeEnabled) && (v != shared.FRPDetailCapability || !detailOffered) && (v != shared.ConfigManageCapability || !configOffered) && (v != shared.ConfigRestoreCapability || !restoreOffered) && (v != shared.TunnelCapability || !tunnelOffered) {
 			return false
 		}
 	}

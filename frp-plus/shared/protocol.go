@@ -169,6 +169,7 @@ type Frame struct {
 	Hello          *Hello
 	Report         *Report
 	FRPDetail      *FRPDetailReport
+	Tunnel         *TunnelReport
 	ConfigCommand  *ConfigCommand
 	ConfigResult   *ConfigResult
 	RestoreCommand *RestoreCommand
@@ -226,6 +227,11 @@ func DecodeFrame(data []byte) (*Frame, error) {
 		f.FRPDetail = new(FRPDetailReport)
 		if err = decodeObject(wire.Params, f.FRPDetail); err == nil {
 			err = f.FRPDetail.Validate()
+		}
+	case "frp.tunnel":
+		f.Tunnel = new(TunnelReport)
+		if err = decodeObject(wire.Params, f.Tunnel); err == nil {
+			err = f.Tunnel.Validate()
 		}
 	case "config.command":
 		f.ConfigCommand = new(ConfigCommand)

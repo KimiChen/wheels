@@ -596,6 +596,7 @@ func (s *Service) serverLoop() {
 		return
 	}
 	update := func() {
+		s.sampleServerTunnels()
 		defer func() {
 			if recover() != nil {
 				s.serverSnapshot.Store(&shared.ServerSnapshot{})

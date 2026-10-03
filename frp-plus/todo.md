@@ -548,6 +548,14 @@ Manager 核对，未宣称关联主控独立 frps 快照或自动验证业务。
 影响：原生 metrics 补丁、`shared/frpserver.go`、`monitor/control/`、`monitor/service.go`。
 验收：午夜、重启、同名重建、改绑、采集缺口、超过 JS 安全整数、负差与时间回拨。
 
+原生观察层首批（2026-10-03）：补丁 0010 建立独立进程 epoch、实例 ID、累计计数
+和有界生命周期窗口，使用独立私有能力上报。完整 `client/...`、`server/...`、shared、
+Agent service 与 monitor race 通过。真实原生 TCP 同名删除重建后，旧连接继续转发，
+旧实例 19B、新实例 3B 分别归属于原 handle；不会随名称复用或午夜重置混入另一实例。
+SUDP 同/混 codec 的字节口径不同，首批字节量标记 unsupported，连接数可观察；UDP
+字节可观察、连接数不适用，XTCP 直连两者均不虚构。Visitor 区分原生事件和采样发现的
+状态时间。事件持久化、绑定 epoch 与历史 API 尚未完成，P3-02/03 仍保持未完成。
+
 ### P3-03 隧道历史 API 与页面
 
 - [ ] 复用可选 `monitor/store` 保存连接数、流量指标和采样质量；默认沿用 7 天保留期，可配置但必须有上限。

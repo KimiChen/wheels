@@ -51,6 +51,9 @@ type node struct {
 	frpDetail           *shared.FRPDetail
 	frpDetailAt         time.Time
 	frpDetailEnabled    bool
+	tunnelEnabled       bool
+	tunnel              *shared.TunnelSnapshot
+	tunnelAt            time.Time
 	probeEnabled        bool
 	configLink          *configLink
 }
@@ -65,42 +68,52 @@ type Service struct {
 	listener net.Listener
 	// location is the accounting calendar timezone shared with the control
 	// store, used by the today-traffic DTO for day boundaries.
-	location          *time.Location
-	mu                sync.Mutex
-	nodes             map[string]*node
-	connections       map[*websocket.Conn]credential
-	wg                sync.WaitGroup
-	closeOnce         sync.Once
-	done              chan struct{}
-	handshakes        chan struct{}
-	streamsPublic     chan struct{}
-	streamsAdmin      chan struct{}
-	rateMu            sync.Mutex
-	rateTokens        float64
-	rateAt            time.Time
-	public            atomic.Pointer[PublicSnapshot]
-	publicJSON        atomic.Pointer[[]byte]
-	publishMu         sync.Mutex
-	adminPublishMu    sync.Mutex
-	adminGeneration   atomic.Uint64
-	adminJSON         atomic.Pointer[adminEncodedSnapshot]
-	control           *control.Store
-	configs           atomic.Pointer[nodeConfigs]
-	groups            atomic.Pointer[groupBook]
-	store             *store.Store
-	storeFailed       bool
-	tasks             atomic.Pointer[probeBook]
-	taskError         atomic.Bool
-	queries           chan struct{}
-	configMu          sync.Mutex
-	credentialError   atomic.Bool
-	admin             *adminState
-	configCoordinator *configCoordinator
-	serverProvider    shared.ServerProvider
-	serverSnapshot    atomic.Pointer[shared.ServerSnapshot]
+	location             *time.Location
+	mu                   sync.Mutex
+	nodes                map[string]*node
+	connections          map[*websocket.Conn]credential
+	wg                   sync.WaitGroup
+	closeOnce            sync.Once
+	done                 chan struct{}
+	handshakes           chan struct{}
+	streamsPublic        chan struct{}
+	streamsAdmin         chan struct{}
+	rateMu               sync.Mutex
+	rateTokens           float64
+	rateAt               time.Time
+	public               atomic.Pointer[PublicSnapshot]
+	publicJSON           atomic.Pointer[[]byte]
+	publishMu            sync.Mutex
+	adminPublishMu       sync.Mutex
+	adminGeneration      atomic.Uint64
+	adminJSON            atomic.Pointer[adminEncodedSnapshot]
+	control              *control.Store
+	configs              atomic.Pointer[nodeConfigs]
+	groups               atomic.Pointer[groupBook]
+	store                *store.Store
+	storeFailed          bool
+	tasks                atomic.Pointer[probeBook]
+	taskError            atomic.Bool
+	queries              chan struct{}
+	configMu             sync.Mutex
+	credentialError      atomic.Bool
+	admin                *adminState
+	configCoordinator    *configCoordinator
+	serverProvider       shared.ServerProvider
+	serverSnapshot       atomic.Pointer[shared.ServerSnapshot]
+	tunnelProvider       shared.TunnelProvider
+	serverTunnelSnapshot atomic.Pointer[shared.TunnelSnapshot]
 }
 
 func Start(ctx context.Context, cfg shared.MonitorConfig, providers ...shared.ServerProvider) (*Service, error) {
+	var server shared.ServerProvider
+	if len(providers) > 0 {
+		server = providers[0]
+	}
+	return StartWithTunnelProvider(ctx, cfg, server, nil)
+}
+
+func StartWithTunnelProvider(ctx context.Context, cfg shared.MonitorConfig, server shared.ServerProvider, tunnel shared.TunnelProvider) (*Service, error) {
 	if !cfg.Enabled {
 		return nil, nil
 	}
@@ -122,9 +135,7 @@ func Start(ctx context.Context, cfg shared.MonitorConfig, providers ...shared.Se
 
 	child, cancel := context.WithCancel(ctx)
 	s := &Service{cfg: cfg, ctx: child, cancel: cancel, location: time.Local, nodes: map[string]*node{}, control: db, connections: map[*websocket.Conn]credential{}, handshakes: make(chan struct{}, 32), streamsPublic: make(chan struct{}, 128), streamsAdmin: make(chan struct{}, 64), done: make(chan struct{}), rateTokens: 40, rateAt: time.Now()}
-	if len(providers) > 0 {
-		s.serverProvider = providers[0]
-	}
+	s.serverProvider, s.tunnelProvider = server, tunnel
 	s.admin, err = newAdmin(cfg)
 	if err != nil {
 		cancel()
@@ -406,6 +417,8 @@ func (s *Service) handleWS(w http.ResponseWriter, r *http.Request) {
 	n.probeEnabled = hasCapability(hello.Capabilities, "ping.v1")
 	n.frpDetailEnabled = hasCapability(hello.Capabilities, shared.FRPDetailCapability)
 	n.frpDetail, n.frpDetailAt = nil, time.Time{}
+	n.tunnelEnabled = hasCapability(hello.Capabilities, shared.TunnelCapability)
+	n.tunnel, n.tunnelAt = nil, time.Time{}
 	n.frp = nil
 	if hello.Extensions != nil {
 		n.frp = hello.Extensions.FRP
@@ -502,7 +515,7 @@ func (s *Service) handleWS(w http.ResponseWriter, r *http.Request) {
 	}()
 	tokens, last := float64(8), time.Now()
 	rate, burst := float64(2), float64(8)
-	if hasCapability(hello.Capabilities, shared.FRPDetailCapability) || hasCapability(hello.Capabilities, shared.ConfigManageCapability) || hasCapability(hello.Capabilities, shared.ConfigRestoreCapability) {
+	if hasCapability(hello.Capabilities, shared.TunnelCapability) || hasCapability(hello.Capabilities, shared.FRPDetailCapability) || hasCapability(hello.Capabilities, shared.ConfigManageCapability) || hasCapability(hello.Capabilities, shared.ConfigRestoreCapability) {
 		rate, burst, tokens = 6, 16, 16
 	}
 	if hasCapability(hello.Capabilities, "ping.v1") {
@@ -529,7 +542,7 @@ func (s *Service) handleWS(w http.ResponseWriter, r *http.Request) {
 		}
 		tokens--
 		frame, err = shared.DecodeFrame(data)
-		if err != nil || (frame.Report == nil && frame.PingResult == nil && frame.FRPDetail == nil && frame.ConfigResult == nil && frame.RestoreResult == nil) {
+		if err != nil || (frame.Tunnel == nil && frame.Report == nil && frame.PingResult == nil && frame.FRPDetail == nil && frame.ConfigResult == nil && frame.RestoreResult == nil) {
 			closeProtocol(c)
 			return
 		}
@@ -549,6 +562,13 @@ func (s *Service) handleWS(w http.ResponseWriter, r *http.Request) {
 		}
 		if frame.PingResult != nil {
 			if !hasCapability(hello.Capabilities, "ping.v1") || !s.acceptProbe(id, c, now, *frame.PingResult) {
+				closeProtocol(c)
+				return
+			}
+			continue
+		}
+		if frame.Tunnel != nil {
+			if !s.acceptTunnel(id, c, now, *frame.Tunnel) {
 				closeProtocol(c)
 				return
 			}
@@ -602,7 +622,7 @@ func supportedCapabilities(offered []string) []string {
 	accepted := make([]string, 0, len(offered))
 	for _, capability := range offered {
 		switch capability {
-		case "metrics.v1", "frp.v1", "ping.v1", shared.FRPDetailCapability, shared.ConfigManageCapability, shared.ConfigRestoreCapability:
+		case "metrics.v1", "frp.v1", "ping.v1", shared.TunnelCapability, shared.FRPDetailCapability, shared.ConfigManageCapability, shared.ConfigRestoreCapability:
 			accepted = append(accepted, capability)
 		}
 	}

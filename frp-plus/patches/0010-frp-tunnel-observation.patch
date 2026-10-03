@@ -1,0 +1,1588 @@
+diff --git a/client/service.go b/client/service.go
+--- a/client/service.go
++++ b/client/service.go
+@@ -43,6 +43,7 @@
+ 	httppkg "github.com/fatedier/frp/pkg/util/http"
+ 	"github.com/fatedier/frp/pkg/util/log"
+ 	netpkg "github.com/fatedier/frp/pkg/util/net"
++	"github.com/fatedier/frp/pkg/util/tunnelmonitor"
+ 	"github.com/fatedier/frp/pkg/util/version"
+ 	"github.com/fatedier/frp/pkg/util/wait"
+ 	"github.com/fatedier/frp/pkg/util/xlog"
+@@ -119,6 +120,7 @@
+ 
+ // Service is the client service that connects to frps and provides proxy services.
+ type Service struct {
++	tunnelRegistry         *tunnelmonitor.Registry
+ 	managedEngine          *managed.Engine
+ 	managedProvider        shared.ConfigProvider
+ 	managedRestoreProvider shared.RestoreProvider
+@@ -261,6 +263,13 @@
+ 	if webServer != nil {
+ 		webServer.RouteRegister(s.registerRouteHandlers)
+ 	}
++	if options.Common.Telemetry.Enabled {
++		serviceID := ""
++		if s.managedEngine != nil {
++			serviceID = s.managedEngine.ServiceID()
++		}
++		s.tunnelRegistry = tunnelmonitor.New("client", serviceID)
++	}
+ 	if options.Common.VirtualNet.Address != "" {
+ 		s.vnetController = vnet.NewController(options.Common.VirtualNet)
+ 	}
+@@ -402,6 +411,7 @@
+ 		visitorCfgs := svr.visitorCfgs
+ 		svr.cfgMu.RUnlock()
+ 
++		sessionCtx.TunnelRegistry = svr.tunnelRegistry
+ 		ctl, err := NewControl(svr.ctx, sessionCtx)
+ 		if err != nil {
+ 			svr.setMonitorControlError("connect_failed")
+@@ -713,7 +723,7 @@
+ 						log.Warnf("frp-plus telemetry stopped after an internal failure")
+ 					}
+ 				}()
+-				telemetry, err := agentmonitor.StartWithRestoreProviders(svr.ctx, svr.common.Telemetry, svr.monitorSnapshot, svr.monitorDetail, svr.managedProvider, svr.managedRestoreProvider)
++				telemetry, err := agentmonitor.StartWithTunnelProviders(svr.ctx, svr.common.Telemetry, svr.monitorSnapshot, svr.monitorDetail, svr.managedProvider, svr.managedRestoreProvider, svr.monitorTunnels)
+ 				if err != nil {
+ 					log.Warnf("frp-plus telemetry initialization failed: %v", err)
+ 					return
+diff --git a/client/control.go b/client/control.go
+--- a/client/control.go
++++ b/client/control.go
+@@ -27,12 +27,14 @@
+ 	"github.com/fatedier/frp/pkg/msg"
+ 	"github.com/fatedier/frp/pkg/naming"
+ 	"github.com/fatedier/frp/pkg/transport"
++	"github.com/fatedier/frp/pkg/util/tunnelmonitor"
+ 	"github.com/fatedier/frp/pkg/util/wait"
+ 	"github.com/fatedier/frp/pkg/util/xlog"
+ 	"github.com/fatedier/frp/pkg/vnet"
+ )
+ 
+ type SessionContext struct {
++	TunnelRegistry *tunnelmonitor.Registry
+ 	// The client common configuration.
+ 	Common *v1.ClientCommonConfig
+ 
+@@ -104,6 +106,8 @@
+ 	)
+ 	ctl.vm = visitor.NewManager(ctl.ctx, sessionCtx.RunID, sessionCtx.Common,
+ 		ctl.connectServer, ctl.msgTransporter, sessionCtx.VnetController, sessionCtx.UDPPacketCodec)
++	ctl.pm.SetTunnelRegistry(sessionCtx.TunnelRegistry)
++	ctl.vm.SetTunnelRegistry(sessionCtx.TunnelRegistry)
+ 	return ctl, nil
+ }
+ 
+diff --git a/client/tunnel.go b/client/tunnel.go
+new file mode 100644
+--- /dev/null
++++ b/client/tunnel.go
+@@ -0,0 +1,18 @@
++package client
++
++import "github.com/fatedier/frp/extension/frpmonitor/shared"
++
++func (svr *Service) monitorTunnels() shared.TunnelSnapshot {
++	if svr.tunnelRegistry == nil {
++		return shared.EmptyTunnelSnapshot("client", "unavailable")
++	}
++	if !svr.ctlMu.TryRLock() {
++		return shared.EmptyTunnelSnapshot("client", "unavailable")
++	}
++	ctl := svr.ctl
++	svr.ctlMu.RUnlock()
++	if ctl != nil && !ctl.vm.ObserveTunnels() {
++		return shared.EmptyTunnelSnapshot("client", "unavailable")
++	}
++	return svr.tunnelRegistry.Snapshot()
++}
+diff --git a/client/proxy/proxy_manager.go b/client/proxy/proxy_manager.go
+--- a/client/proxy/proxy_manager.go
++++ b/client/proxy/proxy_manager.go
+@@ -27,11 +27,13 @@
+ 	v1 "github.com/fatedier/frp/pkg/config/v1"
+ 	"github.com/fatedier/frp/pkg/msg"
+ 	"github.com/fatedier/frp/pkg/transport"
++	"github.com/fatedier/frp/pkg/util/tunnelmonitor"
+ 	"github.com/fatedier/frp/pkg/util/xlog"
+ 	"github.com/fatedier/frp/pkg/vnet"
+ )
+ 
+ type Manager struct {
++	tunnelRegistry     *tunnelmonitor.Registry
+ 	proxies            map[string]*Wrapper
+ 	msgTransporter     transport.MessageTransporter
+ 	inWorkConnCallback func(*v1.ProxyBaseConfig, net.Conn, *msg.StartWorkConn) bool
+@@ -170,6 +172,7 @@
+ 		name := cfg.GetBaseConfig().Name
+ 		if _, ok := pm.proxies[name]; !ok {
+ 			pxy := NewWrapper(pm.ctx, cfg, pm.clientCfg, pm.encryptionKey, pm.HandleEvent, pm.msgTransporter, pm.vnetController, pm.udpPacketCodec)
++			pxy.tunnel = pm.tunnelRegistry.Open(tunnelmonitor.ClientIdentity(pm.clientCfg.Telemetry.ServerID, pm.clientCfg.User, pm.clientCfg.ClientID, "proxy", name, cfg.GetBaseConfig().Type))
+ 			if pm.inWorkConnCallback != nil {
+ 				pxy.SetInWorkConnCallback(pm.inWorkConnCallback)
+ 			}
+diff --git a/client/proxy/proxy_wrapper.go b/client/proxy/proxy_wrapper.go
+--- a/client/proxy/proxy_wrapper.go
++++ b/client/proxy/proxy_wrapper.go
+@@ -32,6 +32,7 @@
+ 	"github.com/fatedier/frp/pkg/naming"
+ 	"github.com/fatedier/frp/pkg/transport"
+ 	"github.com/fatedier/frp/pkg/util/monitorstate"
++	"github.com/fatedier/frp/pkg/util/tunnelmonitor"
+ 	"github.com/fatedier/frp/pkg/util/xlog"
+ 	"github.com/fatedier/frp/pkg/vnet"
+ )
+@@ -63,6 +64,7 @@
+ }
+ 
+ type Wrapper struct {
++	tunnel        *tunnelmonitor.Handle
+ 	monitorErrors monitorstate.Errors
+ 	WorkingStatus
+ 
+@@ -141,6 +143,7 @@
+ func (pw *Wrapper) SetRunningStatus(remoteAddr string, respErr string) error {
+ 	pw.mu.Lock()
+ 	defer pw.mu.Unlock()
++	defer pw.observeTunnelLocked()
+ 	if pw.Phase != ProxyPhaseWaitStart {
+ 		return fmt.Errorf("status not wait start, ignore start message")
+ 	}
+@@ -186,6 +189,7 @@
+ 		pw.monitor.Stop()
+ 	}
+ 	pw.Phase = ProxyPhaseClosed
++	pw.tunnel.Close()
+ 	pw.close()
+ }
+ 
+@@ -215,6 +219,7 @@
+ 
+ 				xl.Tracef("change status from [%s] to [%s]", pw.Phase, ProxyPhaseWaitStart)
+ 				pw.Phase = ProxyPhaseWaitStart
++				pw.observeTunnelLocked()
+ 
+ 				var newProxyMsg msg.NewProxy
+ 				pw.Cfg.MarshalToMsg(&newProxyMsg)
+@@ -231,6 +236,7 @@
+ 				pw.close()
+ 				xl.Tracef("change status from [%s] to [%s]", pw.Phase, ProxyPhaseCheckFailed)
+ 				pw.Phase = ProxyPhaseCheckFailed
++				pw.observeTunnelLocked()
+ 				pw.monitorErrors.Fail("health_check_failed", "health_check")
+ 			}
+ 			pw.mu.Unlock()
+diff --git a/client/proxy/tunnel.go b/client/proxy/tunnel.go
+new file mode 100644
+--- /dev/null
++++ b/client/proxy/tunnel.go
+@@ -0,0 +1,26 @@
++package proxy
++
++import "github.com/fatedier/frp/pkg/util/tunnelmonitor"
++
++// SetTunnelRegistry is called before the manager starts any wrappers.
++func (pm *Manager) SetTunnelRegistry(registry *tunnelmonitor.Registry) { pm.tunnelRegistry = registry }
++
++func (pw *Wrapper) observeTunnelLocked() {
++	state := tunnelmonitor.InitialState("unknown")
++	switch pw.Phase {
++	case ProxyPhaseNew, ProxyPhaseWaitStart:
++		state.Status = "starting"
++	case ProxyPhaseRunning:
++		state.Status = "running"
++	case ProxyPhaseStartErr:
++		state.Status = "error"
++		state.ErrorCode = "start_failed"
++	case ProxyPhaseCheckFailed:
++		state.Status = "error"
++		state.ErrorCode = "health_check_failed"
++	case ProxyPhaseClosed:
++		pw.tunnel.Close()
++		return
++	}
++	pw.tunnel.State(state)
++}
+diff --git a/client/proxy/tunnel_test.go b/client/proxy/tunnel_test.go
+new file mode 100644
+--- /dev/null
++++ b/client/proxy/tunnel_test.go
+@@ -0,0 +1,52 @@
++package proxy
++
++import (
++	"encoding/json"
++	"strings"
++	"testing"
++
++	"github.com/fatedier/frp/pkg/util/tunnelmonitor"
++)
++
++func TestTunnelProxyNativeStatusDoesNotExportErrorOrMergeInstance(t *testing.T) {
++	r := tunnelmonitor.New("client")
++	identity := tunnelmonitor.ClientIdentity("server", "team", "client", "proxy", "same", "tcp")
++	p := &Wrapper{WorkingStatus: WorkingStatus{Name: "same", Type: "tcp", Phase: ProxyPhaseWaitStart}, tunnel: r.Open(identity)}
++	if p.SetRunningStatus("", "secretKey=private") == nil {
++		t.Fatal("expected native rejection")
++	}
++	s := r.Snapshot()
++	if s.Validate() != nil || len(s.Objects) != 1 || s.Objects[0].State.Status != "error" || s.Objects[0].State.ErrorCode != "start_failed" {
++		t.Fatal("registration rejection not classified")
++	}
++	data, _ := json.Marshal(s)
++	if strings.Contains(string(data), "private") || strings.Contains(string(data), "secretKey") {
++		t.Fatal("native error leaked")
++	}
++	id := s.Objects[0].InstanceID
++	p.mu.Lock()
++	p.Phase = ProxyPhaseCheckFailed
++	p.observeTunnelLocked()
++	p.mu.Unlock()
++	if r.Snapshot().Objects[0].State.ErrorCode != "health_check_failed" {
++		t.Fatal("health state conflated with registration error")
++	}
++	p.mu.Lock()
++	p.Phase = ProxyPhaseClosed
++	p.observeTunnelLocked()
++	p.mu.Unlock()
++	r.Open(identity)
++	s = r.Snapshot()
++	if len(s.Objects) != 2 || s.Objects[0].InstanceID == s.Objects[1].InstanceID {
++		t.Fatal("recreated proxy reused instance")
++	}
++	closed := false
++	for _, o := range s.Objects {
++		if o.InstanceID == id {
++			closed = o.ClosedAtMS != nil && o.State.Status == "closed"
++		}
++	}
++	if !closed {
++		t.Fatal("closed original missing")
++	}
++}
+diff --git a/client/visitor/visitor_manager.go b/client/visitor/visitor_manager.go
+--- a/client/visitor/visitor_manager.go
++++ b/client/visitor/visitor_manager.go
+@@ -28,17 +28,20 @@
+ 	"github.com/fatedier/frp/pkg/msg"
+ 	"github.com/fatedier/frp/pkg/transport"
+ 	"github.com/fatedier/frp/pkg/util/monitorstate"
++	"github.com/fatedier/frp/pkg/util/tunnelmonitor"
+ 	"github.com/fatedier/frp/pkg/util/xlog"
+ 	"github.com/fatedier/frp/pkg/vnet"
+ )
+ 
+ type Manager struct {
+-	monitorErrors map[string]*monitorstate.Error
+-	monitorClosed bool
+-	clientCfg     *v1.ClientCommonConfig
+-	cfgs          map[string]v1.VisitorConfigurer
+-	visitors      map[string]Visitor
+-	helper        Helper
++	tunnelRegistry *tunnelmonitor.Registry
++	tunnelHandles  map[string]*tunnelmonitor.Handle
++	monitorErrors  map[string]*monitorstate.Error
++	monitorClosed  bool
++	clientCfg      *v1.ClientCommonConfig
++	cfgs           map[string]v1.VisitorConfigurer
++	visitors       map[string]Visitor
++	helper         Helper
+ 
+ 	checkInterval           time.Duration
+ 	keepVisitorsRunningOnce sync.Once
+@@ -116,6 +119,9 @@
+ 	for _, v := range vm.visitors {
+ 		v.Close()
+ 	}
++	for _, handle := range vm.tunnelHandles {
++		handle.Close()
++	}
+ 	select {
+ 	case <-vm.stopCh:
+ 	default:
+@@ -127,12 +133,22 @@
+ func (vm *Manager) startVisitor(cfg v1.VisitorConfigurer) (err error) {
+ 	xl := xlog.FromContextSafe(vm.ctx)
+ 	name := cfg.GetBaseConfig().Name
++	if vm.tunnelHandles == nil {
++		vm.tunnelHandles = map[string]*tunnelmonitor.Handle{}
++	}
++	handle := vm.tunnelRegistry.Open(tunnelmonitor.ClientIdentity(vm.clientCfg.Telemetry.ServerID, vm.clientCfg.User, vm.clientCfg.ClientID, "visitor", name, cfg.GetBaseConfig().Type))
++	vm.tunnelHandles[name] = handle
+ 	if vm.monitorErrors == nil {
+ 		vm.monitorErrors = make(map[string]*monitorstate.Error)
+ 	}
+ 	code := "plugin_failed"
+ 	defer func() {
+ 		if err != nil {
++			state := tunnelmonitor.InitialState("error")
++			state.LocalState = "error"
++			state.ErrorCode = code
++			handle.State(state)
++			handle.Close()
+ 			vm.monitorErrors[name] = &monitorstate.Error{Code: code, Stage: "visitor", At: time.Now().UTC().Format(time.RFC3339Nano)}
+ 		} else if previous := vm.monitorErrors[name]; previous != nil && previous.RecoveredAt == "" {
+ 			c := *previous
+@@ -151,6 +167,12 @@
+ 		xl.Warnf("start error: %v", err)
+ 	} else {
+ 		vm.visitors[name] = visitor
++		state := tunnelmonitor.InitialState("running")
++		state.LocalState = "configured"
++		if cfg.GetBaseConfig().BindPort > 0 {
++			state.LocalState = "listening"
++		}
++		handle.State(state)
+ 		xl.Infof("start visitor success")
+ 	}
+ 	return
+@@ -183,6 +205,8 @@
+ 			delNames = append(delNames, name)
+ 			delete(vm.cfgs, name)
+ 			delete(vm.monitorErrors, name)
++			vm.tunnelHandles[name].Close()
++			delete(vm.tunnelHandles, name)
+ 			if visitor, ok := vm.visitors[name]; ok {
+ 				visitor.Close()
+ 			}
+diff --git a/client/visitor/tunnel.go b/client/visitor/tunnel.go
+new file mode 100644
+--- /dev/null
++++ b/client/visitor/tunnel.go
+@@ -0,0 +1,47 @@
++package visitor
++
++import "github.com/fatedier/frp/pkg/util/tunnelmonitor"
++
++// SetTunnelRegistry is called before the manager starts any visitors.
++func (vm *Manager) SetTunnelRegistry(registry *tunnelmonitor.Registry) { vm.tunnelRegistry = registry }
++
++// Runtime remote/P2P state is sampled; lifecycle create/close is recorded at its
++// native transition. A transient handshake between samples is not guaranteed.
++func (vm *Manager) ObserveTunnels() bool {
++	if !vm.mu.TryRLock() {
++		return false
++	}
++	defer vm.mu.RUnlock()
++	for name, v := range vm.visitors {
++		observed, ok := v.(interface{ monitorStatus() MonitorStatus })
++		if !ok {
++			continue
++		}
++		got := observed.monitorStatus()
++		state := tunnelmonitor.InitialState("running")
++		state.LocalState = "configured"
++		if cfg := vm.cfgs[name]; cfg != nil && cfg.GetBaseConfig().BindPort > 0 {
++			state.LocalState = "listening"
++		}
++		if got.LocalState != "" {
++			state.LocalState = got.LocalState
++		}
++		state.RemoteState = got.RemoteState
++		state.P2PState = got.P2PState
++		state.FallbackState = got.FallbackState
++		if got.Error != nil && got.Error.RecoveredAt == "" {
++			switch got.Error.Code {
++			case "plugin_failed", "listen_failed":
++				state.ErrorCode = got.Error.Code
++			case "peer_failed":
++				state.ErrorCode = "remote_failed"
++			case "p2p_failed":
++				state.ErrorCode = "p2p_failed"
++			case "fallback_failed":
++				state.ErrorCode = "fallback_failed"
++			}
++		}
++		vm.tunnelHandles[name].ObservedState(state)
++	}
++	return true
++}
+diff --git a/client/visitor/tunnel_test.go b/client/visitor/tunnel_test.go
+new file mode 100644
+--- /dev/null
++++ b/client/visitor/tunnel_test.go
+@@ -0,0 +1,82 @@
++package visitor
++
++import (
++	"context"
++	"net"
++	"testing"
++
++	"github.com/fatedier/frp/extension/frpmonitor/shared"
++	v1 "github.com/fatedier/frp/pkg/config/v1"
++	"github.com/fatedier/frp/pkg/util/tunnelmonitor"
++)
++
++func TestTunnelVisitorAttemptsAndRuntimeStatesRemainSeparate(t *testing.T) {
++	listener, err := net.Listen("tcp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer listener.Close()
++	cfg := &v1.STCPVisitorConfig{VisitorBaseConfig: v1.VisitorBaseConfig{Name: "same", Type: "stcp", ServerName: "private", BindAddr: "127.0.0.1", BindPort: listener.Addr().(*net.TCPAddr).Port}}
++	r := tunnelmonitor.New("client")
++	m := NewManager(context.Background(), "run", &v1.ClientCommonConfig{User: "team", ClientID: "client"}, nil, nil, nil)
++	m.SetTunnelRegistry(r)
++	defer m.Close()
++	m.UpdateAll([]v1.VisitorConfigurer{cfg})
++	snapshot := r.Snapshot()
++	if snapshot.Validate() != nil || len(snapshot.Objects) != 1 || snapshot.Objects[0].State.ErrorCode != "listen_failed" || snapshot.Objects[0].State.RemoteState != "unknown" {
++		t.Fatal("failed attempt was not retained")
++	}
++	old := snapshot.Objects[0].InstanceID
++	listener.Close()
++	m.mu.Lock()
++	err = m.startVisitor(cfg)
++	m.mu.Unlock()
++	if err != nil {
++		t.Fatal("visitor retry failed")
++	}
++	current := func() shared.TunnelObject {
++		t.Helper()
++		if !m.ObserveTunnels() {
++			t.Fatal("visitor lock unexpectedly busy")
++		}
++		s := r.Snapshot()
++		if s.Validate() != nil {
++			t.Fatal("invalid private visitor observation")
++		}
++		for _, o := range s.Objects {
++			if o.ClosedAtMS == nil {
++				return o
++			}
++		}
++		t.Fatal("active visitor missing")
++		return shared.TunnelObject{}
++	}
++	o := current()
++	if o.InstanceID == old || o.State.LocalState != "listening" || o.State.RemoteState != "unknown" || o.Counters.RXBytes != nil {
++		t.Fatal("listener invented remote connectivity or reused failed instance")
++	}
++	m.mu.RLock()
++	v := m.visitors["same"].(*STCPVisitor)
++	m.mu.RUnlock()
++	a, b := net.Pipe()
++	defer b.Close()
++	connection := v.monitorConnection(a)
++	if current().State.RemoteState != "connected" {
++		t.Fatal("real visitor connection missing")
++	}
++	connection.Close()
++	connection.Close()
++	if current().State.RemoteState != "closed" {
++		t.Fatal("visitor close lost")
++	}
++	m.mu.Lock()
++	if m.ObserveTunnels() {
++		t.Error("observer waited behind mutation lock")
++	}
++	m.mu.Unlock()
++	m.UpdateAll(nil)
++	m.UpdateAll([]v1.VisitorConfigurer{cfg})
++	if current().InstanceID == o.InstanceID {
++		t.Fatal("same-name visitor recreation reused generation")
++	}
++}
+diff --git a/server/service.go b/server/service.go
+--- a/server/service.go
++++ b/server/service.go
+@@ -48,6 +48,7 @@
+ 	"github.com/fatedier/frp/pkg/util/log"
+ 	netpkg "github.com/fatedier/frp/pkg/util/net"
+ 	"github.com/fatedier/frp/pkg/util/tcpmux"
++	"github.com/fatedier/frp/pkg/util/tunnelmonitor"
+ 	"github.com/fatedier/frp/pkg/util/util"
+ 	"github.com/fatedier/frp/pkg/util/version"
+ 	"github.com/fatedier/frp/pkg/util/vhost"
+@@ -80,6 +81,7 @@
+ 
+ // Server service
+ type Service struct {
++	tunnelRegistry *tunnelmonitor.Registry
+ 	// Dispatch connections to different handlers listen on same port
+ 	muxer *mux.Mux
+ 
+@@ -207,6 +209,10 @@
+ 		log.Infof("tcpmux httpconnect multiplexer listen on %s, passthrough: %v", address, cfg.TCPMuxPassthrough)
+ 	}
+ 
++	if cfg.Monitor.Enabled {
++		svr.tunnelRegistry = tunnelmonitor.New("server")
++	}
++
+ 	// Init all plugins
+ 	for _, p := range cfg.HTTPPlugins {
+ 		svr.pluginManager.Register(plugin.NewHTTPPluginOptions(p))
+@@ -380,7 +386,7 @@
+ 					log.Warnf("frp-plus listener stopped after an internal failure")
+ 				}
+ 			}()
+-			monitor, err := frpmonitor.Start(ctx, svr.cfg.Monitor, svr.monitorSnapshot)
++			monitor, err := frpmonitor.StartWithTunnelProvider(ctx, svr.cfg.Monitor, svr.monitorSnapshot, svr.tunnelRegistry.Snapshot)
+ 			if err != nil {
+ 				log.Warnf("frp-plus listener initialization failed: %v", err)
+ 				return
+@@ -849,6 +855,7 @@
+ 	ctl, err := NewControl(ctx, &SessionContext{
+ 		RC:             svr.rc,
+ 		PxyManager:     svr.pxyManager,
++		TunnelRegistry: svr.tunnelRegistry,
+ 		PluginManager:  svr.pluginManager,
+ 		AuthVerifier:   authVerifier,
+ 		EncryptionKey:  svr.auth.EncryptionKey(),
+diff --git a/server/control.go b/server/control.go
+--- a/server/control.go
++++ b/server/control.go
+@@ -33,6 +33,7 @@
+ 	"github.com/fatedier/frp/pkg/msg"
+ 	plugin "github.com/fatedier/frp/pkg/plugin/server"
+ 	"github.com/fatedier/frp/pkg/transport"
++	"github.com/fatedier/frp/pkg/util/tunnelmonitor"
+ 	"github.com/fatedier/frp/pkg/util/util"
+ 	"github.com/fatedier/frp/pkg/util/wait"
+ 	"github.com/fatedier/frp/pkg/util/xlog"
+@@ -354,6 +355,7 @@
+ 
+ // SessionContext encapsulates the input parameters for creating a new Control.
+ type SessionContext struct {
++	TunnelRegistry *tunnelmonitor.Registry
+ 	// all resource managers and controllers
+ 	RC *controller.ResourceController
+ 	// proxy manager
+@@ -736,6 +738,7 @@
+ func (ctl *Control) handleNewProxy(m msg.Message) {
+ 	xl := ctl.xl
+ 	inMsg := m.(*msg.NewProxy)
++	requestedName := inMsg.ProxyName
+ 
+ 	content := &plugin.NewProxyContent{
+ 		User:     ctl.loginUserInfo(),
+@@ -745,7 +748,7 @@
+ 	retContent, err := ctl.sessionCtx.PluginManager.NewProxy(content)
+ 	if err == nil {
+ 		inMsg = &retContent.NewProxy
+-		remoteAddr, err = ctl.RegisterProxy(inMsg)
++		remoteAddr, err = ctl.RegisterProxy(inMsg, requestedName)
+ 	}
+ 
+ 	// register proxy in this control
+@@ -815,7 +818,7 @@
+ 	xl.Infof("close proxy [%s] success", inMsg.ProxyName)
+ }
+ 
+-func (ctl *Control) RegisterProxy(pxyMsg *msg.NewProxy) (remoteAddr string, err error) {
++func (ctl *Control) RegisterProxy(pxyMsg *msg.NewProxy, requestedNames ...string) (remoteAddr string, err error) {
+ 	var pxyConf v1.ProxyConfigurer
+ 	// Load configures from NewProxy message and validate.
+ 	pxyConf, err = config.NewProxyConfigurerFromMsg(pxyMsg, ctl.sessionCtx.ServerCfg)
+@@ -830,9 +833,21 @@
+ 		RunID: ctl.runID,
+ 	}
+ 
++	requestedName := pxyMsg.ProxyName
++	if len(requestedNames) > 0 {
++		requestedName = requestedNames[0]
++	}
++	observation := ctl.newTunnelObservation(requestedName, pxyConf.GetBaseConfig().Type)
++	defer func() {
++		if err != nil {
++			observation.Close()
++		}
++	}()
++
+ 	// NewProxy will return an interface Proxy.
+ 	// In fact, it creates different proxies based on the proxy type. We just call run() here.
+ 	pxy, err := proxy.NewProxy(ctl.ctx, &proxy.Options{
++		Observation:        observation,
+ 		UserInfo:           userInfo,
+ 		LoginMsg:           ctl.sessionCtx.LoginMsg,
+ 		PoolCount:          ctl.poolCount,
+@@ -891,6 +906,7 @@
+ 	ctl.mu.Lock()
+ 	ctl.proxies[pxy.GetName()] = pxy
+ 	ctl.mu.Unlock()
++	observation.State(tunnelmonitor.InitialState("registered"))
+ 	return
+ }
+ 
+diff --git a/server/tunnel.go b/server/tunnel.go
+new file mode 100644
+--- /dev/null
++++ b/server/tunnel.go
+@@ -0,0 +1,37 @@
++package server
++
++import (
++	"strings"
++
++	"github.com/fatedier/frp/extension/frpmonitor/shared"
++	"github.com/fatedier/frp/pkg/util/tunnelmonitor"
++)
++
++func (ctl *Control) newTunnelObservation(requestedName, protocol string) *tunnelmonitor.Handle {
++	if ctl.sessionCtx.TunnelRegistry == nil {
++		return nil
++	}
++	login := ctl.sessionCtx.LoginMsg
++	serverID := ctl.sessionCtx.ServerCfg.Monitor.ServerID
++	if serverID == "" {
++		serverID = "default"
++	}
++	id := shared.TunnelIdentity{ServerID: serverID, User: login.User, RawName: requestedName, Kind: "proxy", Protocol: protocol, Quality: "instance_only"}
++	canonical := true
++	if login.User != "" {
++		prefix := login.User + "."
++		if strings.HasPrefix(requestedName, prefix) && len(requestedName) > len(prefix) {
++			id.RawName = strings.TrimPrefix(requestedName, prefix)
++		} else {
++			canonical = false
++		}
++	}
++	if login.ClientID != "" {
++		value := login.ClientID
++		id.RawClientID = &value
++		if canonical {
++			id.Quality = "stable"
++		}
++	}
++	return ctl.sessionCtx.TunnelRegistry.Open(id)
++}
+diff --git a/server/tunnel_test.go b/server/tunnel_test.go
+new file mode 100644
+--- /dev/null
++++ b/server/tunnel_test.go
+@@ -0,0 +1,21 @@
++package server
++
++import (
++	"testing"
++
++	v1 "github.com/fatedier/frp/pkg/config/v1"
++	"github.com/fatedier/frp/pkg/msg"
++	"github.com/fatedier/frp/pkg/util/tunnelmonitor"
++)
++
++func TestTunnelIdentityUsesPrePluginRawNameAndRejectsGuessedOwner(t *testing.T) {
++	for _, test := range []struct{ name, user, client, raw, quality string }{{"alice.same", "alice", "stable", "same", "stable"}, {"same", "alice", "stable", "same", "instance_only"}, {"alice.alice.same", "alice", "stable", "alice.same", "stable"}, {"same", "", "", "same", "instance_only"}} {
++		r := tunnelmonitor.New("server")
++		ctl := &Control{sessionCtx: &SessionContext{TunnelRegistry: r, LoginMsg: &msg.Login{User: test.user, ClientID: test.client}, ServerCfg: &v1.ServerConfig{}}}
++		ctl.newTunnelObservation(test.name, "tcp")
++		s := r.Snapshot()
++		if s.Validate() != nil || len(s.Objects) != 1 || s.Objects[0].Identity.RawName != test.raw || s.Objects[0].Identity.Quality != test.quality {
++			t.Fatal("raw name or stable identity inferred incorrectly")
++		}
++	}
++}
+diff --git a/server/tunnel_native_test.go b/server/tunnel_native_test.go
+new file mode 100644
+--- /dev/null
++++ b/server/tunnel_native_test.go
+@@ -0,0 +1,188 @@
++package server
++
++import (
++	"context"
++	"fmt"
++	"io"
++	"net"
++	"net/http"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/fatedier/frp/extension/frpmonitor/shared"
++	v1 "github.com/fatedier/frp/pkg/config/v1"
++	"github.com/fatedier/frp/pkg/util/tunnelmonitor"
++)
++
++// A real native frpc keeps its first TCP stream alive while a reload removes
++// and recreates the same name. This exercises BaseProxy's actual Join callback,
++// not just the registry API or a synthetic counter increment.
++func TestTunnelNativeSameNameKeepsOldConnectionAccounting(t *testing.T) {
++	binary := os.Getenv("FRP_TUNNEL_E2E_AGENT")
++	if binary == "" {
++		t.Skip("FRP_TUNNEL_E2E_AGENT is required for isolated native forwarding regression")
++	}
++	dir := t.TempDir()
++	cfg := &v1.ServerConfig{}
++	if err := cfg.Complete(); err != nil {
++		t.Fatal("server defaults unavailable")
++	}
++	cfg.BindAddr = "127.0.0.1"
++	cfg.BindPort = 0
++	cfg.ProxyBindAddr = "127.0.0.1"
++	cfg.Monitor.ServerID = "tunnel-test"
++	svr, err := NewService(cfg)
++	if err != nil {
++		t.Fatal("isolated native server failed")
++	}
++	svr.tunnelRegistry = tunnelmonitor.New("server")
++	ctx, cancel := context.WithCancel(context.Background())
++	done := make(chan struct{})
++	go func() { svr.Run(ctx); close(done) }()
++	t.Cleanup(func() {
++		cancel()
++		svr.Close()
++		select {
++		case <-done:
++		case <-time.After(3 * time.Second):
++			t.Error("native server shutdown timeout")
++		}
++	})
++	echo, err := net.Listen("tcp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatal("echo listener unavailable")
++	}
++	t.Cleanup(func() { echo.Close() })
++	go func() {
++		for {
++			c, e := echo.Accept()
++			if e != nil {
++				return
++			}
++			go func() { defer c.Close(); _, _ = io.Copy(c, c) }()
++		}
++	}()
++	freePort := func() int {
++		l, e := net.Listen("tcp", "127.0.0.1:0")
++		if e != nil {
++			t.Fatal("port reservation failed")
++		}
++		p := l.Addr().(*net.TCPAddr).Port
++		l.Close()
++		return p
++	}
++	adminPort, remotePort := freePort(), freePort()
++	configFile := filepath.Join(dir, "frpc.toml")
++	base := fmt.Sprintf("serverAddr = \"127.0.0.1\"\nserverPort = %d\nuser = \"test\"\nclientID = \"stable\"\nwebServer.addr = \"127.0.0.1\"\nwebServer.port = %d\nlog.to = %q\n", svr.listener.Addr().(*net.TCPAddr).Port, adminPort, filepath.Join(dir, "client.log"))
++	proxy := fmt.Sprintf("\n[[proxies]]\nname = \"same\"\ntype = \"tcp\"\nlocalIP = \"127.0.0.1\"\nlocalPort = %d\nremotePort = %d\n", echo.Addr().(*net.TCPAddr).Port, remotePort)
++	write := func(enabled bool) {
++		text := base
++		if enabled {
++			text += proxy
++		}
++		if os.WriteFile(configFile, []byte(text), 0600) != nil {
++			t.Fatal("fixture configuration write failed")
++		}
++	}
++	write(true)
++	logFile, err := os.OpenFile(filepath.Join(dir, "process.log"), os.O_CREATE|os.O_WRONLY, 0600)
++	if err != nil {
++		t.Fatal("fixture log unavailable")
++	}
++	defer logFile.Close()
++	cmd := exec.Command(binary, "-c", configFile)
++	cmd.Stdout = logFile
++	cmd.Stderr = logFile
++	if cmd.Start() != nil {
++		t.Fatal("native client failed to start")
++	}
++	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
++	wait := func(test func() bool) {
++		deadline := time.Now().Add(10 * time.Second)
++		for time.Now().Before(deadline) {
++			if test() {
++				return
++			}
++			time.Sleep(20 * time.Millisecond)
++		}
++		t.Fatal("native tunnel observation did not reach expected state")
++	}
++	find := func(id string) (shared.TunnelObject, bool) {
++		s := svr.tunnelRegistry.Snapshot()
++		if s.State != "ready" {
++			return shared.TunnelObject{}, false
++		}
++		for _, o := range s.Objects {
++			if o.InstanceID == id || id == "" && o.State.Status == "registered" {
++				return o, true
++			}
++		}
++		return shared.TunnelObject{}, false
++	}
++	var first shared.TunnelObject
++	wait(func() bool { var ok bool; first, ok = find(""); return ok })
++	dial := func() net.Conn {
++		c, e := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", remotePort), time.Second)
++		if e != nil {
++			t.Fatal("isolated tunnel connection failed")
++		}
++		t.Cleanup(func() { c.Close() })
++		return c
++	}
++	exchange := func(c net.Conn, text string) {
++		_ = c.SetDeadline(time.Now().Add(3 * time.Second))
++		if _, e := io.WriteString(c, text); e != nil {
++			t.Fatal("forwarding write failed")
++		}
++		b := make([]byte, len(text))
++		if _, e := io.ReadFull(c, b); e != nil || string(b) != text {
++			t.Fatal("forwarding payload mismatch")
++		}
++	}
++	old := dial()
++	exchange(old, "old-before")
++	client := &http.Client{Timeout: 2 * time.Second}
++	reload := func() {
++		r, e := client.Get(fmt.Sprintf("http://127.0.0.1:%d/api/reload?strictConfig=true", adminPort))
++		if e != nil {
++			t.Fatal("native reload failed")
++		}
++		io.Copy(io.Discard, r.Body)
++		r.Body.Close()
++		if r.StatusCode != http.StatusOK {
++			t.Fatal("native reload rejected")
++		}
++	}
++	write(false)
++	reload()
++	wait(func() bool { o, ok := find(first.InstanceID); return ok && o.State.Status == "closed" })
++	write(true)
++	reload()
++	var second shared.TunnelObject
++	wait(func() bool { var ok bool; second, ok = find(""); return ok && second.InstanceID != first.InstanceID })
++	next := dial()
++	exchange(next, "new")
++	next.Close()
++	wait(func() bool {
++		o, ok := find(second.InstanceID)
++		return ok && o.Counters.RXBytes != nil && *o.Counters.RXBytes == "3" && *o.Counters.TXBytes == "3"
++	})
++	exchange(old, "old-after")
++	before, ok := find(first.InstanceID)
++	if !ok || before.Counters.RXBytes == nil || *before.Counters.RXBytes != "0" || *before.Counters.Connections != "1" {
++		t.Fatal("old connection was prematurely accounted or merged")
++	}
++	old.Close()
++	wait(func() bool {
++		o, ok := find(first.InstanceID)
++		return ok && o.Counters.RXBytes != nil && *o.Counters.RXBytes == "19" && *o.Counters.TXBytes == "19" && *o.Counters.Connections == "0"
++	})
++	final, ok := find(second.InstanceID)
++	if !ok || *final.Counters.RXBytes != "3" || *final.Counters.TXBytes != "3" || !strings.EqualFold(first.Identity.RawName, final.Identity.RawName) {
++		t.Fatal("late old callback contaminated new instance")
++	}
++}
+diff --git a/server/proxy/proxy.go b/server/proxy/proxy.go
+--- a/server/proxy/proxy.go
++++ b/server/proxy/proxy.go
+@@ -35,6 +35,7 @@
+ 	"github.com/fatedier/frp/pkg/proto/wire"
+ 	"github.com/fatedier/frp/pkg/util/limit"
+ 	netpkg "github.com/fatedier/frp/pkg/util/net"
++	"github.com/fatedier/frp/pkg/util/tunnelmonitor"
+ 	"github.com/fatedier/frp/pkg/util/xlog"
+ 	"github.com/fatedier/frp/server/controller"
+ 	"github.com/fatedier/frp/server/metrics"
+@@ -82,6 +83,7 @@
+ }
+ 
+ type BaseProxy struct {
++	observation    *tunnelmonitor.Handle
+ 	name           string
+ 	rc             *controller.ResourceController
+ 	listeners      []net.Listener
+@@ -135,6 +137,7 @@
+ }
+ 
+ func (pxy *BaseProxy) Close() {
++	pxy.observation.Close()
+ 	xl := xlog.FromContextSafe(pxy.ctx)
+ 	xl.Infof("proxy closing")
+ 	for _, l := range pxy.listeners {
+@@ -319,7 +322,9 @@
+ 	name := pxy.GetName()
+ 	proxyType := cfg.Type
+ 	metrics.Server.OpenConnection(name, proxyType)
++	pxy.observation.OpenConnection()
+ 	inCount, outCount, _ := pxy.joinUserConnection(local, userConn, proxyType, xl)
++	pxy.observation.FinishConnection(inCount, outCount)
+ 	metrics.Server.CloseConnection(name, proxyType)
+ 	metrics.Server.AddTrafficIn(name, proxyType, inCount)
+ 	metrics.Server.AddTrafficOut(name, proxyType, outCount)
+@@ -517,6 +522,7 @@
+ }
+ 
+ type Options struct {
++	Observation        *tunnelmonitor.Handle
+ 	UserInfo           plugin.UserInfo
+ 	LoginMsg           *msg.Login
+ 	PoolCount          int
+@@ -540,6 +546,7 @@
+ 	}
+ 
+ 	basePxy := BaseProxy{
++		observation:    options.Observation,
+ 		name:           configurer.GetBaseConfig().Name,
+ 		rc:             options.ResourceController,
+ 		listeners:      make([]net.Listener, 0),
+diff --git a/server/proxy/http.go b/server/proxy/http.go
+--- a/server/proxy/http.go
++++ b/server/proxy/http.go
+@@ -147,10 +147,12 @@
+ 	workConn = netpkg.WrapReadWriteCloserToConn(rwc, tmpConn)
+ 	workConn = netpkg.WrapStatsConn(workConn, pxy.updateStatsAfterClosedConn)
+ 	metrics.Server.OpenConnection(pxy.GetName(), pxy.GetConfigurer().GetBaseConfig().Type)
++	pxy.observation.OpenConnection()
+ 	return
+ }
+ 
+ func (pxy *HTTPProxy) updateStatsAfterClosedConn(totalRead, totalWrite int64) {
++	pxy.observation.FinishConnection(totalWrite, totalRead)
+ 	name := pxy.GetName()
+ 	proxyType := pxy.GetConfigurer().GetBaseConfig().Type
+ 	metrics.Server.CloseConnection(name, proxyType)
+diff --git a/server/proxy/udp.go b/server/proxy/udp.go
+--- a/server/proxy/udp.go
++++ b/server/proxy/udp.go
+@@ -138,6 +138,7 @@
+ 				if errRet := errors.PanicToError(func() {
+ 					xl.Tracef("get udp message from workConn, len: %d", len(m.Content))
+ 					pxy.readCh <- m
++					pxy.observation.Add(0, int64(len(m.Content)))
+ 					metrics.Server.AddTrafficOut(
+ 						pxy.GetName(),
+ 						pxy.GetConfigurer().GetBaseConfig().Type,
+@@ -168,6 +169,7 @@
+ 					return
+ 				}
+ 				xl.Tracef("send message to udp workConn, len: %d", len(udpMsg.Content))
++				pxy.observation.Add(int64(len(udpMsg.Content)), 0)
+ 				metrics.Server.AddTrafficIn(
+ 					pxy.GetName(),
+ 					pxy.GetConfigurer().GetBaseConfig().Type,
+diff --git a/pkg/util/tunnelmonitor/registry.go b/pkg/util/tunnelmonitor/registry.go
+new file mode 100644
+--- /dev/null
++++ b/pkg/util/tunnelmonitor/registry.go
+@@ -0,0 +1,428 @@
++// Package tunnelmonitor records private instance observations independently of
++// FRP's name-keyed dashboard and Prometheus metrics. No forwarding decision
++// depends on the availability of this bounded, in-memory observer.
++package tunnelmonitor
++
++import (
++	"crypto/rand"
++	"encoding/hex"
++	"math"
++	"sort"
++	"strconv"
++	"sync"
++	"time"
++
++	"github.com/fatedier/frp/extension/frpmonitor/shared"
++)
++
++const maxInstances = 4096
++const ringSize = 2048
++
++type Registry struct {
++	mu                sync.Mutex
++	source, epoch     string
++	serviceID         string
++	objects           map[string]*Handle
++	ring              [ringSize]shared.TunnelEvent
++	sequence, dropped uint64
++	untracked         int
++	failed            bool
++	now               func() time.Time
++}
++
++type Handle struct {
++	mu                       sync.Mutex
++	registry                 *Registry
++	value                    shared.TunnelObject
++	rx, tx, connections      uint64
++	tracked, closed, invalid bool
++	settledAtMS              int64
++}
++
++func uuid() string {
++	var b [16]byte
++	if _, err := rand.Read(b[:]); err != nil {
++		return ""
++	}
++	b[6] = b[6]&15 | 64
++	b[8] = b[8]&63 | 128
++	s := hex.EncodeToString(b[:])
++	return s[:8] + "-" + s[8:12] + "-" + s[12:16] + "-" + s[16:20] + "-" + s[20:]
++}
++
++func New(source string, serviceIDs ...string) *Registry {
++	r := &Registry{source: source, epoch: uuid(), objects: map[string]*Handle{}, now: time.Now}
++	if len(serviceIDs) > 0 {
++		if source != "client" || serviceIDs[0] != "" && !shared.ValidConfigOperationID(serviceIDs[0]) {
++			r.failed = true
++		} else {
++			r.serviceID = serviceIDs[0]
++		}
++	}
++	return r
++}
++
++func InitialState(status string) shared.TunnelState {
++	return shared.TunnelState{Status: status, LocalState: "unknown", RemoteState: "unknown", P2PState: "unknown", FallbackState: "unknown"}
++}
++
++func ClientIdentity(server, user, client, kind, name, protocol string) shared.TunnelIdentity {
++	if server == "" {
++		server = "default"
++	}
++	i := shared.TunnelIdentity{ServerID: server, User: user, Kind: kind, RawName: name, Protocol: protocol, Quality: "instance_only"}
++	if client != "" {
++		i.RawClientID = &client
++		i.Quality = "stable"
++	}
++	return i
++}
++
++// Open creates a fresh handle even when the logical name already exists.
++// Registry admission is bounded; an untracked handle only records its eventual
++// close, allowing the inventory to recover from a temporary capacity limit.
++func (r *Registry) Open(identity shared.TunnelIdentity) *Handle {
++	if r == nil {
++		return nil
++	}
++	if identity.RawClientID != nil {
++		value := *identity.RawClientID
++		identity.RawClientID = &value
++	}
++	now := r.now().UTC()
++	h := &Handle{registry: r, value: shared.TunnelObject{InstanceID: uuid(), Identity: identity, State: InitialState("starting"), CreatedAtMS: now.UnixMilli(), OperationRelation: "none", ServiceID: r.serviceID, Counters: shared.TunnelCounters{Quality: "unsupported", ConnectionsQuality: "unsupported", Accounting: "not_observed", ByteScope: "not_observed"}}}
++	if r.source == "server" && identity.Protocol != "xtcp" {
++		h.value.Counters.Epoch = uuid()
++		if identity.Protocol != "udp" {
++			h.value.Counters.ConnectionsQuality = "ok"
++		}
++		if identity.Protocol != "sudp" {
++			h.value.Counters.Quality = "ok"
++			h.value.Counters.Accounting = "connection_close"
++			h.value.Counters.ByteScope = "forwarded_stream"
++			if identity.Protocol == "udp" {
++				h.value.Counters.Accounting = "datagram"
++				h.value.Counters.ByteScope = "datagram_payload"
++			}
++		}
++	}
++	r.mu.Lock()
++	// A completed handle remains observable long enough to collect final totals.
++	// Only registry ownership is evicted; callbacks still own the same handle.
++	r.pruneLocked(now.UnixMilli())
++	if h.snapshotLocked().Validate(r.source) != nil || r.epoch == "" || h.value.InstanceID == "" || (h.value.Counters.Quality == "ok" && h.value.Counters.Epoch == "") || len(r.objects) >= maxInstances {
++		r.untracked++
++		r.dropLocked()
++		r.mu.Unlock()
++		return h
++	}
++	h.tracked = true
++	r.objects[h.value.InstanceID] = h
++	r.mu.Unlock()
++	h.emit("created")
++	return h
++}
++
++func (r *Registry) dropLocked() {
++	if r.dropped == math.MaxUint64 {
++		r.failed = true
++	} else {
++		r.dropped++
++	}
++}
++
++func (h *Handle) snapshotLocked() shared.TunnelObject {
++	o := h.value
++	if o.Identity.RawClientID != nil {
++		value := *o.Identity.RawClientID
++		o.Identity.RawClientID = &value
++	}
++	if o.ClosedAtMS != nil {
++		value := *o.ClosedAtMS
++		o.ClosedAtMS = &value
++	}
++	if o.Counters.Quality == "ok" {
++		rx, tx := strconv.FormatUint(h.rx, 10), strconv.FormatUint(h.tx, 10)
++		o.Counters.RXBytes = &rx
++		o.Counters.TXBytes = &tx
++
++	}
++	if o.Counters.ConnectionsQuality == "ok" {
++		connections := strconv.FormatUint(h.connections, 10)
++		o.Counters.Connections = &connections
++	}
++	return o
++}
++
++func (h *Handle) emit(code string) {
++	if h == nil || !h.tracked {
++		return
++	}
++	h.mu.Lock()
++	defer h.mu.Unlock()
++	h.emitLocked(code)
++}
++
++func (h *Handle) emitLocked(code string, bases ...string) {
++	if !h.tracked {
++		return
++	}
++	o := h.snapshotLocked()
++	r := h.registry
++	r.mu.Lock()
++	defer r.mu.Unlock()
++	if r.sequence == math.MaxUint64 {
++		r.failed = true
++		return
++	}
++	r.sequence++
++	if r.sequence > ringSize {
++		r.dropLocked()
++	}
++	basis := "native"
++	if len(bases) > 0 {
++		basis = bases[0]
++	}
++	r.ring[(r.sequence-1)%ringSize] = shared.TunnelEvent{TimeBasis: basis, Sequence: strconv.FormatUint(r.sequence, 10), OccurredAtMS: r.now().UTC().UnixMilli(), Code: code, Object: o}
++}
++
++func (h *Handle) State(state shared.TunnelState) { h.setState(state, "native") }
++
++// ObservedState dates a sampled change; it is not a native transition timestamp.
++func (h *Handle) ObservedState(state shared.TunnelState) { h.setState(state, "observed") }
++
++func (h *Handle) setState(state shared.TunnelState, basis string) {
++	if h == nil {
++		return
++	}
++	h.mu.Lock()
++	if h.closed || h.value.State == state {
++		h.mu.Unlock()
++		return
++	}
++	h.value.State = state
++	code := "state_changed"
++	if state.Status == "registered" {
++		code = "registered"
++	}
++	h.emitLocked(code, basis)
++	h.mu.Unlock()
++}
++
++func (h *Handle) Close() {
++	if h == nil {
++		return
++	}
++	h.mu.Lock()
++	if h.closed {
++		h.mu.Unlock()
++		return
++	}
++	h.closed = true
++	if h.connections == 0 {
++		h.settledAtMS = h.registry.now().UTC().UnixMilli()
++	}
++	at := h.registry.now().UTC().UnixMilli()
++	h.value.ClosedAtMS = &at
++	h.value.State.Status = "closed"
++	if h.value.Identity.Kind == "visitor" {
++		h.value.State.LocalState = "closed"
++		if h.value.State.RemoteState == "connected" || h.value.State.RemoteState == "connecting" {
++			h.value.State.RemoteState = "closed"
++		}
++		if h.value.State.P2PState == "connected" || h.value.State.P2PState == "connecting" {
++			h.value.State.P2PState = "unknown"
++		}
++		if h.value.State.FallbackState == "active" {
++			h.value.State.FallbackState = "unknown"
++		}
++	}
++	if !h.tracked {
++		h.mu.Unlock()
++		h.registry.mu.Lock()
++		h.registry.untracked--
++		h.registry.mu.Unlock()
++		return
++	}
++	h.emitLocked("closed")
++	h.mu.Unlock()
++}
++
++func (h *Handle) invalidateLocked() bool {
++	if h.invalid {
++		return false
++	}
++	h.invalid = true
++	if h.value.Counters.Quality != "unsupported" {
++		h.value.Counters.Quality = "unknown"
++	}
++	if h.value.Counters.ConnectionsQuality != "unsupported" {
++		h.value.Counters.ConnectionsQuality = "unknown"
++	}
++	h.value.Counters.Connections = nil
++	h.value.Counters.RXBytes = nil
++	h.value.Counters.TXBytes = nil
++	return true
++}
++
++func (h *Handle) OpenConnection() {
++	if h == nil || !h.tracked {
++		return
++	}
++	h.mu.Lock()
++	changed := false
++	if h.connections == math.MaxUint64 {
++		changed = h.invalidateLocked()
++	} else {
++		h.connections++
++	}
++	h.mu.Unlock()
++	if changed {
++		h.emit("counter_invalid")
++	}
++}
++
++// FinishConnection is called exactly once by the connection owner, including
++// after proxy Close. Its byte totals can only reach this original handle.
++func (h *Handle) FinishConnection(rx, tx int64) {
++	if h == nil || !h.tracked {
++		return
++	}
++	h.mu.Lock()
++	changed := false
++	if h.connections == 0 {
++		changed = h.invalidateLocked()
++	} else {
++		h.connections--
++	}
++	if rx < 0 || tx < 0 || math.MaxUint64-h.rx < uint64(rx) || math.MaxUint64-h.tx < uint64(tx) {
++		changed = h.invalidateLocked() || changed
++	} else {
++		h.rx += uint64(rx)
++		h.tx += uint64(tx)
++	}
++	final := h.closed && h.connections == 0
++	if final {
++		h.settledAtMS = h.registry.now().UTC().UnixMilli()
++	}
++	h.mu.Unlock()
++	if changed {
++		h.emit("counter_invalid")
++	} else if final {
++		h.emit("settled")
++	}
++}
++
++func (h *Handle) Add(rx, tx int64) {
++	if h == nil || !h.tracked {
++		return
++	}
++	h.mu.Lock()
++	changed := false
++	if rx < 0 || tx < 0 || math.MaxUint64-h.rx < uint64(rx) || math.MaxUint64-h.tx < uint64(tx) {
++		changed = h.invalidateLocked()
++	} else {
++		h.rx += uint64(rx)
++		h.tx += uint64(tx)
++	}
++	h.mu.Unlock()
++	if changed {
++		h.emit("counter_invalid")
++	}
++}
++
++// Snapshot never waits for native state/counter locks. Replay is intentionally
++// bounded to the latest wire window; a consumer detects gaps from sequence
++// bounds rather than treating overwritten events as complete history.
++func (r *Registry) Snapshot() shared.TunnelSnapshot {
++	if r == nil {
++		return shared.EmptyTunnelSnapshot("server", "unavailable")
++	}
++	out := shared.EmptyTunnelSnapshot(r.source, "unavailable")
++	if !r.mu.TryLock() {
++		return out
++	}
++	if r.epoch == "" || r.failed {
++		r.mu.Unlock()
++		return out
++	}
++	out.ProcessEpoch = r.epoch
++	out.CollectedAtMS = r.now().UTC().UnixMilli()
++	out.State = "ready"
++	r.pruneLocked(out.CollectedAtMS)
++	out.DroppedEvents = strconv.FormatUint(r.dropped, 10)
++	objects := make([]*Handle, 0, len(r.objects))
++	for _, h := range r.objects {
++		objects = append(objects, h)
++	}
++	if r.untracked > 0 || len(objects) > shared.MaxTunnelObjects {
++		out.State = "truncated"
++	}
++	if r.sequence > 0 {
++		first := uint64(1)
++		if r.sequence > shared.MaxTunnelEvents {
++			first = r.sequence - shared.MaxTunnelEvents + 1
++		}
++		out.FirstSequence = strconv.FormatUint(first, 10)
++		out.LastSequence = strconv.FormatUint(r.sequence, 10)
++		for seq := first; seq <= r.sequence; seq++ {
++			event := r.ring[(seq-1)%ringSize]
++			event.Object = cloneObject(event.Object)
++			out.Events = append(out.Events, event)
++			if seq == math.MaxUint64 {
++				break
++			}
++		}
++	}
++	r.mu.Unlock()
++	if out.State == "ready" {
++		for _, h := range objects {
++			if !h.mu.TryLock() {
++				out.State = "unavailable"
++				out.Objects = []shared.TunnelObject{}
++				break
++			}
++			out.Objects = append(out.Objects, h.snapshotLocked())
++			h.mu.Unlock()
++		}
++		sort.Slice(out.Objects, func(i, j int) bool { return out.Objects[i].InstanceID < out.Objects[j].InstanceID })
++	}
++	if err := out.Validate(); err != nil {
++		out.State = "truncated"
++		out.Objects = []shared.TunnelObject{}
++		if out.Validate() != nil {
++			return shared.EmptyTunnelSnapshot(r.source, "unavailable")
++		}
++	}
++	return out
++}
++
++func (r *Registry) pruneLocked(now int64) {
++	for id, h := range r.objects {
++		if h.mu.TryLock() {
++			eligible := h.closed && h.connections == 0 && h.settledAtMS != 0 && now-h.settledAtMS > int64(5*time.Minute/time.Millisecond)
++			h.mu.Unlock()
++			if eligible {
++				delete(r.objects, id)
++			}
++		}
++	}
++}
++func cloneObject(o shared.TunnelObject) shared.TunnelObject {
++	clone := func(p *string) *string {
++		if p == nil {
++			return nil
++		}
++		v := *p
++		return &v
++	}
++	o.Identity.RawClientID = clone(o.Identity.RawClientID)
++	o.Counters.RXBytes = clone(o.Counters.RXBytes)
++	o.Counters.TXBytes = clone(o.Counters.TXBytes)
++	o.Counters.Connections = clone(o.Counters.Connections)
++	if o.ClosedAtMS != nil {
++		v := *o.ClosedAtMS
++		o.ClosedAtMS = &v
++	}
++	return o
++}
+diff --git a/pkg/util/tunnelmonitor/registry_test.go b/pkg/util/tunnelmonitor/registry_test.go
+new file mode 100644
+--- /dev/null
++++ b/pkg/util/tunnelmonitor/registry_test.go
+@@ -0,0 +1,191 @@
++package tunnelmonitor
++
++import (
++	"math"
++	"strconv"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/fatedier/frp/extension/frpmonitor/shared"
++)
++
++func testIdentity() shared.TunnelIdentity {
++	return ClientIdentity("test", "user", "client", "proxy", "same", "tcp")
++}
++func find(t *testing.T, r *Registry, id string) shared.TunnelObject {
++	t.Helper()
++	s := r.Snapshot()
++	if err := s.Validate(); err != nil {
++		t.Fatal(err)
++	}
++	for _, o := range s.Objects {
++		if o.InstanceID == id {
++			return o
++		}
++	}
++	t.Fatal("instance missing")
++	return shared.TunnelObject{}
++}
++
++func TestSameNameCallbacksKeepOriginalInstance(t *testing.T) {
++	r := New("server")
++	old := r.Open(testIdentity())
++	old.OpenConnection()
++	old.Close()
++	next := r.Open(testIdentity())
++	next.OpenConnection()
++	next.FinishConnection(7, 9)
++	old.FinishConnection(9007199254740993, 11)
++	a, b := find(t, r, old.value.InstanceID), find(t, r, next.value.InstanceID)
++	if a.InstanceID == b.InstanceID || *a.Counters.RXBytes != "9007199254740993" || *b.Counters.RXBytes != "7" || *a.Counters.Connections != "0" || *b.Counters.Connections != "0" {
++		t.Fatal("late connection totals reached a new same-name instance")
++	}
++	if a.ClosedAtMS == nil || b.ClosedAtMS != nil {
++		t.Fatal("lifecycle merged")
++	}
++}
++
++func TestCounterInvalidNeverWrapsOrInventsZero(t *testing.T) {
++	r := New("server")
++	h := r.Open(testIdentity())
++	h.rx = math.MaxUint64
++	h.Add(1, 0)
++	o := find(t, r, h.value.InstanceID)
++	if o.Counters.Quality != "unknown" || o.Counters.RXBytes != nil || o.Counters.Connections != nil {
++		t.Fatal("overflow produced a usable counter")
++	}
++	h = r.Open(testIdentity())
++	h.FinishConnection(1, 1)
++	if find(t, r, h.value.InstanceID).Counters.Quality != "unknown" {
++		t.Fatal("unmatched close produced negative connections")
++	}
++	legacy := testIdentity()
++	legacy.RawClientID = nil
++	legacy.Quality = "instance_only"
++	h = r.Open(legacy)
++	if find(t, r, h.value.InstanceID).Identity.Quality != "instance_only" {
++		t.Fatal("legacy identity became stable")
++	}
++}
++
++func TestReplayAndInventoryAreBoundedAndBusyFailsClosed(t *testing.T) {
++	r := New("server")
++	h := r.Open(testIdentity())
++	for i := 0; i < ringSize+10; i++ {
++		state := InitialState("starting")
++		if i%2 == 0 {
++			state.Status = "registered"
++		}
++		h.State(state)
++	}
++	s := r.Snapshot()
++	if s.Validate() != nil || len(s.Events) != shared.MaxTunnelEvents || s.DroppedEvents == "0" || s.FirstSequence == "1" {
++		t.Fatal("event overflow hidden or unbounded")
++	}
++	r.mu.Lock()
++	s = r.Snapshot()
++	r.mu.Unlock()
++	if s.State != "unavailable" || len(s.Objects) != 0 {
++		t.Fatal("busy registry claimed complete inventory")
++	}
++	for i := 0; i < shared.MaxTunnelObjects; i++ {
++		r.Open(testIdentity())
++	}
++	s = r.Snapshot()
++	if s.State != "truncated" || len(s.Objects) != 0 || len(s.Events) == 0 {
++		t.Fatal("partial inventory pretended complete or lost bounded events")
++	}
++	r.mu.Lock()
++	r.sequence = math.MaxUint64
++	r.mu.Unlock()
++	h.State(InitialState("running"))
++	if r.Snapshot().State != "unavailable" {
++		t.Fatal("sequence overflow wrapped")
++	}
++}
++
++func TestConcurrentCounterAndSnapshotOwnership(t *testing.T) {
++	r := New("server")
++	h := r.Open(testIdentity())
++	var wg sync.WaitGroup
++	for j := 0; j < 8; j++ {
++		wg.Add(1)
++		go func() {
++			defer wg.Done()
++			for i := 0; i < 1000; i++ {
++				h.OpenConnection()
++				h.FinishConnection(1, 2)
++			}
++		}()
++	}
++	for i := 0; i < 100; i++ {
++		s := r.Snapshot()
++		if err := s.Validate(); err != nil {
++			t.Fatal(err)
++		}
++		if len(s.Objects) > 0 {
++			s.Objects[0].Identity.RawClientID = ptr("modified")
++		}
++	}
++	wg.Wait()
++	o := find(t, r, h.value.InstanceID)
++	if *o.Counters.RXBytes != strconv.Itoa(8000) || *o.Counters.TXBytes != "16000" || *o.Identity.RawClientID != "client" {
++		t.Fatal("counter race or provider alias")
++	}
++}
++func ptr(s string) *string { return &s }
++
++func TestProtocolCounterScopesDoNotInventComparableBytes(t *testing.T) {
++	for _, test := range []struct{ protocol, bytes, connections, accounting, scope string }{
++		{"tcp", "ok", "ok", "connection_close", "forwarded_stream"},
++		{"udp", "ok", "unsupported", "datagram", "datagram_payload"},
++		// A SUDP proxy can serve framed and transcoded payload sessions together.
++		{"sudp", "unsupported", "ok", "not_observed", "not_observed"},
++		{"xtcp", "unsupported", "unsupported", "not_observed", "not_observed"},
++	} {
++		t.Run(test.protocol, func(t *testing.T) {
++			r := New("server")
++			i := testIdentity()
++			i.Protocol = test.protocol
++			h := r.Open(i)
++			o := find(t, r, h.value.InstanceID)
++			c := o.Counters
++			if c.Quality != test.bytes || c.ConnectionsQuality != test.connections || c.Accounting != test.accounting || c.ByteScope != test.scope {
++				t.Fatal("incompatible protocol accounting combined")
++			}
++			if test.bytes == "unsupported" && (c.RXBytes != nil || c.TXBytes != nil) {
++				t.Fatal("unsupported traffic shown as zero")
++			}
++			if test.connections == "unsupported" && c.Connections != nil {
++				t.Fatal("unsupported connections shown as zero")
++			}
++		})
++	}
++}
++
++func TestSettledRetentionAndDetachedEventReplay(t *testing.T) {
++	r := New("server")
++	now := time.Now()
++	r.now = func() time.Time { return now }
++	h := r.Open(testIdentity())
++	h.OpenConnection()
++	h.Close()
++	now = now.Add(10 * time.Minute)
++	if len(r.Snapshot().Objects) != 1 {
++		t.Fatal("closed proxy with live stream was evicted")
++	}
++	h.FinishConnection(10, 11)
++	s := r.Snapshot()
++	if len(s.Objects) != 1 {
++		t.Fatal("late final totals were evicted before sampling")
++	}
++	*s.Events[0].Object.Identity.RawClientID = "mutated"
++	if *r.Snapshot().Events[0].Object.Identity.RawClientID != "client" {
++		t.Fatal("replay aliases registry")
++	}
++	now = now.Add(6 * time.Minute)
++	if len(r.Snapshot().Objects) != 0 {
++		t.Fatal("completed instances grew without retention")
++	}
++}
