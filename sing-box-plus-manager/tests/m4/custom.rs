@@ -211,6 +211,127 @@ async fn socks5的前置必须可用() {
     assert_eq!(item["has_password"], false);
 }
 
+/// 用夹具的测试密钥核对实际配置，不能只看列表里的 `has_password`。
+async fn socks5_config(api: &Api, actor: &Actor) -> proxy_manager::custom::parse::CustomSocks5 {
+    let key = proxy_manager::custom::crypto::CryptoBox::from_bytes(&[42u8; 32]).unwrap();
+    let mut rows =
+        proxy_manager::custom::store::list_socks5(&api.store, &key, actor.user_id).await.unwrap();
+    assert_eq!(rows.len(), 1, "更新后应仍然只有原来那一条");
+    rows.remove(0).config
+}
+
+/// 编辑表单不能取回原口令：留空不传表示保留，明确传空串才是清除。
+#[tokio::test]
+async fn socks5编辑保留替换与清除口令() {
+    let api = api().await;
+    let alice = api.user("alice", Role::User, "local").await;
+    let (status, body, _) = api
+        .post(
+            "/api/v1/me/custom/socks5",
+            &alice,
+            json!({ "name": "落地", "server": "s.example", "port": "1080",
+                    "username": "old-user", "password": "old-password", "dialer_proxy": "HK" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let id = body["id"].as_i64().unwrap();
+    let path = format!("/api/v1/me/custom/socks5/{id}");
+
+    for (password, expected_password, username) in [
+        (None, "old-password", "new-user"),
+        (Some("new-password"), "new-password", "new-user"),
+        (Some(""), "", ""),
+    ] {
+        let mut update = json!({ "name": "新落地", "server": "new.example", "port": "2080",
+                                 "username": username, "dialer_proxy": "DIRECT" });
+        if let Some(password) = password {
+            update["password"] = json!(password);
+        }
+        let (status, body, _) = api.put_json(&path, &alice, update, Some(&alice.csrf), None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            socks5_config(&api, &alice).await,
+            proxy_manager::custom::parse::CustomSocks5 {
+                name: "新落地".into(),
+                server: "new.example".into(),
+                port: 2080,
+                username: username.into(),
+                password: expected_password.into(),
+                dialer_proxy: "DIRECT".into(),
+            }
+        );
+
+        let (_, body, _) = api.get("/api/v1/me/custom", Some(&alice)).await;
+        let item = &body["socks5"][0];
+        assert_eq!(item["id"], id);
+        assert_eq!(item["username"], username);
+        assert_eq!(item["has_password"], !expected_password.is_empty());
+        assert_eq!(item["rendered_name"], "Socks5-新落地");
+        assert_eq!(item["dialer_group"], "Socks5-新落地-先选前置节点");
+        assert!(item.get("password").is_none(), "编辑后列表也不能回口令：{item}");
+        assert!(!body.to_string().contains("old-password"), "{body}");
+        assert!(!body.to_string().contains("new-password"), "{body}");
+    }
+}
+
+/// 拒绝更新不能留下半份配置，尤其不能先改名字再发现前置或认证无效。
+#[tokio::test]
+async fn socks5编辑无效时原配置不变() {
+    let api = api().await;
+    let alice = api.user("alice", Role::User, "local").await;
+    let (status, body, _) = api
+        .post(
+            "/api/v1/me/custom/socks5",
+            &alice,
+            json!({ "name": "落地", "server": "s.example", "port": "1080",
+                    "username": "user", "password": "password", "dialer_proxy": "HK" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let path = format!("/api/v1/me/custom/socks5/{}", body["id"].as_i64().unwrap());
+    let before = socks5_config(&api, &alice).await;
+
+    for (username, dialer) in [("user", "并不存在"), ("", "DIRECT")] {
+        let update = json!({ "name": "新落地", "server": "new.example", "port": "2080",
+                             "username": username, "dialer_proxy": dialer });
+        let (status, body, _) = api.put_json(&path, &alice, update, Some(&alice.csrf), None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(socks5_config(&api, &alice).await, before, "拒绝更新后配置必须原样保留");
+    }
+}
+
+#[tokio::test]
+async fn socks5编辑碰不到别人的条目() {
+    let api = api().await;
+    let alice = api.user("alice", Role::User, "local").await;
+    let bob = api.user("bob", Role::User, "local").await;
+    let (status, body, _) = api
+        .post(
+            "/api/v1/me/custom/socks5",
+            &alice,
+            json!({ "name": "落地", "server": "s.example", "port": "1080",
+                    "username": "user", "password": "password", "dialer_proxy": "HK" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let path = format!("/api/v1/me/custom/socks5/{}", body["id"].as_i64().unwrap());
+    let before = socks5_config(&api, &alice).await;
+    let (status, body, _) = api
+        .put_json(
+            &path,
+            &bob,
+            json!({ "name": "抢过来", "server": "other.example", "port": "2080",
+                    "username": "", "password": "", "dialer_proxy": "DIRECT" }),
+            Some(&bob.csrf),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "别人的条目该是 404：{body}");
+    assert_eq!(socks5_config(&api, &alice).await, before);
+    let (_, body, _) = api.get("/api/v1/me/custom", Some(&bob)).await;
+    assert_eq!(body["socks5"], json!([]), "不能把别人的条目搬到自己名下：{body}");
+}
+
 /// **被引用的上游不能删。**
 ///
 /// 允许的话那条 SOCKS5 的前置会指向一个不存在的名字，

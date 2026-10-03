@@ -388,8 +388,9 @@
         // 「换个展示方式」变成一次后端改动。
         const withEndpoint = (rows) =>
           rows.map((row) => ({ ...row, endpoint: `${row.server}:${row.port}` }));
+        customSocks5Rows = data.socks5 ?? [];
         renderCollection("custom-proxies", withEndpoint(data.proxies), "还没有自定义上游。");
-        renderCollection("custom-socks5", withEndpoint(data.socks5), "还没有 SOCKS5 落地。");
+        renderCollection("custom-socks5", withEndpoint(customSocks5Rows), "还没有 SOCKS5 落地。");
 
         // 前置候选。**每次渲染都重建**：刚加的那条上游要立刻能被选中，
         // 而刚删掉的那条不能还留在选项里。
@@ -946,6 +947,7 @@
   }
 
   let customNodesBound = false;
+  let customSocks5Rows = [];
 
   /// 自定义节点页的写操作。
   //
@@ -954,6 +956,42 @@
   function bindCustomNodes() {
     if (customNodesBound) return;
     customNodesBound = true;
+
+    const socksForm = document.querySelector("[data-pm-add-socks]");
+    let pending = false;
+    const setSocksForm = (row = null) => {
+      if (!socksForm) return;
+      socksForm.reset();
+      if (row) {
+        socksForm.dataset.editId = String(row.id);
+        for (const key of ["name", "server", "port", "username", "dialer_proxy"]) {
+          socksForm.elements.namedItem(key).value = row[key] ?? "";
+        }
+      } else {
+        delete socksForm.dataset.editId;
+      }
+      // 列表不返回口令；编辑时留空表示保留，清空必须明确勾选。
+      socksForm.elements.namedItem("password").value = "";
+      socksForm.elements.namedItem("password").disabled = pending;
+      socksForm.querySelector("[data-pm-socks-heading]").textContent = row
+        ? `编辑 SOCKS5 落地：${row.name}` : "添加 SOCKS5 落地";
+      socksForm.querySelector("[data-pm-socks-submit]").textContent = row ? "保存修改" : "添加节点";
+      socksForm.querySelector("[data-pm-cancel-socks]").hidden = !row;
+      socksForm.querySelector("[data-pm-socks-clear-password]").hidden = !row?.has_password;
+      socksForm.querySelector("[data-pm-socks-password-label]").textContent = row
+        ? "新口令（留空保留原值）" : "口令（可留空）";
+      const hint = socksForm.querySelector("[data-pm-socks-password-hint]");
+      hint.hidden = !row;
+      hint.textContent = row?.has_password
+        ? "已保存口令。输入新口令可替换；如需移除认证，请同时清空用户名并勾选清除口令。"
+        : "当前未设置口令，可留空。";
+    };
+
+    socksForm?.addEventListener("change", (event) => {
+      if (event.target.name === "clear_password") {
+        socksForm.elements.namedItem("password").disabled = event.target.checked;
+      }
+    });
 
     const status = document.querySelector("[data-pm-custom-status]");
     const say = (text, ok) => {
@@ -972,12 +1010,28 @@
     };
 
     const run = async (label, action) => {
+      if (pending) return;
+      pending = true;
+      const controls = Array.from(document.querySelectorAll(
+        "[data-pm-custom-enabled] input, [data-pm-custom-enabled] select, [data-pm-custom-enabled] button"
+      )).map((node) => [node, node.disabled]);
+      controls.forEach(([node]) => { node.disabled = true; });
       try {
         await action();
-        await refresh();
-        say(`${label}成功。改完记得在客户端里重新拉一次订阅。`, true);
+        try {
+          await refresh();
+          say(`${label}成功。改完记得在客户端里重新拉一次订阅。`, true);
+        } catch (error) {
+          say(`${label}成功，但列表刷新失败：${error.message}。请刷新页面。`, false);
+        }
       } catch (error) {
         say(`${label}失败：${error.message}`, false);
+      } finally {
+        pending = false;
+        controls.forEach(([node, disabled]) => { node.disabled = disabled; });
+        if (socksForm) {
+          socksForm.elements.namedItem("password").disabled = socksForm.elements.namedItem("clear_password").checked;
+        }
       }
     };
 
@@ -995,27 +1049,31 @@
         });
       } else if (form?.matches?.("[data-pm-add-socks]")) {
         event.preventDefault();
+        if (pending) return;
+        const id = form.dataset.editId;
         const data = new FormData(form);
         const password = String(data.get("password") ?? "");
-        run("添加 SOCKS5", async () => {
-          await sendJson("POST", "/me/custom/socks5", {
-            name: String(data.get("name") ?? ""),
-            server: String(data.get("server") ?? ""),
-            port: String(data.get("port") ?? ""),
-            username: String(data.get("username") ?? ""),
-            password,
-            dialer_proxy: String(data.get("dialer_proxy") ?? ""),
-          });
-          form.reset();
+        const body = {
+          name: String(data.get("name") ?? ""),
+          server: String(data.get("server") ?? ""),
+          port: String(data.get("port") ?? ""),
+          username: String(data.get("username") ?? ""),
+          dialer_proxy: String(data.get("dialer_proxy") ?? ""),
+        };
+        if (id && data.has("clear_password")) body.password = "";
+        else if (!id || password !== "") body.password = password;
+        run(id ? "修改 SOCKS5" : "添加 SOCKS5", async () => {
+          await sendJson(id ? "PUT" : "POST", id ? `/me/custom/socks5/${id}` : "/me/custom/socks5", body);
+          setSocksForm();
         });
       }
     });
 
     document.addEventListener("click", (event) => {
       const button = event.target?.closest?.(
-        "[data-pm-delete-proxy], [data-pm-rename-proxy], [data-pm-delete-socks]"
+        "[data-pm-delete-proxy], [data-pm-rename-proxy], [data-pm-delete-socks], [data-pm-edit-socks], [data-pm-cancel-socks]"
       );
-      if (!button) return;
+      if (!button || pending) return;
       const id = button.getAttribute("data-id");
       const name = button.getAttribute("data-name") ?? "";
       if (button.hasAttribute("data-pm-delete-proxy")) {
@@ -1028,9 +1086,22 @@
         if (next == null || next === name) return;
         // 只传 name：服务端据此判定「只改名字，配置原样保留」。
         run("改名", () => sendJson("PUT", `/me/custom/proxies/${id}`, { name: next }));
+      } else if (button.hasAttribute("data-pm-edit-socks")) {
+        const row = customSocks5Rows.find((row) => String(row.id) === id);
+        if (!row || !socksForm) return;
+        setSocksForm(row);
+        if (status) status.hidden = true;
+        socksForm.scrollIntoView({ block: "center" });
+        socksForm.elements.namedItem("name").focus({ preventScroll: true });
+      } else if (button.hasAttribute("data-pm-cancel-socks")) {
+        setSocksForm();
+        socksForm?.elements.namedItem("name").focus();
       } else {
         if (!window.confirm(`删除 SOCKS5 落地「${name}」？`)) return;
-        run("删除 SOCKS5", () => sendJson("DELETE", `/me/custom/socks5/${id}`));
+        run("删除 SOCKS5", async () => {
+          await sendJson("DELETE", `/me/custom/socks5/${id}`);
+          if (socksForm?.dataset.editId === id) setSocksForm();
+        });
       }
     });
   }
