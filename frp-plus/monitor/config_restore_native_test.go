@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -136,10 +138,61 @@ func runConfigNativeRestore(t *testing.T, ctx context.Context, s *Service, cooki
 		t.Fatal("offline restore confirmation absent")
 	}
 	final := startConfigNative(t, ctx, binary, config, root, "agent-confirmed")
-	configNativeWait(t, ctx, "restored management activation", []*configNativeProcess{server, final}, func() bool {
-		status, data := configNativeHTTP(t, ctx, s, cookie, "", "GET", configAdminPath, nil)
+	activationCtx, activationCancel := context.WithTimeout(ctx, 45*time.Second)
+	defer activationCancel()
+	lastDiagnostic, lastDiagnosticAt := "", time.Time{}
+	configNativeWait(t, activationCtx, "restored management activation", []*configNativeProcess{server, final}, func() bool {
+		status, data := configNativeHTTP(t, activationCtx, s, cookie, "", "GET", configAdminPath, nil)
+		diagnostic := configRestoreActivationDiagnostic(root, installed.ServiceID, status, data)
+		if lastDiagnostic == "" || time.Since(lastDiagnosticAt) >= 5*time.Second {
+			t.Log("restored activation facts: " + diagnostic)
+			lastDiagnostic, lastDiagnosticAt = diagnostic, time.Now()
+		}
 		return status == 200 && json.Unmarshal(data, &inventory) == nil && inventory.Inventory != nil && inventory.Inventory.State == "ready" && inventory.ServiceID == installed.ServiceID
 	})
 	configNativeWait(t, ctx, "confirmed restored forwarding", []*configNativeProcess{server, final}, func() bool { return configNativeEcho(remotePort) && configNativeEcho(visitorPort) })
 	t.Log("native restore E2E passed: private checkpoint, crash journal recovery, rotated identity, closed write gate, authenticated CAS takeover, two offline steps, TCP and STCP Visitor forwarding")
+}
+
+// Never emit API payloads, marker identities, native paths, or issue messages.
+// Local marker facts distinguish runtime activation from transport rate limits.
+func configRestoreActivationDiagnostic(root, serviceID string, status int, data []byte) string {
+	var response struct {
+		Code      string                  `json:"code"`
+		ServiceID string                  `json:"service_id"`
+		Inventory *shared.ConfigInventory `json:"inventory"`
+	}
+	code, state, issues := "invalid", "absent", []string{}
+	if json.Unmarshal(data, &response) == nil {
+		code = configRestoreDiagnosticEnum(response.Code)
+		if response.Inventory != nil {
+			state = configRestoreDiagnosticEnum(response.Inventory.State)
+			for _, issue := range response.Inventory.Issues {
+				issues = append(issues, configRestoreDiagnosticEnum(issue.Code))
+			}
+		}
+	}
+	var marker struct {
+		State          string `json:"state"`
+		Activated      bool   `json:"activated"`
+		RuntimeLoaded  bool   `json:"runtime_loaded"`
+		ResourcesReady bool   `json:"resources_ready"`
+	}
+	markerState := "unavailable"
+	if raw, err := os.ReadFile(filepath.Join(root, "managed", "restore.json")); err == nil && len(raw) <= 16*1024 && json.Unmarshal(raw, &marker) == nil {
+		markerState = configRestoreDiagnosticEnum(marker.State)
+	}
+	return fmt.Sprintf("http=%d code=%s inventory=%s issues=%s service_match=%t marker=%s activated=%t runtime_loaded=%t resources_ready=%t", status, code, state, strings.Join(issues, ","), response.ServiceID == serviceID, markerState, marker.Activated, marker.RuntimeLoaded, marker.ResourcesReady)
+}
+
+func configRestoreDiagnosticEnum(value string) string {
+	if shared.ValidConfigResultCode(value) || shared.ValidConfigOperationState(value) {
+		return value
+	}
+	switch value {
+	case "ready", "read_only", "pending", "verified", "acknowledged":
+		return value
+	default:
+		return "unknown"
+	}
 }

@@ -3,6 +3,7 @@ package managed
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -193,14 +194,14 @@ func (e *Engine) verifyRestoration() {
 		err = checkRestoreV2Sources(e.root, &marker)
 	}
 	if err == nil {
-		err = checkSafely(runtime.Check, ctx, Operation{ID: marker.Epoch, ContextRevision: marker.ContextRevision}, "recovery")
+		err = checkRestorationSafely(runtime.Check, ctx, Operation{ID: marker.Epoch, ContextRevision: marker.ContextRevision})
 	}
 	var verified Verification
 	if err == nil {
 		verified, err = verifySafely(runtime.Verify, ctx, current)
 	}
 	if err == nil {
-		err = checkSafely(runtime.Check, ctx, Operation{ID: marker.Epoch, ContextRevision: marker.ContextRevision}, "recovery")
+		err = checkRestorationSafely(runtime.Check, ctx, Operation{ID: marker.Epoch, ContextRevision: marker.ContextRevision})
 	}
 	if err == nil {
 		after, readErr := e.readStore()
@@ -251,6 +252,32 @@ func (e *Engine) verifyRestoration() {
 		e.release()
 	}
 }
+
+// Native snapshot locks can be busy during startup or inventory inspection.
+// Retry only that read refusal within the existing restoration deadline. The
+// outer guard preserves panic, cancellation, and other error semantics; neither
+// runtime Apply nor Verify is repeated by this helper.
+func checkRestorationSafely(callback func(context.Context, Operation, string) error, ctx context.Context, operation Operation) error {
+	return checkSafely(func(ctx context.Context, operation Operation, phase string) error {
+		for {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			err := callback(ctx, operation, phase)
+			if !errors.Is(err, ErrBusy) {
+				return err
+			}
+			timer := time.NewTimer(50 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-timer.C:
+			}
+		}
+	}, ctx, operation, "recovery")
+}
+
 func (e *Engine) AcknowledgeRestore(ctx context.Context, epoch, manifest, contextRevision, storeDigest, ackID string) (RestoreStatus, error) {
 	if ctx.Err() != nil {
 		return RestoreStatus{}, ctx.Err()

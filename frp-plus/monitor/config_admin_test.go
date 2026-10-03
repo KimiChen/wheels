@@ -589,3 +589,72 @@ func TestConfigAdminExpiredRollbackNeverStrandsConfirmedOperation(t *testing.T) 
 		})
 	}
 }
+
+func TestConfigRollbackPreflightWaitsForReadCapacity(t *testing.T) {
+	for _, alwaysBusy := range []bool{false, true} {
+		t.Run(map[bool]string{false: "capacity_recovers", true: "capacity_stays_busy"}[alwaysBusy], func(t *testing.T) {
+			s, _, admin := testAdmin(t)
+			a := installConfigAgent(s)
+			cookie, session := login(t, s, admin)
+			response := adminRequest(t, s, "POST", configAdminPath+"/operations", configBody(t, configAdminInput()), cookie, session.CSRF, nil)
+			expectStatus(t, response, 201)
+			prepared := decodeConfigResponse(t, response)
+			path := configAdminPath + "/operations/" + prepared.Operation.OperationID
+			action := configActionRequest{ExpectedVersion: prepared.Operation.Version, ContextRevision: prepared.Agent.ContextRevision, CandidateDigest: prepared.Operation.CandidateDigest}
+			response = adminRequest(t, s, "POST", path+"/apply", configBody(t, action), cookie, session.CSRF, nil)
+			expectStatus(t, response, 200)
+			confirmed := decodeConfigResponse(t, response)
+			queries := 0
+			s.configCoordinator.mu.Lock()
+			s.configCoordinator.command = func(ctx context.Context, node string, c shared.ConfigCommand) (shared.ConfigResult, error) {
+				if c.Action == "query" {
+					queries++
+					if queries == 1 || alwaysBusy {
+						return shared.ConfigResult{}, errors.Join(ErrConfigBusy, ErrConfigNotSent)
+					}
+				}
+				return a.handle(ctx, node, c)
+			}
+			s.configCoordinator.mu.Unlock()
+			action = configActionRequest{ExpectedVersion: confirmed.Operation.Version, ContextRevision: confirmed.Agent.ContextRevision, CandidateDigest: confirmed.Operation.CandidateDigest}
+			response = adminRequest(t, s, "POST", path+"/rollback", configBody(t, action), cookie, session.CSRF, nil)
+			expectStatus(t, response, 200)
+			result := decodeConfigResponse(t, response)
+			a.mu.Lock()
+			rollbacks := 0
+			for _, call := range a.calls {
+				if call == "rollback" {
+					rollbacks++
+				}
+			}
+			a.mu.Unlock()
+			if alwaysBusy {
+				if queries != 3 || rollbacks != 0 || result.Code != "busy" || result.Operation.State != "confirmed" || result.Operation.Version != confirmed.Operation.Version {
+					t.Fatal("busy preflight changed intent or exceeded retry bound", result.Code, queries, rollbacks)
+				}
+			} else if queries != 2 || rollbacks != 1 || result.Operation.State != "rolled_back" {
+				t.Fatal("read capacity recovery repeated or failed rollback", result.Code, queries, rollbacks)
+			}
+			active, err := s.control.ListActiveConfigOperations(context.Background(), "", 16)
+			if err != nil || len(active) != 0 {
+				t.Fatal("preflight stranded an operation lease", err)
+			}
+		})
+	}
+}
+
+func TestConfigRollbackPreflightHonorsCancellation(t *testing.T) {
+	s, _, _ := testAdmin(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	calls := 0
+	s.configCoordinator.command = func(context.Context, string, shared.ConfigCommand) (shared.ConfigResult, error) {
+		calls++
+		cancel()
+		return shared.ConfigResult{}, ErrConfigBusy
+	}
+	op := &control.ConfigOperation{NodeID: "1"}
+	got, code := s.queryConfigBeforeRollback(ctx, op)
+	if got != op || code != "timeout" || calls != 1 {
+		t.Fatal("cancelled preflight retried or changed state", code, calls)
+	}
+}

@@ -1,0 +1,114 @@
+diff --git a/client/service.go b/client/service.go
+index 343e34d..7bfe1b3 100644
+--- a/client/service.go
++++ b/client/service.go
+@@ -21,6 +21,7 @@ import (
+ 	"net"
+ 	"net/http"
+ 	"os"
++	"reflect"
+ 	"strconv"
+ 	"sync"
+ 	"sync/atomic"
+@@ -479,7 +480,7 @@ func (svr *Service) UpdateConfigSource(
+ 	svr.reloadMu.Lock()
+ 	defer svr.reloadMu.Unlock()
+ 
+-	if common != nil && svr.common != nil && common.Telemetry != svr.common.Telemetry {
++	if common != nil && svr.common != nil && !reflect.DeepEqual(common.Telemetry, svr.common.Telemetry) {
+ 		return errors.New("telemetry configuration changes require a process restart")
+ 	}
+ 	cfgSource := svr.configSource
+diff --git a/client/telemetry_reload_test.go b/client/telemetry_reload_test.go
+new file mode 100644
+index 0000000..a7b30a7
+--- /dev/null
++++ b/client/telemetry_reload_test.go
+@@ -0,0 +1,87 @@
++package client
++
++import (
++	"encoding/json"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++
++	"github.com/fatedier/frp/pkg/config"
++	"github.com/fatedier/frp/pkg/config/source"
++	"github.com/fatedier/frp/pkg/policy/security"
++)
++
++func TestReloadFromFileComparesTelemetryValues(t *testing.T) {
++	tests := []struct {
++		name   string
++		change func(map[string]any, map[string]any)
++	}{
++		{name: "explicit disabled management with equal values"},
++		{name: "enable management", change: func(_, management map[string]any) { management["enabled"] = true }},
++		{name: "change disabled management root", change: func(_, management map[string]any) { management["root"] = filepath.Join(t.TempDir(), "other-managed") }},
++		{name: "change retention", change: func(_, management map[string]any) { management["snapshotRetentionDays"] = 31 }},
++		{name: "change capacity", change: func(_, management map[string]any) { management["maxSnapshotBytes"] = 64 << 20 }},
++		{name: "remove explicit management", change: func(telemetry, _ map[string]any) { delete(telemetry, "configManagement") }},
++		{name: "disable telemetry", change: func(telemetry, _ map[string]any) { telemetry["enabled"] = false }},
++		{name: "change endpoint", change: func(telemetry, _ map[string]any) { telemetry["endpoint"] = "ws://127.0.0.1:2/agent/v1/ws" }},
++		{name: "change credential file", change: func(telemetry, _ map[string]any) { telemetry["tokenFile"] = filepath.Join(t.TempDir(), "other.token") }},
++		{name: "change server association", change: func(telemetry, _ map[string]any) { telemetry["serverID"] = "other-server" }},
++		{name: "change interval", change: func(telemetry, _ map[string]any) { telemetry["intervalSeconds"] = 2 }},
++	}
++	for _, tc := range tests {
++		t.Run(tc.name, func(t *testing.T) {
++			root := t.TempDir()
++			path := filepath.Join(root, "frpc.json")
++			management := map[string]any{"enabled": false, "root": filepath.Join(root, "managed"), "snapshotRetentionDays": 30, "maxSnapshotBytes": 32 << 20}
++			telemetry := map[string]any{"enabled": true, "endpoint": "ws://127.0.0.1:1/agent/v1/ws", "tokenFile": filepath.Join(root, "agent.token"), "serverID": "test-server", "intervalSeconds": 1, "allowInsecureLoopback": true, "configManagement": management}
++			object := map[string]any{"name": "before", "type": "tcp", "localIP": "127.0.0.1", "localPort": 8080}
++			document := map[string]any{"telemetry": telemetry, "proxies": []any{object}}
++			write := func() {
++				t.Helper()
++				data, err := json.Marshal(document)
++				if err != nil || os.WriteFile(path, data, 0600) != nil {
++					t.Fatal("cannot write reload fixture")
++				}
++			}
++			write()
++			initial, err := config.LoadClientConfigResult(path, true)
++			if err != nil {
++				t.Fatal(err)
++			}
++			cfgSource := source.NewConfigSource()
++			if err := cfgSource.ReplaceAll(initial.Proxies, initial.Visitors); err != nil {
++				t.Fatal(err)
++			}
++			svr := &Service{common: initial.Common, reloadCommon: initial.Common, configFilePath: path, unsafeFeatures: security.NewUnsafeFeatures(nil), aggregator: source.NewAggregator(cfgSource), configSource: cfgSource}
++			object["name"] = "after"
++			if tc.change != nil {
++				tc.change(telemetry, management)
++			}
++			write()
++			err = (&serviceConfigManager{svr: svr}).ReloadFromFile(true)
++			if tc.change != nil {
++				if err == nil || !strings.Contains(err.Error(), "telemetry configuration changes require a process restart") {
++					t.Fatalf("startup-only telemetry change was not rejected: %v", err)
++				}
++				if svr.reloadCommon != initial.Common {
++					t.Fatal("rejected startup change mutated reload context")
++				}
++				proxies, _, err := cfgSource.Load()
++				if err != nil || len(proxies) != 1 || proxies[0].GetBaseConfig().Name != "before" {
++					t.Fatal("rejected startup change mutated file source")
++				}
++				return
++			}
++			if err != nil {
++				t.Fatalf("equal explicit disabled management failed reload: %v", err)
++			}
++			if svr.common != initial.Common || svr.reloadCommon == initial.Common || svr.reloadCommon.Telemetry.ConfigManagement == initial.Common.Telemetry.ConfigManagement {
++				t.Fatal("reload did not preserve startup context and independently decoded values")
++			}
++			if len(svr.proxyCfgs) != 1 || svr.proxyCfgs[0].GetBaseConfig().Name != "after" || svr.managedEngine != nil {
++				t.Fatal("unmanaged reload did not update the native proxy collection")
++			}
++		})
++	}
++}

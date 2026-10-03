@@ -410,7 +410,7 @@ func (s *Service) actionConfigOperation(w http.ResponseWriter, r *http.Request, 
 	}
 	if action == "rollback" && o.State == "confirmed" && o.Agent != nil && o.Agent.MaterialsState != "expired" && o.Agent.MaterialsState != "context_changed" {
 		var code string
-		o, code = s.queryConfigOperation(ctx, o, configReconcileActor)
+		o, code = s.queryConfigBeforeRollback(ctx, o)
 		if code != "ok" || o.State != "confirmed" {
 			response, e := s.configResponse(ctx, o, code, nil, false)
 			if e != nil {
@@ -487,6 +487,27 @@ func (s *Service) actionConfigOperation(w http.ResponseWriter, r *http.Request, 
 	} else {
 		adminJSON(w, 200, response)
 	}
+}
+
+// A recent inventory/journal request may consume the channel's command rate
+// allowance. Retry only this read-only preflight; no rollback intent has been
+// persisted or sent yet. Other failures and context changes return immediately.
+func (s *Service) queryConfigBeforeRollback(ctx context.Context, o *control.ConfigOperation) (*control.ConfigOperation, string) {
+	for attempt := 0; attempt < 3; attempt++ {
+		observed, code := s.queryConfigOperation(ctx, o, configReconcileActor)
+		o = observed
+		if code != "busy" || attempt == 2 {
+			return o, code
+		}
+		timer := time.NewTimer(time.Second)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return o, configFailureCode(ctx.Err())
+		case <-timer.C:
+		}
+	}
+	return o, "busy"
 }
 
 // These are emitted by the pure adapter before Engine.Prepare can persist a

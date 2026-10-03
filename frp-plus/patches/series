@@ -13,3 +13,4 @@
 0012-managed-retention.patch
 0013-backup-relocation.patch
 0014-server-backup-context.patch
+0015-telemetry-reload-values.patch

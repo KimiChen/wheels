@@ -245,6 +245,11 @@ func runConfigNativeAdmin(t *testing.T, scenario string) {
 	common := fmt.Sprintf("auth.method = \"token\"\nauth.token = %q\nlog.to = \"console\"\nlog.level = \"warn\"\n", frpToken)
 	serverConfig := privateWrite("server.toml", fmt.Sprintf("bindAddr = \"127.0.0.1\"\nproxyBindAddr = \"127.0.0.1\"\nbindPort = %d\n", controlPort)+common)
 	agentConfig := privateWrite("agent.toml", fmt.Sprintf("serverAddr = \"127.0.0.1\"\nserverPort = %d\nclientID = \"1\"\nloginFailExit = false\ntransport.protocol = \"tcp\"\ntransport.wireProtocol = \"v2\"\ntransport.tls.enable = true\nstore.path = %q\n", controlPort, storePath)+common+fmt.Sprintf("\n[telemetry]\nenabled = true\nendpoint = %q\ntokenFile = %q\nserverID = \"native-admin-e2e\"\nintervalSeconds = 1\nallowInsecureLoopback = true\n\n[telemetry.configManagement]\nenabled = true\nroot = %q\n", "ws://"+s.Address()+"/agent/v1/ws", tokenPath, managedRoot))
+	var exitDashboardPort int
+	var exitDashboardPassword string
+	if scenario == "exit_management" {
+		exitDashboardPort, exitDashboardPassword = configNativeExitDashboard(t, agentConfig)
+	}
 	controlReservation.Close()
 	server := startConfigNative(t, ctx, serverBinary, serverConfig, root, "server")
 	configNativeWait(t, ctx, "FRP control listener", []*configNativeProcess{server}, func() bool { return configNativeOpen(controlPort) })
@@ -380,6 +385,10 @@ func runConfigNativeAdmin(t *testing.T, scenario string) {
 	}
 	configNativeWait(t, ctx, "TCP business forwarding", processes, func() bool { return configNativeEcho(remotePort) })
 	configNativeWait(t, ctx, "STCP Visitor business forwarding", processes, func() bool { return configNativeEcho(visitorPort) })
+	if scenario == "exit_management" {
+		runConfigNativeExitManagement(t, ctx, s, root, agentBinary, agentConfig, server, client, confirmed, localPort, remotePort, visitorPort, exitDashboardPort, exitDashboardPassword)
+		return
+	}
 	if scenario == "restore" {
 		runConfigNativeRestore(t, ctx, s, cookie, session.CSRF, root, agentBinary, agentConfig, server, client, inventory.ServiceID, remotePort, visitorPort)
 		return
