@@ -98,6 +98,28 @@ func TestConfigOperationDatabaseActiveStatesMatchProtocol(t *testing.T) {
 	}
 }
 
+func TestConfigOperationLostPrepareCanReconcileExpiredRecovery(t *testing.T) {
+	f := setup(t, utc("2026-10-03T12:00:00Z"), time.UTC)
+	node := f.create(DefaultNodeConfig("node"))
+	o := createOperation(t, f.s, operationRequest(f, node.ID, 1))
+	o = transitionOperation(t, f.s, o, "outcome_unknown", "connection_lost")
+	if o.CandidateDigest != "" {
+		t.Fatal("lost prepare unexpectedly had a digest")
+	}
+	f.clock.Store(o.DeadlineAtMS + 1)
+	recovered, err := f.s.TransitionConfigOperation(context.Background(), o.OperationID, ConfigOperationTransition{
+		ExpectedVersion: o.Version, NextState: "rolled_back", Code: "recovered", CandidateDigest: strings.Repeat("b", 64),
+	})
+	if err != nil || recovered.State != "rolled_back" || recovered.CandidateDigest != strings.Repeat("b", 64) {
+		t.Fatal("cannot record actual post-deadline Agent recovery", recovered, err)
+	}
+	events, err := f.s.ListConfigOperationEvents(context.Background(), o.OperationID)
+	if err != nil || len(events) != 3 || events[2].Code != "recovered" {
+		t.Fatal("recovery not audited", err)
+	}
+	createOperation(t, f.s, operationRequest(f, node.ID, 2))
+}
+
 func TestConfigOperationConcurrentCreationHasSingleWinner(t *testing.T) {
 	f := setup(t, utc("2026-10-03T12:00:00Z"), time.UTC)
 	node := f.create(DefaultNodeConfig("node"))

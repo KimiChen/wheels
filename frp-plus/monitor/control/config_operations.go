@@ -266,7 +266,11 @@ func (s *Store) TransitionConfigOperation(ctx context.Context, id string, input 
 			return ErrConflict
 		}
 		if input.CandidateDigest != "" {
-			if o.CandidateDigest == "" && input.NextState != "validated" && input.NextState != "prepared" {
+			// A lost prepare response can leave the coordinator without the
+			// digest while the Agent has already recovered/rolled back. Only a
+			// caller that matched the authenticated journal's service, ID and
+			// base revision may reconcile this one-time assignment from unknown.
+			if o.CandidateDigest == "" && o.State != "outcome_unknown" && input.NextState != "validated" && input.NextState != "prepared" {
 				return fmt.Errorf("%w: candidate digest assignment", ErrInvalid)
 			}
 			if o.CandidateDigest != "" && o.CandidateDigest != input.CandidateDigest {
