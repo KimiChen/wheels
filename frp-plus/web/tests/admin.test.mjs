@@ -128,3 +128,11 @@ test("private facts and FRP byte values retain unknown versus zero and integer p
   assert.equal(fieldText({quality: "ok", value: 0}), "0"); assert.equal(fieldText({quality: "unsupported", value: null}), "暂不支持");
   assert.match(errorText({status: 409}), /重新读取/);
 });
+
+test('administrative errors expose only a bounded code, never raw downstream errors', async () => {
+  for (const [body, expected] of [[{code: 'source_drift', error: 'private native error'}, 'source_drift'], [{code: 'https://private.invalid/secret'}, undefined], [{code: 'x'.repeat(65)}, undefined]]) {
+    const h = harness(); const result = h.client.request('/api/admin/v1/nodes/1/configuration');
+    h.requests[0].resolve({ok: false, status: 409, json: async () => body});
+    await assert.rejects(result, error => error.status === 409 && error.code === expected && error.message === 'request_failed');
+  }
+});

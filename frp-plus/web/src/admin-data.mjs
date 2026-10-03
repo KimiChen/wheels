@@ -103,8 +103,11 @@ export function adminClient({fetcher = globalThis.fetch, onExpired = () => {}, t
       const response = await fetcher(path, {method, headers, body: body === undefined ? undefined : JSON.stringify(body), credentials: "same-origin", cache: "no-store", signal: controller.signal, redirect: "error"});
       if (generation !== epoch || controller.signal.aborted) throw Object.assign(new Error("cancelled"), {name: "AbortError"});
       if (!response.ok) {
-        if (response.status === 401 || response.status === 403) { clear(); onExpired(); }
-        throw Object.assign(new Error("request_failed"), {status: response.status});
+        if (response.status === 401 || response.status === 403) { clear(); onExpired(); throw Object.assign(new Error("request_failed"), {status: response.status}); }
+        let code;
+        try { const failure = await response.json(); if (typeof failure?.code === "string" && /^[a-z_]{1,64}$/.test(failure.code)) code = failure.code; } catch { /* Non-JSON failures keep the HTTP status. */ }
+        if (generation !== epoch || controller.signal.aborted) throw Object.assign(new Error("cancelled"), {name: "AbortError"});
+        throw Object.assign(new Error("request_failed"), {status: response.status, code});
       }
       const data = response.status === 204 ? null : await response.json();
       if (generation !== epoch || controller.signal.aborted) throw Object.assign(new Error("cancelled"), {name: "AbortError"});

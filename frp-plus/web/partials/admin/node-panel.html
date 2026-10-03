@@ -2,7 +2,7 @@
 <dialog id="node-panel" class="wsk-dialog fa-dialog fa-node-editor" aria-labelledby="node-title" hidden>
   <header class="wsk-dialog-head fa-dialog-header"><div><h2 id="node-title">编辑节点</h2><p class="fa-node-id">#<span id="node-id"></span> · <span id="node-name-label"></span><span id="node-session" class="wsk-badge fm-badge"></span></p></div><button class="wsk-icon-button fa-icon" type="button" data-close-dialog aria-label="关闭节点窗口"><svg class="wsk-icon" aria-hidden="true"><use href="#close"/></svg></button></header>
   <div class="wsk-dialog-body fa-editor-body">
-    <nav class="fa-editor-tabs" aria-label="节点管理内容"><button class="wsk-button wsk-quiet" type="button" data-editor-pane="settings" aria-controls="settings-basic" aria-pressed="true">基本信息</button><button class="wsk-button wsk-quiet" type="button" data-editor-pane="plan" aria-controls="settings-plan" aria-pressed="false">费用与套餐</button><button class="wsk-button wsk-quiet" type="button" data-editor-pane="binding" aria-controls="editor-binding" aria-pressed="false">FRP 绑定</button></nav>
+    <nav class="fa-editor-tabs" aria-label="节点管理内容"><button class="wsk-button wsk-quiet" type="button" data-editor-pane="settings" aria-controls="settings-basic" aria-pressed="true">基本信息</button><button class="wsk-button wsk-quiet" type="button" data-editor-pane="plan" aria-controls="settings-plan" aria-pressed="false">费用与套餐</button><button class="wsk-button wsk-quiet" type="button" data-editor-pane="binding" aria-controls="editor-binding" aria-pressed="false">FRP 绑定</button><button class="wsk-button wsk-quiet" type="button" data-editor-pane="configuration" aria-controls="editor-configuration" aria-pressed="false">隧道配置</button></nav>
     <p data-dialog-notice class="wsk-alert wsk-info fa-notice" role="status" hidden></p>
     <section id="editor-settings" data-editor-panel="settings" aria-label="节点设置"><form id="settings-form" novalidate>
       <fieldset id="settings-basic" data-settings-pane="settings"><legend class="wsk-sr-only">基本信息</legend><div class="fa-settings-grid">
@@ -29,6 +29,7 @@
       </div><button id="traffic-reset" class="wsk-secondary wsk-button" type="button">重置套餐周期</button><p class="fa-muted fa-reset-note">仅重置当前套餐用量，今日与系统累计流量保留。</p></details></fieldset>
     </form></section>
     <section id="editor-resources" data-editor-panel="resources" aria-label="节点资源与隧道" hidden><div id="node-details"></div><div id="node-frp-details"></div></section>
+    <section id="editor-configuration" data-editor-panel="configuration" aria-label="隧道配置管理" hidden><div id="node-configuration"></div></section>
     <section id="editor-binding" data-editor-panel="binding" aria-labelledby="binding-title" hidden><h3 id="binding-title" class="wsk-sr-only">FRP 可信绑定</h3><p class="fa-editor-summary">绑定只决定关联关系，不远程修改 FRP 配置。</p><form id="binding-form"><div class="fa-form-grid">
       <label class="wsk-field"><span class="wsk-label">服务端标识</span><input class="wsk-control" name="server_id" required maxlength="128" autocomplete="off" placeholder="frps-main"></label>
       <label class="wsk-field"><span class="wsk-label">FRP 用户（可留空）</span><input class="wsk-control" name="user" maxlength="128" autocomplete="off" placeholder="未设置 user 时留空"></label>

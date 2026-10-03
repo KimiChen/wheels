@@ -337,3 +337,19 @@
   .fa-login { margin: var(--space-48) auto 80px; }
 }
 @media (forced-colors: active) { .fa-navigation a[aria-current], .fa-editor-tabs button[aria-pressed="true"] { outline: 1px solid Highlight; } }
+
+/* Configuration transactions keep drafts separate from refreshed observations. */
+.fa-config-inventory, .fa-config-editor, .fa-config-preview, .fa-config-result, .fa-config-history { margin-block: 1.25rem; min-width: 0; }
+.fa-config-object { border: 1px solid var(--wsk-border, #d5d9e0); border-radius: .65rem; padding: .8rem; margin-block: .65rem; overflow-wrap: anywhere; }
+.fa-config-object h5 { font-size: .95rem; margin: 0 0 .35rem; }
+.fa-config-object p { margin-block: .35rem; }
+.fa-config-digest, .fa-config-timeline { overflow-wrap: anywhere; }
+.fa-config-fields { margin-block: .9rem; }
+.fa-config-fields .wsk-field { min-width: 0; }
+.fa-config-secret { grid-column: 1 / -1; }
+.fa-config-secret > .wsk-field { margin-block: .35rem; }
+.fa-config-confirm { display: flex; flex-direction: row; align-items: center; gap: .6rem; margin-block: 1rem; }
+.fa-config-confirm input { flex: 0 0 auto; }
+.fa-config-history-item { display: block; margin-block: .4rem; max-width: 100%; white-space: normal; text-align: start; overflow-wrap: anywhere; }
+.fa-config-timeline li { margin-block: .4rem; }
+@media (max-width: 540px) { .fa-config-fields { grid-template-columns: minmax(0, 1fr); } .fa-config-object .fa-actions, .fa-editor-tabs { flex-wrap: wrap; } }

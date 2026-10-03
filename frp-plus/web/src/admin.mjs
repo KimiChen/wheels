@@ -5,6 +5,7 @@ import {overview, filterAdminNodes, expiryCalendar, localDayKey} from "./admin-o
 import {directoryRow} from "./admin-directory.mjs";
 import {membershipDraft, membershipChanges, saveNodeChanges, retainAcknowledgedSettings} from "./admin-editor.mjs";
 import {renderFRPDetail, clearFRPDetail, serverEndpointText, createFRPDetailReader, renderNativeRegistryAccess} from "./admin-frp.mjs";
+import {createConfigPanel} from "./admin-configuration.mjs";
 
 const $ = id => document.getElementById(id);
 const client = adminClient({onExpired: () => locked("管理会话已失效，请重新登录。")});
@@ -16,6 +17,7 @@ let calendarMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1)
 let editorMembership = null, settingsNeedsReload = false, editorSettingsSaved = false, bindingBaseline = null, bindingDirty = false;
 const acknowledgedSettings = new Map();
 const frpDetails = createFRPDetailReader({request: path => client.request(path), onChange: () => renderSelectedFRPDetail()});
+const configuration = createConfigPanel($("node-configuration"), {request: (path, options) => client.request(path, options)});
 const el = (tag, text, className) => { const node = document.createElement(tag); if (text !== undefined) node.textContent = text; if (className) node.className = className; return node; };
 const safe = raw => typeof raw === "string" || (typeof raw === "number" && Number.isFinite(raw)) ? String(raw) : "—";
 function notice(text, state = "ready") {
@@ -37,6 +39,7 @@ function locked(message = "请使用 GitHub 登录。", disabled = false) {
   client.clear(); loggedIn = false; refreshing = false; clearTimeout(poll); probeEpoch++;
   snapshotEpoch++; snapshot = null; selectedID = null; probes = null; pendingAction = null;
   frpDetails.clear();
+  configuration.clear();
   groupsEpoch++; groups = []; groupsReady = false; draft = groupDraft(); groupDirty = false; groupMessage = ""; pendingGroupDelete = null;
   groupRows.clear(); groupMembers.clear(); $("group-list").replaceChildren(); $("group-members").replaceChildren(); $("group-form").reset(); $("group-confirm").hidden = true;
   $("group-editor-title").textContent = "新建分组"; $("group-save").textContent = "创建分组";
@@ -228,7 +231,7 @@ function renderCalendar() {
 }
 function selectNode(id, pane = "settings") {
   const changed = selectedID !== id;
-  if (changed) frpDetails.clear();
+  if (changed) { frpDetails.clear(); configuration.clear(); }
   selectedID = id; pendingAction = null; $("confirm-action").hidden = true;
   const node = snapshot?.nodes.find(item => item.id === id);
   $("node-panel").hidden = !node;
@@ -239,6 +242,7 @@ function selectNode(id, pane = "settings") {
 }
 function discardNodeEditor() {
   frpDetails.clear();
+  configuration.clear();
   selectedID = null; pendingAction = null; editorMembership = null; settingsRevision = null; settingsDirty = false;
   settingsNeedsReload = false; editorSettingsSaved = false; bindingBaseline = null; bindingDirty = false;
   $("settings-form").reset(); $("binding-form").reset(); $("node-editor-groups").replaceChildren(); $("node-details").replaceChildren();
@@ -266,6 +270,10 @@ function showEditorPane(pane) {
   $("editor-save").setAttribute("form", pane === "binding" ? "binding-form" : "settings-form");
   $("editor-save").textContent = "保存修改";
   if (pane === "resources") void refreshSelectedFRPDetail();
+  if (pane === "configuration") {
+    const node = snapshot?.nodes.find(item => item.id === selectedID);
+    if (loggedIn && node) void configuration.open(node.id, node.session === "online");
+  }
 }
 
 async function refreshSelectedFRPDetail() {
@@ -289,6 +297,7 @@ function showView() {
 }
 function renderDetail() {
   const node = snapshot?.nodes.find(item => item.id === selectedID); if (!node) return;
+  if (configuration.state.nodeID === node.id) configuration.setOnline(node.session === "online");
   $("node-name-label").textContent = node.name; $("node-id").textContent = node.id;
   $("node-session").textContent = sessionLabels[node.session]; $("node-session").dataset.state = node.session;
   const today = todayText(node.traffic_today), plan = planText(node.traffic_plan);

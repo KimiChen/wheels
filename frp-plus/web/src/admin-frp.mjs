@@ -77,7 +77,7 @@ export function detailModel(node, reconciliation) {
     ["配置修订", typeof configuration.revision === "string" && /^[a-f0-9]{64}$/.test(configuration.revision) ? configuration.revision : "尚未提供"],
     ["来源最近读取", timestamp(configuration.read_at)],
     ["原生 Dashboard", configuration.dashboard_enabled === true ? "已配置监听；访问入口由管理员设置" : configuration.dashboard_enabled === false ? "未启用" : "启用状态未知"],
-    ["管理能力", "只读观察；远程配置管理尚未开放"],
+    ["管理能力", "在“隧道配置”中读取管理能力；仅本机显式启用的 Store 支持远程配置操作"],
     ["原生对象重载", configuration.reloadable === true ? "可按原生流程重载 Proxy/Visitor；启动字段仍需重启" : configuration.reloadable === false ? "当前实例没有可用的文件 / Store 重载入口" : "尚未确认"],
     ["控制连接错误", errorSummary(detail.control_error)]
   ];
@@ -192,11 +192,11 @@ export function renderNativeRegistryAccess(document, registry, nativeAccess) {
 
 const maintenance = [
   ["文件 / include", "在 Agent 所在主机备份并修改原生配置，先运行 frp-plus-agent verify -c <配置文件>。Proxy/Visitor 变更按原生 reload 流程应用，再核对运行结果。"],
-  ["原生 Store", "仅当 Store 已启用时，通过原生 frpc Dashboard 或 Store API 维护。文件与 Store 同名会发生覆盖；禁用或删除 Store 条目可能重新启用文件定义。"],
+  ["原生 Store", "未托管的 Store 通过原生 frpc Dashboard 或 Store API 维护；本机启用 Plus 托管后，原生并行写入口返回 409。文件与 Store 同名须先清理，避免禁用或删除后激活文件定义。"],
   ["需要重启的配置", "serverAddr、认证、TLS、telemetry、Store 路径等启动配置不能依靠 frpc reload 全部替换。frps 监听、monitor 等服务端启动配置需原生维护和重启。"],
   ["原生 Dashboard", "仅访问管理员明确配置的入口。未启用或仅监听回环时，需在对应主机访问或使用 SSH 转发；本页面不自动开放管理端口、不提供原生密码。"],
   ["服务实例与归属", "当前仅观察此节点对应的单个 frpc Service。缺少稳定 clientID 或运行多个 Service 时，不能按名称推断唯一归属；应在对应原生进程中维护配置。"],
-  ["当前操作范围", "此处只读展示配置来源和维护步骤。节点可信绑定只改变对账归属，不会修改隧道配置；尚不提供远程编辑、应用或回退。"]
+  ["当前操作范围", "资源详情只读展示来源与运行观察。隧道配置页面按 Agent 实际管理能力提供 Store 校验、预览、应用与回退；节点可信绑定只改变对账归属。"]
 ];
 
 export function clearFRPDetail(container) {
