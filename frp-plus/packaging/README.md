@@ -1,7 +1,7 @@
 # 发布与恢复
 
 `python3 scripts/frp.py package` 生成 Linux amd64/arm64 发布包，包含两个二进制、
-固定上游记录、构建信息、校验和、许可原文、下列运维工具、`monitor/control/schema.sql` 及 `.env.example`。
+固定上游记录、构建信息、校验和、许可原文、下列运维工具、两个控制库 schema SQL、组备份清单模板及 `.env.example`。
 包不包含运行时目录、Token、证书、数据库或本地 `.env`。
 二进制运行不需要 Node、Python 或 SQLite CLI；初始化和备份工具需要 Python 3.11+
 及其标准库 sqlite3。运行前校验发布目录和包内的 `SHA256SUMS`。
@@ -121,36 +121,39 @@ Agent 将两处 `server` 改为 `agent`。生成器只输出unit，安装/启用
 
 ## 一致备份与恢复
 
-工具只支持 `local.py` / `ops.py` 创建的 format 2 安装；开发期不兼容旧配置和备份。运行文件必须在同一私有目录，不支持外部includes。
-控制库支持本项目 v4、v5 与 v6；新版主控首次启动时自动迁移至 v6，保留业务数据并删除旧采集范围基线字段；v4 同时加入分组表。升级前保留完整备份，回滚旧版时恢复配套备份，不能手工降低数据库版本号。
-先创建0700备份目录。输出是包含凭据和私钥的0600归档，应和运行目录一样限制访问。
-输出必须位于运行目录之外，运行目录的任意层级子目录均被拒绝。
+完整流程与恢复门禁见[根文档的备份章节](../README.md#托管-agent-的离线备份与恢复接管)，
+11角色记录使用[私有组清单模板](backup-set.example.json)。发布包包含 `ops.py`、
+`ops_checkpoint.py`、`ops_history.py`、`local.py` 及基础/审计保留 schema SQL；初始化与主控
+一致使用 schema12，备份支持控制库4–12，未知版本拒绝。
+
+- format2：旧生成安装的配置与SQLite；无Store的旧Agent可由新版Python直接备份，无需新helper。
+- format3：原单Agent托管检查点v1，保留原读取路径。
+- format4：`--dependency-graph` 或托管Agent的 `--complete` 包装检查点v2；主控的
+  `--complete --offline` 同组保存SQLite与完整TSDB。普通format2不会自动包含历史目录。
+
+先停止主控，再停止所有Agent，保留未完成事务；在11角色归档和旧程序/服务单元哈希全部
+核验后直接替换。以下为占位路径，不会自动停止服务或连接远程机器：
 
 ```sh
-python3 scripts/ops.py backup --directory /var/lib/frp-plus \
-  --output /secure/backups/frp-plus-20260927.tar.gz
-python3 scripts/ops.py restore --archive /secure/backups/frp-plus-20260927.tar.gz \
-  --directory /var/lib/frp-plus-restored
+python3 scripts/ops.py backup --directory <原安装绝对目录> \
+  --output <新建私有归档路径> --complete --offline
+# 托管Agent额外指定已支持检查点v2的可信helper：
+python3 scripts/ops.py backup --directory <Agent原安装绝对目录> \
+  --output <新建私有归档路径> --dependency-graph --offline \
+  --agent-binary <可信Agent绝对路径>
 ```
 
-备份使用SQLite在线backup API取得 `control.sqlite` 包含已提交WAL的数据库快照，并执行 `integrity_check`，
-不直接拷贝活跃的 `.sqlite/-wal/-shm`。只收集白名单运行文件，不含日志、依赖或程序。
-每个文件保存SHA-256用于检测损坏；校验和不是签名，应只恢复可信来源的私有备份。
-默认备份时限30秒、数据库1GiB/总解包2GiB上限，超限明确失败，不生成半成品。
-节点、分组及成员关系、套餐累计、计数器基线与探测配置在同一个数据库快照中。启动用TOML和密钥文件逐个读取，
-备份期间不要替换这些文件；需要完整安装同一时点快照时先停服务。
+主控TSDB保持停机并取得原 `flock.lock`，从私有DB/WAL副本生成数据库快照，检查全部来源
+的路径、文件类型、摘要与修改时间，归档是最后持久化状态。主控数据上限2GiB、单文件1GiB、
+文件及目录8192项；超限失败。归档含凭据和私钥，文件0600、父目录0700，仅在私有位置保存。
+编号USTAR避免源文件名进入tar扩展头，拒绝链接、穿越、重复成员、压缩炸弹和配置引用遗漏。
+内部摘要不是来源签名；归档SHA256须与可信私有组清单核对，不能用自改的清单证明材料完整。
 
-可选 TSDB 的 `historyDataPath` 目录不进入此备份，恢复后可以重新积累曲线。若需要保留
-指标历史，停止主控后单独复制该目录；不要在线拼接复制内部文件。恢复会同步调整配置中
-的历史目录路径，空路径继续保持关闭。
+主控恢复前先停服务并将原目录整体移到私有保留目录，原路径须空缺；验证staging后原子
+发布回相同绝对目录。Agent托管恢复保留Root/.lock，更新身份并要求本地运行验证、Admin
+接管和二次离线确认。`restore` 自动按格式分派；旧format2仍可恢复到新目录，当前部署统一
+用原路径。原生 `verify` 和真实监控/业务/历史验收通过后再保留或清理旧目录。
 
-恢复只写新目录，拒绝覆盖、归档链接、目录穿越、重复文件及校验失败；验证数据库后，
-把生成配置中旧安装目录的文件路径替换为新目录。证书身份、网络端点和FRP绑定不会改变。
-恢复后先以相同版本二进制 `verify -c`，再修改unit的运行目录并启用；保留旧目录直到验收。
-当前费用、套餐用量、今日累计与差分基线会恢复，在线会话不会恢复，页面等待 agent 重新上报。
-历史曲线不会从控制库恢复。恢复旧备份会恢复旧节点 token 散列，正式切换后按需轮换节点令牌；
-这不会改变原生 FRP 认证。GitHub 管理员白名单及 Client Secret 随启动配置恢复，确认其仍有效后启用。
-
-GitHub 账号权限由主控白名单控制。需要撤销管理员时编辑白名单并重启主控；更换 OAuth App
-密钥时更新0600 `github.secret` 后重启。节点在管理页轮换或撤销会断开旧监控会话，
-原生 FRP 隧道继续按自身凭据运行。
+失败时停止所有角色，用同组旧二进制和数据恢复；不得让旧frps打开新schema数据库。
+程序/BUILD和unit另随组清单保存，单角色数据归档不包含程序。模板、外部映射、跨目录的
+完整依赖恢复不开放，缺任何角色材料不得将组状态标为complete。这里不提供自动跨机器编排。

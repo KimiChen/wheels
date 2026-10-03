@@ -526,7 +526,8 @@ def archive_format(fd):
             if count > MANAGED_MAX_FILES + 2 or total > MAX_TOTAL or time.monotonic() > deadline:
                 raise ValueError('backup inventory exceeds limits')
             if (member.name not in FILES | {'BACKUP.json', 'checkpoint/CHECKPOINT.json'}
-                    and not (member.name.startswith('checkpoint/') and checkpoint_path(member.name.removeprefix('checkpoint/')))):
+                    and not (member.name.startswith('checkpoint/') and checkpoint_path(member.name.removeprefix('checkpoint/')))
+                    and re.fullmatch(r'payload/[0-9]{6}', member.name) is None):
                 raise ValueError('invalid backup inventory')
             if member.size < 0 or member.size > (MAX_FILE if member.name == 'control.sqlite' else MANAGED_MAX_FILE):
                 raise ValueError('backup member exceeds size limit')
@@ -535,7 +536,7 @@ def archive_format(fd):
                     raise ValueError('invalid backup manifest')
                 with archive.extractfile(member) as value:
                     manifest = strict_json(value.read(MANAGED_MAX_FILE + 1))
-                if not isinstance(manifest, dict) or manifest.get('format') not in (2, 3):
+                if not isinstance(manifest, dict) or manifest.get('format') not in (2, 3, 4):
                     raise ValueError('unsupported backup format')
                 return manifest['format']
     raise ValueError('backup manifest is missing')
@@ -602,14 +603,22 @@ def restore_confirm(directory, epoch, manifest_digest, *, offline=False, agent_b
                           '--manifest-digest', manifest_digest], folder, agent_binary)
     return restore_result(result, 'confirmed', manifest_digest)
 
-def backup(directory, output, *, offline=False, agent_binary=None):
+def backup(directory, output, *, offline=False, agent_binary=None, dependency_graph=False, complete=False):
     folder = private_directory(directory)
     output = path_without_links(output)
     private_directory(output.parent)
     if output.exists() or output == folder or folder in output.parents:
         raise ValueError('backup output must be new and outside the runtime directory')
     if managed_profile(folder):
+        if dependency_graph or complete:
+            from ops_checkpoint import backup as dependency_backup
+            return dependency_backup(sys.modules[__name__], folder, output, offline=offline, agent_binary=agent_binary)
         return managed_backup(folder, output, offline=offline, agent_binary=agent_binary)
+    if dependency_graph:
+        raise ValueError('dependency graph packaging requires a managed Agent')
+    if complete:
+        from ops_history import backup as complete_backup
+        return complete_backup(sys.modules[__name__], folder, output, offline=offline)
     files = managed_files(folder)
     with tempfile.TemporaryDirectory(prefix='.frp-backup-', dir=output.parent) as temporary:
         temporary = Path(temporary)
@@ -687,7 +696,7 @@ def restore(archive_path, directory, *, offline=False, agent_binary=None):
                 integrity_check(connection, time.monotonic() + 30)
                 # Database identity constants; must match monitor/control/schema.sql
                 # and the startup check in monitor/control/store.go.
-                if connection.execute('PRAGMA application_id').fetchone() != (1179798836,) or connection.execute('PRAGMA user_version').fetchone()[0] not in (4, 5, 6, 7, 8, 9, 10):
+                if connection.execute('PRAGMA application_id').fetchone() != (1179798836,) or connection.execute('PRAGMA user_version').fetchone()[0] not in (4, 5, 6, 7, 8, 9, 10, 11, 12):
                     raise ValueError('unsupported control database schema')
         # Generated TOML uses JSON-compatible quoted strings for file paths.
         for name in ('server.toml', 'agent.toml'):
@@ -700,7 +709,11 @@ def restore(archive_path, directory, *, offline=False, agent_binary=None):
         (stage / 'BACKUP.json').unlink()
         managed_files(stage, final)
     try:
-        if archive_format(fd) == 3:
+        version = archive_format(fd)
+        if version == 4:
+            from ops_checkpoint import restore as indexed_restore
+            return indexed_restore(sys.modules[__name__], fd, directory, offline=offline, agent_binary=agent_binary)
+        if version == 3:
             return managed_restore(fd, directory, offline=offline, agent_binary=agent_binary)
         return new_directory(directory, write)
     finally:
@@ -774,6 +787,8 @@ def main():
     save.add_argument('--output', required=True)
     save.add_argument('--offline', action='store_true', help='acknowledge stopped Agent maintenance; native lease still enforced')
     save.add_argument('--agent-binary', help='native Agent with managed-maintenance support')
+    save.add_argument('--dependency-graph', action='store_true', help='format4 managed Agent dependency checkpoint')
+    save.add_argument('--complete', action='store_true', help='offline complete generated installation including server history')
     load = commands.add_parser('restore')
     load.add_argument('--archive', required=True)
     load.add_argument('--directory', required=True)
@@ -796,7 +811,7 @@ def main():
             print(systemd_unit(args.role, args.directory, args.binary_directory, args.user), end='')
         else:
             result = (server_init(args) if args.action == 'server-init' else agent_init(args) if args.action == 'agent-init'
-                      else backup(args.directory, args.output, offline=args.offline, agent_binary=args.agent_binary) if args.action == 'backup'
+                      else backup(args.directory, args.output, offline=args.offline, agent_binary=args.agent_binary, dependency_graph=args.dependency_graph, complete=args.complete) if args.action == 'backup'
                       else restore(args.archive, args.directory, offline=args.offline, agent_binary=args.agent_binary) if args.action == 'restore'
                       else restore_confirm(args.directory, args.epoch, args.manifest_digest,
                                            offline=args.offline, agent_binary=args.agent_binary))

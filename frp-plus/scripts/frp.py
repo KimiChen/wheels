@@ -491,9 +491,10 @@ class Pipeline:
                                       "SQLite control storage is required; embedded history is optional. Administration uses GitHub OAuth only.\n"
                                       "Operations and systemd instructions: packaging/README.md; tools require Python 3.11+.\n"
                                       "Build provenance and exact Go version: BUILD.json.\n").encode("utf-8")
-            for name in ("scripts/ops.py", "scripts/local.py", "packaging/README.md", "packaging/nginx.conf.example", ".env.example"):
+            for name in ("scripts/ops.py", "scripts/ops_checkpoint.py", "scripts/ops_history.py", "scripts/local.py", "packaging/README.md", "packaging/backup-set.example.json", "packaging/nginx.conf.example", ".env.example"):
                 payload[name] = read_regular(self.root / name)
-            payload["monitor/control/schema.sql"] = read_regular(self.root / "monitor/control/schema.sql")
+            for schema in ("schema.sql", "audit_retention_schema.sql"):
+                payload["monitor/control/" + schema] = read_regular(self.root / "monitor/control" / schema)
             payload["SHA256SUMS"] = "".join(f"{digest(data)}  {name}\n" for name, data in sorted(payload.items())).encode("utf-8")
             basename = f"frp-plus-{self.lock['tag']}-{manifest['target'].replace('/', '-')}"
             path = self.output / (basename + ".tar.gz")

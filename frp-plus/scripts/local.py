@@ -166,7 +166,9 @@ def control_database(path: Path, *, node_name=None, token=None, server_id="local
     """Create the current schema, with an optional first node and probe document."""
     private(path, "")
     with closing(sqlite3.connect(path)) as database:
-        database.executescript((ROOT / "monitor/control/schema.sql").read_text(encoding="utf-8"))
+        database.executescript((ROOT / "monitor/control/schema.sql").read_text(encoding="utf-8")
+                              + (ROOT / "monitor/control/audit_retention_schema.sql").read_text(encoding="utf-8")
+                              + "\nPRAGMA user_version=12;\n")
         node_id = None
         with database:
             if node_name is not None:

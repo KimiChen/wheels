@@ -107,6 +107,20 @@ JWKS 和 RS256 签名验证。两种 wire 均检查正常业务，以及 audienc
 该测试不覆盖外部 IdP 可用性、复杂 NAT 或长时间稳定性。脚本首先记录二进制 SHA256，
 不读取生产账号，临时秘密保持私有并在退出时清理。
 
+锁定上游的分组与限速用例可直接使用增强版产物运行：
+
+```sh
+go -C .cache/upstream/worktree test -count=1 -timeout=5m ./test/e2e -args \
+  -frpc-path="$PWD/dist/darwin-arm64/frp-plus-agent" \
+  -frps-path="$PWD/dist/darwin-arm64/frp-plus-server" \
+  '-ginkgo.focus=\[Feature: (Group|Bandwidth Limit)\]' -ginkgo.no-color
+```
+
+共 12 项覆盖 TOML/旧 INI 下的负载均衡、健康检查摘除/恢复及客户端/服务端限速；
+包含服务端 NewProxy 插件。2026-10-03 使用 G2 九补丁实际产物验收：首次 11 项通过，
+一项 fixture 初始化遇本机其他应用端口占用，定向运行客户端限速两项通过。
+该结果是功能回归，不作为容量或长期稳定性承诺。
+
 ## 配置管理的真实联合验收
 
 `monitor/config_native_test.go` 用真实 Admin HTTP、SQLite、管理 WebSocket 与原生
@@ -144,6 +158,15 @@ Node/Playwright/Chromium 参数，并将 `FRP_AUDIT_BROWSER_HELPER` 指向
 `tests/audit_browser_e2e.mjs`。它连接实际 Handler、认证、审计 API 和 SQLite，验证分页、
 未知操作者、旧 Service ID、筛选、脱敏 JSONL 下载及会话清理；事件由测试种入，
 不将该测试描述为原生配置执行流程的验收。
+
+隧道历史页面使用 `monitor/tunnel_browser_test.go` 的 `TestTunnelBrowserEndToEnd`；
+`FRP_TUNNEL_BROWSER_HELPER` 指向 `tests/tunnel_browser_e2e.mjs`，其余浏览器参数相同。
+测试连接实际管理员认证、SQLite 和 VictoriaMetrics，验证一个逻辑对象的两代实例、
+生命周期事件、真实历史曲线、7 天窗口、Visitor 筛选与退出清理；原生事件和累计值由
+测试种入，原生转发由互通测试独立验证。页面单元测试还覆盖连接数可用但字节不受支持、
+采样缺口、超过 uint64 的历史汇总及操作审计关联，避免把未知观察当成零值。
+2026-10-03 静态测试树运行上述两个真实浏览器用例，`go test -v -race -count=1`
+通过（8.674 秒）；前端 129 项测试通过，1366/390/320 宽度的明暗主题无横向溢出。
 
 ## 最小托管备份与真实恢复接管
 

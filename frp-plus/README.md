@@ -152,21 +152,52 @@ Dashboard 地址只接受 HTTPS 或字面量回环 HTTP，不允许 URL 内嵌�
 - 本地恢复材料使用私有目录、0600 文件和跨进程锁；回退前同时检查 Store 原文及
   文件/includes/启动参数/实际模板依赖。普通重启保留 Service 身份，恢复工具需显式
   更新身份才能拒绝旧命令。秘密引用只在本机解析，原生 Store 与恢复材料仍可能有明文。
-- `scripts/ops.py` 的 format 2 保留控制库操作与恢复接管审计；新增 format 3 支持
-  工具生成的单 Agent 托管安装，包含 Store、秘密引用和事务恢复材料。两者的范围不同，
-  均不能据此宣称完整 includes、外部依赖或跨主机一致备份。
+- `scripts/ops.py` 保留 format 2/3；format 4 增加同安装根的 Agent 依赖检查点和
+  停机主控 SQLite/TSDB 完整归档。外部映射、环境模板及跨主机同一时刻事务仍不在范围内。
 
 ### 配置审计查询与导出
 
 管理员侧栏的“配置审计”按时间、操作者、节点、Service、Proxy/Visitor、操作 ID 和
-结果查询。列表每页 50 条，翻页保持同一查询上界；新事件通过重新查询显示。详情保存
-事件当时的状态、变更字段名和修订摘要，不保存配置前后明文。外部漂移标记“未知操作者”，
-观察记录者单独显示；恢复“已接管”不等同 Agent 已完成离线确认。
+结果查询。列表每页 50 条，翻页保持同一查询上界；清理使旧游标失效时需重新查询。
+详情保存事件当时的状态、变更字段名和修订摘要，不保存配置前后明文。外部漂移标记
+“未知操作者”，观察记录者单独显示；恢复“已接管”不等同 Agent 已完成离线确认。
 
 “导出本次查询”生成 UTF-8 JSONL，最多 10000 条、8 MiB，超限须缩小范围。导出本身记录
 请求、准备完成或失败；准备完成仅表示服务端已生成文件。导出不包含秘密、私有快照或
-配置字段值。审计保留 90 天、已完成操作私有快照 30 天是当前目标，**自动清理尚未启用**。
-退出登录会清空页面和待处理下载。审计是本地数据库记录，不承诺不可篡改。
+配置字段值。退出登录会清空页面和待处理下载。审计是本地数据库记录，不承诺不可篡改。
+
+保留策略在启动配置中设置，省略时采用下列默认值：
+
+```toml
+# frps：管理审计，与流量 TSDB 保留期相互独立
+[monitor.audit]
+retentionDays = 90
+maxRows = 100000
+maxBytes = 268435456
+
+# frpc：已有 telemetry.configManagement 块内追加这两项
+[telemetry.configManagement]
+snapshotRetentionDays = 30
+maxSnapshotBytes = 33554432
+```
+
+审计期限可设 1–366 天，行数上限 100–10000000，逻辑字节预算 1 MiB–16 GiB。
+Agent 快照期限可设 1–366 天，旧/新 Store 快照预算 1 MiB–1 GiB；操作元数据固定最多
+1024 条。容量是新配置操作的准入线，达到时返回 `audit_capacity` 或 `managed_capacity`，
+不会为腾出空间提前删除恢复材料，也不阻止已有操作恢复。逻辑预算不等于 SQLite 文件
+大小；清理不执行阻塞式压缩。
+
+自动清理按有界批次运行。进行中、结果未知和恢复失败的操作保持受保护；恢复接管记录
+必须收到身份、摘要和接管编号完全匹配的 Agent `confirmed` 事实，才开始计算其关联
+审计的保留期。仅 `acknowledged` 不够。审计删除、容量计数和清理事件在同一事务内，
+失败整体回退。仍需恢复的证据可能使容量暂时超过准入线。
+
+Agent 仅清理已完成操作的私有 Store 快照，先持久化 `materials_state=expired`，再删除
+旧/新文件；中途退出可重试清理。操作业务终态、最后验证事实、幂等索引和安全元数据仍
+保留，秘密引用不随本轮快照清理删除。旧版终态记录从首次采用新策略时重新计算期限。
+过期操作仍能查询，但回退明确返回材料不存在并保留历史终态，不占用永久未知操作名额。
+检查点只归档过期操作的元数据，恢复后不能复活已过期的回退能力。旧 Agent 省略材料
+状态时界面显示未知，不能据此判断材料已删除。
 
 查询 API 为 `GET /api/admin/v1/configuration/audit`、详情为同路径加 `/{id}`；
 `POST /api/admin/v1/configuration/audit/export` 需要管理员会话、同源和 CSRF 校验。
@@ -234,8 +265,8 @@ python3 scripts/ops.py restore-confirm --directory <原安装绝对目录> \
 
 离线确认会重新检查上下文、Store、事务状态与已确认的接管记录；重启后再验证一次，
 通过才允许写入。管理员接管、磁盘恢复和业务转发是不同事实，仍须实际验证业务协议。
-摘要用于检查材料一致性，不是归档来源签名；不要恢复不可信的材料。主控数据库、
-TSDB、服务单元和跨机器角色协调不在这个最小 Agent 恢复流程内，阶段三继续扩展。
+摘要用于检查材料一致性，不是归档来源签名；不要恢复不可信的材料。主控数据库与 TSDB
+使用下文独立停机归档；程序、服务单元和跨机器协调由同组维护清单关联。
 
 ### 依赖图检查点
 
@@ -244,8 +275,62 @@ v2 检查点。默认仍为 v1；安装和确认按已校验的检查点版本�
 主文件、includes、Store、Token/TLS、插件证书，以及历史操作旧/新 Store 所引用的文件。
 恢复保留锁目录身份，记录可重试的安装计划，并按现有“运行验证 → 管理端接管 → 离线确认”
 流程恢复写管理。当前仅支持同目录、0700 目录/0600 文件；模板、外部映射和跨目录恢复
-仍未开放，依赖不完整时拒绝导出。运维 tar 归档工具尚在接入 v2，不能把旧 format3 当作
-完整依赖备份。此接口已通过真实 mTLS、Token 文件、include 和 HTTPS 插件恢复后转发验证。
+仍未开放，依赖不完整时拒绝导出。运维工具用 format 4 的固定编号 USTAR 成员封装 v2，
+源路径保留在私有清单中，支持深层目录和 UTF-8 文件名，不开放 PAX/GNU 扩展。
+未过期事务包含完整旧/新快照；已过期事务只保存幂等记录，不重新归档待清理残余或恢复回退能力。
+
+```sh
+python3 scripts/ops.py backup --directory <Agent原安装绝对目录> \
+  --output <新建私有归档路径> --offline --dependency-graph \
+  --agent-binary <具备0011维护命令的Agent绝对路径>
+```
+
+`restore` 和 `restore-confirm` 沿用上一节命令，并按清单版本分派；format 2/3 原读取路径
+不变。此流程已通过双 wire v1/v2 的真实 mTLS、Token 文件、include、HTTPS 插件证书恢复
+及转发验证，包含精确字节/纳秒 mtime、原锁 inode、身份轮换和未接管时拒绝离线确认。
+
+### 停机主控完整归档与 11 角色替换
+
+主控执行 `backup --complete --offline`，format 4 同组保存生成安装的私有配置、凭据、
+SQLite 及 `historyDataPath` 下完整 TSDB 文件和空目录。先读取停机 DB 与 WAL 的私有副本，
+再用 SQLite backup API 生成一致数据库；不会在原库上创建或整理 WAL/SHM。TSDB 使用原
+`flock.lock` 的非阻塞锁、固定目录身份和归档前后的文件闭包校验，锁文件本身不进入归档。
+没有历史目录时明确记录不存在；历史关闭时不误收集旧目录。主控支持 schema 4–12，
+未知版本拒绝，v6 原生主控和新 schema12 主控均已实测备份、恢复历史并继续采样。
+
+```sh
+python3 scripts/ops.py backup --directory <主控原安装绝对目录> \
+  --output <主控私有归档路径> --complete --offline
+# 停机后将当前主控目录移到同文件系统的私有保留目录；原路径此时须不存在。
+python3 scripts/ops.py restore --archive <主控私有归档路径> \
+  --directory <主控原安装绝对目录> --offline
+```
+
+恢复先在 0700 staging 校验全部摘要、数据库身份/版本和配置引用，再原子发布到原绝对路径。
+文件为 0600，配置与历史文件保留纳秒 mtime；不修改域名、端点或配置内路径。原目录保留用于
+失败回退，不逐文件覆盖正在运行的主控。归档记录的是最后持久化状态，不承诺强制退出前
+尚在队列中的尾部样本；`--offline` 是停机确认，TSDB 锁不能代表 SQLite 的在线全站事务。
+主控上限为单文件 1 GiB、合计 2 GiB、文件及目录 8192 项；Agent 依赖归档沿用检查点预算。
+符号链接、硬链接、缺失依赖、动态模板、外部路径或超限均明确失败，不截断后声称完整。
+
+当前 1 主控 + 10 Agent 直接替换使用[私有组清单模板](packaging/backup-set.example.json)：
+
+1. 在私有 0700 备份根复制模板，填写本次 UUID、实际 11 个角色、原路径、配置引用及依赖检查，
+   保留每项旧二进制/BUILD、服务单元和 SHA256。真实主机别名与路径只写私有副本。
+2. 先停止主控，确认进程退出、派发停止，再停止 10 个 Agent。未完成操作保留原 ID、
+   主控状态与 Agent journal，不通过启动 Agent 或删日志来“排空”。一台离线或缺备份时组状态保持 incomplete。
+3. 对旧无 Store、无托管目录的生成 Agent 使用新版 Python `backup --complete --offline`，
+   生成原 format 2，无需旧 Agent 支持 checkpoint。主控用同命令生成 format 4。
+   已托管的 Agent 则使用上面的 v2 helper 流程；不在旧运行目录自动创建 Store/身份或升级配置。
+4. 逐项核验 11 份归档及旧程序的 SHA256、配置引用、依赖范围和停止状态，把结果与归档格式、
+   主控 schema、活动操作 ID 写入同一清单。清单全部匹配才标 complete 并直接替换二进制；
+   工具不隐式连接远程主机，也不把部分完成当作全组快照。
+5. 先启动主控，再启动 Agent，验证节点、配置、业务及历史。失败时先停全部角色，保留失败现场，
+   用同一组旧程序、SQLite/TSDB 与 Agent 归档在各原路径恢复，再按相同顺序启动。
+   旧二进制不得打开已升级的新库；托管恢复仍须完成运行验证、管理员接管和二次离线确认。
+
+程序与 unit 不在单角色数据归档中，必须随组清单另外保留。模板仅是维护记录，不是已完成的
+生产备份；实际 11 角色执行与哈希核验由部署流程完成，不承诺跨机器原子提交或跨目录恢复。
 
 ### 显式迁移文件对象到 Store
 
@@ -383,14 +468,60 @@ Store 字节和 Context 恰好恢复成相同值（ABA），仍允许显式回�
 不能直接用旧二进制打开 v9 控制库；降级需先恢复适用的旧版本备份，并核对节点实际
 配置。上述开发没有部署到生产，不改变前文记录的线上版本。
 
+## 隧道事件与历史
+
+管理端“隧道历史”通过独立私有能力 `frp.tunnel.v1` 读取 Proxy/Visitor 生命周期，
+不加入公开 API 或公开/管理 SSE。现有 Dashboard 与 Prometheus 的原生口径保持不变。
+逻辑身份由 `server_id + user + raw_client_id + kind + raw_name` 和可信绑定区间确定；
+没有稳定身份时只关联当前实例。删除重建生成新实例与 generation，节点重新绑定（包括
+A→B→A）开启新绑定区间，删除节点保留历史。列表内 `instance_id` 是数据库非复用数字
+字符串，`native_instance_id` 是原生运行 UUID，两者用途不同。
+
+服务端为每个原生实例持有独立计数 handle，旧连接不会随同名新代理转移计数。RX 表示
+服务端向 frpc 记录的字节，TX 为反向；TCP/STCP/HTTP/HTTPS/TCPMUX 在连接关闭时入账，
+UDP 按数据报载荷记账。SUDP 的同/混 codec 字节口径不同，字节显示不支持观察，连接数
+可独立显示；UDP 连接数、XTCP 服务端直连流量、客户端与 Visitor 字节量均不补零。
+这些是原生转发观察，不是系统今日/套餐账本或精确计费依据。
+
+SQLite 保存状态事件、采集缺口和实例摘要，普通字节变化不每秒写入 SQLite。原生事件
+与采样发现的状态变化分别标明 `native` / `observed` 时间。进程、遥测会话或采集器
+重启会留下缺口；完整性不足不会推断隧道已关闭。配置操作仅按已认证节点、实际托管
+Service、绑定区间及声明的对象变更关联为 `declared_change`，不按邻近时间推断因果，
+不把服务端事件冒称为某次配置应用的直接结果。
+
+事件保留 30 天，目标上限 100,000 条，批量接收允许短暂越界后停止新增，清理每批最多
+256 条并返回已清理边界。实例材料最多保留 10,000 份，超过容量显示 `capacity_limited`；
+过期的已关闭实例或不再观察的来源按 `max(30, retentionDays)` 天清理，当前来源保留。
+这些限制与可选 TSDB 开关独立。历史采集是单独低优先级 worker，每轮最多 16 个来源，
+每个数据库事务最多处理 64 个对象/事件，不在 WebSocket 锁内执行磁盘操作。
+
+隧道曲线沿用 `monitor.historyDataPath` 与 `retentionDays`（默认 7 天，上限 365 天）。
+指标只以内部数字 `tunnel_series_id` 为标签，不使用名称、域名、IP、错误或秘密。
+差分先以 uint64 精确相减，写入 TSDB 后按 float64 近似聚合。页面展示“记录字节增量”
+和“估算记录速率（字节/秒）”，不称作真实瞬时带宽；连接关闭时集中入账尤其不能代表
+该时刻的实际传输速率。缺样、重置或时间回拨保持未知/部分覆盖，区间存在缺口时不输出
+估算速率；同一查询桶内的多个缺口合并展示。关闭或降级只影响指标历史，不关闭实时采集、
+当前账本与配置管理。
+
+仅登录管理员可访问下列端点，沿用管理会话和同源检查；分页游标绑定筛选及最高事件 ID：
+
+- `GET /api/admin/v1/tunnels?node_id=&kind=&limit=&cursor=`：逻辑隧道与最新实例。
+- `GET /api/admin/v1/tunnels/{id}/instances?source=&limit=&cursor=`：独立运行代际。
+- `GET /api/admin/v1/tunnels/{id}/events?instance_id=&from_ms=&to_ms=&limit=&cursor=`：状态、缺口与声明关联。
+- `GET /api/admin/v1/tunnels/{id}/history?instance_id=&window=1h|6h|24h|7d`：最多 500 个聚合点及缺口。
+
+事件时间筛选的 `from_ms` / `to_ms` 须同时提供，范围不超过 31 天。
+当前状态新鲜度独立于主机指标；主控重启后的持久摘要先显示 stale，收到新观察才恢复
+fresh。历史查询有 3 秒预算、固定字段和有界结果，不返回原生配置或原始错误文本。
+
 ## 模块与职责
 
 | 模块 | 职责与详细说明 |
 |---|---|
 | [agent](agent/README.md) | Linux `/proc`、`/sys` 和文件系统采集，WSS 上报、FRP 客户端状态；[TCP 探测](agent/probe/README.md) |
 | [monitor](monitor/README.md) | 节点认证、公开/管理 API、SSE、OAuth 和服务端 FRP 对账 |
-| `monitor/control` | SQLite 配置、当前流量账本、基线及串行事务 |
-| [monitor/store](monitor/store/README.md) | 可选指标与 TCP 探测历史，有界异步队列和窗口聚合 |
+| `monitor/control` | SQLite 配置、当前流量账本、审计、隧道事件及串行事务 |
+| [monitor/store](monitor/store/README.md) | 可选主机、TCP 探测与隧道指标历史，有界异步队列和窗口聚合 |
 | [shared](shared/README.md) | 帧、质量标记、会话/序号、浏览器整数表示和可信绑定契约 |
 | [web](web/README.md) | 嵌入式 HTML/CSS/ES Modules 页面，复用 web-standard-kit，无 CDN 或 Node 运行服务 |
 | [scripts](scripts/README.md) | 固定源码构建、本地初始化；[发布与备份](packaging/README.md) |
@@ -416,8 +547,9 @@ flowchart LR
 
 ## 存储与节点数据结构
 
-SQL 的唯一维护来源是 [monitor/control/schema.sql](monitor/control/schema.sql)，
-初始化工具与 Go 主控共用此文件。节点和分组使用 `nodes`、`settings`、`node_groups` 和
+SQL 基础来源是 [monitor/control/schema.sql](monitor/control/schema.sql)，
+并拼接 [audit_retention_schema.sql](monitor/control/audit_retention_schema.sql)；
+初始化工具与 Go 主控使用相同的 schema12。节点和分组使用 `nodes`、`settings`、`node_groups` 和
 `node_group_members`；另有配置事务、恢复接管、审计及对象索引表。分组沿用哪吒的分组表与
 成员关联表方式，避免在节点中重复保存组名。
 
@@ -432,8 +564,9 @@ SQL 的唯一维护来源是 [monitor/control/schema.sql](monitor/control/schema
 | `node_groups` | 自增数字 ID、唯一分组名称、配置修订号 |
 | `node_group_members` | 分组 ID 与节点 ID 联合主键；外键在删除节点或分组时自动清理关联 |
 | 配置事务与审计 | 操作意图、状态事件、恢复接管、脱敏摘要、对象索引及外部上下文观察基线 |
+| 隧道事件 | 可信绑定区间、逻辑身份、运行实例、状态变化、采集缺口及保留边界 |
 | 内存 | 连接/会话、最新 Facts/Metrics、在线与新鲜度、FRP 实时状态、管理员会话 |
-| 可选 TSDB | CPU、内存、磁盘、负载、网速和 TCP 探测等历史曲线 |
+| 可选 TSDB | 主机资源、TCP 探测及隧道记录流量/连接数历史曲线 |
 
 API 使用数字 ID 的十进制字符串，例如 `"1"`，删除不复用。时间戳统一 UTC 毫秒；
 流量与浏览器大整数使用十进制字符串。价格为非负最小货币单位，流量校准差额可以为负。

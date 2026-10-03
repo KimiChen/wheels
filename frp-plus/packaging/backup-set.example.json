@@ -1,0 +1,409 @@
+{
+  "version": 1,
+  "kind": "frp-plus-offline-backup-set",
+  "set_id": "<UUID>",
+  "created_at_utc": "<UTC-time>",
+  "state": "incomplete",
+  "expected_roles": {
+    "server": 1,
+    "agent": 10
+  },
+  "master_original_directory": "/var/lib/frp-plus",
+  "stop_order": [
+    "server",
+    "agents"
+  ],
+  "start_order": [
+    "server",
+    "agents"
+  ],
+  "new_release_sha256": "<SHA256>",
+  "members": [
+    {
+      "id": "master-01",
+      "role": "server",
+      "host_ref": "<private-inventory-key>",
+      "original_directory": "/var/lib/frp-plus",
+      "config_reference": "server.toml",
+      "dependency_check": {
+        "state": "not_checked",
+        "references": [],
+        "store": "not_checked",
+        "active_operation_ids": []
+      },
+      "stopped": false,
+      "archive": {
+        "path": "master-01.tar.gz",
+        "format": 4,
+        "sha256": "<SHA256>",
+        "verified": false
+      },
+      "old_binary": {
+        "path": "binaries/master-01/frp-plus-server",
+        "sha256": "<SHA256>",
+        "build_manifest": "binaries/master-01/BUILD.json"
+      },
+      "service_unit": {
+        "path": "units/master-01.service",
+        "sha256": "<SHA256>"
+      },
+      "sqlite_schema": 6,
+      "failure_restore": {
+        "original_directory": "/var/lib/frp-plus",
+        "keep_current_as": "<private-same-filesystem-move-aside-directory>",
+        "use_same_set": true
+      }
+    },
+    {
+      "id": "agent-01",
+      "role": "agent",
+      "host_ref": "<private-inventory-key>",
+      "original_directory": "/var/lib/frp-plus",
+      "config_reference": "agent.toml",
+      "dependency_check": {
+        "state": "not_checked",
+        "references": [],
+        "store": "not_checked",
+        "active_operation_ids": []
+      },
+      "stopped": false,
+      "archive": {
+        "path": "agent-01.tar.gz",
+        "format": 2,
+        "sha256": "<SHA256>",
+        "verified": false
+      },
+      "old_binary": {
+        "path": "binaries/agent-01/frp-plus-agent",
+        "sha256": "<SHA256>",
+        "build_manifest": "binaries/agent-01/BUILD.json"
+      },
+      "service_unit": {
+        "path": "units/agent-01.service",
+        "sha256": "<SHA256>"
+      },
+      "sqlite_schema": null,
+      "failure_restore": {
+        "original_directory": "/var/lib/frp-plus",
+        "keep_current_as": "<private-same-filesystem-move-aside-directory>",
+        "use_same_set": true
+      }
+    },
+    {
+      "id": "agent-02",
+      "role": "agent",
+      "host_ref": "<private-inventory-key>",
+      "original_directory": "/var/lib/frp-plus",
+      "config_reference": "agent.toml",
+      "dependency_check": {
+        "state": "not_checked",
+        "references": [],
+        "store": "not_checked",
+        "active_operation_ids": []
+      },
+      "stopped": false,
+      "archive": {
+        "path": "agent-02.tar.gz",
+        "format": 2,
+        "sha256": "<SHA256>",
+        "verified": false
+      },
+      "old_binary": {
+        "path": "binaries/agent-02/frp-plus-agent",
+        "sha256": "<SHA256>",
+        "build_manifest": "binaries/agent-02/BUILD.json"
+      },
+      "service_unit": {
+        "path": "units/agent-02.service",
+        "sha256": "<SHA256>"
+      },
+      "sqlite_schema": null,
+      "failure_restore": {
+        "original_directory": "/var/lib/frp-plus",
+        "keep_current_as": "<private-same-filesystem-move-aside-directory>",
+        "use_same_set": true
+      }
+    },
+    {
+      "id": "agent-03",
+      "role": "agent",
+      "host_ref": "<private-inventory-key>",
+      "original_directory": "/var/lib/frp-plus",
+      "config_reference": "agent.toml",
+      "dependency_check": {
+        "state": "not_checked",
+        "references": [],
+        "store": "not_checked",
+        "active_operation_ids": []
+      },
+      "stopped": false,
+      "archive": {
+        "path": "agent-03.tar.gz",
+        "format": 2,
+        "sha256": "<SHA256>",
+        "verified": false
+      },
+      "old_binary": {
+        "path": "binaries/agent-03/frp-plus-agent",
+        "sha256": "<SHA256>",
+        "build_manifest": "binaries/agent-03/BUILD.json"
+      },
+      "service_unit": {
+        "path": "units/agent-03.service",
+        "sha256": "<SHA256>"
+      },
+      "sqlite_schema": null,
+      "failure_restore": {
+        "original_directory": "/var/lib/frp-plus",
+        "keep_current_as": "<private-same-filesystem-move-aside-directory>",
+        "use_same_set": true
+      }
+    },
+    {
+      "id": "agent-04",
+      "role": "agent",
+      "host_ref": "<private-inventory-key>",
+      "original_directory": "/var/lib/frp-plus",
+      "config_reference": "agent.toml",
+      "dependency_check": {
+        "state": "not_checked",
+        "references": [],
+        "store": "not_checked",
+        "active_operation_ids": []
+      },
+      "stopped": false,
+      "archive": {
+        "path": "agent-04.tar.gz",
+        "format": 2,
+        "sha256": "<SHA256>",
+        "verified": false
+      },
+      "old_binary": {
+        "path": "binaries/agent-04/frp-plus-agent",
+        "sha256": "<SHA256>",
+        "build_manifest": "binaries/agent-04/BUILD.json"
+      },
+      "service_unit": {
+        "path": "units/agent-04.service",
+        "sha256": "<SHA256>"
+      },
+      "sqlite_schema": null,
+      "failure_restore": {
+        "original_directory": "/var/lib/frp-plus",
+        "keep_current_as": "<private-same-filesystem-move-aside-directory>",
+        "use_same_set": true
+      }
+    },
+    {
+      "id": "agent-05",
+      "role": "agent",
+      "host_ref": "<private-inventory-key>",
+      "original_directory": "/var/lib/frp-plus",
+      "config_reference": "agent.toml",
+      "dependency_check": {
+        "state": "not_checked",
+        "references": [],
+        "store": "not_checked",
+        "active_operation_ids": []
+      },
+      "stopped": false,
+      "archive": {
+        "path": "agent-05.tar.gz",
+        "format": 2,
+        "sha256": "<SHA256>",
+        "verified": false
+      },
+      "old_binary": {
+        "path": "binaries/agent-05/frp-plus-agent",
+        "sha256": "<SHA256>",
+        "build_manifest": "binaries/agent-05/BUILD.json"
+      },
+      "service_unit": {
+        "path": "units/agent-05.service",
+        "sha256": "<SHA256>"
+      },
+      "sqlite_schema": null,
+      "failure_restore": {
+        "original_directory": "/var/lib/frp-plus",
+        "keep_current_as": "<private-same-filesystem-move-aside-directory>",
+        "use_same_set": true
+      }
+    },
+    {
+      "id": "agent-06",
+      "role": "agent",
+      "host_ref": "<private-inventory-key>",
+      "original_directory": "/var/lib/frp-plus",
+      "config_reference": "agent.toml",
+      "dependency_check": {
+        "state": "not_checked",
+        "references": [],
+        "store": "not_checked",
+        "active_operation_ids": []
+      },
+      "stopped": false,
+      "archive": {
+        "path": "agent-06.tar.gz",
+        "format": 2,
+        "sha256": "<SHA256>",
+        "verified": false
+      },
+      "old_binary": {
+        "path": "binaries/agent-06/frp-plus-agent",
+        "sha256": "<SHA256>",
+        "build_manifest": "binaries/agent-06/BUILD.json"
+      },
+      "service_unit": {
+        "path": "units/agent-06.service",
+        "sha256": "<SHA256>"
+      },
+      "sqlite_schema": null,
+      "failure_restore": {
+        "original_directory": "/var/lib/frp-plus",
+        "keep_current_as": "<private-same-filesystem-move-aside-directory>",
+        "use_same_set": true
+      }
+    },
+    {
+      "id": "agent-07",
+      "role": "agent",
+      "host_ref": "<private-inventory-key>",
+      "original_directory": "/var/lib/frp-plus",
+      "config_reference": "agent.toml",
+      "dependency_check": {
+        "state": "not_checked",
+        "references": [],
+        "store": "not_checked",
+        "active_operation_ids": []
+      },
+      "stopped": false,
+      "archive": {
+        "path": "agent-07.tar.gz",
+        "format": 2,
+        "sha256": "<SHA256>",
+        "verified": false
+      },
+      "old_binary": {
+        "path": "binaries/agent-07/frp-plus-agent",
+        "sha256": "<SHA256>",
+        "build_manifest": "binaries/agent-07/BUILD.json"
+      },
+      "service_unit": {
+        "path": "units/agent-07.service",
+        "sha256": "<SHA256>"
+      },
+      "sqlite_schema": null,
+      "failure_restore": {
+        "original_directory": "/var/lib/frp-plus",
+        "keep_current_as": "<private-same-filesystem-move-aside-directory>",
+        "use_same_set": true
+      }
+    },
+    {
+      "id": "agent-08",
+      "role": "agent",
+      "host_ref": "<private-inventory-key>",
+      "original_directory": "/var/lib/frp-plus",
+      "config_reference": "agent.toml",
+      "dependency_check": {
+        "state": "not_checked",
+        "references": [],
+        "store": "not_checked",
+        "active_operation_ids": []
+      },
+      "stopped": false,
+      "archive": {
+        "path": "agent-08.tar.gz",
+        "format": 2,
+        "sha256": "<SHA256>",
+        "verified": false
+      },
+      "old_binary": {
+        "path": "binaries/agent-08/frp-plus-agent",
+        "sha256": "<SHA256>",
+        "build_manifest": "binaries/agent-08/BUILD.json"
+      },
+      "service_unit": {
+        "path": "units/agent-08.service",
+        "sha256": "<SHA256>"
+      },
+      "sqlite_schema": null,
+      "failure_restore": {
+        "original_directory": "/var/lib/frp-plus",
+        "keep_current_as": "<private-same-filesystem-move-aside-directory>",
+        "use_same_set": true
+      }
+    },
+    {
+      "id": "agent-09",
+      "role": "agent",
+      "host_ref": "<private-inventory-key>",
+      "original_directory": "/var/lib/frp-plus",
+      "config_reference": "agent.toml",
+      "dependency_check": {
+        "state": "not_checked",
+        "references": [],
+        "store": "not_checked",
+        "active_operation_ids": []
+      },
+      "stopped": false,
+      "archive": {
+        "path": "agent-09.tar.gz",
+        "format": 2,
+        "sha256": "<SHA256>",
+        "verified": false
+      },
+      "old_binary": {
+        "path": "binaries/agent-09/frp-plus-agent",
+        "sha256": "<SHA256>",
+        "build_manifest": "binaries/agent-09/BUILD.json"
+      },
+      "service_unit": {
+        "path": "units/agent-09.service",
+        "sha256": "<SHA256>"
+      },
+      "sqlite_schema": null,
+      "failure_restore": {
+        "original_directory": "/var/lib/frp-plus",
+        "keep_current_as": "<private-same-filesystem-move-aside-directory>",
+        "use_same_set": true
+      }
+    },
+    {
+      "id": "agent-10",
+      "role": "agent",
+      "host_ref": "<private-inventory-key>",
+      "original_directory": "/var/lib/frp-plus",
+      "config_reference": "agent.toml",
+      "dependency_check": {
+        "state": "not_checked",
+        "references": [],
+        "store": "not_checked",
+        "active_operation_ids": []
+      },
+      "stopped": false,
+      "archive": {
+        "path": "agent-10.tar.gz",
+        "format": 2,
+        "sha256": "<SHA256>",
+        "verified": false
+      },
+      "old_binary": {
+        "path": "binaries/agent-10/frp-plus-agent",
+        "sha256": "<SHA256>",
+        "build_manifest": "binaries/agent-10/BUILD.json"
+      },
+      "service_unit": {
+        "path": "units/agent-10.service",
+        "sha256": "<SHA256>"
+      },
+      "sqlite_schema": null,
+      "failure_restore": {
+        "original_directory": "/var/lib/frp-plus",
+        "keep_current_as": "<private-same-filesystem-move-aside-directory>",
+        "use_same_set": true
+      }
+    }
+  ],
+  "failure_restore": "Stop all roles; restore this same set and its old binaries at original paths before starting."
+}
