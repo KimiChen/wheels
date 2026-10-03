@@ -298,7 +298,7 @@ class OpsTests(unittest.TestCase):
         archive = ops.backup(self.runtime, self.backups / 'groups.tar.gz')
         restored = ops.restore(archive, self.root / 'restored-groups')
         with closing(sqlite3.connect(restored / 'control.sqlite')) as database:
-            self.assertEqual(database.execute('PRAGMA user_version').fetchone(), (6,))
+            self.assertEqual(database.execute('PRAGMA user_version').fetchone(), (7,))
             self.assertEqual(database.execute('SELECT * FROM nodes').fetchall(), expected_node)
             self.assertEqual(database.execute('SELECT id,name,config_revision FROM node_groups ORDER BY id').fetchall(),
                              [(7, '生产🛰', 9), (8, 'empty', 2)])
@@ -309,7 +309,8 @@ class OpsTests(unittest.TestCase):
 
     def test_restore_keeps_supported_v4_for_startup_migration_and_rejects_other_versions(self):
         with closing(sqlite3.connect(self.runtime / 'control.sqlite')) as database:
-            database.executescript('DROP TABLE node_group_members; DROP TABLE node_groups; PRAGMA user_version=4;')
+            database.executescript('DROP TABLE config_operation_events; DROP TABLE config_operations; '
+                                  'DROP TABLE node_group_members; DROP TABLE node_groups; PRAGMA user_version=4;')
             expected_node = database.execute('SELECT * FROM nodes').fetchall()
             expected_settings = database.execute('SELECT * FROM settings').fetchall()
         archive = ops.backup(self.runtime, self.backups / 'legacy.tar.gz')
@@ -319,7 +320,7 @@ class OpsTests(unittest.TestCase):
             self.assertEqual(database.execute('SELECT * FROM nodes').fetchall(), expected_node)
             self.assertEqual(database.execute('SELECT * FROM settings').fetchall(), expected_settings)
             self.assertEqual(database.execute("SELECT count(*) FROM sqlite_master WHERE name='node_groups'").fetchone(), (0,))
-        for version, application in ((3, 1179798836), (7, 1179798836), (4, 123), (5, 123)):
+        for version, application in ((3, 1179798836), (8, 1179798836), (4, 123), (5, 123)):
             with self.subTest(version=version, application=application):
                 with closing(sqlite3.connect(self.runtime / 'control.sqlite')) as database:
                     database.executescript(f'PRAGMA user_version={version}; PRAGMA application_id={application};')
@@ -328,6 +329,31 @@ class OpsTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'unsupported control database'):
                     ops.restore(archive, target)
                 self.assertFalse(target.exists())
+
+    def test_backup_preserves_configuration_operations_and_audit(self):
+        operation = '12345678-1234-4234-8234-123456789abc'
+        digest = 'a' * 64
+        with closing(sqlite3.connect(self.runtime / 'control.sqlite')) as database:
+            with database:
+                database.execute('INSERT INTO config_operations VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                                 (operation, 1, 'managed-service', digest, digest, 'administrator',
+                                  2000000000000, operation, digest, 'outcome_unknown', 2, 1000, 2000))
+                database.execute('INSERT INTO config_operation_events(operation_id,version,state,code,changes_json,created_at_ms) '
+                                 'VALUES(?,?,?,?,?,?)', (operation, 2, 'outcome_unknown', 'connection_lost', '[]', 2000))
+            expected_operations = database.execute('SELECT * FROM config_operations').fetchall()
+            expected_events = database.execute('SELECT * FROM config_operation_events').fetchall()
+        archive = ops.backup(self.runtime, self.backups / 'operations.tar.gz')
+        restored = ops.restore(archive, self.root / 'restored-operations')
+        with closing(sqlite3.connect(restored / 'control.sqlite')) as database:
+            self.assertEqual(database.execute('PRAGMA user_version').fetchone(), (7,))
+            self.assertEqual(database.execute('SELECT * FROM config_operations').fetchall(), expected_operations)
+            self.assertEqual(database.execute('SELECT * FROM config_operation_events').fetchall(), expected_events)
+            self.assertEqual(database.execute('PRAGMA foreign_key_check').fetchall(), [])
+            # Restoration cannot accidentally release the unresolved node lease.
+            with self.assertRaises(sqlite3.IntegrityError):
+                database.execute('INSERT INTO config_operations VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                                 ('87654321-1234-4234-8234-123456789abc', 1, 'managed-service', digest, '',
+                                  'administrator', 2000000000000, 'other', digest, 'draft', 1, 2000, 2000))
 
     def test_old_installation_format_and_missing_control_database_are_rejected(self):
         metadata = self.runtime / 'installation.json'

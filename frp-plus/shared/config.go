@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net"
 	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -13,19 +14,41 @@ const Version = "0.4.0-p4"
 // AgentConfig is embedded in the native frpc configuration as [telemetry].
 // Runtime secrets are loaded from private files, never from these public types.
 type AgentConfig struct {
-	Enabled               bool   `json:"enabled,omitempty"`
-	Endpoint              string `json:"endpoint,omitempty"`
-	TokenFile             string `json:"tokenFile,omitempty"`
-	CAFile                string `json:"caFile,omitempty"`
-	ServerID              string `json:"serverID,omitempty"`
-	Iface                 string `json:"iface,omitempty"`
-	IntervalSeconds       int    `json:"intervalSeconds,omitempty"`
-	AllowInsecureLoopback bool   `json:"allowInsecureLoopback,omitempty"`
-	ProbeEnabled          bool   `json:"probeEnabled,omitempty"`
-	ProbeAllowPrivate     bool   `json:"probeAllowPrivate,omitempty"`
+	Enabled               bool                    `json:"enabled,omitempty"`
+	Endpoint              string                  `json:"endpoint,omitempty"`
+	TokenFile             string                  `json:"tokenFile,omitempty"`
+	CAFile                string                  `json:"caFile,omitempty"`
+	ServerID              string                  `json:"serverID,omitempty"`
+	Iface                 string                  `json:"iface,omitempty"`
+	IntervalSeconds       int                     `json:"intervalSeconds,omitempty"`
+	AllowInsecureLoopback bool                    `json:"allowInsecureLoopback,omitempty"`
+	ProbeEnabled          bool                    `json:"probeEnabled,omitempty"`
+	ProbeAllowPrivate     bool                    `json:"probeAllowPrivate,omitempty"`
+	ConfigManagement      *ConfigManagementConfig `json:"configManagement,omitempty"`
+}
+
+// ConfigManagementConfig is a local startup opt-in. Store.Path remains the
+// native setting; the adapter requires it to be a direct child of Root.
+// Neither management requests nor the browser can choose local file paths.
+type ConfigManagementConfig struct {
+	Enabled bool   `json:"enabled,omitempty"`
+	Root    string `json:"root,omitempty"`
+}
+
+func (c *ConfigManagementConfig) Validate(telemetryEnabled bool) error {
+	if c == nil || !c.Enabled {
+		return nil
+	}
+	if !telemetryEnabled || !configPath(c.Root, true) || !filepath.IsAbs(c.Root) || filepath.Clean(c.Root) != c.Root || filepath.Dir(c.Root) == c.Root {
+		return errors.New("configuration management requires telemetry and an absolute private root")
+	}
+	return nil
 }
 
 func (c *AgentConfig) Complete() error {
+	if err := c.ConfigManagement.Validate(c.Enabled); err != nil {
+		return err
+	}
 	if !c.Enabled {
 		return nil
 	}
@@ -39,6 +62,9 @@ func (c *AgentConfig) Complete() error {
 }
 
 func (c AgentConfig) Validate() error {
+	if err := c.ConfigManagement.Validate(c.Enabled); err != nil {
+		return err
+	}
 	if !c.Enabled {
 		return nil
 	}

@@ -164,13 +164,15 @@ type PingResult struct {
 // Frame contains exactly one supported message body.
 // ID is present only for hello, which requires a JSON-RPC response.
 type Frame struct {
-	ID         string
-	Method     string
-	Hello      *Hello
-	Report     *Report
-	FRPDetail  *FRPDetailReport
-	PingTasks  *PingTasks
-	PingResult *PingResult
+	ID            string
+	Method        string
+	Hello         *Hello
+	Report        *Report
+	FRPDetail     *FRPDetailReport
+	ConfigCommand *ConfigCommand
+	ConfigResult  *ConfigResult
+	PingTasks     *PingTasks
+	PingResult    *PingResult
 }
 
 // DecodeFrame validates method frames for the v1 application profile of JSON-RPC
@@ -222,6 +224,16 @@ func DecodeFrame(data []byte) (*Frame, error) {
 		f.FRPDetail = new(FRPDetailReport)
 		if err = decodeObject(wire.Params, f.FRPDetail); err == nil {
 			err = f.FRPDetail.Validate()
+		}
+	case "config.command":
+		f.ConfigCommand = new(ConfigCommand)
+		if err = decodeObject(wire.Params, f.ConfigCommand); err == nil {
+			err = f.ConfigCommand.Validate()
+		}
+	case "config.result":
+		f.ConfigResult = new(ConfigResult)
+		if err = decodeObject(wire.Params, f.ConfigResult); err == nil {
+			err = f.ConfigResult.Validate()
 		}
 	case "ping.tasks":
 		f.PingTasks = new(PingTasks)
@@ -596,6 +608,12 @@ func requireFields(data []byte, typ reflect.Type) error {
 		}
 		typ = typ.Elem()
 	}
+	// RawMessage is a JSON value, including an explicit null reset instruction.
+	// Its owning DTO validates semantics; absence is still rejected above by
+	// the containing struct. Ordinary required scalars/arrays remain non-null.
+	if typ == reflect.TypeOf(json.RawMessage{}) {
+		return nil
+	}
 	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
 		return errors.New("required field cannot be null")
 	}
@@ -633,9 +651,6 @@ func requireFields(data []byte, typ reflect.Type) error {
 			}
 		}
 	case reflect.Slice, reflect.Array:
-		if typ == reflect.TypeOf(json.RawMessage{}) {
-			return nil
-		}
 		var items []json.RawMessage
 		if err := json.Unmarshal(data, &items); err != nil {
 			return err

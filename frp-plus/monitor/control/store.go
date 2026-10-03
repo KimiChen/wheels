@@ -24,6 +24,8 @@ import (
 var Schema string
 
 const groupSchemaMarker = "-- Node groups (schema v5).\n"
+const operationSchemaMarker = "-- Configuration operations (schema v7).\n"
+const identitySchemaMarker = "-- Database identity;"
 
 type request struct {
 	sample *sample
@@ -33,21 +35,28 @@ type request struct {
 }
 
 type Store struct {
-	db        *sql.DB
-	cfg       Config
-	queue     chan request
-	stop      chan struct{}
-	done      chan struct{}
-	mu        sync.RWMutex
-	closed    bool
-	closeErr  error
-	closeOnce sync.Once
-	unhealthy atomic.Bool
+	db              *sql.DB
+	cfg             Config
+	queue           chan request
+	stop            chan struct{}
+	done            chan struct{}
+	mu              sync.RWMutex
+	closed          bool
+	closeErr        error
+	closeOnce       sync.Once
+	migrationBackup string
+	unhealthy       atomic.Bool
 	// The worker owns ingestErr; it reports any failed batch through Flush.
 	ingestErr error
 }
 
 func Open(cfg Config) (*Store, error) {
+	return openWithMigrationBackup(cfg, backupBeforeMigration)
+}
+
+// The backup callback makes failure-before-DDL testable without injecting a
+// filesystem or SQLite replacement into ordinary traffic/configuration paths.
+func openWithMigrationBackup(cfg Config, backup func(context.Context, *sql.DB, string, int) (string, error)) (*Store, error) {
 	if cfg.ReportInterval == 0 {
 		cfg.ReportInterval = time.Second
 	}
@@ -93,7 +102,7 @@ func Open(cfg Config) (*Store, error) {
 	if err = db.QueryRowContext(ctx, "PRAGMA application_id").Scan(&application); err != nil {
 		return fail(err)
 	}
-	var schemaChange string
+	var schemaChange, migrationBackup string
 	if version == 0 && application == 0 {
 		var tables int
 		if err = db.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_master WHERE type='table'").Scan(&tables); err != nil {
@@ -103,19 +112,28 @@ func Open(cfg Config) (*Store, error) {
 			return fail(errors.New("control database must be a new empty database"))
 		}
 		schemaChange = Schema
-	} else if application != 1179798836 || (version != 4 && version != 5 && version != 6) {
+	} else if application != 1179798836 || (version != 4 && version != 5 && version != 6 && version != 7) {
 		return fail(errors.New("unsupported control database"))
-	} else if version == 4 {
-		// Reuse the fresh schema's group DDL. Migration only adds tables and
-		// an index; node IDs, counters, credentials and settings stay intact.
-		var found bool
-		_, schemaChange, found = strings.Cut(Schema, groupSchemaMarker)
-		if !found {
-			return fail(errors.New("missing control group schema"))
+	} else if version < 7 {
+		if version == 4 {
+			groups, e := schemaSection(groupSchemaMarker, operationSchemaMarker)
+			if e != nil {
+				return fail(e)
+			}
+			schemaChange += groups
 		}
-	}
-	if version == 4 || version == 5 {
-		schemaChange += "ALTER TABLE nodes DROP COLUMN counter_scope; PRAGMA user_version=6;"
+		if version == 4 || version == 5 {
+			schemaChange += "ALTER TABLE nodes DROP COLUMN counter_scope;\n"
+		}
+		operations, e := schemaSection(operationSchemaMarker, identitySchemaMarker)
+		if e != nil {
+			return fail(e)
+		}
+		schemaChange += operations + "PRAGMA user_version=7;"
+		migrationBackup, err = backup(ctx, db, path, version)
+		if err != nil {
+			return fail(fmt.Errorf("control migration backup failed: %w", err))
+		}
 	}
 	if schemaChange != "" {
 		tx, e := db.BeginTx(ctx, nil)
@@ -137,9 +155,76 @@ func Open(cfg Config) (*Store, error) {
 	if mode != "wal" {
 		return fail(errors.New("control WAL unavailable"))
 	}
-	s := &Store{db: db, cfg: cfg, queue: make(chan request, cfg.QueueCapacity), stop: make(chan struct{}), done: make(chan struct{})}
+	s := &Store{db: db, cfg: cfg, queue: make(chan request, cfg.QueueCapacity), stop: make(chan struct{}), done: make(chan struct{}), migrationBackup: migrationBackup}
 	go s.run()
 	return s, nil
+}
+
+func schemaSection(start, end string) (string, error) {
+	_, suffix, found := strings.Cut(Schema, start)
+	if !found {
+		return "", errors.New("missing control migration schema")
+	}
+	section, _, found := strings.Cut(suffix, end)
+	if !found {
+		return "", errors.New("missing control migration boundary")
+	}
+	return section, nil
+}
+
+// MigrationBackupPath identifies the private consistent pre-migration image.
+// It is empty for fresh databases and databases already using the current schema.
+func (s *Store) MigrationBackupPath() string { return s.migrationBackup }
+
+// VACUUM INTO reads SQLite's consistent view, including committed WAL records;
+// copying the main file would silently omit those records. Delete incomplete
+// images, and durably finish a private recovery image before running any DDL.
+func backupBeforeMigration(ctx context.Context, db *sql.DB, path string, version int) (string, error) {
+	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+fmt.Sprintf(".pre-v7-v%d-", version)+"*.sqlite")
+	if err != nil {
+		return "", errors.New("cannot create private migration backup")
+	}
+	backupPath := f.Name()
+	complete := false
+	defer func() {
+		if !complete {
+			_ = os.Remove(backupPath)
+		}
+	}()
+	if err = f.Chmod(0600); err != nil {
+		f.Close()
+		return "", errors.New("cannot secure migration backup")
+	}
+	if err = f.Close(); err != nil {
+		return "", errors.New("cannot close migration backup")
+	}
+	if _, err = db.ExecContext(ctx, "VACUUM main INTO ?", backupPath); err != nil {
+		return "", errors.New("cannot create consistent migration backup")
+	}
+	st, err := os.Lstat(backupPath)
+	if err != nil || !st.Mode().IsRegular() || st.Mode().Perm() != 0600 {
+		return "", errors.New("invalid migration backup file")
+	}
+	f, err = os.OpenFile(backupPath, os.O_RDWR, 0)
+	if err != nil {
+		return "", errors.New("cannot open migration backup")
+	}
+	err = f.Sync()
+	closeErr := f.Close()
+	if err != nil || closeErr != nil {
+		return "", errors.New("cannot sync migration backup")
+	}
+	directory, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return "", errors.New("cannot open migration backup directory")
+	}
+	err = directory.Sync()
+	closeErr = directory.Close()
+	if err != nil || closeErr != nil {
+		return "", errors.New("cannot sync migration backup directory")
+	}
+	complete = true
+	return backupPath, nil
 }
 
 func securePath(path string) error {

@@ -1,4 +1,4 @@
--- Current control database. Schema v6 removes the collection scope baseline.
+-- Current control database. Schema v7 adds durable configuration operations.
 CREATE TABLE nodes (
  id INTEGER PRIMARY KEY AUTOINCREMENT,
  name TEXT NOT NULL,
@@ -60,7 +60,38 @@ CREATE TABLE node_group_members (
  PRIMARY KEY (group_id,node_id)
 );
 CREATE INDEX node_group_members_node_id ON node_group_members(node_id);
+-- Configuration operations (schema v7).
+-- node_id deliberately has no foreign key: deleting a node retains its audit.
+CREATE TABLE config_operations (
+ operation_id TEXT PRIMARY KEY NOT NULL,
+ node_id INTEGER NOT NULL CHECK (node_id > 0),
+ service_id TEXT NOT NULL,
+ base_revision TEXT NOT NULL CHECK (length(base_revision)=64 AND base_revision NOT GLOB '*[^0-9a-f]*'),
+ candidate_digest TEXT NOT NULL CHECK (candidate_digest='' OR (length(candidate_digest)=64 AND candidate_digest NOT GLOB '*[^0-9a-f]*')),
+ creator TEXT NOT NULL,
+ deadline_at_ms INTEGER NOT NULL,
+ idempotency_key TEXT NOT NULL UNIQUE,
+ request_digest TEXT NOT NULL CHECK (length(request_digest)=64 AND request_digest NOT GLOB '*[^0-9a-f]*'),
+ state TEXT NOT NULL CHECK (state IN ('draft','validated','prepared','applying','verifying','confirmed','rejected','conflict','failed','outcome_unknown','cancelled','rolling_back','rolled_back','rollback_failed')),
+ version INTEGER NOT NULL CHECK (version >= 1),
+ created_at_ms INTEGER NOT NULL,
+ updated_at_ms INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX config_operations_active_node ON config_operations(node_id)
+ WHERE state IN ('draft','validated','prepared','applying','verifying','outcome_unknown','rolling_back','rollback_failed');
+CREATE INDEX config_operations_node_created ON config_operations(node_id,created_at_ms,operation_id);
+CREATE TABLE config_operation_events (
+ event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+ operation_id TEXT NOT NULL REFERENCES config_operations(operation_id),
+ version INTEGER NOT NULL CHECK (version >= 1),
+ state TEXT NOT NULL,
+ code TEXT NOT NULL,
+ changes_json TEXT NOT NULL CHECK (length(changes_json)<=65536 AND json_valid(changes_json) AND json_type(changes_json)='array'),
+ created_at_ms INTEGER NOT NULL,
+ UNIQUE(operation_id,version)
+);
+CREATE INDEX config_operation_events_operation ON config_operation_events(operation_id,event_id);
 -- Database identity; must match the restore check in scripts/ops.py
 -- and the startup check in monitor/control/store.go.
 PRAGMA application_id=1179798836;
-PRAGMA user_version=6;
+PRAGMA user_version=7;

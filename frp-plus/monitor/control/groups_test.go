@@ -275,7 +275,10 @@ func TestLegacyMigrationPreservesNodeDataAndSequences(t *testing.T) {
 		t.Run(fmt.Sprint(version), func(t *testing.T) {
 			path, db := legacyDatabase(t)
 			if version == 5 {
-				_, groups, _ := strings.Cut(Schema, groupSchemaMarker)
+				groups, e := schemaSection(groupSchemaMarker, operationSchemaMarker)
+				if e != nil {
+					t.Fatal(e)
+				}
 				if _, err := db.Exec(groups + "PRAGMA user_version=5;"); err != nil {
 					t.Fatal(err)
 				}
@@ -315,6 +318,21 @@ func TestLegacyMigrationPreservesNodeDataAndSequences(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { s.Close() })
+			if s.MigrationBackupPath() == "" {
+				t.Fatal("legacy migration did not create a recovery image")
+			}
+			saved, err := sql.Open("sqlite", s.MigrationBackupPath())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { saved.Close() })
+			var savedVersion, savedLegacyColumn int
+			if err := saved.QueryRow("PRAGMA user_version").Scan(&savedVersion); err != nil || savedVersion != version {
+				t.Fatal("backup was not taken before the migration", savedVersion, err)
+			}
+			if err := saved.QueryRow("SELECT count(*) FROM pragma_table_info('nodes') WHERE name='counter_scope'").Scan(&savedLegacyColumn); err != nil || savedLegacyColumn != 1 {
+				t.Fatal("backup lost the legacy baseline column", savedLegacyColumn, err)
+			}
 			var removed int
 			if err := s.db.QueryRow("SELECT count(*) FROM pragma_table_info('nodes') WHERE name='counter_scope'").Scan(&removed); err != nil || removed != 0 {
 				t.Fatal("legacy baseline column remains", removed, err)
@@ -353,7 +371,7 @@ func TestLegacyMigrationPreservesNodeDataAndSequences(t *testing.T) {
 				if err := tx.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 					return err
 				}
-				if version != 6 {
+				if version != 7 {
 					return fmt.Errorf("unexpected migration version %d", version)
 				}
 				return nil
@@ -365,7 +383,7 @@ func TestLegacyMigrationPreservesNodeDataAndSequences(t *testing.T) {
 }
 
 func TestMigrationRejectsUnknownIdentityAndRollsBackDDL(t *testing.T) {
-	for _, tt := range []struct{ version, application int }{{3, 1179798836}, {7, 1179798836}, {4, 123}, {5, 123}} {
+	for _, tt := range []struct{ version, application int }{{3, 1179798836}, {8, 1179798836}, {4, 123}, {5, 123}} {
 		t.Run(fmt.Sprint(tt), func(t *testing.T) {
 			path, db := legacyDatabase(t)
 			if _, err := db.Exec(fmt.Sprintf("PRAGMA user_version=%d; PRAGMA application_id=%d", tt.version, tt.application)); err != nil {

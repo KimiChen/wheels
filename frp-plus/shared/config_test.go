@@ -1,9 +1,36 @@
 package shared
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestConfigurationManagementRequiresLocalExplicitRoot(t *testing.T) {
+	if err := (&AgentConfig{}).Complete(); err != nil {
+		t.Fatal("legacy disabled telemetry must remain valid", err)
+	}
+	root := filepath.Join(t.TempDir(), "managed")
+	a := AgentConfig{Enabled: true, Endpoint: "wss://monitor.example.invalid/agent/v1/ws", TokenFile: "token", ConfigManagement: &ConfigManagementConfig{Enabled: true, Root: root}}
+	if err := a.Complete(); err != nil {
+		t.Fatal(err)
+	}
+	a.Enabled = false
+	if a.Complete() == nil || a.Validate() == nil {
+		t.Fatal("write management cannot silently start without telemetry")
+	}
+	a.Enabled = true
+	for _, root := range []string{"", "relative", string(filepath.Separator), root + string(filepath.Separator) + "..", root + "\n"} {
+		a.ConfigManagement.Root = root
+		if a.Validate() == nil {
+			t.Fatalf("accepted invalid managed root %q", root)
+		}
+	}
+	a.ConfigManagement = &ConfigManagementConfig{Enabled: false}
+	if err := a.Validate(); err != nil {
+		t.Fatal("management remains opt-in", err)
+	}
+}
 
 func TestMonitorConfigurationBoundary(t *testing.T) {
 	a := AgentConfig{Enabled: true, Endpoint: "wss://monitor.example.invalid/agent/v1/ws", TokenFile: "token"}
