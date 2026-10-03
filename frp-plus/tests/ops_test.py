@@ -214,6 +214,8 @@ class OpsTests(unittest.TestCase):
         self.assertTrue(managed['telemetry']['configManagement']['enabled'])
         self.assertEqual((managed_folder / 'managed').stat().st_mode & 0o777, 0o700)
         self.assertEqual((managed_folder / 'managed/store.json').stat().st_mode & 0o777, 0o600)
+        self.assertEqual(json.loads((managed_folder / 'installation.json').read_text())['managed'],
+                         {'version': 1, 'root': 'managed', 'store': 'store.json'})
         # Old format 2 must reject rather than silently omit managed recovery state.
         with self.assertRaises(ValueError):
             ops.backup(managed_folder, self.backups / 'incomplete-managed.tar.gz')
@@ -312,7 +314,7 @@ class OpsTests(unittest.TestCase):
         archive = ops.backup(self.runtime, self.backups / 'groups.tar.gz')
         restored = ops.restore(archive, self.root / 'restored-groups')
         with closing(sqlite3.connect(restored / 'control.sqlite')) as database:
-            self.assertEqual(database.execute('PRAGMA user_version').fetchone(), (8,))
+            self.assertEqual(database.execute('PRAGMA user_version').fetchone(), (9,))
             self.assertEqual(database.execute('SELECT * FROM nodes').fetchall(), expected_node)
             self.assertEqual(database.execute('SELECT id,name,config_revision FROM node_groups ORDER BY id').fetchall(),
                              [(7, '生产🛰', 9), (8, 'empty', 2)])
@@ -334,7 +336,7 @@ class OpsTests(unittest.TestCase):
             self.assertEqual(database.execute('SELECT * FROM nodes').fetchall(), expected_node)
             self.assertEqual(database.execute('SELECT * FROM settings').fetchall(), expected_settings)
             self.assertEqual(database.execute("SELECT count(*) FROM sqlite_master WHERE name='node_groups'").fetchone(), (0,))
-        for version, application in ((3, 1179798836), (9, 1179798836), (4, 123), (5, 123)):
+        for version, application in ((3, 1179798836), (10, 1179798836), (4, 123), (5, 123)):
             with self.subTest(version=version, application=application):
                 with closing(sqlite3.connect(self.runtime / 'control.sqlite')) as database:
                     database.executescript(f'PRAGMA user_version={version}; PRAGMA application_id={application};')
@@ -364,7 +366,7 @@ class OpsTests(unittest.TestCase):
         archive = ops.backup(self.runtime, self.backups / 'operations.tar.gz')
         restored = ops.restore(archive, self.root / 'restored-operations')
         with closing(sqlite3.connect(restored / 'control.sqlite')) as database:
-            self.assertEqual(database.execute('PRAGMA user_version').fetchone(), (8,))
+            self.assertEqual(database.execute('PRAGMA user_version').fetchone(), (9,))
             self.assertEqual(database.execute('SELECT * FROM config_operations').fetchall(), expected_operations)
             self.assertEqual(database.execute('SELECT * FROM config_operation_events').fetchall(), expected_events)
             self.assertEqual(database.execute('PRAGMA foreign_key_check').fetchall(), [])
@@ -373,6 +375,21 @@ class OpsTests(unittest.TestCase):
                 database.execute('INSERT INTO config_operations VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
                                  ('87654321-1234-4234-8234-123456789abc', 1, 'managed-service', digest, '',
                                   'administrator', 2000000000000, 'other', digest, 'draft', 1, 2000, 2000, None, None))
+
+    def test_backup_preserves_schema_nine_restore_takeover_receipts(self):
+        with closing(sqlite3.connect(self.runtime / 'control.sqlite')) as database:
+            token = database.execute('SELECT token_sha256 FROM nodes WHERE id=1').fetchone()[0]
+            row = ('12345678-1234-4234-8234-123456789abc', 1, token,
+                   '23456789-1234-4234-8234-123456789abc', '34567890-1234-4234-8234-123456789abc',
+                   '45678901-1234-4234-8234-123456789abc', '', 'a' * 64, 'b' * 64, 'c' * 64,
+                   'pending', 'first-admin', 1000, 1000, 1)
+            database.execute('INSERT INTO config_restores VALUES(' + ','.join('?' for _ in row) + ')', row)
+            database.commit()
+        archive = ops.backup(self.runtime, self.backups / 'restore-receipts.tar.gz')
+        restored = ops.restore(archive, self.root / 'restored-receipts')
+        with closing(sqlite3.connect(restored / 'control.sqlite')) as database:
+            self.assertEqual(database.execute('PRAGMA user_version').fetchone(), (9,))
+            self.assertEqual(database.execute('SELECT * FROM config_restores').fetchall(), [row])
 
     def test_old_installation_format_and_missing_control_database_are_rejected(self):
         metadata = self.runtime / 'installation.json'

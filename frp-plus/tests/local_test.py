@@ -26,7 +26,7 @@ class LocalTests(unittest.TestCase):
             with closing(sqlite3.connect(folder / "control.sqlite")) as database:
                 database.row_factory = sqlite3.Row
                 credentials = dict(database.execute("SELECT * FROM nodes").fetchone())
-                self.assertEqual(database.execute("PRAGMA user_version").fetchone()[0], 8)
+                self.assertEqual(database.execute("PRAGMA user_version").fetchone()[0], 9)
                 self.assertEqual(database.execute("SELECT count(*) FROM node_groups").fetchone()[0], 0)
                 self.assertEqual(database.execute("SELECT count(*) FROM node_group_members").fetchone()[0], 0)
             agent = tomllib.loads((folder / "agent.toml").read_text())
@@ -99,6 +99,8 @@ class LocalTests(unittest.TestCase):
                     self.assertEqual(managed.stat().st_mode & 0o777, 0o700)
                     self.assertEqual((managed / "store.json").stat().st_mode & 0o777, 0o600)
                     self.assertEqual(json.loads((managed / "store.json").read_text()), {"proxies": [], "visitors": []})
+                    self.assertEqual(json.loads((folder / "installation.json").read_text())["managed"],
+                                     {"version": 1, "root": "managed", "store": "store.json"})
                 else:
                     self.assertNotIn("store", agent)
                     self.assertNotIn("configManagement", agent["telemetry"])

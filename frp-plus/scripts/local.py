@@ -223,6 +223,14 @@ def initialize_managed_store(staging, destination, enabled):
     return f'store.path = {toml_value(str(destination / "managed/store.json"))}\n'
 
 
+def installation_metadata(roles, managed=False):
+    """Declare the generated layout without storing any runtime identity or secret."""
+    result = {"format": 2, "roles": roles}
+    if managed:
+        result["managed"] = {"version": 1, "root": "managed", "store": "store.json"}
+    return json.dumps(result) + "\n"
+
+
 def render_monitor(config, directory, *, bind, server_id, cert_file="", key_file="", oauth=""):
     q = lambda name: toml_value(str(directory / name))
     return ('\n[monitor]\nenabled = true\n'
@@ -283,7 +291,7 @@ def initialize(destination: Path, *, plain_http=False, probes=False, config=None
                 server_id="local", ca_file="" if plain_http else "local.crt", probes=probes,
                 allow_private_probes=probes, allow_insecure_loopback=plain_http, manage_config=manage_config))
         private(staging / "local.json", json.dumps({"url": f'{"http" if plain_http else "https"}://127.0.0.1:{c["FRP_MONITOR_PORT"]}/', "id": node_id}) + "\n")
-        private(staging / "installation.json", json.dumps({"format": 2, "roles": ["server", "agent"]}) + "\n")
+        private(staging / "installation.json", installation_metadata(["server", "agent"], manage_config))
         os.rename(staging, destination)
     finally:
         # Remove only files created by this failed initialization, never an existing installation.
