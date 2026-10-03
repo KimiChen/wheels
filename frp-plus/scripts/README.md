@@ -24,7 +24,7 @@ python3 scripts/frp.py package
 | 命令 | 行为 |
 | --- | --- |
 | `prepare` | 严格校验锁文件，获取并核验上游 annotated tag 和 Commit，在临时目录应用补丁和映射扩展，成功后发布源码树 |
-| `test` | 重新 prepare，运行 `pkg/config/...`、`pkg/msg/...`、`pkg/util/...`、`pkg/metrics/...`、`client`、`server`、`server/registry`、`server/proxy` 和所有 `extension/frpmonitor/...` 本机 Go 测试；不运行 Docker/e2e |
+| `test` | 重新 prepare，运行 `pkg/config/...`、`pkg/msg/...`、`pkg/util/...`、`pkg/metrics/...`、`client/...`（含 Proxy/Visitor）、`server/...` 和所有 `extension/frpmonitor/...` 本机 Go 测试；不运行 Docker/e2e |
 | `build` | 重新 prepare，构建原生 frpc/frps Dashboard，再构建 Linux amd64 和 arm64 两套二进制 |
 | `build --native` | 使用本机 OS/架构，供本地 smoke；支持 macOS/Linux amd64/arm64 |
 | `build --target linux/amd64` | 只构建指定目标；可重复 `--target`，不能与 `--native` 同用 |

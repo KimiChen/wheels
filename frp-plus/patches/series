@@ -3,3 +3,4 @@
 0002-storage-dependencies.patch
 0003-persistence-shutdown.patch
 0004-frp-reconciliation.patch
+0005-frp-observation.patch

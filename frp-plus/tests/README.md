@@ -15,8 +15,8 @@ node --test web/tests/*.test.mjs
 python3 scripts/frp.py build --native
 ```
 
-构建脚本准备固定上游和 Overlay，运行 FRP 配置、消息、工具、metrics、client、server、
-registry、proxy 及所有监控扩展测试。采集的 17 组脱敏向量保存在
+构建脚本准备固定上游和 Overlay，运行 FRP 配置、消息、工具、metrics、完整 `client/...`
+（含 Proxy/Visitor）、`server/...` 及所有监控扩展测试。采集的 17 组脱敏向量保存在
 [fixtures/collect](fixtures/collect/README.md)，入口自动设置其路径。
 对并发/生命周期改动，在准备目录运行相关包的 `go test -race`；扩展包同时运行 `go vet`。
 `nginx_test.py` 另需本机 nginx 与 openssl；缺少时明确跳过。它在临时回环端口启动隔离反代，
@@ -51,6 +51,9 @@ python3 tests/monitor_smoke.py \
 python3 tests/monitor_smoke.py \
   --agent dist/darwin-arm64/frp-plus-agent \
   --server dist/darwin-arm64/frp-plus-server --history
+python3 tests/frp_detail_smoke.py \
+  --agent dist/darwin-arm64/frp-plus-agent \
+  --server dist/darwin-arm64/frp-plus-server
 ```
 
 `smoke.py` 验证原生 TOML、Dashboard 认证及嵌入资源、无 Proxy 登录、wire v1/v2
@@ -61,22 +64,40 @@ python3 tests/monitor_smoke.py \
 开关和重启恢复；并覆盖 FRP 与监控连接的故障隔离、节点凭据变更以及真实探测任务生命周期。
 运行时业务变更使用临时库与主控刷新，不绕过或替代 Go 测试中的管理端认证。
 
-所有子进程使用隔离环境，回环 TLS 校验名称和 CA；超时强制结束会判失败。仅本机 Linux
+`frp_detail_smoke.py` 对 wire v1/v2 使用真实增强二进制和透明回环 WebSocket 中继，
+观察实际 `frp.detail` 帧：file/include/Store 来源与覆盖顺序、动态 TCP 请求和真实分配端口、
+HTTP 注册入口与实际转发、原生 reload 后配置修订/读取时间，以及 STCP Visitor 的
+未连接、peer 失败、实际连接、恢复时间和连接关闭。SUDP 验证真实 datagram 转发及远端
+关闭后本地仍监听；XTCP 使用本机 STUN 占位地址及不存在的目标，验证确定失败后的
+STCP fallback 实际使用与释放。本机场景不证明跨公网 NAT 穿透成功。
+验证期间主机报告保持同一会话及递增序号，
+公开 JSON/SSE 不包含私有详情，未配置 OAuth 时详情入口返回 404。配置和帧只存在于临时目录或内存，
+不输出原始子进程日志。该脚本仅捕获二进制适配器实际发出的私有帧；管理员会话、OAuth、
+详情 API 授权和陈旧状态另由 Go 测试验收，不能将此组合描述为真实 GitHub 登录端到端测试。
+本地中继显式开启 `allowInsecureLoopback`，只连接动态回环端口；FRP 控制连接仍启用 TLS。
+帧捕获自身的分片、容量、序号和隐私检测由 `frp_detail_smoke_test.py` 验证。
+
+所有子进程使用隔离环境；TLS 场景校验名称和 CA，超时强制结束会判失败。仅本机 Linux
 会产生完整内核指标，Darwin 合法返回 unsupported。退出后清理测试进程与临时文件。
 
 ## 原版 FRP 互通矩阵
 
 ```sh
+python3 tests/build_original.py
 python3 tests/frp_smoke.py \
   --agent dist/darwin-arm64/frp-plus-agent \
   --server dist/darwin-arm64/frp-plus-server \
-  --original-agent /private/test/original-frpc \
-  --original-server /private/test/original-frps
+  --original-agent .cache/original/bin/darwin-arm64/frpc \
+  --original-server .cache/original/bin/darwin-arm64/frps
 ```
 
 原版二进制必须来自 `upstream.lock` 固定 commit，未经 Overlay 或监控补丁，并保留
 原生 Dashboard。矩阵覆盖增强/增强、原版/增强、增强/原版三种组合，各测 wire v1/v2
 的 TCP、UDP、HTTP 虚拟主机和 STCP visitor；关闭监控的增强版不能冒充原版。
+`build_original.py` 从固定 Git archive 独立构建，记录源码、工具链、双 Dashboard 与产物
+摘要，构建前后检查源码未变更。互通脚本默认读取原版二进制同目录 `BUILD.json`，
+强制匹配锁定身份、空补丁/Overlay 清单和实际二进制 SHA；分离存放时显式指定
+`--original-manifest`。`--monitor-version` 仅作额外检查。本地清单校验不是签名信任证明。
 可信归属冲突、不同 user 的同名 clientID、适配器忙锁和快照过期另有 Go 回归。
 
 ## Linux 实机对照

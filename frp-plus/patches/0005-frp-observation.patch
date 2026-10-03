@@ -1,0 +1,1780 @@
+diff --git a/client/config_manager.go b/client/config_manager.go
+index 24512e9..4476491 100644
+--- a/client/config_manager.go
++++ b/client/config_manager.go
+@@ -45,7 +45,7 @@ func (m *serviceConfigManager) ReloadFromFile(strict bool) error {
+ 		return fmt.Errorf("%w: %v", configmgmt.ErrInvalidArgument, err)
+ 	}
+ 
+-	if err := m.svr.UpdateConfigSource(result.Common, result.Proxies, result.Visitors); err != nil {
++	if err := m.svr.UpdateConfigSource(result.Common, result.Proxies, result.Visitors, result.ProxyOrigins, result.VisitorOrigins); err != nil {
+ 		return fmt.Errorf("%w: %v", configmgmt.ErrApplyConfig, err)
+ 	}
+ 
+diff --git a/client/control_session.go b/client/control_session.go
+index e3ed27f..1a9ef92 100644
+--- a/client/control_session.go
++++ b/client/control_session.go
+@@ -36,7 +36,8 @@ import (
+ )
+ 
+ type controlSessionDialer struct {
+-	ctx context.Context
++	monitorFailureCode string
++	ctx                context.Context
+ 
+ 	common         *v1.ClientCommonConfig
+ 	auth           *auth.ClientAuth
+@@ -47,6 +48,7 @@ type controlSessionDialer struct {
+ }
+ 
+ func (d *controlSessionDialer) Dial(previousRunID string) (*SessionContext, error) {
++	d.monitorFailureCode = "connect_failed"
+ 	connector := d.connectorCreator(d.ctx, d.common)
+ 	if err := connector.Open(); err != nil {
+ 		return nil, err
+@@ -69,6 +71,7 @@ func (d *controlSessionDialer) Dial(previousRunID string) (*SessionContext, erro
+ 		}
+ 	}()
+ 
++	d.monitorFailureCode = "login_failed"
+ 	loginMsg, err := d.buildLoginMsg(previousRunID)
+ 	if err != nil {
+ 		return nil, err
+diff --git a/client/monitor_detail.go b/client/monitor_detail.go
+new file mode 100644
+index 0000000..1f7a883
+--- /dev/null
++++ b/client/monitor_detail.go
+@@ -0,0 +1,365 @@
++package client
++
++import (
++	"crypto/sha256"
++	"encoding/hex"
++	"encoding/json"
++	"errors"
++	"net"
++	"slices"
++	"strconv"
++	"strings"
++	"time"
++
++	"github.com/fatedier/frp/client/proxy"
++	"github.com/fatedier/frp/client/visitor"
++	"github.com/fatedier/frp/extension/frpmonitor/shared"
++	v1 "github.com/fatedier/frp/pkg/config/v1"
++	"github.com/fatedier/frp/pkg/util/monitorstate"
++)
++
++func (svr *Service) setMonitorControlError(code string) {
++	now := time.Now().UTC().Format(time.RFC3339Nano)
++	stage := "control"
++	if code == "login_failed" {
++		stage = "login"
++	}
++	old := svr.monitorControlError.Load()
++	if old != nil && old.Code == code && old.RecoveredAt == nil {
++		return
++	}
++	svr.monitorControlError.Store(&shared.FRPErrorDetail{Code: code, Stage: stage, At: &now})
++}
++
++func (svr *Service) recoverMonitorControlError() {
++	if old := svr.monitorControlError.Load(); old != nil && old.RecoveredAt == nil {
++		next := *old
++		now := time.Now().UTC().Format(time.RFC3339Nano)
++		next.RecoveredAt = &now
++		svr.monitorControlError.Store(&next)
++	}
++}
++
++func detailError(err *monitorstate.Error) *shared.FRPErrorDetail {
++	if err == nil {
++		return nil
++	}
++	out := &shared.FRPErrorDetail{Code: err.Code, Stage: err.Stage}
++	if err.At != "" {
++		at := err.At
++		out.At = &at
++	}
++	if err.RecoveredAt != "" {
++		at := err.RecoveredAt
++		out.RecoveredAt = &at
++	}
++	return out
++}
++
++func detailBool(v bool) *bool { return &v }
++func detailPort(v int) *uint16 {
++	if v < 0 || v > 65535 {
++		return nil
++	}
++	p := uint16(v)
++	return &p
++}
++func detailFailure(state string) shared.FRPDetail {
++	if state != "busy" && state != "truncated" {
++		state = "unavailable"
++	}
++	return shared.EmptyFRPDetail(state)
++}
++
++// monitorDetail is a separate allowlisted adapter. Raw config, errors, paths,
++// plugin options and credentials never cross the administrative boundary.
++func (svr *Service) monitorDetail() shared.FRPDetail {
++	if !svr.reloadMu.TryLock() {
++		return detailFailure("busy")
++	}
++	if !svr.cfgMu.TryRLock() {
++		svr.reloadMu.Unlock()
++		return detailFailure("busy")
++	}
++	common, reloadCommon, aggregator := svr.common, svr.reloadCommon, svr.aggregator
++	svr.cfgMu.RUnlock()
++	if common == nil || aggregator == nil {
++		svr.reloadMu.Unlock()
++		return detailFailure("unavailable")
++	}
++	config, state := aggregator.MonitorDetail(2 * (shared.MaxDetailProxies + shared.MaxDetailVisitors))
++	svr.reloadMu.Unlock()
++	if state != "ready" {
++		return detailFailure(state)
++	}
++	if len(config.Proxies) > shared.MaxDetailProxies || len(config.Visitors) > shared.MaxDetailVisitors {
++		return detailFailure("truncated")
++	}
++	if !svr.ctlMu.TryRLock() {
++		return detailFailure("busy")
++	}
++	ctl := svr.ctl
++	svr.ctlMu.RUnlock()
++	connected := false
++	if ctl != nil {
++		select {
++		case <-ctl.Done():
++		default:
++			connected = true
++		}
++	}
++	proxyStates := map[string]proxy.MonitorStatus{}
++	visitorStates := map[string]visitor.MonitorStatus{}
++	if connected {
++		proxyStates, state = ctl.pm.MonitorSnapshot(shared.MaxDetailProxies)
++		if state != "ready" {
++			return detailFailure(state)
++		}
++		visitorStates, state = ctl.vm.MonitorSnapshot(shared.MaxDetailVisitors)
++		if state != "ready" {
++			return detailFailure(state)
++		}
++	}
++	out := shared.EmptyFRPDetail("ready")
++	out.Association = shared.FRPAssociation{ServerID: common.Telemetry.ServerID, User: common.User}
++	if out.Association.ServerID == "" {
++		out.Association.ServerID = "default"
++	}
++	if common.ClientID != "" {
++		id := common.ClientID
++		out.Association.RawClientID = &id
++	}
++	id := sha256.Sum256([]byte(svr.configFilePath + "\x00" + common.User + "\x00" + common.ClientID + "\x00" + common.ServerAddr + ":" + strconv.Itoa(common.ServerPort)))
++	out.ServiceID = "svc-" + hex.EncodeToString(id[:16])
++	out.Transport = shared.FRPTransportDetail{Protocol: common.Transport.Protocol, WireProtocol: common.Transport.WireProtocol, Source: "configured", TLS: common.Transport.TLS.Enable, TCPMux: common.Transport.TCPMux}
++	if out.Transport.Protocol == "" {
++		out.Transport.Protocol = "unknown"
++	}
++	if out.Transport.WireProtocol == "" {
++		out.Transport.WireProtocol = "unknown"
++	}
++	if e := svr.monitorControlError.Load(); e != nil {
++		copy := *e
++		out.ControlError = &copy
++	}
++	out.Configuration = shared.FRPConfigurationDetail{Source: "file", SourceState: "active", NativeEntry: "file", Reloadable: detailBool(true)}
++	out.Configuration.DashboardEnabled = detailBool(common.WebServer.Port > 0)
++	if !config.ReadAt.IsZero() {
++		at := config.ReadAt.Format(time.RFC3339Nano)
++		out.Configuration.ReadAt = &at
++	}
++	if svr.configFilePath == "" {
++		out.Configuration.NativeEntry = "unavailable"
++		out.Configuration.Reloadable = detailBool(false)
++	}
++	if config.HasStore {
++		out.Configuration.Reloadable = detailBool(true)
++		out.Configuration.Source = "mixed"
++		out.Configuration.NativeEntry = "store"
++	}
++	// The digest is private and opaque, and includes secrets without returning them.
++	revisionInput := struct {
++		Config any
++		Start  []string
++	}{Config: config}
++	if reloadCommon != nil {
++		revisionInput.Start = reloadCommon.Start
++	}
++	if data, err := json.Marshal(revisionInput); err == nil {
++		sum := sha256.Sum256(data)
++		revision := hex.EncodeToString(sum[:])
++		out.Configuration.Revision = &revision
++	}
++	selected := func(name string, enabled *bool) bool {
++		return (enabled == nil || *enabled) && (reloadCommon == nil || len(reloadCommon.Start) == 0 || slices.Contains(reloadCommon.Start, name))
++	}
++	for _, entry := range config.Proxies {
++		cfg := entry.Config
++		base := cfg.GetBaseConfig()
++		p := shared.FRPProxyDetail{Name: base.Name, Type: base.Type, Source: entry.Source, SourceState: "active", ShadowedSources: detailShadowed(entry.ShadowedSources), Enabled: selected(base.Name, base.Enabled), Status: "unknown", Endpoints: detailConfiguredEndpoints(cfg, common.ServerAddr), Encryption: detailBool(base.Transport.UseEncryption), Compression: detailBool(base.Transport.UseCompression)}
++		if base.Plugin.Type != "" {
++			name := base.Plugin.Type
++			p.PluginType = &name
++		}
++		if base.Plugin.ClientPluginOptions == nil && base.LocalPort > 0 {
++			host := base.LocalIP
++			if host == "" {
++				host = "127.0.0.1"
++			}
++			target := net.JoinHostPort(host, strconv.Itoa(base.LocalPort))
++			p.LocalTarget = &target
++		}
++		if !p.Enabled {
++			p.Status = "disabled"
++		} else if status, ok := proxyStates[base.Name]; ok {
++			switch status.Phase {
++			case proxy.ProxyPhaseRunning:
++				p.Status = "running"
++			case proxy.ProxyPhaseNew, proxy.ProxyPhaseWaitStart:
++				p.Status = "starting"
++			case proxy.ProxyPhaseStartErr, proxy.ProxyPhaseCheckFailed:
++				p.Status = "error"
++			case proxy.ProxyPhaseClosed:
++				p.Status = "closed"
++			}
++			p.Error = detailError(status.Error)
++			if p.Status == "running" {
++				p.Endpoints = append(p.Endpoints, detailObservedEndpoints(base.Type, status.RemoteAddr, common.ServerAddr)...)
++			}
++		}
++		out.Proxies = append(out.Proxies, p)
++	}
++	for _, entry := range config.Visitors {
++		cfg := entry.Config
++		cfg.Complete()
++		base := cfg.GetBaseConfig()
++		v := shared.FRPVisitorDetail{Name: base.Name, Type: base.Type, Source: entry.Source, SourceState: "active", ShadowedSources: detailShadowed(entry.ShadowedSources), Enabled: selected(base.Name, base.Enabled), Status: "unknown", ServerUser: base.ServerUser, ServerName: base.ServerName, Protocol: out.Transport.Protocol, LocalState: "unknown", RemoteState: "unknown", P2PState: "unsupported", FallbackState: "disabled", Encryption: detailBool(base.Transport.UseEncryption), Compression: detailBool(base.Transport.UseCompression)}
++		if base.Plugin.Type != "" {
++			name := base.Plugin.Type
++			v.PluginType = &name
++		}
++		if v.ServerUser == "" {
++			v.ServerUser = common.User
++		}
++		if base.BindPort > 0 {
++			kind := "tcp"
++			if base.Type == "sudp" {
++				kind = "udp"
++			}
++			v.BindEndpoint = &shared.FRPEndpoint{Kind: kind, Source: "configured", Host: base.BindAddr, Port: detailPort(base.BindPort)}
++		}
++		if c, ok := cfg.(*v1.XTCPVisitorConfig); ok {
++			v.Protocol = c.Protocol
++			v.P2PState = "unknown"
++			if c.FallbackTo != "" {
++				fallback := c.FallbackTo
++				v.FallbackTo = &fallback
++				v.FallbackState = "available"
++			}
++		}
++		if !v.Enabled {
++			v.Status = "disabled"
++			v.LocalState = "disabled"
++		} else if status, ok := visitorStates[base.Name]; ok {
++			v.LocalState = status.LocalState
++			v.RemoteState = status.RemoteState
++			v.Error = detailError(status.Error)
++			if v.LocalState == "starting" {
++				v.LocalState = "unknown"
++				v.Status = "starting"
++			} else {
++				v.Status = v.LocalState
++			}
++			if v.LocalState == "listening" && v.BindEndpoint != nil {
++				v.BindEndpoint.Source = "observed"
++			}
++			if base.Type == "xtcp" {
++				v.P2PState = status.P2PState
++				if status.FallbackState != "unknown" {
++					v.FallbackState = status.FallbackState
++				}
++			}
++			if v.RemoteState == "connected" {
++				v.Status = "connected"
++			}
++		}
++		out.Visitors = append(out.Visitors, v)
++	}
++	if err := out.Validate(); err != nil {
++		if errors.Is(err, shared.ErrFRPDetailTooLarge) {
++			return detailFailure("truncated")
++		}
++		return detailFailure("unavailable")
++	}
++	return out
++}
++
++func detailShadowed(values []string) []string {
++	out := []string{}
++	for _, v := range values {
++		if (v == "file" || v == "include" || v == "store") && !slices.Contains(out, v) {
++			out = append(out, v)
++		}
++	}
++	return out
++}
++
++func detailConfiguredEndpoints(cfg v1.ProxyConfigurer, server string) []shared.FRPEndpoint {
++	out := []shared.FRPEndpoint{}
++	kind := cfg.GetBaseConfig().Type
++	var domains []string
++	var subdomain string
++	paths := []string{""}
++	switch c := cfg.(type) {
++	case *v1.TCPProxyConfig:
++		return []shared.FRPEndpoint{{Kind: kind, Source: "configured", Host: server, Port: detailPort(c.RemotePort)}}
++	case *v1.UDPProxyConfig:
++		return []shared.FRPEndpoint{{Kind: kind, Source: "configured", Host: server, Port: detailPort(c.RemotePort)}}
++	case *v1.HTTPProxyConfig:
++		domains, subdomain = c.CustomDomains, c.SubDomain
++		if len(c.Locations) > 0 {
++			paths = c.Locations
++		}
++	case *v1.HTTPSProxyConfig:
++		domains, subdomain = c.CustomDomains, c.SubDomain
++	case *v1.TCPMuxProxyConfig:
++		domains, subdomain = c.CustomDomains, c.SubDomain
++	default:
++		return []shared.FRPEndpoint{{Kind: "visitor", Source: "configured"}}
++	}
++	for _, host := range domains {
++		for _, path := range paths {
++			out = append(out, shared.FRPEndpoint{Kind: kind, Source: "configured", Host: host, Path: path})
++			if len(out) > shared.MaxDetailEndpoints {
++				return out
++			}
++		}
++	}
++	if subdomain != "" {
++		for _, path := range paths {
++			sub := subdomain
++			out = append(out, shared.FRPEndpoint{Kind: kind, Source: "configured", Subdomain: &sub, Path: path})
++			if len(out) > shared.MaxDetailEndpoints {
++				return out
++			}
++		}
++	}
++	return out
++}
++
++func detailObservedEndpoints(kind, remote, _ string) []shared.FRPEndpoint {
++	out := []shared.FRPEndpoint{}
++	if kind == "stcp" || kind == "sudp" || kind == "xtcp" {
++		return []shared.FRPEndpoint{{Kind: "visitor", Source: "observed"}}
++	}
++	for _, address := range strings.Split(remote, ",") {
++		if len(out) > shared.MaxDetailEndpoints {
++			return out
++		}
++		if address == "" {
++			continue
++		}
++		host, port, err := net.SplitHostPort(address)
++		if err != nil { // Native CanonicalAddr omits BOTH 80 and 443: port is unknown.
++			if kind == "tcp" || kind == "udp" {
++				continue
++			}
++			e := shared.FRPEndpoint{Kind: kind, Source: "observed", Host: address}
++			if e.Validate() == nil {
++				out = append(out, e)
++			}
++			continue
++		}
++		n, err := strconv.Atoi(port)
++		if err != nil || n <= 0 || n > 65535 {
++			continue
++		}
++		e := shared.FRPEndpoint{Kind: kind, Source: "observed", Host: host, Port: detailPort(n)}
++		if e.Validate() == nil && !slices.ContainsFunc(out, func(old shared.FRPEndpoint) bool {
++			return old.Kind == e.Kind && old.Host == e.Host && old.Port != nil && *old.Port == *e.Port
++		}) {
++			out = append(out, e)
++		}
++	}
++	return out
++}
+diff --git a/client/monitor_detail_test.go b/client/monitor_detail_test.go
+new file mode 100644
+index 0000000..6ab6f2c
+--- /dev/null
++++ b/client/monitor_detail_test.go
+@@ -0,0 +1,86 @@
++package client
++
++import (
++	"encoding/json"
++	"strings"
++	"testing"
++
++	"github.com/fatedier/frp/pkg/config/source"
++	v1 "github.com/fatedier/frp/pkg/config/v1"
++)
++
++func TestMonitorDetailPrivateProjectionAndOrigins(t *testing.T) {
++	common := &v1.ClientCommonConfig{User: "team", ClientID: "stable", ServerAddr: "2001:db8::1"}
++	if err := common.Complete(); err != nil {
++		t.Fatal(err)
++	}
++	common.Auth.Token = "private-token-never-export"
++	p := &v1.HTTPProxyConfig{ProxyBaseConfig: v1.ProxyBaseConfig{Name: "web", Type: "http"}, DomainConfig: v1.DomainConfig{CustomDomains: []string{"example.invalid"}, SubDomain: "sub"}, HTTPPassword: "private-http-password", Locations: []string{"/app"}}
++	disabled := false
++	v := &v1.XTCPVisitorConfig{VisitorBaseConfig: v1.VisitorBaseConfig{Name: "private", Type: "xtcp", ServerName: "peer", SecretKey: "private-visitor-key", Enabled: &disabled, BindPort: -1}, FallbackTo: "backup"}
++	c := source.NewConfigSource()
++	if err := c.ReplaceAll([]v1.ProxyConfigurer{p}, []v1.VisitorConfigurer{v}); err != nil {
++		t.Fatal(err)
++	}
++	c.SetMonitorOrigins(map[string]string{"web": "include"}, map[string]string{"private": "file"})
++	svr, err := NewService(ServiceOptions{Common: common, ConfigSourceAggregator: source.NewAggregator(c)})
++	if err != nil {
++		t.Fatal(err)
++	}
++	d := svr.monitorDetail()
++	if err = d.Validate(); err != nil {
++		t.Fatal(err)
++	}
++	if d.State != "ready" || len(d.Proxies) != 1 || len(d.Visitors) != 1 {
++		t.Fatalf("detail unavailable: %#v", d)
++	}
++	if d.Configuration.ReadAt == nil || d.Configuration.DashboardEnabled == nil || *d.Configuration.DashboardEnabled {
++		t.Fatal("missing source time or incorrect dashboard fact")
++	}
++	if d.Configuration.NativeEntry != "unavailable" || d.Configuration.Reloadable == nil || *d.Configuration.Reloadable {
++		t.Fatal("file-less service falsely offers native file reload")
++	}
++	if d.Proxies[0].Source != "include" || d.Proxies[0].Endpoints[1].Subdomain == nil || d.Proxies[0].Endpoints[1].Host != "" {
++		t.Fatal("invented subdomain hostname or lost include origin")
++	}
++	if d.Visitors[0].Status != "disabled" || d.Visitors[0].BindEndpoint != nil || d.Visitors[0].RemoteState != "unknown" {
++		t.Fatal("disabled/non-listening visitor projected incorrectly")
++	}
++	data, _ := json.Marshal(d)
++	for _, secret := range []string{common.Auth.Token, p.HTTPPassword, v.SecretKey} {
++		if strings.Contains(string(data), secret) {
++			t.Fatal("secret crossed detail projection")
++		}
++	}
++	svr.reloadMu.Lock()
++	busy := svr.monitorDetail()
++	svr.reloadMu.Unlock()
++	if busy.State != "busy" || len(busy.Proxies) != 0 || len(busy.Visitors) != 0 {
++		t.Fatal("busy detail lost lock state or claims completeness")
++	}
++	if err := busy.Validate(); err != nil {
++		t.Fatalf("busy detail violates wire contract: %v", err)
++	}
++	svr.setMonitorControlError("login_failed")
++	svr.recoverMonitorControlError()
++	d = svr.monitorDetail()
++	if d.ControlError == nil || d.ControlError.RecoveredAt == nil {
++		t.Fatal("missing login error recovery")
++	}
++}
++
++func TestMonitorEndpointDistinguishesDynamicAndUnknownPorts(t *testing.T) {
++	p := &v1.TCPProxyConfig{ProxyBaseConfig: v1.ProxyBaseConfig{Type: "tcp"}, RemotePort: 0}
++	configured := detailConfiguredEndpoints(p, "2001:db8::1")
++	if configured[0].Port == nil || *configured[0].Port != 0 {
++		t.Fatal("lost dynamic requested port")
++	}
++	observed := detailObservedEndpoints("tcp", ":12345", "2001:db8::1")
++	if len(observed) != 1 || observed[0].Host != "" || *observed[0].Port != 12345 {
++		t.Fatal("invented an observed public hostname")
++	}
++	observed = detailObservedEndpoints("https", "example.invalid", "control.invalid")
++	if len(observed) != 1 || observed[0].Port != nil {
++		t.Fatal("invented an omitted native port")
++	}
++}
+diff --git a/client/proxy/monitor.go b/client/proxy/monitor.go
+new file mode 100644
+index 0000000..063b34b
+--- /dev/null
++++ b/client/proxy/monitor.go
+@@ -0,0 +1,27 @@
++package proxy
++
++import "github.com/fatedier/frp/pkg/util/monitorstate"
++
++type MonitorStatus struct {
++	Phase, RemoteAddr string
++	Error             *monitorstate.Error
++}
++
++func (pm *Manager) MonitorSnapshot(limit int) (map[string]MonitorStatus, string) {
++	if !pm.mu.TryRLock() {
++		return nil, "busy"
++	}
++	defer pm.mu.RUnlock()
++	if len(pm.proxies) > limit {
++		return nil, "truncated"
++	}
++	out := make(map[string]MonitorStatus, len(pm.proxies))
++	for name, p := range pm.proxies {
++		if !p.mu.TryRLock() {
++			return nil, "busy"
++		}
++		out[name] = MonitorStatus{Phase: p.Phase, RemoteAddr: p.RemoteAddr, Error: p.monitorErrors.Snapshot()}
++		p.mu.RUnlock()
++	}
++	return out, "ready"
++}
+diff --git a/client/proxy/monitor_test.go b/client/proxy/monitor_test.go
+new file mode 100644
+index 0000000..b55fd88
+--- /dev/null
++++ b/client/proxy/monitor_test.go
+@@ -0,0 +1,35 @@
++package proxy
++
++import (
++	"encoding/json"
++	"strings"
++	"testing"
++)
++
++func TestProxyMonitorSnapshotUsesFixedCodesAndSkipsBusyLocks(t *testing.T) {
++	p := &Wrapper{WorkingStatus: WorkingStatus{Name: "test", Phase: ProxyPhaseStartErr, Err: "secretKey=private\n<script>"}}
++	p.monitorErrors.Fail("register_failed", "proxy")
++	pm := &Manager{proxies: map[string]*Wrapper{"test": p}}
++	values, state := pm.MonitorSnapshot(1)
++	if state != "ready" || values["test"].Error.Code != "register_failed" {
++		t.Fatal("missing registration error")
++	}
++	data, _ := json.Marshal(values)
++	if strings.Contains(string(data), "private") || strings.Contains(string(data), "script") {
++		t.Fatal("raw native error was exported")
++	}
++	p.mu.Lock()
++	_, state = pm.MonitorSnapshot(1)
++	p.mu.Unlock()
++	if state != "busy" {
++		t.Fatal("waited behind proxy mutation")
++	}
++	if _, state = pm.MonitorSnapshot(0); state != "truncated" {
++		t.Fatal("missing snapshot bound")
++	}
++	p.monitorErrors.Recover()
++	values, _ = pm.MonitorSnapshot(1)
++	if values["test"].Error.RecoveredAt == "" {
++		t.Fatal("recovered error is still current")
++	}
++}
+diff --git a/client/proxy/proxy_wrapper.go b/client/proxy/proxy_wrapper.go
+index 37a7127..ba78d6a 100644
+--- a/client/proxy/proxy_wrapper.go
++++ b/client/proxy/proxy_wrapper.go
+@@ -31,6 +31,7 @@ import (
+ 	"github.com/fatedier/frp/pkg/msg"
+ 	"github.com/fatedier/frp/pkg/naming"
+ 	"github.com/fatedier/frp/pkg/transport"
++	"github.com/fatedier/frp/pkg/util/monitorstate"
+ 	"github.com/fatedier/frp/pkg/util/xlog"
+ 	"github.com/fatedier/frp/pkg/vnet"
+ )
+@@ -62,6 +63,7 @@ type WorkingStatus struct {
+ }
+ 
+ type Wrapper struct {
++	monitorErrors monitorstate.Errors
+ 	WorkingStatus
+ 
+ 	// underlying proxy
+@@ -145,6 +147,7 @@ func (pw *Wrapper) SetRunningStatus(remoteAddr string, respErr string) error {
+ 
+ 	pw.RemoteAddr = remoteAddr
+ 	if respErr != "" {
++		pw.monitorErrors.Fail("register_failed", "proxy")
+ 		pw.Phase = ProxyPhaseStartErr
+ 		pw.Err = respErr
+ 		pw.lastStartErr = time.Now()
+@@ -152,6 +155,7 @@ func (pw *Wrapper) SetRunningStatus(remoteAddr string, respErr string) error {
+ 	}
+ 
+ 	if err := pw.pxy.Run(); err != nil {
++		pw.monitorErrors.Fail("plugin_failed", "proxy")
+ 		pw.close()
+ 		pw.Phase = ProxyPhaseStartErr
+ 		pw.Err = err.Error()
+@@ -159,6 +163,7 @@ func (pw *Wrapper) SetRunningStatus(remoteAddr string, respErr string) error {
+ 		return err
+ 	}
+ 
++	pw.monitorErrors.Recover()
+ 	pw.Phase = ProxyPhaseRunning
+ 	pw.Err = ""
+ 	return nil
+@@ -226,6 +231,7 @@ func (pw *Wrapper) checkWorker() {
+ 				pw.close()
+ 				xl.Tracef("change status from [%s] to [%s]", pw.Phase, ProxyPhaseCheckFailed)
+ 				pw.Phase = ProxyPhaseCheckFailed
++				pw.monitorErrors.Fail("health_check_failed", "health_check")
+ 			}
+ 			pw.mu.Unlock()
+ 		}
+diff --git a/client/service.go b/client/service.go
+index 49979f6..28e0941 100644
+--- a/client/service.go
++++ b/client/service.go
+@@ -117,7 +117,8 @@ func setServiceOptionsDefault(options *ServiceOptions) error {
+ 
+ // Service is the client service that connects to frps and provides proxy services.
+ type Service struct {
+-	ctlMu sync.RWMutex
++	monitorControlError atomic.Pointer[shared.FRPErrorDetail]
++	ctlMu               sync.RWMutex
+ 	// Stores gracefulShutdownDuration independently from ctlMu, because the
+ 	// graceful shutdown wait may hold ctlMu for an arbitrary duration.
+ 	gracefulShutdownDuration atomic.Int64
+@@ -247,7 +248,7 @@ func (svr *Service) Run(ctx context.Context) error {
+ 						log.Warnf("frp-plus telemetry stopped after an internal failure")
+ 					}
+ 				}()
+-				telemetry, err := agentmonitor.Start(svr.ctx, svr.common.Telemetry, svr.monitorSnapshot)
++				telemetry, err := agentmonitor.Start(svr.ctx, svr.common.Telemetry, svr.monitorSnapshot, svr.monitorDetail)
+ 				if err != nil {
+ 					log.Warnf("frp-plus telemetry initialization failed: %v", err)
+ 					return
+@@ -326,6 +327,9 @@ func (svr *Service) keepControllerWorking() {
+ 		svr.loopLoginUntilSuccess(20*time.Second, false)
+ 		if svr.ctl != nil {
+ 			<-svr.ctl.Done()
++			if svr.ctx.Err() == nil {
++				svr.setMonitorControlError("connect_failed")
++			}
+ 			return false, errors.New("control is closed and try another loop")
+ 		}
+ 		// If the control is nil, it means that the login failed and the service is also closed.
+@@ -359,6 +363,7 @@ func (svr *Service) loopLoginUntilSuccess(maxInterval time.Duration, firstLoginE
+ 		}
+ 		sessionCtx, err := dialer.Dial(svr.runID)
+ 		if err != nil {
++			svr.setMonitorControlError(dialer.monitorFailureCode)
+ 			xl.Warnf("connect to server error: %v", err)
+ 			if firstLoginExit {
+ 				svr.cancel(cancelErr{Err: err})
+@@ -377,11 +382,13 @@ func (svr *Service) loopLoginUntilSuccess(maxInterval time.Duration, firstLoginE
+ 
+ 		ctl, err := NewControl(svr.ctx, sessionCtx)
+ 		if err != nil {
++			svr.setMonitorControlError("connect_failed")
+ 			sessionCtx.Conn.Close()
+ 			sessionCtx.Connector.Close()
+ 			xl.Errorf("new control error: %v", err)
+ 			return false, err
+ 		}
++		svr.recoverMonitorControlError()
+ 		ctl.SetInWorkConnCallback(svr.handleWorkConnCb)
+ 
+ 		ctl.Run(proxyCfgs, visitorCfgs)
+@@ -425,6 +432,7 @@ func (svr *Service) UpdateConfigSource(
+ 	common *v1.ClientCommonConfig,
+ 	proxyCfgs []v1.ProxyConfigurer,
+ 	visitorCfgs []v1.VisitorConfigurer,
++	origins ...map[string]string,
+ ) error {
+ 	svr.reloadMu.Lock()
+ 	defer svr.reloadMu.Unlock()
+@@ -441,6 +449,12 @@ func (svr *Service) UpdateConfigSource(
+ 		return err
+ 	}
+ 
++	if len(origins) == 2 {
++		cfgSource.SetMonitorOrigins(origins[0], origins[1])
++	} else {
++		cfgSource.SetMonitorOrigins(nil, nil)
++	}
++
+ 	// Non-atomic update semantics: source has been updated at this point.
+ 	// Even if reload fails below, keep this common config for subsequent reloads.
+ 	svr.cfgMu.Lock()
+diff --git a/client/visitor/monitor.go b/client/visitor/monitor.go
+new file mode 100644
+index 0000000..93ac912
+--- /dev/null
++++ b/client/visitor/monitor.go
+@@ -0,0 +1,151 @@
++package visitor
++
++import (
++	"net"
++	"sync"
++	"sync/atomic"
++
++	"github.com/fatedier/frp/pkg/util/monitorstate"
++)
++
++type monitorObservation struct {
++	errors         monitorstate.Errors
++	active         atomic.Int64
++	attempts       atomic.Int64
++	everConnected  atomic.Bool
++	fallback       atomic.Int64
++	fallbackFailed atomic.Bool
++	localClosed    atomic.Bool
++	p2p            atomic.Int32 // 0 unknown, 1 connecting, 2 connected, 3 failed
++}
++
++type MonitorStatus struct {
++	LocalState, RemoteState, P2PState, FallbackState string
++	Error                                            *monitorstate.Error
++}
++
++func (v *BaseVisitor) monitorStatus() MonitorStatus {
++	s := MonitorStatus{RemoteState: "unknown", P2PState: "unknown", FallbackState: "unknown", Error: v.observation.errors.Snapshot()}
++	if v.observation.active.Load() > 0 {
++		s.RemoteState = "connected"
++	} else if v.observation.attempts.Load() > 0 {
++		s.RemoteState = "connecting"
++	} else if s.Error != nil && s.Error.RecoveredAt == "" {
++		s.RemoteState = "error"
++	} else if v.observation.everConnected.Load() {
++		s.RemoteState = "closed"
++	}
++	switch v.observation.p2p.Load() {
++	case 1:
++		s.P2PState = "connecting"
++	case 2:
++		s.P2PState = "connected"
++	case 3:
++		s.P2PState = "failed"
++	}
++	if v.observation.fallback.Load() > 0 {
++		s.FallbackState = "active"
++	} else if v.observation.fallbackFailed.Load() {
++		s.FallbackState = "failed"
++	}
++	if v.observation.localClosed.Load() {
++		s.LocalState = "closed"
++	}
++	return s
++}
++
++// Session liveness is inspected without opening a test stream or starting NAT
++// traversal. A previous successful handshake alone is not a current connection.
++func (v *XTCPVisitor) monitorStatus() MonitorStatus {
++	s := v.BaseVisitor.monitorStatus()
++	connected := false
++	switch session := v.session.(type) {
++	case *KCPTunnelSession:
++		if !session.mu.TryRLock() {
++			s.P2PState = "unknown"
++			return s
++		}
++		connected = session.session != nil && !session.session.IsClosed()
++		session.mu.RUnlock()
++	case *QUICTunnelSession:
++		if !session.mu.TryRLock() {
++			s.P2PState = "unknown"
++			return s
++		}
++		connected = session.session != nil && session.session.Context().Err() == nil
++		session.mu.RUnlock()
++	}
++	if connected {
++		s.P2PState = "connected"
++	} else if s.P2PState == "connected" {
++		s.P2PState = "failed"
++	}
++	return s
++}
++
++type monitorConn struct {
++	net.Conn
++	once sync.Once
++	done func()
++}
++
++func (c *monitorConn) Close() error { err := c.Conn.Close(); c.once.Do(c.done); return err }
++func (c *monitorConn) CloseWithError(reason error) error {
++	if inner, ok := c.Conn.(interface{ CloseWithError(error) error }); ok {
++		err := inner.CloseWithError(reason)
++		c.once.Do(c.done)
++		return err
++	}
++	return c.Close()
++}
++
++func (v *BaseVisitor) monitorConnection(c net.Conn) net.Conn {
++	v.observation.active.Add(1)
++	v.observation.everConnected.Store(true)
++	v.observation.errors.Recover()
++	return &monitorConn{Conn: c, done: func() { v.observation.active.Add(-1) }}
++}
++
++// MonitorSnapshot is read-only, bounded and never waits behind a visitor start.
++// A listening socket is not evidence of a successful remote connection.
++func (vm *Manager) MonitorSnapshot(limit int) (map[string]MonitorStatus, string) {
++	if !vm.mu.TryRLock() {
++		return nil, "busy"
++	}
++	defer vm.mu.RUnlock()
++	if len(vm.cfgs) > limit {
++		return nil, "truncated"
++	}
++	out := make(map[string]MonitorStatus, len(vm.cfgs))
++	for name, cfg := range vm.cfgs {
++		s := MonitorStatus{LocalState: "starting", RemoteState: "unknown", P2PState: "unknown", FallbackState: "unknown"}
++		if err := vm.monitorErrors[name]; err != nil {
++			s.LocalState = "error"
++			c := *err
++			s.Error = &c
++		}
++		if v, ok := vm.visitors[name].(interface{ monitorStatus() MonitorStatus }); ok {
++			s = v.monitorStatus()
++			if s.LocalState != "closed" {
++				s.LocalState = "configured"
++				if cfg.GetBaseConfig().BindPort > 0 {
++					s.LocalState = "listening"
++				}
++			}
++			if s.Error == nil {
++				if e := vm.monitorErrors[name]; e != nil {
++					c := *e
++					s.Error = &c
++				}
++			}
++		}
++		if vm.monitorClosed {
++			s.LocalState = "closed"
++			s.RemoteState = "closed"
++			s.P2PState = "unknown"
++			s.FallbackState = "unknown"
++		}
++		out[name] = s
++	}
++	return out, "ready"
++}
+diff --git a/client/visitor/monitor_test.go b/client/visitor/monitor_test.go
+new file mode 100644
+index 0000000..8377408
+--- /dev/null
++++ b/client/visitor/monitor_test.go
+@@ -0,0 +1,97 @@
++package visitor
++
++import (
++	"context"
++	"net"
++	"testing"
++
++	v1 "github.com/fatedier/frp/pkg/config/v1"
++	"github.com/fatedier/frp/pkg/msg"
++)
++
++func TestVisitorMonitorListeningDoesNotClaimRemoteConnection(t *testing.T) {
++	listener, err := net.Listen("tcp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer listener.Close()
++	port := listener.Addr().(*net.TCPAddr).Port
++	cfg := &v1.STCPVisitorConfig{VisitorBaseConfig: v1.VisitorBaseConfig{Name: "test", Type: "stcp", ServerName: "remote", BindAddr: "127.0.0.1", BindPort: port}}
++	manager := NewManager(context.Background(), "run", &v1.ClientCommonConfig{}, nil, nil, nil)
++	defer manager.Close()
++	manager.UpdateAll([]v1.VisitorConfigurer{cfg})
++	values, state := manager.MonitorSnapshot(4)
++	if state != "ready" || values["test"].LocalState != "error" || values["test"].Error.Code != "listen_failed" || values["test"].Error.At == "" {
++		t.Fatalf("missing listen failure: %#v", values)
++	}
++	listener.Close()
++	manager.mu.Lock()
++	err = manager.startVisitor(cfg)
++	manager.mu.Unlock()
++	if err != nil {
++		t.Fatal(err)
++	}
++	values, _ = manager.MonitorSnapshot(4)
++	if values["test"].LocalState != "listening" || values["test"].RemoteState != "unknown" || values["test"].Error.RecoveredAt == "" {
++		t.Fatalf("listener fabricated remote state or lost recovery: %#v", values)
++	}
++	manager.mu.Lock()
++	_, state = manager.MonitorSnapshot(4)
++	manager.mu.Unlock()
++	if state != "busy" {
++		t.Fatal("monitor waits behind native lock")
++	}
++	if _, state = manager.MonitorSnapshot(0); state != "truncated" {
++		t.Fatal("missing bound")
++	}
++	manager.Close()
++	values, _ = manager.MonitorSnapshot(4)
++	if values["test"].LocalState != "closed" {
++		t.Fatal("closed visitor still listening")
++	}
++}
++
++func TestVisitorMonitorCountsActualConnectionLifetime(t *testing.T) {
++	v := &BaseVisitor{}
++	a, b := net.Pipe()
++	defer b.Close()
++	observed := v.monitorConnection(a)
++	if v.monitorStatus().RemoteState != "connected" {
++		t.Fatal("actual connection missing")
++	}
++	observed.Close()
++	observed.Close()
++	if v.monitorStatus().RemoteState != "closed" || v.observation.active.Load() != 0 {
++		t.Fatal("connection close not counted exactly once")
++	}
++	v.observation.errors.Fail("peer_failed", "visitor")
++	if v.monitorStatus().RemoteState != "error" {
++		t.Fatal("peer failure missing")
++	}
++}
++
++func TestVisitorMonitorPeerReplyDoesNotExportRawError(t *testing.T) {
++	a, b := net.Pipe()
++	defer a.Close()
++	defer b.Close()
++	server := msg.NewConn(b, msg.NewReadWriter(b, "v1"))
++	done := make(chan error, 1)
++	go func() {
++		if _, err := server.ReadMsg(); err != nil {
++			done <- err
++			return
++		}
++		done <- server.WriteMsg(&msg.NewVisitorConnResp{Error: "secretKey=do-not-export\n<script>"})
++	}()
++	base := &BaseVisitor{clientCfg: &v1.ClientCommonConfig{}, helper: &visitorHelperImpl{connectServerFn: func() (*msg.Conn, error) { return msg.NewConn(a, msg.NewReadWriter(a, "v1")), nil }}}
++	if _, err := base.dialRawVisitorConn(&v1.VisitorBaseConfig{ServerName: "missing"}); err == nil {
++		t.Fatal("expected server rejection")
++	}
++	if err := <-done; err != nil {
++		t.Fatal(err)
++	}
++	s := base.monitorStatus()
++	if s.RemoteState != "error" || s.Error == nil || s.Error.Code != "peer_failed" || s.Error.At == "" {
++		t.Fatalf("missing classified event: %#v", s)
++	}
++}
+diff --git a/client/visitor/visitor.go b/client/visitor/visitor.go
+index eccad01..9ed9b52 100644
+--- a/client/visitor/visitor.go
++++ b/client/visitor/visitor.go
+@@ -124,11 +124,12 @@ func NewVisitor(
+ }
+ 
+ type BaseVisitor struct {
+-	clientCfg  *v1.ClientCommonConfig
+-	helper     Helper
+-	l          net.Listener
+-	internalLn *netpkg.InternalListener
+-	plugin     plugin.Plugin
++	observation monitorObservation
++	clientCfg   *v1.ClientCommonConfig
++	helper      Helper
++	l           net.Listener
++	internalLn  *netpkg.InternalListener
++	plugin      plugin.Plugin
+ 
+ 	mu  sync.RWMutex
+ 	ctx context.Context
+@@ -143,6 +144,9 @@ func (v *BaseVisitor) acceptLoop(l net.Listener, name string, handleConn func(ne
+ 	for {
+ 		conn, err := l.Accept()
+ 		if err != nil {
++			if l == v.l {
++				v.observation.localClosed.Store(true)
++			}
+ 			xl.Warnf("%s listener closed", name)
+ 			return
+ 		}
+@@ -151,6 +155,7 @@ func (v *BaseVisitor) acceptLoop(l net.Listener, name string, handleConn func(ne
+ }
+ 
+ func (v *BaseVisitor) Close() {
++	v.observation.localClosed.Store(true)
+ 	if v.l != nil {
+ 		v.l.Close()
+ 	}
+@@ -162,7 +167,14 @@ func (v *BaseVisitor) Close() {
+ 	}
+ }
+ 
+-func (v *BaseVisitor) dialRawVisitorConn(cfg *v1.VisitorBaseConfig) (net.Conn, error) {
++func (v *BaseVisitor) dialRawVisitorConn(cfg *v1.VisitorBaseConfig) (result net.Conn, resultErr error) {
++	v.observation.attempts.Add(1)
++	defer func() {
++		v.observation.attempts.Add(-1)
++		if resultErr != nil {
++			v.observation.errors.Fail("peer_failed", "visitor")
++		}
++	}()
+ 	visitorConn, err := v.helper.ConnectServer()
+ 	if err != nil {
+ 		return nil, fmt.Errorf("connect to server error: %v", err)
+@@ -197,7 +209,7 @@ func (v *BaseVisitor) dialRawVisitorConn(cfg *v1.VisitorBaseConfig) (net.Conn, e
+ 		visitorConn.Close()
+ 		return nil, fmt.Errorf("start new visitor connection error: %s", newVisitorConnRespMsg.Error)
+ 	}
+-	return visitorConn, nil
++	return v.monitorConnection(visitorConn), nil
+ }
+ 
+ func wrapVisitorConn(conn io.ReadWriteCloser, cfg *v1.VisitorBaseConfig) (io.ReadWriteCloser, func(), error) {
+diff --git a/client/visitor/visitor_manager.go b/client/visitor/visitor_manager.go
+index 3e614f7..e857ade 100644
+--- a/client/visitor/visitor_manager.go
++++ b/client/visitor/visitor_manager.go
+@@ -27,15 +27,18 @@ import (
+ 	v1 "github.com/fatedier/frp/pkg/config/v1"
+ 	"github.com/fatedier/frp/pkg/msg"
+ 	"github.com/fatedier/frp/pkg/transport"
++	"github.com/fatedier/frp/pkg/util/monitorstate"
+ 	"github.com/fatedier/frp/pkg/util/xlog"
+ 	"github.com/fatedier/frp/pkg/vnet"
+ )
+ 
+ type Manager struct {
+-	clientCfg *v1.ClientCommonConfig
+-	cfgs      map[string]v1.VisitorConfigurer
+-	visitors  map[string]Visitor
+-	helper    Helper
++	monitorErrors map[string]*monitorstate.Error
++	monitorClosed bool
++	clientCfg     *v1.ClientCommonConfig
++	cfgs          map[string]v1.VisitorConfigurer
++	visitors      map[string]Visitor
++	helper        Helper
+ 
+ 	checkInterval           time.Duration
+ 	keepVisitorsRunningOnce sync.Once
+@@ -60,6 +63,7 @@ func NewManager(
+ 		udpPacketCodec = udpPacketCodecs[0]
+ 	}
+ 	m := &Manager{
++		monitorErrors: make(map[string]*monitorstate.Error),
+ 		clientCfg:     clientCfg,
+ 		cfgs:          make(map[string]v1.VisitorConfigurer),
+ 		visitors:      make(map[string]Visitor),
+@@ -107,6 +111,7 @@ func (vm *Manager) keepVisitorsRunning() {
+ 
+ func (vm *Manager) Close() {
+ 	vm.mu.Lock()
++	vm.monitorClosed = true
+ 	defer vm.mu.Unlock()
+ 	for _, v := range vm.visitors {
+ 		v.Close()
+@@ -122,11 +127,25 @@ func (vm *Manager) Close() {
+ func (vm *Manager) startVisitor(cfg v1.VisitorConfigurer) (err error) {
+ 	xl := xlog.FromContextSafe(vm.ctx)
+ 	name := cfg.GetBaseConfig().Name
++	if vm.monitorErrors == nil {
++		vm.monitorErrors = make(map[string]*monitorstate.Error)
++	}
++	code := "plugin_failed"
++	defer func() {
++		if err != nil {
++			vm.monitorErrors[name] = &monitorstate.Error{Code: code, Stage: "visitor", At: time.Now().UTC().Format(time.RFC3339Nano)}
++		} else if previous := vm.monitorErrors[name]; previous != nil && previous.RecoveredAt == "" {
++			c := *previous
++			c.RecoveredAt = time.Now().UTC().Format(time.RFC3339Nano)
++			vm.monitorErrors[name] = &c
++		}
++	}()
+ 	visitor, err := NewVisitor(vm.ctx, cfg, vm.clientCfg, vm.helper)
+ 	if err != nil {
+ 		xl.Warnf("new visitor error: %v", err)
+ 		return
+ 	}
++	code = "listen_failed"
+ 	err = visitor.Run()
+ 	if err != nil {
+ 		xl.Warnf("start error: %v", err)
+@@ -163,6 +182,7 @@ func (vm *Manager) UpdateAll(cfgs []v1.VisitorConfigurer) {
+ 		if del {
+ 			delNames = append(delNames, name)
+ 			delete(vm.cfgs, name)
++			delete(vm.monitorErrors, name)
+ 			if visitor, ok := vm.visitors[name]; ok {
+ 				visitor.Close()
+ 			}
+diff --git a/client/visitor/xtcp.go b/client/visitor/xtcp.go
+index e7a6089..787e3e9 100644
+--- a/client/visitor/xtcp.go
++++ b/client/visitor/xtcp.go
+@@ -163,8 +163,11 @@ func (sv *XTCPVisitor) handleConn(userConn net.Conn) {
+ 		defer cancel()
+ 		ctx = timeoutCtx
+ 	}
++	sv.observation.attempts.Add(1)
+ 	tunnelConn, err := sv.openTunnel(ctx)
++	sv.observation.attempts.Add(-1)
+ 	if err != nil {
++		sv.observation.errors.Fail("nat_traversal_failed", "visitor")
+ 		xl.Errorf("open tunnel error: %v", err)
+ 		tunnelErr = err
+ 
+@@ -174,14 +177,20 @@ func (sv *XTCPVisitor) handleConn(userConn net.Conn) {
+ 		}
+ 
+ 		xl.Debugf("try to transfer connection to visitor: %s", sv.cfg.FallbackTo)
+-		if err := sv.helper.TransferConn(sv.cfg.FallbackTo, userConn); err != nil {
++		sv.observation.fallback.Add(1)
++		wrapped := &monitorConn{Conn: userConn, done: func() { sv.observation.fallback.Add(-1) }}
++		if err := sv.helper.TransferConn(sv.cfg.FallbackTo, wrapped); err != nil {
++			wrapped.once.Do(wrapped.done)
++			sv.observation.fallbackFailed.Store(true)
+ 			xl.Errorf("transfer connection to visitor %s error: %v", sv.cfg.FallbackTo, err)
+ 			return
+ 		}
++		sv.observation.fallbackFailed.Store(false)
+ 		isConnTransferred = true
+ 		return
+ 	}
+ 
++	tunnelConn = sv.monitorConnection(tunnelConn)
+ 	muxConnRWCloser, recycleFn, err := wrapVisitorConn(tunnelConn, sv.cfg.GetBaseConfig())
+ 	if err != nil {
+ 		xl.Errorf("%v", err)
+@@ -236,6 +245,7 @@ func (sv *XTCPVisitor) getTunnelConn(ctx context.Context) (net.Conn, error) {
+ 		return conn, nil
+ 	}
+ 	sv.session.Close()
++	sv.observation.p2p.Store(3)
+ 
+ 	select {
+ 	case sv.startTunnelCh <- struct{}{}:
+@@ -250,6 +260,12 @@ func (sv *XTCPVisitor) getTunnelConn(ctx context.Context) (net.Conn, error) {
+ // 3. MakeNATHole
+ // 4. Create a tunnel session using an underlying UDP connection.
+ func (sv *XTCPVisitor) makeNatHole() {
++	sv.observation.p2p.Store(1)
++	defer func() {
++		if sv.observation.p2p.CompareAndSwap(1, 3) {
++			sv.observation.errors.Fail("nat_traversal_failed", "visitor")
++		}
++	}()
+ 	xl := xlog.FromContextSafe(sv.ctx)
+ 	targetProxyName := naming.BuildTargetServerProxyName(sv.clientCfg.User, sv.cfg.ServerUser, sv.cfg.ServerName)
+ 	xl.Tracef("makeNatHole start")
+@@ -316,6 +332,8 @@ func (sv *XTCPVisitor) makeNatHole() {
+ 		xl.Warnf("init tunnel session error: %v", err)
+ 		return
+ 	}
++	sv.observation.p2p.Store(2)
++	sv.observation.errors.Recover()
+ }
+ 
+ type TunnelSession interface {
+diff --git a/cmd/frpc/sub/root.go b/cmd/frpc/sub/root.go
+index 4a6503c..2983f7f 100644
+--- a/cmd/frpc/sub/root.go
++++ b/cmd/frpc/sub/root.go
+@@ -147,6 +147,8 @@ func runClientWithAggregator(result *config.ClientConfigLoadResult, unsafeFeatur
+ 		return fmt.Errorf("failed to set config source: %w", err)
+ 	}
+ 
++	configSource.SetMonitorOrigins(result.ProxyOrigins, result.VisitorOrigins)
++
+ 	var storeSource *source.StoreSource
+ 
+ 	if result.Common.Store.IsEnabled() {
+diff --git a/pkg/config/load.go b/pkg/config/load.go
+index 2aaf145..1530fb9 100644
+--- a/pkg/config/load.go
++++ b/pkg/config/load.go
+@@ -338,6 +338,10 @@ type ClientConfigLoadResult struct {
+ 
+ 	// IsLegacyFormat indicates whether the config file is in legacy INI format.
+ 	IsLegacyFormat bool
++
++	// Private monitor provenance; never interpreted by native forwarding.
++	ProxyOrigins   map[string]string
++	VisitorOrigins map[string]string
+ }
+ 
+ // LoadClientConfigResult loads and parses a client configuration file.
+@@ -376,6 +380,19 @@ func LoadClientConfigResult(path string, strict bool) (*ClientConfigLoadResult,
+ 		}
+ 	}
+ 
++	result.ProxyOrigins = make(map[string]string)
++	result.VisitorOrigins = make(map[string]string)
++	origin := "file"
++	if result.IsLegacyFormat {
++		origin = "unknown"
++	}
++	for _, p := range result.Proxies {
++		result.ProxyOrigins[p.GetBaseConfig().Name] = origin
++	}
++	for _, v := range result.Visitors {
++		result.VisitorOrigins[v.GetBaseConfig().Name] = origin
++	}
++
+ 	// Load additional config from includes.
+ 	// legacy ini format already handle this in ParseClientConfig.
+ 	if len(result.Common.IncludeConfigFiles) > 0 && !result.IsLegacyFormat {
+@@ -383,6 +400,12 @@ func LoadClientConfigResult(path string, strict bool) (*ClientConfigLoadResult,
+ 		if err != nil {
+ 			return nil, err
+ 		}
++		for _, p := range extProxyCfgs {
++			result.ProxyOrigins[p.GetBaseConfig().Name] = "include"
++		}
++		for _, v := range extVisitorCfgs {
++			result.VisitorOrigins[v.GetBaseConfig().Name] = "include"
++		}
+ 		result.Proxies = append(result.Proxies, extProxyCfgs...)
+ 		result.Visitors = append(result.Visitors, extVisitorCfgs...)
+ 	}
+diff --git a/pkg/config/monitor_origins_test.go b/pkg/config/monitor_origins_test.go
+new file mode 100644
+index 0000000..2096a16
+--- /dev/null
++++ b/pkg/config/monitor_origins_test.go
+@@ -0,0 +1,28 @@
++package config
++
++import (
++	"os"
++	"path/filepath"
++	"strconv"
++	"testing"
++)
++
++func TestLoadMonitorOriginsDistinguishesIncludes(t *testing.T) {
++	dir := t.TempDir()
++	included := filepath.Join(dir, "extra.toml")
++	main := filepath.Join(dir, "frpc.toml")
++	if err := os.WriteFile(included, []byte("[[proxies]]\nname='included'\ntype='tcp'\nlocalPort=8080\n"), 0600); err != nil {
++		t.Fatal(err)
++	}
++	text := "includes=[" + strconv.Quote(included) + "]\n[[visitors]]\nname='main'\ntype='stcp'\nserverName='peer'\nbindPort=18000\n"
++	if err := os.WriteFile(main, []byte(text), 0600); err != nil {
++		t.Fatal(err)
++	}
++	result, err := LoadClientConfigResult(main, true)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if result.ProxyOrigins["included"] != "include" || result.VisitorOrigins["main"] != "file" {
++		t.Fatalf("origins not preserved: %#v %#v", result.ProxyOrigins, result.VisitorOrigins)
++	}
++}
+diff --git a/pkg/config/source/base_source.go b/pkg/config/source/base_source.go
+index ab1f59f..ddfe1db 100644
+--- a/pkg/config/source/base_source.go
++++ b/pkg/config/source/base_source.go
+@@ -16,6 +16,7 @@ package source
+ 
+ import (
+ 	"sync"
++	"time"
+ 
+ 	v1 "github.com/fatedier/frp/pkg/config/v1"
+ )
+@@ -24,7 +25,8 @@ import (
+ // It manages proxy/visitor storage.
+ // Concrete types (ConfigSource, StoreSource) embed this struct.
+ type baseSource struct {
+-	mu sync.RWMutex
++	monitorReadAt time.Time
++	mu            sync.RWMutex
+ 
+ 	proxies  map[string]v1.ProxyConfigurer
+ 	visitors map[string]v1.VisitorConfigurer
+diff --git a/pkg/config/source/config_source.go b/pkg/config/source/config_source.go
+index 95c8cfa..dcc8530 100644
+--- a/pkg/config/source/config_source.go
++++ b/pkg/config/source/config_source.go
+@@ -14,12 +14,17 @@
+ 
+ package source
+ 
+-import v1 "github.com/fatedier/frp/pkg/config/v1"
++import (
++	v1 "github.com/fatedier/frp/pkg/config/v1"
++	"time"
++)
+ 
+ // ConfigSource implements Source for in-memory configuration.
+ // All operations are thread-safe.
+ type ConfigSource struct {
+ 	baseSource
++	monitorProxyOrigins   map[string]string
++	monitorVisitorOrigins map[string]string
+ }
+ 
+ func NewConfigSource() *ConfigSource {
+@@ -51,5 +56,6 @@ func (s *ConfigSource) ReplaceAll(proxies []v1.ProxyConfigurer, visitors []v1.Vi
+ 	}
+ 	s.proxies = nextProxies
+ 	s.visitors = nextVisitors
++	s.monitorReadAt = time.Now().UTC()
+ 	return nil
+ }
+diff --git a/pkg/config/source/monitor_detail.go b/pkg/config/source/monitor_detail.go
+new file mode 100644
+index 0000000..8eea336
+--- /dev/null
++++ b/pkg/config/source/monitor_detail.go
+@@ -0,0 +1,117 @@
++package source
++
++import (
++	"cmp"
++	"maps"
++	"slices"
++	"time"
++
++	v1 "github.com/fatedier/frp/pkg/config/v1"
++)
++
++// MonitorEntry is a defensive, private configuration copy. Callers must project
++// an explicit field allowlist before crossing the monitoring boundary.
++type MonitorEntry[T any] struct {
++	Config          T
++	Source          string
++	ShadowedSources []string
++}
++
++type MonitorConfiguration struct {
++	ReadAt   time.Time `json:"-"`
++	Proxies  []MonitorEntry[v1.ProxyConfigurer]
++	Visitors []MonitorEntry[v1.VisitorConfigurer]
++	HasStore bool
++}
++
++func (s *ConfigSource) SetMonitorOrigins(proxies, visitors map[string]string) {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	s.monitorProxyOrigins = maps.Clone(proxies)
++	s.monitorVisitorOrigins = maps.Clone(visitors)
++}
++
++// MonitorDetail never waits behind a native mutation, never returns a partial
++// configuration and preserves native enabled-source precedence.
++func (a *Aggregator) MonitorDetail(limit int) (MonitorConfiguration, string) {
++	out := MonitorConfiguration{}
++	if !a.mu.TryRLock() {
++		return out, "busy"
++	}
++	defer a.mu.RUnlock()
++	proxies := make(map[string]MonitorEntry[v1.ProxyConfigurer])
++	visitors := make(map[string]MonitorEntry[v1.VisitorConfigurer])
++	count := 0
++	for _, src := range a.getSourcesLocked() {
++		var base *baseSource
++		var po, vo map[string]string
++		kind := "unknown"
++		switch s := src.(type) {
++		case *ConfigSource:
++			base = &s.baseSource
++			kind = "file"
++		case *StoreSource:
++			base = &s.baseSource
++			kind = "store"
++			out.HasStore = true
++		default:
++			return MonitorConfiguration{}, "unavailable"
++		}
++		if !base.mu.TryRLock() {
++			return MonitorConfiguration{}, "busy"
++		}
++		if s, ok := src.(*ConfigSource); ok {
++			po, vo = s.monitorProxyOrigins, s.monitorVisitorOrigins
++		}
++		if base.monitorReadAt.After(out.ReadAt) {
++			out.ReadAt = base.monitorReadAt
++		}
++		count += len(base.proxies) + len(base.visitors)
++		if count > limit {
++			base.mu.RUnlock()
++			return MonitorConfiguration{}, "truncated"
++		}
++		for name, p := range base.proxies {
++			origin := kind
++			if po[name] != "" {
++				origin = po[name]
++			}
++			next := MonitorEntry[v1.ProxyConfigurer]{Config: p.Clone(), Source: origin}
++			if old, ok := proxies[name]; ok {
++				if enabled(p.GetBaseConfig().Enabled) || !enabled(old.Config.GetBaseConfig().Enabled) {
++					next.ShadowedSources = append(slices.Clone(old.ShadowedSources), old.Source)
++				} else {
++					old.ShadowedSources = append(old.ShadowedSources, origin)
++					next = old
++				}
++			}
++			proxies[name] = next
++		}
++		for name, v := range base.visitors {
++			origin := kind
++			if vo[name] != "" {
++				origin = vo[name]
++			}
++			next := MonitorEntry[v1.VisitorConfigurer]{Config: v.Clone(), Source: origin}
++			if old, ok := visitors[name]; ok {
++				if enabled(v.GetBaseConfig().Enabled) || !enabled(old.Config.GetBaseConfig().Enabled) {
++					next.ShadowedSources = append(slices.Clone(old.ShadowedSources), old.Source)
++				} else {
++					old.ShadowedSources = append(old.ShadowedSources, origin)
++					next = old
++				}
++			}
++			visitors[name] = next
++		}
++		base.mu.RUnlock()
++	}
++	out.Proxies = slices.SortedFunc(maps.Values(proxies), func(a, b MonitorEntry[v1.ProxyConfigurer]) int {
++		return cmp.Compare(a.Config.GetBaseConfig().Name, b.Config.GetBaseConfig().Name)
++	})
++	out.Visitors = slices.SortedFunc(maps.Values(visitors), func(a, b MonitorEntry[v1.VisitorConfigurer]) int {
++		return cmp.Compare(a.Config.GetBaseConfig().Name, b.Config.GetBaseConfig().Name)
++	})
++	return out, "ready"
++}
++
++func enabled(v *bool) bool { return v == nil || *v }
+diff --git a/pkg/config/source/monitor_detail_test.go b/pkg/config/source/monitor_detail_test.go
+new file mode 100644
+index 0000000..679f5a0
+--- /dev/null
++++ b/pkg/config/source/monitor_detail_test.go
+@@ -0,0 +1,70 @@
++package source
++
++import (
++	"path/filepath"
++	"testing"
++
++	v1 "github.com/fatedier/frp/pkg/config/v1"
++)
++
++func TestMonitorDetailPreservesPrecedenceOriginsAndVisitors(t *testing.T) {
++	disabled := false
++	p := &v1.TCPProxyConfig{ProxyBaseConfig: v1.ProxyBaseConfig{Name: "same", Type: "tcp"}, RemotePort: 1001}
++	v := &v1.STCPVisitorConfig{VisitorBaseConfig: v1.VisitorBaseConfig{Name: "visitor", Type: "stcp", Enabled: &disabled, ServerName: "private"}}
++	c := NewConfigSource()
++	if err := c.ReplaceAll([]v1.ProxyConfigurer{p}, []v1.VisitorConfigurer{v}); err != nil {
++		t.Fatal(err)
++	}
++	c.SetMonitorOrigins(map[string]string{"same": "include"}, map[string]string{"visitor": "file"})
++	store, err := NewStoreSource(StoreSourceConfig{Path: filepath.Join(t.TempDir(), "store.json")})
++	if err != nil {
++		t.Fatal(err)
++	}
++	shadow := p.Clone()
++	shadow.GetBaseConfig().Enabled = &disabled
++	if err = store.AddProxy(shadow); err != nil {
++		t.Fatal(err)
++	}
++	a := NewAggregator(c)
++	a.SetStoreSource(store)
++	snapshot, state := a.MonitorDetail(10)
++	if state != "ready" || len(snapshot.Proxies) != 1 || len(snapshot.Visitors) != 1 {
++		t.Fatalf("incomplete snapshot: %#v %s", snapshot, state)
++	}
++	readAt := snapshot.ReadAt
++	if readAt.IsZero() {
++		t.Fatal("missing real source load/update time")
++	}
++	again, _ := a.MonitorDetail(10)
++	if !again.ReadAt.Equal(readAt) {
++		t.Fatal("sampling advanced source read time")
++	}
++	if snapshot.Proxies[0].Source != "include" || len(snapshot.Proxies[0].ShadowedSources) != 1 || snapshot.Proxies[0].ShadowedSources[0] != "store" || snapshot.Visitors[0].Source != "file" {
++		t.Fatal("disabled store changed native precedence or lost origin")
++	}
++	snapshot.Proxies[0].Config.GetBaseConfig().Name = "mutated"
++	native, _, err := a.Load()
++	if err != nil || native[0].GetBaseConfig().Name != "same" {
++		t.Fatal("monitor modified native configuration")
++	}
++	shadow.GetBaseConfig().Enabled = nil
++	if err = store.UpdateProxy(shadow); err != nil {
++		t.Fatal(err)
++	}
++	snapshot, state = a.MonitorDetail(10)
++	if state != "ready" || snapshot.Proxies[0].Source != "store" || snapshot.Proxies[0].ShadowedSources[0] != "include" {
++		t.Fatal("enabled store failed to win")
++	}
++	if snapshot.ReadAt.Before(readAt) {
++		t.Fatal("source update time moved backwards")
++	}
++	c.mu.Lock()
++	_, state = a.MonitorDetail(10)
++	c.mu.Unlock()
++	if state != "busy" {
++		t.Fatal("waited for busy source")
++	}
++	if _, state = a.MonitorDetail(1); state != "truncated" {
++		t.Fatal("oversized source was not rejected")
++	}
++}
+diff --git a/pkg/config/source/store.go b/pkg/config/source/store.go
+index f568f88..25eb59e 100644
+--- a/pkg/config/source/store.go
++++ b/pkg/config/source/store.go
+@@ -19,6 +19,7 @@ import (
+ 	"fmt"
+ 	"os"
+ 	"path/filepath"
++	"time"
+ 
+ 	v1 "github.com/fatedier/frp/pkg/config/v1"
+ 	"github.com/fatedier/frp/pkg/util/jsonx"
+@@ -119,6 +120,7 @@ func (s *StoreSource) loadFromFileUnlocked() error {
+ 		s.visitors[name] = visitorCfg
+ 	}
+ 
++	s.monitorReadAt = time.Now().UTC()
+ 	return nil
+ }
+ 
+@@ -174,6 +176,7 @@ func (s *StoreSource) saveToFileUnlocked() error {
+ 		return fmt.Errorf("failed to rename temp file: %w", err)
+ 	}
+ 
++	s.monitorReadAt = time.Now().UTC()
+ 	return nil
+ }
+ 
+diff --git a/pkg/util/monitorstate/error.go b/pkg/util/monitorstate/error.go
+new file mode 100644
+index 0000000..4141037
+--- /dev/null
++++ b/pkg/util/monitorstate/error.go
+@@ -0,0 +1,43 @@
++// Package monitorstate records fixed, credential-free lifecycle events.
++package monitorstate
++
++import (
++	"sync/atomic"
++	"time"
++)
++
++type Error struct{ Code, Stage, At, RecoveredAt string }
++type Errors struct{ current atomic.Pointer[Error] }
++
++func (e *Errors) Fail(code, stage string) {
++	for {
++		old := e.current.Load()
++		if old != nil && old.Code == code && old.Stage == stage && old.RecoveredAt == "" {
++			return
++		}
++		next := &Error{Code: code, Stage: stage, At: time.Now().UTC().Format(time.RFC3339Nano)}
++		if e.current.CompareAndSwap(old, next) {
++			return
++		}
++	}
++}
++func (e *Errors) Recover() {
++	for {
++		old := e.current.Load()
++		if old == nil || old.RecoveredAt != "" {
++			return
++		}
++		next := *old
++		next.RecoveredAt = time.Now().UTC().Format(time.RFC3339Nano)
++		if e.current.CompareAndSwap(old, &next) {
++			return
++		}
++	}
++}
++func (e *Errors) Snapshot() *Error {
++	if v := e.current.Load(); v != nil {
++		c := *v
++		return &c
++	}
++	return nil
++}
+diff --git a/pkg/util/monitorstate/error_test.go b/pkg/util/monitorstate/error_test.go
+new file mode 100644
+index 0000000..ae65df8
+--- /dev/null
++++ b/pkg/util/monitorstate/error_test.go
+@@ -0,0 +1,38 @@
++package monitorstate
++
++import (
++	"sync"
++	"testing"
++)
++
++func TestErrorRecordsRecoveryWithoutRawText(t *testing.T) {
++	var e Errors
++	e.Fail("listen_failed", "visitor")
++	first := e.Snapshot()
++	e.Fail("listen_failed", "visitor")
++	if e.Snapshot().At != first.At {
++		t.Fatal("repeated error replaced first event time")
++	}
++	e.Recover()
++	next := e.Snapshot()
++	if next.RecoveredAt == "" || next.At != first.At {
++		t.Fatal("recovery did not preserve error event")
++	}
++	next.Code = "changed"
++	if e.Snapshot().Code != "listen_failed" {
++		t.Fatal("snapshot aliases state")
++	}
++	var wg sync.WaitGroup
++	for i := 0; i < 8; i++ {
++		wg.Add(1)
++		go func() {
++			defer wg.Done()
++			for j := 0; j < 100; j++ {
++				e.Fail("peer_failed", "visitor")
++				e.Recover()
++				_ = e.Snapshot()
++			}
++		}()
++	}
++	wg.Wait()
++}
+diff --git a/server/monitor.go b/server/monitor.go
+index 5674d31..ed5f601 100644
+--- a/server/monitor.go
++++ b/server/monitor.go
+@@ -51,13 +51,21 @@ func (svr *Service) monitorSnapshot() shared.ServerSnapshot {
+ 		if id == "" {
+ 			id = c.RunID
+ 		}
+-		live[p.GetName()] = shared.ServerProxy{Name: p.GetName(), Type: p.GetConfigurer().GetBaseConfig().Type, User: c.User, ClientID: id, Online: true}
++		endpoints, ok := svr.monitorEndpoints(p.GetConfigurer())
++		if !ok {
++			out.State = "truncated"
++			out.Clients = nil
++			out.Proxies = nil
++			return out
++		}
++		live[p.GetName()] = shared.ServerProxy{Endpoints: endpoints, Name: p.GetName(), Type: p.GetConfigurer().GetBaseConfig().Type, User: c.User, ClientID: id, Online: true}
+ 	}
+ 	for _, p := range stats {
+ 		v := shared.ServerProxy{Name: p.Name, Type: p.Type, User: p.User, ClientID: p.ClientID, Connections: monitorCounter(p.CurConns), TodayRXBytes: monitorCounter(p.TodayTrafficIn), TodayTXBytes: monitorCounter(p.TodayTrafficOut)}
+ 		if current, ok := live[p.Name]; ok {
+ 			if current.User == p.User && current.ClientID == p.ClientID && current.Type == p.Type {
+ 				v.Online = true
++				v.Endpoints = current.Endpoints
+ 			} else {
+ 				v = current
+ 			}
+diff --git a/server/monitor_detail.go b/server/monitor_detail.go
+new file mode 100644
+index 0000000..51ddcda
+--- /dev/null
++++ b/server/monitor_detail.go
+@@ -0,0 +1,73 @@
++package server
++
++import (
++	"github.com/fatedier/frp/extension/frpmonitor/shared"
++	v1 "github.com/fatedier/frp/pkg/config/v1"
++)
++
++// Only live proxies are passed here: Manager.Add follows successful Run. TCP
++// and UDP Run replace RemotePort with the allocated port, including port zero.
++// ProxyBindAddr may be a wildcard/private address, never a public reachability
++// claim. Virtual-host endpoints use the actual server listener configuration.
++func (svr *Service) monitorEndpoints(cfg v1.ProxyConfigurer) ([]shared.FRPEndpoint, bool) {
++	out := []shared.FRPEndpoint{}
++	kind := cfg.GetBaseConfig().Type
++	port := 0
++	var domains []string
++	sub := ""
++	paths := []string{""}
++	switch c := cfg.(type) {
++	case *v1.TCPProxyConfig:
++		port = c.RemotePort
++		domains = []string{svr.cfg.ProxyBindAddr}
++	case *v1.UDPProxyConfig:
++		port = c.RemotePort
++		domains = []string{svr.cfg.ProxyBindAddr}
++	case *v1.HTTPProxyConfig:
++		port = svr.cfg.VhostHTTPPort
++		domains = c.CustomDomains
++		sub = c.SubDomain
++		if len(c.Locations) > 0 {
++			paths = c.Locations
++		}
++	case *v1.HTTPSProxyConfig:
++		port = svr.cfg.VhostHTTPSPort
++		domains = c.CustomDomains
++		sub = c.SubDomain
++	case *v1.TCPMuxProxyConfig:
++		port = svr.cfg.TCPMuxHTTPConnectPort
++		domains = c.CustomDomains
++		sub = c.SubDomain
++	default:
++		return []shared.FRPEndpoint{{Kind: "visitor", Source: "observed"}}, true
++	}
++	if port <= 0 || port > 65535 {
++		return out, true
++	}
++	appendHost := func(host string) bool {
++		if host == "" {
++			return true
++		}
++		for _, path := range paths {
++			p := uint16(port)
++			e := shared.FRPEndpoint{Kind: kind, Source: "observed", Host: host, Port: &p, Path: path}
++			if e.Validate() != nil {
++				return false
++			}
++			out = append(out, e)
++			if len(out) > shared.MaxDetailEndpoints {
++				return false
++			}
++		}
++		return true
++	}
++	for _, host := range domains {
++		if !appendHost(host) {
++			return nil, false
++		}
++	}
++	if sub != "" && !appendHost(sub+"."+svr.cfg.SubDomainHost) {
++		return nil, false
++	}
++	return out, true
++}
+diff --git a/server/monitor_detail_test.go b/server/monitor_detail_test.go
+new file mode 100644
+index 0000000..e95c5f9
+--- /dev/null
++++ b/server/monitor_detail_test.go
+@@ -0,0 +1,23 @@
++package server
++
++import (
++	"testing"
++
++	v1 "github.com/fatedier/frp/pkg/config/v1"
++)
++
++func TestMonitorEndpointsUseServerListenerFacts(t *testing.T) {
++	s := &Service{cfg: &v1.ServerConfig{ProxyBindAddr: "::", VhostHTTPPort: 8080, SubDomainHost: "example.invalid"}}
++	e, ok := s.monitorEndpoints(&v1.TCPProxyConfig{ProxyBaseConfig: v1.ProxyBaseConfig{Type: "tcp"}, RemotePort: 12345})
++	if !ok || len(e) != 1 || e[0].Host != "::" || *e[0].Port != 12345 || e[0].Source != "observed" {
++		t.Fatal("actual listener lost")
++	}
++	e, ok = s.monitorEndpoints(&v1.HTTPProxyConfig{ProxyBaseConfig: v1.ProxyBaseConfig{Type: "http"}, DomainConfig: v1.DomainConfig{CustomDomains: []string{"first.invalid"}, SubDomain: "app"}, Locations: []string{"/v1", "/v2"}})
++	if !ok || len(e) != 4 || e[3].Host != "app.example.invalid" || e[3].Path != "/v2" || *e[3].Port != 8080 {
++		t.Fatalf("incorrect registered vhost routes: %#v", e)
++	}
++	e, ok = s.monitorEndpoints(&v1.STCPProxyConfig{ProxyBaseConfig: v1.ProxyBaseConfig{Type: "stcp"}})
++	if !ok || len(e) != 1 || e[0].Kind != "visitor" || e[0].Host != "" || e[0].Port != nil {
++		t.Fatal("private proxy fabricated public endpoint")
++	}
++}

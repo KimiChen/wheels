@@ -4,7 +4,8 @@
 All sockets use dynamic loopback ports. Configurations/tokens are generated into
 private temporary directories. The upstream binaries must be separately built
 from the exact upstream.lock archive; monitoring-disabled enhanced binaries are
-explicitly rejected as upstream inputs.
+explicitly rejected as upstream inputs. BUILD.json checks local provenance and
+binary hash consistency; it is not a signed attestation.
 """
 from __future__ import annotations
 
@@ -30,6 +31,7 @@ import local
 from smoke import (LOOPBACK, PAYLOAD, SmokeFailure, child, child_environment,
                    echo_matches, echo_server, interrupted, port_open,
                    positive_timeout, reserve_port, verify, wait_for, write_private)
+from build_original import verify_original_binaries, frp as original_pipeline
 
 
 class UDPEcho(socketserver.BaseRequestHandler):
@@ -175,6 +177,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("agent", "server", "original-agent", "original-server"):
         parser.add_argument("--" + name, type=Path, required=True)
+    parser.add_argument("--original-manifest", type=Path,
+                        help="Original BUILD.json; defaults to the common original binary directory")
     parser.add_argument("--wire", choices=("v1", "v2"), action="append")
     parser.add_argument("--timeout", type=positive_timeout, default=30.0)
     args = parser.parse_args(argv)
@@ -183,8 +187,16 @@ def main(argv: list[str] | None = None) -> int:
         if not binary.is_file() or not os.access(binary, os.X_OK):
             parser.error("each binary must be an existing native executable")
     agent, server, original_agent, original_server = [b.resolve() for b in binaries]
+    if args.original_manifest is None and original_agent.parent != original_server.parent:
+        parser.error("separate original binary directories require --original-manifest")
+    manifest = args.original_manifest or original_agent.parent / "BUILD.json"
+    try:
+        provenance = verify_original_binaries(original_agent, original_server, manifest)
+    except (original_pipeline.PipelineError, OSError, ValueError) as exc:
+        raise SmokeFailure(f"original input provenance check failed: {exc}") from exc
     if not is_original(original_agent) or not is_original(original_server):
         raise SmokeFailure("upstream inputs are enhanced binaries; build exact original archive separately")
+    print(f"PASS original provenance: {provenance['upstream']['commit']}; local manifest and binary hashes match", flush=True)
     for wire in dict.fromkeys(args.wire or ("v1", "v2")):
         run_pair(agent, server, "enhanced-to-enhanced", wire, True, True, args.timeout)
         run_pair(original_agent, server, "original-to-enhanced", wire, False, True, args.timeout)
