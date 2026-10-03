@@ -79,6 +79,7 @@ type Change struct {
 	Kind      string
 	Name      string
 	Type      string
+	CloneFrom string
 	Fields    map[string]json.RawMessage
 	Secrets   map[string]SecretAction
 }

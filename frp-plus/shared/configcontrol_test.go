@@ -342,3 +342,35 @@ func TestConfigControlRawNullDoesNotRelaxLegacyFrames(t *testing.T) {
 		t.Fatal("legacy ok observation admitted null")
 	}
 }
+
+func TestConfigCloneWireIsAnIdentityInstructionOnly(t *testing.T) {
+	c := controlCommand("prepare")
+	c.Changes[0].CloneFrom = "original"
+	if _, err := DecodeFrame(encodeFrame(t, "config.command", c)); err != nil {
+		t.Fatal("clone command rejected", err)
+	}
+	for _, mutate := range []func(*ConfigChange){
+		func(c *ConfigChange) { c.CloneFrom = c.Name },
+		func(c *ConfigChange) { c.CloneFrom = "bad\nname" },
+		func(c *ConfigChange) { c.CloneFrom = strings.Repeat("x", 257) },
+		func(c *ConfigChange) { c.Operation = "update"; c.Type = "" },
+		func(c *ConfigChange) { c.Operation = "delete"; c.Type = ""; c.Fields = []ConfigFieldPatch{} },
+	} {
+		bad := controlCommand("prepare")
+		bad.Changes[0].CloneFrom = "original"
+		mutate(&bad.Changes[0])
+		if _, err := DecodeFrame(encodeFrame(t, "config.command", bad)); err == nil {
+			t.Fatal("invalid clone request accepted")
+		}
+	}
+	raw := string(encodeFrame(t, "config.command", c))
+	for _, bad := range []string{
+		strings.Replace(raw, `"clone_from":"original"`, `"cloneFrom":"original"`, 1),
+		strings.Replace(raw, `"clone_from":"original"`, `"clone_from":{"name":"original","password":"synthetic-secret"}`, 1),
+		strings.Replace(raw, `"clone_from":"original"`, `"clone_from":"original","native_config":{"password":"synthetic-secret"}`, 1),
+	} {
+		if _, err := DecodeFrame([]byte(bad)); err == nil {
+			t.Fatal("clone request carried raw native material")
+		}
+	}
+}

@@ -310,15 +310,21 @@ func TestReadOnlyCheckTimeoutNeverAppliesCandidate(t *testing.T) {
 	e := opened(t, o)
 	runtime := &memoryRuntime{current: cloneSnapshot(oldStore)}
 	hooks := runtime.hooks()
-	hooks.Check = func(ctx context.Context, _ Operation, _ string) error { <-ctx.Done(); return nil }
+	var checked atomic.Bool
+	hooks.Check = func(ctx context.Context, _ Operation, _ string) error {
+		checked.Store(true)
+		<-ctx.Done()
+		return nil
+	}
 	if err := e.AttachRuntime(hooks); err != nil {
 		t.Fatal(err)
 	}
 	req := request("check-timeout")
-	req.Deadline = time.Now().Add(40 * time.Millisecond)
+	// Include the real Prepare journal fsyncs before exercising Check's timeout.
+	req.Deadline = time.Now().Add(time.Second)
 	prepare(t, e, req)
 	result, err := e.Apply(context.Background(), req.ID)
-	if err != nil || result.State != Cancelled || runtime.counts(Digest(newStore)) != 0 || runtime.counts(Digest(oldStore)) != 0 {
+	if err != nil || !checked.Load() || result.State != Cancelled || runtime.counts(Digest(newStore)) != 0 || runtime.counts(Digest(oldStore)) != 0 {
 		t.Fatalf("read-only timeout mutated runtime: %#v %v", result, err)
 	}
 	disk(t, o.StorePath, oldStore)
@@ -342,11 +348,18 @@ func TestLocalDeadlineWaitsForCallbackBeforeRollback(t *testing.T) {
 		t.Fatal(err)
 	}
 	req := request("deadline")
-	req.Deadline = time.Now().Add(80 * time.Millisecond)
+	// Leave budget for the durable Prepare fsyncs before the callback starts.
+	req.Deadline = time.Now().Add(time.Second)
 	prepare(t, e, req)
 	done := make(chan Operation, 1)
 	go func() { op, _ := e.Apply(context.Background(), req.ID); done <- op }()
-	<-started
+	select {
+	case <-started:
+	case op := <-done:
+		t.Fatalf("operation completed before callback: %#v", op)
+	case <-time.After(3 * time.Second):
+		t.Fatal("callback did not start")
+	}
 	eventually(t, func() bool { op, _ := e.Query(context.Background(), req.ID); return op.State == OutcomeUnknown })
 	if runtime.counts(Digest(oldStore)) != 0 {
 		t.Fatal("rollback raced a running apply")

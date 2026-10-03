@@ -201,3 +201,76 @@ func TestProviderRejectsStaleIdentityRevisionAndInvalidCandidate(t *testing.T) {
 		t.Fatal("expired command accepted")
 	}
 }
+
+func TestProviderHistoricalRollbackReturnsConflictWithHistory(t *testing.T) {
+	f := makeBridgeFixture(t)
+	ctx := context.Background()
+	applyChange := func(operation, name string, port int) shared.ConfigResult {
+		inspection := f.provider.HandleConfig(ctx, bridgeCommand("inspect", ""))
+		cmd := bridgeCommand("prepare", inspection.ServiceID)
+		cmd.OperationID, _ = shared.NewConfigOperationID()
+		cmd.IdempotencyKey, _ = shared.NewConfigOperationID()
+		cmd.BaseRevision = inspection.Inventory.Revision
+		cmd.OperationDeadlineAtMS = time.Now().Add(time.Minute).UnixMilli()
+		raw, _ := json.Marshal(port)
+		change := shared.ConfigChange{Operation: operation, Kind: "proxy", Name: name, Fields: []shared.ConfigFieldPatch{{Path: "localPort", Value: raw}}, Secrets: []shared.ConfigSecretPatch{}}
+		if operation == "create" {
+			change.Type = "tcp"
+		}
+		cmd.Changes = []shared.ConfigChange{change}
+		prepared := f.provider.HandleConfig(ctx, cmd)
+		if prepared.Code != "ok" {
+			t.Fatal("prepare", prepared.Code)
+		}
+		applied := f.provider.HandleConfig(ctx, bridgeAction("apply", prepared))
+		if applied.Code != "ok" || applied.Operation.State != "confirmed" {
+			t.Fatal("apply", applied.Code)
+		}
+		return applied
+	}
+	first := applyChange("create", "sample", 8080)
+	_ = applyChange("update", "sample", 8081)
+	diskBefore, _ := os.ReadFile(f.input.StoreFile)
+	calls := f.applications
+	refused := f.provider.HandleConfig(ctx, bridgeAction("rollback", first))
+	if refused.Code != "conflict" || refused.Validate() != nil || refused.Operation == nil || *refused.Operation != *first.Operation {
+		t.Fatalf("rollback conflict hidden behind history: %#v", refused)
+	}
+	diskAfter, _ := os.ReadFile(f.input.StoreFile)
+	if string(diskBefore) != string(diskAfter) || f.applications != calls {
+		t.Fatal("obsolete rollback mutated state")
+	}
+	_ = applyChange("update", "sample", 8082)
+}
+
+func TestProviderContextRollbackReturnsConflictWithHistory(t *testing.T) {
+	f := makeBridgeFixture(t)
+	ctx := context.Background()
+	inspection := f.provider.HandleConfig(ctx, bridgeCommand("inspect", ""))
+	cmd := bridgeCommand("prepare", inspection.ServiceID)
+	cmd.OperationID, _ = shared.NewConfigOperationID()
+	cmd.IdempotencyKey, _ = shared.NewConfigOperationID()
+	cmd.BaseRevision = inspection.Inventory.Revision
+	cmd.OperationDeadlineAtMS = time.Now().Add(time.Minute).UnixMilli()
+	cmd.Changes = []shared.ConfigChange{{Operation: "create", Kind: "proxy", Name: "sample", Type: "tcp", Fields: []shared.ConfigFieldPatch{{Path: "localPort", Value: json.RawMessage(`8080`)}}, Secrets: []shared.ConfigSecretPatch{}}}
+	prepared := f.provider.HandleConfig(ctx, cmd)
+	applied := f.provider.HandleConfig(ctx, bridgeAction("apply", prepared))
+	if applied.Code != "ok" {
+		t.Fatal(applied.Code)
+	}
+	f.mu.Lock()
+	startup, err := commonCopy(f.input.StartupCommon)
+	if err != nil {
+		t.Fatal(err)
+	}
+	startup.Log.Level = "warn"
+	f.input.StartupCommon = startup
+	f.mu.Unlock()
+	refused := f.provider.HandleConfig(ctx, bridgeAction("rollback", applied))
+	if refused.Code != "conflict" || refused.Operation == nil || *refused.Operation != *applied.Operation || refused.Validate() != nil {
+		t.Fatalf("context refusal hidden: %#v", refused)
+	}
+	if f.applications != 1 {
+		t.Fatal("context refusal touched runtime")
+	}
+}

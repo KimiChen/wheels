@@ -32,6 +32,12 @@ type record struct {
 	NeedsRuntime bool   `json:"needs_runtime"`
 }
 
+type workerResult struct {
+	done      chan struct{}
+	operation Operation
+	err       error
+}
+
 type Engine struct {
 	mu               sync.Mutex
 	opts             Options
@@ -49,7 +55,7 @@ type Engine struct {
 	cancel           context.CancelFunc
 	abortCode        string
 	phase            uint64
-	workerDone       chan struct{}
+	worker           *workerResult
 	closing          bool
 	closed           chan struct{}
 	closeOnce        sync.Once
@@ -220,6 +226,12 @@ func (e *Engine) writeStore(value StoreSnapshot, expected string) error {
 }
 func (e *Engine) save(r *record) error {
 	r.UpdatedAt = time.Now().UTC()
+	return e.persist(r)
+}
+
+// persist preserves the exact historical operation when a rollback CAS lost
+// before replacing the Store and only its intent journal needs cancellation.
+func (e *Engine) persist(r *record) error {
 	data, err := json.Marshal(r)
 	if err != nil || len(data) > journalLimit {
 		return ErrStorage
@@ -422,50 +434,50 @@ func (e *Engine) AttachRuntime(runtime Runtime) error {
 	e.runtime, e.attached = runtime, true
 	if e.active != "" && e.records[e.active].NeedsRuntime {
 		r := e.records[e.active]
-		e.launch(r, func() { e.rollbackWorker(r.ID, true) })
+		e.launch(r, func() error { e.rollbackWorker(r.ID, true); return nil })
 	}
 	return nil
 }
 
-func (e *Engine) launch(r *record, work func()) {
+func (e *Engine) launch(r *record, work func() error) {
 	e.running, e.active, e.abortCode = true, r.ID, ""
 	e.restoring = false
-	e.workerDone = make(chan struct{})
-	done := e.workerDone
+	worker := &workerResult{done: make(chan struct{})}
+	e.worker = worker
 	go func() {
-		defer func() {
-			e.mu.Lock()
-			e.running, e.cancel = false, nil
-			if terminal(e.records[r.ID].State) {
-				e.active = ""
-			}
-			close(done)
-			if e.closing {
-				e.release()
-			}
-			e.mu.Unlock()
-		}()
-		work()
+		err := work()
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		worker.err = err
+		worker.operation = e.records[r.ID].Operation
+		e.running, e.cancel = false, nil
+		if terminal(worker.operation.State) {
+			e.active = ""
+		}
+		close(worker.done)
+		if e.closing {
+			e.release()
+		}
 	}()
 }
 
-func (e *Engine) wait(ctx context.Context, id string, done <-chan struct{}) (Operation, error) {
+func (e *Engine) wait(ctx context.Context, id string, worker *workerResult) (Operation, error) {
 	select {
 	case <-ctx.Done():
 		e.mu.Lock()
 		defer e.mu.Unlock()
 		return e.records[id].Operation, ctx.Err()
-	case <-done:
-		e.mu.Lock()
-		defer e.mu.Unlock()
-		r := e.records[id]
-		if r.State == OutcomeUnknown || r.State == RollbackFailed {
-			return r.Operation, ErrOutcomeUnknown
+	case <-worker.done:
+		if worker.err != nil {
+			return worker.operation, worker.err
 		}
-		if r.State == Conflict {
-			return r.Operation, ErrConflict
+		if worker.operation.State == OutcomeUnknown || worker.operation.State == RollbackFailed {
+			return worker.operation, ErrOutcomeUnknown
 		}
-		return r.Operation, nil
+		if worker.operation.State == Conflict {
+			return worker.operation, ErrConflict
+		}
+		return worker.operation, nil
 	}
 }
 
@@ -488,9 +500,9 @@ func (e *Engine) Apply(ctx context.Context, id string) (Operation, error) {
 		return Operation{}, ErrNotFound
 	}
 	if e.running && e.active == id {
-		done := e.workerDone
+		worker := e.worker
 		e.mu.Unlock()
-		return e.wait(ctx, id, done)
+		return e.wait(ctx, id, worker)
 	}
 	if r.State != Prepared {
 		result := r.Operation
@@ -523,10 +535,10 @@ func (e *Engine) Apply(ctx context.Context, id string) (Operation, error) {
 		e.mu.Unlock()
 		return result, err
 	}
-	e.launch(r, func() { e.applyWorker(id) })
-	done := e.workerDone
+	e.launch(r, func() error { e.applyWorker(id); return nil })
+	worker := e.worker
 	e.mu.Unlock()
-	return e.wait(ctx, id, done)
+	return e.wait(ctx, id, worker)
 }
 
 // Rollback during an uncooperative callback only requests cancellation. The
@@ -561,9 +573,9 @@ func (e *Engine) Rollback(ctx context.Context, id string) (Operation, error) {
 				e.cancel()
 			}
 		}
-		done := e.workerDone
+		worker := e.worker
 		e.mu.Unlock()
-		return e.wait(ctx, id, done)
+		return e.wait(ctx, id, worker)
 	}
 	if r.State == Prepared {
 		err := e.state(r, Cancelled, "cancelled_before_apply")
@@ -581,6 +593,35 @@ func (e *Engine) Rollback(ctx context.Context, id string) (Operation, error) {
 		e.mu.Unlock()
 		return result, ErrBusy
 	}
+	// A historical confirmed operation has no unfinished work to recover. An
+	// obsolete undo request must not turn it into an incomplete transaction.
+	// This is byte/presence CAS, not a history generation: identical restored
+	// bytes (ABA) plus unchanged context remain eligible for an explicit undo.
+	if r.State == Confirmed {
+		if !e.attached {
+			result := r.Operation
+			e.mu.Unlock()
+			return result, ErrRuntime
+		}
+		current, err := e.readStore()
+		if err != nil || Digest(current) != r.NewDigest {
+			result := r.Operation
+			e.mu.Unlock()
+			return result, ErrConflict
+		}
+		if _, _, err = e.snapshots(r); err != nil {
+			result := r.Operation
+			e.mu.Unlock()
+			return result, ErrStorage
+		}
+		original := r.Operation
+		e.launch(r, func() error { return e.rollbackConfirmed(original) })
+		e.restoring = true // duplicate rollback calls join this read-only preflight
+		worker := e.worker
+		e.mu.Unlock()
+		return e.wait(ctx, id, worker)
+	}
+
 	if _, _, snapshotErr := e.snapshots(r); snapshotErr != nil {
 		journal, journalErr := e.operations.read(idHash(r.ID)+".json", journalLimit)
 		if journalErr == nil && !journal.Exists {
@@ -600,10 +641,10 @@ func (e *Engine) Rollback(ctx context.Context, id string) (Operation, error) {
 		e.mu.Unlock()
 		return result, err
 	}
-	e.launch(r, func() { e.rollbackWorker(id, false) })
-	done := e.workerDone
+	e.launch(r, func() error { e.rollbackWorker(id, false); return nil })
+	worker := e.worker
 	e.mu.Unlock()
-	return e.wait(ctx, id, done)
+	return e.wait(ctx, id, worker)
 }
 
 func (e *Engine) release() {

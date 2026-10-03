@@ -198,8 +198,17 @@ func Prepare(input Input, request Request) (*Prepared, error) {
 		owners[o.key()] = true
 	}
 	entries := map[string]object{}
+	// Capture raw original objects before any edit can mutate an entries map.
+	// A rename is delete+create, and cloning must have the same result regardless
+	// of their order (or another edit to the source within this transaction).
+	originals := map[string]json.RawMessage{}
 	for _, o := range s.store {
 		entries[o.key()] = o
+		original, err := json.Marshal(o.raw)
+		if err != nil {
+			return nil, failure("invalid_source")
+		}
+		originals[o.key()] = original
 	}
 	seen := map[string]bool{}
 	out := &Prepared{BaseRevision: s.revision, ContextRevision: s.contextRevision, Changes: []ChangePreview{}, Warnings: []Issue{}}
@@ -207,6 +216,9 @@ func Prepare(input Input, request Request) (*Prepared, error) {
 	out.OriginalStoreExists = s.originalStoreExists
 	for _, change := range request.Changes {
 		if !identifier(change.Name) || (change.Kind != "proxy" && change.Kind != "visitor") {
+			return nil, failure("invalid_change")
+		}
+		if change.CloneFrom != "" && (change.Operation != "create" || !identifier(change.CloneFrom) || change.CloneFrom == change.Name) {
 			return nil, failure("invalid_change")
 		}
 		key := change.Kind + "/" + change.Name
@@ -226,10 +238,35 @@ func Prepare(input Input, request Request) (*Prepared, error) {
 			if fieldSpecs(change.Kind, change.Type) == nil {
 				return nil, failure("invalid_type")
 			}
-			raw, _ := json.Marshal(map[string]string{"name": change.Name, "type": change.Type})
-			o, err = parseObject(change.Kind, "store", raw)
-			if err != nil {
-				return nil, err
+			if change.CloneFrom != "" {
+				sourceKey := change.Kind + "/" + change.CloneFrom
+				if owners[sourceKey] {
+					return nil, failure("ownership_conflict")
+				}
+				raw, exists := originals[sourceKey]
+				if !exists {
+					return nil, failure("not_found")
+				}
+				o, err = parseObject(change.Kind, "store", raw)
+				if err != nil {
+					return nil, err
+				}
+				if o.typ != change.Type {
+					return nil, failure("invalid_type")
+				}
+				if hasPlugin(o) {
+					return nil, failure("advanced_read_only")
+				}
+				// parseObject owns fresh raw bytes and native objects. Only the
+				// identity changes here; applyChange preserves untouched secrets
+				// and known advanced members, then validates the complete object.
+				o.raw["name"], _ = json.Marshal(change.Name)
+			} else {
+				raw, _ := json.Marshal(map[string]string{"name": change.Name, "type": change.Type})
+				o, err = parseObject(change.Kind, "store", raw)
+				if err != nil {
+					return nil, err
+				}
 			}
 		} else {
 			if !exists {

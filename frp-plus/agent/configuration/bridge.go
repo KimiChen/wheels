@@ -128,7 +128,7 @@ func (p *Provider) prepare(ctx context.Context, command shared.ConfigCommand, re
 	references := []string{}
 	changes := make([]Change, 0, len(command.Changes))
 	for _, change := range command.Changes {
-		item := Change{Operation: change.Operation, Kind: change.Kind, Name: change.Name, Type: change.Type, Fields: map[string]json.RawMessage{}, Secrets: map[string]SecretAction{}}
+		item := Change{Operation: change.Operation, Kind: change.Kind, Name: change.Name, Type: change.Type, CloneFrom: change.CloneFrom, Fields: map[string]json.RawMessage{}, Secrets: map[string]SecretAction{}}
 		for _, field := range change.Fields {
 			item.Fields[field.Path] = append(json.RawMessage(nil), field.Value...)
 		}
@@ -160,8 +160,11 @@ func (p *Provider) prepare(ctx context.Context, command shared.ConfigCommand, re
 		ExpectedDigest: managed.Digest(managed.StoreSnapshot{Exists: prepared.OriginalStoreExists, Bytes: prepared.OriginalStoreBytes}),
 		Candidate:      prepared.StoreBytes, Deadline: time.UnixMilli(command.OperationDeadlineAtMS),
 	})
-	if err != nil && op.ID == "" {
+	if err != nil {
 		result.Code = resultCode(err)
+		if op.ID != "" {
+			result.Operation = operationView(op)
+		}
 		return
 	}
 	result.Operation = operationView(op)
@@ -197,13 +200,14 @@ func (p *Provider) execute(ctx context.Context, command shared.ConfigCommand, re
 		result.Code = "invalid_request"
 		return
 	}
-	// A deadline/lost caller response does not replace a known durable record
-	// with a generic failure. The state and five facts explain the actual outcome.
+	// Keep known durable facts alongside a refused or interrupted action. A
+	// confirmed history record does not make an obsolete rollback successful.
 	if op.ID != "" {
 		result.Operation = operationView(op)
-		return
 	}
-	result.Code = resultCode(err)
+	if err != nil {
+		result.Code = resultCode(err)
+	}
 }
 
 func resultCode(err error) string {

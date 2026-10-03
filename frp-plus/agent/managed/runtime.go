@@ -230,8 +230,53 @@ func (e *Engine) rollbackWorker(id string, startup bool) {
 		e.mu.Unlock()
 		return
 	}
+	e.mu.Unlock()
+	_ = e.rollbackAfterCheck(id, startup, nil)
+}
+
+// A confirmed rollback holds the worker lease while checking external context
+// outside the engine lock. Its read-only deadline never changes the journal.
+func (e *Engine) rollbackConfirmed(original Operation) error {
+	ctx, cancel := context.WithTimeout(context.Background(), e.opts.RollbackTimeout)
+	e.mu.Lock()
+	e.cancel = cancel
+	if e.closing {
+		cancel()
+	}
+	e.mu.Unlock()
+	err := checkSafely(e.runtime.Check, ctx, original, "rollback")
+	cancelled := ctx.Err()
+	cancel()
+	e.mu.Lock()
+	e.cancel = nil
+	closing := e.closing
+	e.mu.Unlock()
+	if closing {
+		return ErrClosed
+	}
+	if cancelled != nil {
+		return cancelled
+	}
+	if err != nil {
+		return ErrConflict
+	}
+	return e.rollbackAfterCheck(original.ID, false, &original)
+}
+
+func (e *Engine) rollbackAfterCheck(id string, startup bool, confirmed *Operation) error {
+	e.mu.Lock()
+	r := e.records[id]
+	if confirmed != nil && e.closing {
+		e.mu.Unlock()
+		return ErrClosed
+	}
+
 	old, _, err := e.snapshots(r)
 	if err != nil {
+		if confirmed != nil {
+			e.mu.Unlock()
+			return ErrStorage
+		}
 		// A preparation that never completed its recovery snapshots must not
 		// manufacture an invalid durable journal merely because rollback was
 		// requested. It remains gated in this process; orphan files alone carry
@@ -243,23 +288,46 @@ func (e *Engine) rollbackWorker(id string, startup bool) {
 			_ = e.state(r, RollbackFailed, "snapshot_invalid")
 		}
 		e.mu.Unlock()
-		return
+		return nil
 	}
 	current, err := e.readStore()
-	if err != nil || (Digest(current) != r.OldDigest && Digest(current) != r.NewDigest) {
+	if err != nil || (Digest(current) != r.OldDigest && Digest(current) != r.NewDigest) || (confirmed != nil && Digest(current) != confirmed.NewDigest) {
+		if confirmed != nil {
+			e.mu.Unlock()
+			return ErrConflict
+		}
 		_ = e.state(r, RollbackFailed, "store_drift")
 		e.mu.Unlock()
-		return
+		return nil
 	}
 	code := r.ErrorCode
+	if confirmed != nil {
+		code = "rollback_requested"
+	}
 	// A durable applying/outcome_unknown journal already contains all recovery
 	// material if this phase update fails. Still attempt the old disk/runtime;
 	// a final journal failure prevents a false success and keeps the gate shut.
-	_ = e.state(r, RollingBack, code)
+	if err := e.state(r, RollingBack, code); err != nil && confirmed != nil {
+		e.mu.Unlock()
+		return ErrStorage
+	}
 	if err := e.writeStore(old, Digest(current)); err != nil {
+		if confirmed != nil && isConflict(err) {
+			// replace reports CAS conflict only before replacing the Store. Restore
+			// the previous durable history; a failure to cancel this journal remains
+			// uncertain and retains the normal recovery gate.
+			r.Operation = *confirmed
+			if err = e.persist(r); err != nil {
+				r.State, r.ErrorCode = OutcomeUnknown, "journal_failed"
+				e.mu.Unlock()
+				return ErrStorage
+			}
+			e.mu.Unlock()
+			return ErrConflict
+		}
 		_ = e.state(r, RollbackFailed, "rollback_store_failed")
 		e.mu.Unlock()
-		return
+		return nil
 	}
 	r.StorePersisted = false
 	if err := e.save(r); err != nil {
@@ -274,7 +342,7 @@ func (e *Engine) rollbackWorker(id string, startup bool) {
 			e.mu.Lock()
 			_ = e.state(r, RollbackFailed, "rollback_apply_failed")
 			e.mu.Unlock()
-			return
+			return nil
 		}
 	}
 	// A late Apply return still requires a fresh explicit observation. This is
@@ -287,17 +355,18 @@ func (e *Engine) rollbackWorker(id string, startup bool) {
 	defer e.mu.Unlock()
 	if cancelled {
 		_ = e.state(r, RollbackFailed, "rollback_timeout")
-		return
+		return nil
 	}
 	if err != nil || !verified.RuntimeLoaded || !verified.ResourcesReady {
 		_ = e.state(r, RollbackFailed, "rollback_verification_failed")
-		return
+		return nil
 	}
 	current, err = e.readStore()
 	if err != nil || Digest(current) != r.OldDigest {
 		_ = e.state(r, RollbackFailed, "store_drift")
-		return
+		return nil
 	}
 	r.RuntimeApplied, r.NeedsRuntime, r.Verification = false, false, verified
 	_ = e.state(r, RolledBack, code)
+	return nil
 }

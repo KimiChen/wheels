@@ -90,6 +90,7 @@ type ConfigChange struct {
 	Kind      string              `json:"kind"`
 	Name      string              `json:"name"`
 	Type      string              `json:"type"`
+	CloneFrom string              `json:"clone_from,omitempty"`
 	Fields    []ConfigFieldPatch  `json:"fields"`
 	Secrets   []ConfigSecretPatch `json:"secrets"`
 }
@@ -171,6 +172,11 @@ func (change ConfigChange) Validate() error {
 	if !detailEnum(change.Operation, "create", "update", "delete", "enable", "disable") ||
 		!detailEnum(change.Kind, "proxy", "visitor") || !detailText(change.Name, 256, false) ||
 		change.Fields == nil || change.Secrets == nil || len(change.Fields) > 64 || len(change.Secrets) > 8 {
+		return invalid
+	}
+	// CloneFrom identifies an original Store object of the same kind/type;
+	// source existence, ownership and type are verified by the native adapter.
+	if change.CloneFrom != "" && (change.Operation != "create" || !detailText(change.CloneFrom, 256, false) || change.CloneFrom == change.Name) {
 		return invalid
 	}
 	if change.Operation == "create" {
