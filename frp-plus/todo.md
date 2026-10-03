@@ -650,11 +650,30 @@ schema12 frps `c7c16b7c7ff5ea00beeec00bebe6b8c16ab2cdd15abfc5e48be46c7238881811`
 旧v6使用已固定兼容基线 `23851a2298eac85e384c8ba61cb9ba89710d24e5` 的原始initializer和binary。
 旧/新包均为Darwin arm64本机验收，最终Linux统一候选仍须发布核验。43项ops、17项local、
 19项pipeline测试通过；Agent tombstone checkpoint适配另通过Checkpoint/Restore race及专门残余反例。
-已完成复选项限已开放的同安装根/同路径范围；模板、外部映射、跨目录、生产11机组验收未完成，
-不据此勾选整个P3-04。
+上述同目录增量的完成复选项限其已开放范围；模板、外部映射及跨目录的 Agent 新增证据见下文，
+生产11机组结果见P3-06，不据此勾选整个P3-04。
 
 本批隧道历史、审计/材料保留、页面与 schema v12 已提交 `e765192`。完整 12 补丁链
 使用 Go 1.26.6 成功构建本机 Agent/frps，最终统一产物回归与部署结果将在 P3-06 续记。
+
+
+Agent 检查点 v3 增量（2026-10-03，独立分支验收，未部署）：
+- [x] Agent 显式本地根/精确外部文件 policy；归档不授予目标路径权限，源和目标 ID 一一映射。
+- [x] Agent 静态模板仅归档原文、引用名称及渲染摘要，本地双供值重新校验；环境供值文件不入包。
+- [x] Agent 结构化跨目录恢复，保留业务语义和旧 journal/快照；独立迁移证明与后续检查点封闭，
+  旧历史 `context_changed` 不派发回退。进行中/unknown/rollback_failed 拒绝搬迁。
+- [x] format4/v3 与旧 format2/3、v1/v2 命令兼容；真实双 wire 各完成跨目录删除源、mTLS、
+  Token、include、HTTPS2HTTP/TCP 转发、Admin 接管/离线确认、第二次同路径恢复及谱系查询。
+
+证据：`monitor/config_relocation_native_test.go` 最终双 wire race 9.349 秒通过；
+`tests/ops_relocation_test.py` 加入 11 项包装和 3 项可选真实 CLI 用例，连原 46 项共 60 项通过。
+shared/managed/configuration/control/cmd 全包 race 通过；managed 新反例覆盖中断计划/标记/发布、
+外部 CAS/授权漂移、未完成来源零写拒绝、丢失/空迁移证明和旧回退无 lease。补丁 `0013` 仅接原生命令。
+
+上方未限定角色的模板、外部映射、跨目录三条仍不整体勾选：本增量只开放单 Agent。
+主控 format4 仍限生成安装、原绝对路径；其同类增强由独立主控增量继续，不把本机 Agent
+验收写成主控或生产已支持。旧主控严格 `config.manage.v1` 不认识 `context_changed`，
+v3 搬迁要求主控/Agent 同版本替换；没有搬迁的原路径不产生该枚举。
 
 ### P3-05 原生互通与配置操作回归
 

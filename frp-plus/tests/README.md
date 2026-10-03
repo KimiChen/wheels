@@ -348,3 +348,17 @@ python3 tests/linux_acceptance.py \
 
 浏览器检查覆盖卡片、详情、管理编辑、浅/深主题、390px 窄屏、键盘及实时更新中的焦点保持。
 测试方法在本文件维护，配置与架构细节分别见根 README 和相应模块说明。
+
+
+Agent 检查点 v3 额外回归：
+
+```sh
+FRP_PLUS_TEST_AGENT=<本机新版Agent绝对路径> python3 -m unittest discover -s tests -p 'ops*_test.py'
+# 在完整补丁组装树执行，二进制必须来自同一候选。
+FRP_BACKUP_RELOCATION_E2E_AGENT=<新版Agent> FRP_BACKUP_RELOCATION_E2E_SERVER=<原生Server> \
+  go test -race ./extension/frpmonitor/monitor -run TestBackupRelocationNativeEndToEnd -count=1
+```
+
+第二条覆盖 wire v1/v2、源与外部依赖删除、跨目录 mTLS/Token/include/HTTPS 插件/TCP 业务、
+真实管理端接管与离线确认、旧终态材料的只读谱系查询及本地拒绝回退、再备份同路径恢复。
+第一条未设置二进制时会明确跳过 3 项真实 CLI 测试；不能将纯包装通过等同原生恢复验收。

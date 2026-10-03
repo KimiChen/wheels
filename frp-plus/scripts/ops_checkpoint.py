@@ -28,7 +28,7 @@ def relative(name):
 
 
 def checkpoint_path(api, name):
-    if name == 'GRAPH.json' or name == 'managed/restore-install.json':
+    if name in ('GRAPH.json', 'POLICY.json', 'managed/restore-install.json', 'managed/context-history.json'):
         return True
     if isinstance(name, str) and name.startswith('context/'):
         value = name.removeprefix('context/')
@@ -39,7 +39,9 @@ def checkpoint_path(api, name):
 def entries(api, manifest, folder):
     required = {'version', 'kind', 'id', 'created_at_ms', 'root', 'store_name', 'config_file', 'cwd',
                 'context_revision', 'service_id', 'store_exists', 'store_digest', 'files', 'graph_sha256'}
-    if (not isinstance(manifest, dict) or set(manifest) != required or manifest['version'] != 2
+    if isinstance(manifest, dict) and manifest.get('version') == 3:
+        required |= {'policy_sha256', 'context_sources'}
+    if (not isinstance(manifest, dict) or set(manifest) != required or manifest['version'] not in (2, 3)
             or manifest['kind'] != 'frp-managed-checkpoint' or manifest['root'] != str(folder / 'managed')
             or manifest['store_name'] != 'store.json' or manifest['config_file'] != str(folder / 'agent.toml')
             or manifest['cwd'] != str(folder) or type(manifest['created_at_ms']) is not int
@@ -48,13 +50,29 @@ def entries(api, manifest, folder):
     for key in ('id', 'service_id'):
         if not isinstance(manifest[key], str) or not api.UUID.fullmatch(manifest[key]):
             raise ValueError('invalid dependency checkpoint identity')
-    for key in ('context_revision', 'store_digest', 'graph_sha256'):
+    for key in ('context_revision', 'store_digest', 'graph_sha256') + (('policy_sha256',) if manifest['version'] == 3 else ()):
         if not isinstance(manifest[key], str) or not api.HEX_DIGEST.fullmatch(manifest[key]):
             raise ValueError('invalid dependency checkpoint digest')
     result = validate_entries(api, manifest['files'], api.MANAGED_MAX_BYTES, api.MANAGED_MAX_FILE,
                               lambda name: checkpoint_path(api, name))
     names = {entry['path'] for entry in result}
-    if (not {'GRAPH.json', 'context/agent.toml', 'context/installation.json', 'managed/identity.json'} <= names
+    context_names = {'context/agent.toml', 'context/installation.json'}
+    if manifest['version'] == 3:
+        sources = manifest['context_sources']
+        if not isinstance(sources, list) or not 2 <= len(sources) <= 128:
+            raise ValueError('invalid explicit checkpoint sources')
+        paths, context_names = set(), set()
+        for index, source in enumerate(sources, 1):
+            if (not isinstance(source, dict) or set(source) != {'path', 'payload'}
+                    or not absolute(source['path']) or source['path'] in paths
+                    or source['payload'] != f'context/f{index:06d}'):
+                raise ValueError('invalid explicit checkpoint source')
+            paths.add(source['path']); context_names.add(source['payload'])
+        if (not {str(folder / 'agent.toml'), str(folder / 'installation.json')} <= paths
+                or context_names != {name for name in names if name.startswith('context/')}
+                or 'POLICY.json' not in names):
+            raise ValueError('incomplete explicit checkpoint sources')
+    if (not {'GRAPH.json', 'managed/identity.json'} | context_names <= names
             or ('managed/store.json' in names) != manifest['store_exists']):
         raise ValueError('incomplete dependency checkpoint')
     return result
@@ -67,7 +85,7 @@ def validate_entries(api, values, maximum, maximum_file, allowed):
     for value in values:
         if (not isinstance(value, dict) or set(value) != {'path', 'size', 'sha256', 'mtime_ns'}
                 or not relative(value['path']) or not allowed(value['path']) or value['path'] in seen
-                or type(value['size']) is not int or not 0 <= value['size'] <= maximum_file
+                or type(value['size']) is not int or not 0 <= value['size'] <= file_limit(value['path'], maximum_file)
                 or type(value['mtime_ns']) is not int or not 0 < value['mtime_ns'] < 2**63
                 or not isinstance(value['sha256'], str) or not api.HEX_DIGEST.fullmatch(value['sha256'])):
             raise ValueError('invalid checkpoint file')
@@ -96,11 +114,13 @@ def directory(api, checkpoint, folder):
     parents = set()
     for entry in values:
         name = entry['path']
-        data = private_bytes(api, checkpoint / name, api.MANAGED_MAX_FILE)
+        data = private_bytes(api, checkpoint / name, file_limit(name, api.MANAGED_MAX_FILE))
         if len(data) != entry['size'] or hashlib.sha256(data).hexdigest() != entry['sha256']:
             raise ValueError('checkpoint payload mismatch')
         if name == 'GRAPH.json' and hashlib.sha256(data).hexdigest() != manifest['graph_sha256']:
             raise ValueError('dependency graph mismatch')
+        if name == 'POLICY.json' and hashlib.sha256(data).hexdigest() != manifest.get('policy_sha256'):
+            raise ValueError('checkpoint policy mismatch')
         payload.append((name, data)); expected.add(name)
         parents.update(str(p) for p in PurePosixPath(name).parents if str(p) != '.')
     actual = set()
@@ -117,7 +137,10 @@ def directory(api, checkpoint, folder):
             raise ValueError('checkpoint exceeds file budget')
     if actual != expected:
         raise ValueError('checkpoint inventory mismatch')
-    metadata = api.strict_json(dict(payload)['context/installation.json'])
+    metadata_name = 'context/installation.json'
+    if manifest['version'] == 3:
+        metadata_name = next(source['payload'] for source in manifest['context_sources'] if source['path'] == str(folder / 'installation.json'))
+    metadata = api.strict_json(dict(payload)[metadata_name])
     if metadata != {'format': 2, 'roles': ['agent'], 'managed': {'version': 1, 'root': 'managed', 'store': 'store.json'}}:
         raise ValueError('unsupported dependency checkpoint profile')
     return manifest, payload, hashlib.sha256(raw).hexdigest()
@@ -148,22 +171,23 @@ def write_archive(api, output, temporary, kind, folder, manifest, payload, befor
     return output
 
 
-def backup(api, folder, output, *, offline, agent_binary):
+def backup(api, folder, output, *, offline, agent_binary, policy=None, env_file=None):
     if not offline:
         raise ValueError('dependency checkpoint requires stopped Agent acknowledgement')
     with tempfile.TemporaryDirectory(prefix='.frp-checkpoint-', dir=output.parent) as temporary:
         temporary = Path(temporary); checkpoint = temporary / 'checkpoint'
         result = api.maintenance(['checkpoint', '--config', str(folder / 'agent.toml'), '--output', str(checkpoint),
-                                  '--dependency-graph'], folder, agent_binary)
+                                  '--dependency-graph', *policy_arguments(policy, env_file)], folder, agent_binary)
         manifest, payload, digest = directory(api, checkpoint, folder)
-        if (result.get('manifest_digest') != digest or result.get('checkpoint_id') != manifest['id']
+        if (manifest['version'] != (3 if policy else 2)
+                or result.get('manifest_digest') != digest or result.get('checkpoint_id') != manifest['id']
                 or result.get('file_count') != len(manifest['files'])
                 or result.get('total_bytes') != sum(value['size'] for value in manifest['files'])):
             raise ValueError('native checkpoint response does not match durable files')
         return write_archive(api, output, temporary, AGENT_KIND, folder, payload[0][1], payload[1:])
 
 
-def extract(api, fd, folder, destination, resolve):
+def extract(api, fd, folder, destination, resolve, *, allow_relocation=False):
     """Read strict sequential numbered payloads; source names never enter tar headers."""
     with api.read_archive(fd, api.MAX_TOTAL + 2 * api.MANAGED_MAX_FILE) as archive:
         def next_member(name, limit):
@@ -176,7 +200,8 @@ def extract(api, fd, folder, destination, resolve):
         with archive.extractfile(first) as source: envelope = api.strict_json(source.read(api.MANAGED_MAX_FILE + 1))
         if (not isinstance(envelope, dict) or set(envelope) != {'format', 'kind', 'original_directory', 'manifest_sha256', 'created_at_ms', 'payload_count'}
                 or envelope['format'] != 4 or envelope['kind'] not in (AGENT_KIND, SERVER_KIND)
-                or envelope['original_directory'] != str(folder) or type(envelope['created_at_ms']) is not int
+                or not absolute(envelope['original_directory'])
+                or (envelope['original_directory'] != str(folder) and not (allow_relocation and envelope['kind'] == AGENT_KIND)) or type(envelope['created_at_ms']) is not int
                 or envelope['created_at_ms'] <= 0 or type(envelope['payload_count']) is not int
                 or not 2 <= envelope['payload_count'] <= api.MANAGED_MAX_FILES + 1
                 or not isinstance(envelope['manifest_sha256'], str) or not api.HEX_DIGEST.fullmatch(envelope['manifest_sha256'])):
@@ -186,6 +211,14 @@ def extract(api, fd, folder, destination, resolve):
         if hashlib.sha256(raw).hexdigest() != envelope['manifest_sha256']:
             raise ValueError('indexed manifest mismatch')
         manifest = api.strict_json(raw)
+        if not isinstance(manifest, dict):
+            raise ValueError('invalid indexed manifest')
+        if allow_relocation and (envelope['kind'] != AGENT_KIND or manifest.get('version') != 3):
+            raise ValueError('explicit policies require a version3 Agent checkpoint')
+        if envelope['kind'] == AGENT_KIND and manifest.get('version') == 3 and not allow_relocation:
+            raise ValueError('version3 restoration requires both local policies')
+        if envelope['kind'] == AGENT_KIND and manifest.get('cwd') != envelope['original_directory']:
+            raise ValueError('checkpoint source identity mismatch')
         name, values = resolve(envelope['kind'], manifest)
         if len(values) + 1 != envelope['payload_count']:
             raise ValueError('indexed payload count mismatch')
@@ -237,9 +270,11 @@ def restore_parent(api, path):
         os.close(parent_fd)
 
 
-def restore(api, fd, folder, *, offline, agent_binary):
+def restore(api, fd, folder, *, offline, agent_binary, policy=None, source_policy=None, env_file=None, source_env_file=None):
     if not offline:
         raise ValueError('indexed restoration requires offline acknowledgement')
+    if bool(policy) != bool(source_policy) or (env_file or source_env_file) and not policy:
+        raise ValueError('explicit restoration requires both local policies')
     folder = api.path_without_links(folder)
     with restore_parent(api, folder.parent) as check_parent, tempfile.TemporaryDirectory(prefix='.frp-indexed-', dir=folder.parent) as temporary:
         checkpoint = Path(temporary)
@@ -247,17 +282,40 @@ def restore(api, fd, folder, *, offline, agent_binary):
         def resolve(kind, manifest):
             if kind == AGENT_KIND:
                 api.private_directory(folder)
-                return 'CHECKPOINT.json', entries(api, manifest, folder)
+                return 'CHECKPOINT.json', entries(api, manifest, Path(manifest['cwd']) if policy else folder)
             from ops_history import entries as server_entries
             return 'SERVER.json', server_entries(api, manifest, folder)
-        envelope, manifest = extract(api, fd, folder, checkpoint, resolve)
+        envelope, manifest = extract(api, fd, folder, checkpoint, resolve, allow_relocation=bool(policy))
         check_parent()
         if envelope['kind'] == SERVER_KIND:
             from ops_history import restore as server_restore
             return server_restore(api, checkpoint, manifest, folder)
-        _, _, digest = directory(api, checkpoint, folder)
+        _, _, digest = directory(api, checkpoint, Path(manifest['cwd']) if policy else folder)
         if digest != envelope['manifest_sha256']:
             raise ValueError('checkpoint changed after indexed extraction')
         result = api.maintenance(['restore-install', '--checkpoint', str(checkpoint), '--root', str(folder / 'managed'),
-                                  '--manifest-digest', digest], folder, agent_binary)
+                                  '--manifest-digest', digest, *policy_arguments(policy, env_file, source_policy, source_env_file)], folder, agent_binary)
         return api.restore_result(result, 'pending', digest)
+
+
+def absolute(value):
+    return (isinstance(value, str) and len(value.encode()) <= 4096 and value.startswith('/')
+            and not value.startswith('//')
+            and str(PurePosixPath(value)) == value and not any(ord(c) < 32 for c in value)
+            and '..' not in PurePosixPath(value).parts)
+
+
+def file_limit(name, maximum):
+    return 4 * 1024 * 1024 if name == 'managed/context-history.json' else maximum
+
+
+def policy_arguments(policy=None, env_file=None, source_policy=None, source_env_file=None):
+    if (env_file or source_policy or source_env_file) and not policy:
+        raise ValueError('local policy is required')
+    arguments = []
+    for flag, value in (('--policy', policy), ('--env-file', env_file), ('--source-policy', source_policy), ('--source-env-file', source_env_file)):
+        if value is not None:
+            if not isinstance(value, (str, Path)) or not str(value):
+                raise ValueError('local policy arguments must be nonempty paths')
+            arguments.extend((flag, str(Path(value).absolute())))
+    return arguments

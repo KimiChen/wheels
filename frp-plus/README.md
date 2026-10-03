@@ -19,7 +19,7 @@ GitHub 管理登录。当前控制库为 v12，支持从 v4 至 v11 升级，保
 
 2026-10-03 已将 1 个主控和 10 个 Agent 一次性替换为源码至 `ab110d6` 的 Linux amd64
 产物，使用 Go 1.26.6 和完整 12 条补丁。当前上线包含观察详情、显式配置事务、配置审计、
-隧道历史、保留策略和同目录完整备份工具；模板、外部映射和跨目录检查点 v3 仍在开发，
+隧道历史、保留策略和同目录完整备份工具；Agent 模板/外部映射/跨目录检查点 v3 已完成隔离验收但尚未部署，主控对应增强仍在开发，
 G3 尚未整体完成。线上沿用原生文件来源，Store 托管保持关闭。
 
 11 个服务均核对实际运行程序摘要，10/10 节点在线、采样新鲜且 FRP 已连接。控制库
@@ -173,7 +173,7 @@ Dashboard 地址只接受 HTTPS 或字面量回环 HTTP，不允许 URL 内嵌�
   文件/includes/启动参数/实际模板依赖。普通重启保留 Service 身份，恢复工具需显式
   更新身份才能拒绝旧命令。秘密引用只在本机解析，原生 Store 与恢复材料仍可能有明文。
 - `scripts/ops.py` 保留 format 2/3；format 4 增加同安装根的 Agent 依赖检查点和
-  停机主控 SQLite/TSDB 完整归档。外部映射、环境模板及跨主机同一时刻事务仍不在范围内。
+  停机主控 SQLite/TSDB 完整归档。Agent 检查点 v3 另支持显式映射、静态环境模板和结构化跨目录恢复；主控仍限下文同路径范围，不承诺跨主机同一时刻事务。
 
 ### 配置审计查询与导出
 
@@ -294,8 +294,8 @@ python3 scripts/ops.py restore-confirm --directory <原安装绝对目录> \
 v2 检查点。默认仍为 v1；安装和确认按已校验的检查点版本分派。v2 覆盖同一安装根中的
 主文件、includes、Store、Token/TLS、插件证书，以及历史操作旧/新 Store 所引用的文件。
 恢复保留锁目录身份，记录可重试的安装计划，并按现有“运行验证 → 管理端接管 → 离线确认”
-流程恢复写管理。当前仅支持同目录、0700 目录/0600 文件；模板、外部映射和跨目录恢复
-仍未开放，依赖不完整时拒绝导出。运维工具用 format 4 的固定编号 USTAR 成员封装 v2，
+流程恢复写管理。v2 限同目录、0700 目录/0600 文件；模板、外部映射和跨目录使用下节显式 v3，
+依赖不完整时拒绝导出。运维工具用 format 4 的固定编号 USTAR 成员封装检查点，
 源路径保留在私有清单中，支持深层目录和 UTF-8 文件名，不开放 PAX/GNU 扩展。
 未过期事务包含完整旧/新快照；已过期事务只保存幂等记录，不重新归档待清理残余或恢复回退能力。
 
@@ -313,6 +313,60 @@ python3 scripts/ops.py backup --directory <Agent原安装绝对目录> \
 `restore` 和 `restore-confirm` 沿用上一节命令，并按清单版本分派；format 2/3 原读取路径
 不变。此流程已通过双 wire v1/v2 的真实 mTLS、Token 文件、include、HTTPS 插件证书恢复
 及转发验证，包含精确字节/纳秒 mtime、原锁 inode、身份轮换和未接管时拒绝离线确认。
+
+### 显式策略与 Agent 跨目录恢复（检查点 v3）
+
+| 角色 / 格式 | 静态环境模板 | 外部依赖授权 | 跨目录恢复 |
+| --- | --- | --- | --- |
+| 单 Agent 检查点 v1/v2 | 拒绝 | v2 仅同安装根 | 拒绝 |
+| 单 Agent 检查点 v3，format4 包装 | 显式本地供值 | 指定根及精确文件映射 | 结构化路径重写 |
+| 主控 format4 完整归档 | 当前生成安装不支持 | 当前限安装根及配置的历史目录 | 当前仅原绝对路径 |
+
+v3 使用 0600 的本地策略 JSON，`version` 为 1，包含 `config_file`、`working_dir`、
+`store_file`、`roots`（`id`/`path` 数组）和 `files`（精确 `id`/`path` 数组）。主文件仍为
+安装目录的 `agent.toml`，Store 为 `managed/store.json`。例如安装根可授权为
+`roots: [{"id":"installation","path":"/srv/frp-agent"}]`；外部 CA 可授权为
+`files: [{"id":"client-ca","path":"/srv/frp-private/ca.crt"}]`。完整文件必须是合法 JSON，
+没有外部文件时写 `files: []`。源与目标策略保留相同 ID 和根/文件类型，只修改明确的路径。
+归档自带策略用于比对，不能代替操作者提交的本地授权；精确文件映射不会授权其父目录的其他文件。
+
+模板支持静态 `.Envs.NAME`、`$.Envs.NAME`、字面量 `index .Envs "NAME"`，及有界的原生
+标量、条件和 `numberRange`。所有分支引用的变量均须在本地 `--env-file`（0600 JSON 字符串
+映射）提供；不读取完整进程环境。包中保存原模板、变量名称和渲染摘要，不保存该供值文件或
+渲染后的秘密。必要的派生路径仍属于私有清单，现有 Token/证书材料也仍是私有备份内容。
+供值文件若同时成为配置、Store 或凭据依赖会被拒绝，避免把整个变量映射误收进归档。
+
+```sh
+python3 scripts/ops.py backup --directory <Agent源安装目录> \
+  --output <新建私有归档> --offline --agent-binary <新版Agent> \
+  --policy <源策略JSON> --env-file <源变量JSON>
+# 停机并预先创建目标安装/managed/授权根及精确文件父目录，全部为0700。
+python3 scripts/ops.py restore --archive <私有归档> --directory <Agent目标安装目录> \
+  --offline --agent-binary <新版Agent> --source-policy <源策略JSON> \
+  --policy <目标策略JSON> --source-env-file <源变量JSON> --env-file <目标变量JSON>
+```
+
+无模板可省略供值参数；省略 `--source-env-file` 时源校验使用显式目标供值。启动目标 Agent 时
+须由本机服务环境提供相同变量。完成实际运行验证和管理端接管后，按原 `restore-confirm`
+命令增加 `--policy <目标策略JSON> --env-file <目标变量JSON>` 离线确认，再启动验证。
+
+只重写包括 Store、includes、管理根、TLS/Token/受支持插件证书在内的已知路径字段；完整原生
+配置语义须相等。域名、用户名、身份、Start、禁用项、秘密及高级业务字段不会随路径替换。
+同一变量同时改变路径和业务值、需要无法保真重写的控制流模板、动态文件目录或未知依赖均拒绝。
+目录与文件采取 no-follow、精确摘要/纳秒 mtime CAS，源/目标存在进行中、结果未知或
+`rollback_failed` 操作时拒绝搬迁。旧终态 journal 和快照保持原文，独立迁移证明随后续检查点保存；
+旧操作显示 `materials_state=context_changed`，不改业务终态，也不向新上下文派发回退。
+真正按 TTL 清理后仍显示 `expired`。恢复旧上下文须使用其原检查点。
+
+跨身份的旧终态材料查询只允许经过同节点、同令牌绑定、已观察到最终运行确认的恢复谱系，
+最多 128 代；保留原操作 ServiceID。没有完整谱系则返回 `service_mismatch` 并禁用回退。
+v3 搬迁须先将主控和 Agent 一起更新到支持该状态的版本：旧 `config.manage.v1` 严格解析器
+不认识 `context_changed`，混用旧主控的迁移场景不受支持；普通未搬迁安装不产生该状态。
+
+本批已通过双 wire v1/v2 的真实源目录删除、新目录 mTLS/Token/include/HTTPS 插件与 TCP
+转发、管理端接管、离线确认、历史只读查询及零回退派发，再备份后的同目录恢复；Python
+包装额外验证源与外部文件全删除后恢复、幂等 epoch/字节/mtime、语义变化无写拒绝和环境文件
+不入包。这里是隔离本机验收；已上线的 12 补丁版本不包含本节新 v3 能力。
 
 ### 停机主控完整归档与 11 角色替换
 
