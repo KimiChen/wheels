@@ -100,6 +100,26 @@ python3 tests/frp_smoke.py \
 `--original-manifest`。`--monitor-version` 仅作额外检查。本地清单校验不是签名信任证明。
 可信归属冲突、不同 user 的同名 clientID、适配器忙锁和快照过期另有 Go 回归。
 
+## 旧版 Plus 滚动升级兼容
+
+原版 FRP 互通不能代替旧监控协议兼容。另从新增详情能力前的固定 Git 提交
+`23851a2298eac85e384c8ba61cb9ba89710d24e5` 归档构建旧 Plus，保留旧补丁与 Overlay，
+不能将新版本关闭详情冒充旧版本：
+
+```sh
+python3 tests/build_compat_baseline.py
+python3 tests/frp_compat_smoke.py \
+  --agent dist/darwin-arm64/frp-plus-agent \
+  --server dist/darwin-arm64/frp-plus-server \
+  --old-agent .cache/compat-baseline/project/dist/darwin-arm64/frp-plus-agent \
+  --old-server .cache/compat-baseline/project/dist/darwin-arm64/frp-plus-server
+```
+
+执行前核对固定归档、旧输入和实际二进制摘要。新/新、新/旧、旧/新、旧/旧分别在私有
+回环 TLS 环境连续观察 12 秒：指标和 last_seen 持续推进、TCP 载荷正确，监控必须保持
+一个连接且没有关闭/重连。监控桥只统计 TLS 连接，不截取凭据或解密流量。
+此检查验证版本组合稳定性，不代替持续负载或真实公网升级演练。
+
 ## Linux 实机对照
 
 在运行 agent 的同一主机和命名空间执行：
