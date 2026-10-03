@@ -314,7 +314,7 @@ class OpsTests(unittest.TestCase):
         archive = ops.backup(self.runtime, self.backups / 'groups.tar.gz')
         restored = ops.restore(archive, self.root / 'restored-groups')
         with closing(sqlite3.connect(restored / 'control.sqlite')) as database:
-            self.assertEqual(database.execute('PRAGMA user_version').fetchone(), (9,))
+            self.assertEqual(database.execute('PRAGMA user_version').fetchone(), (10,))
             self.assertEqual(database.execute('SELECT * FROM nodes').fetchall(), expected_node)
             self.assertEqual(database.execute('SELECT id,name,config_revision FROM node_groups ORDER BY id').fetchall(),
                              [(7, '生产🛰', 9), (8, 'empty', 2)])
@@ -336,7 +336,7 @@ class OpsTests(unittest.TestCase):
             self.assertEqual(database.execute('SELECT * FROM nodes').fetchall(), expected_node)
             self.assertEqual(database.execute('SELECT * FROM settings').fetchall(), expected_settings)
             self.assertEqual(database.execute("SELECT count(*) FROM sqlite_master WHERE name='node_groups'").fetchone(), (0,))
-        for version, application in ((3, 1179798836), (10, 1179798836), (4, 123), (5, 123)):
+        for version, application in ((3, 1179798836), (11, 1179798836), (4, 123), (5, 123)):
             with self.subTest(version=version, application=application):
                 with closing(sqlite3.connect(self.runtime / 'control.sqlite')) as database:
                     database.executescript(f'PRAGMA user_version={version}; PRAGMA application_id={application};')
@@ -366,7 +366,7 @@ class OpsTests(unittest.TestCase):
         archive = ops.backup(self.runtime, self.backups / 'operations.tar.gz')
         restored = ops.restore(archive, self.root / 'restored-operations')
         with closing(sqlite3.connect(restored / 'control.sqlite')) as database:
-            self.assertEqual(database.execute('PRAGMA user_version').fetchone(), (9,))
+            self.assertEqual(database.execute('PRAGMA user_version').fetchone(), (10,))
             self.assertEqual(database.execute('SELECT * FROM config_operations').fetchall(), expected_operations)
             self.assertEqual(database.execute('SELECT * FROM config_operation_events').fetchall(), expected_events)
             self.assertEqual(database.execute('PRAGMA foreign_key_check').fetchall(), [])
@@ -388,8 +388,28 @@ class OpsTests(unittest.TestCase):
         archive = ops.backup(self.runtime, self.backups / 'restore-receipts.tar.gz')
         restored = ops.restore(archive, self.root / 'restored-receipts')
         with closing(sqlite3.connect(restored / 'control.sqlite')) as database:
-            self.assertEqual(database.execute('PRAGMA user_version').fetchone(), (9,))
+            self.assertEqual(database.execute('PRAGMA user_version').fetchone(), (10,))
             self.assertEqual(database.execute('SELECT * FROM config_restores').fetchall(), [row])
+
+    def test_backup_preserves_schema_ten_audit_ledger_and_object_index(self):
+        changes = json.dumps([{'kind': 'proxy', 'name': 'audit-fixture', 'action': 'update',
+                               'fields': ['secretKey']}])
+        with closing(sqlite3.connect(self.runtime / 'control.sqlite')) as database:
+            with database:
+                database.execute('INSERT INTO config_audit_entries(recorded_at_ms,kind,actor_kind,actor,observer,'
+                                 'node_id,service_id,state,code,object_count,field_count,changes_json,origin_kind,origin_id) '
+                                 "VALUES(2000,'external_drift','unknown','','observer',1,'primary','','source_drift',1,1,?,'audit','fixture')", (changes,))
+                database.execute("INSERT INTO config_audit_objects VALUES(1,'proxy','audit-fixture','update')")
+                database.execute('INSERT INTO config_audit_observations VALUES(1,?,?,2000)', ('primary', 'a' * 64))
+            expected = {table: database.execute('SELECT * FROM ' + table).fetchall()
+                        for table in ('config_audit_entries', 'config_audit_objects', 'config_audit_observations')}
+        archive = ops.backup(self.runtime, self.backups / 'audit-ten.tar.gz')
+        restored = ops.restore(archive, self.root / 'restored-audit-ten')
+        with closing(sqlite3.connect(restored / 'control.sqlite')) as database:
+            self.assertEqual(database.execute('PRAGMA user_version').fetchone(), (10,))
+            for table, rows in expected.items():
+                self.assertEqual(database.execute('SELECT * FROM ' + table).fetchall(), rows)
+            self.assertEqual(database.execute('PRAGMA foreign_key_check').fetchall(), [])
 
     def test_old_installation_format_and_missing_control_database_are_rejected(self):
         metadata = self.runtime / 'installation.json'

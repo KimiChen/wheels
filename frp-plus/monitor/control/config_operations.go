@@ -157,7 +157,20 @@ func operationField(value string) bool {
 }
 
 func appendConfigOperationEvent(tx *sql.Tx, o *ConfigOperation, code string, changes []byte, now int64, actor string) error {
-	_, err := tx.Exec("INSERT INTO config_operation_events(operation_id,version,state,code,changes_json,created_at_ms,actor) VALUES(?,?,?,?,?,?,?)", o.OperationID, o.Version, o.State, code, string(changes), now, actor)
+	result, err := tx.Exec("INSERT INTO config_operation_events(operation_id,version,state,code,changes_json,created_at_ms,actor) VALUES(?,?,?,?,?,?,?)", o.OperationID, o.Version, o.State, code, string(changes), now, actor)
+	if err != nil {
+		return err
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		return err
+	}
+	var summary []ConfigOperationChange
+	if json.Unmarshal(changes, &summary) != nil {
+		return ErrInvalid
+	}
+	actorKind, actor := auditActor(actor)
+	_, err = appendAuditTx(tx, now, AuditInput{Kind: "state", ActorKind: actorKind, Actor: actor, NodeID: o.NodeID, ServiceID: o.ServiceID, OperationID: o.OperationID, OperationVersion: &o.Version, State: o.State, Code: code, Changes: summary}, "operation_event", fmt.Sprint(id))
 	return err
 }
 
@@ -182,7 +195,13 @@ func (s *Store) CreateConfigOperation(ctx context.Context, input CreateConfigOpe
 				return ErrConflict
 			}
 			result, replayed = old, true
-			return nil
+			actorKind, actor := auditActor(input.Creator)
+			id, err := shared.NewConfigOperationID()
+			if err != nil {
+				return err
+			}
+			_, err = appendAuditTx(tx, s.cfg.Now().UnixMilli(), AuditInput{Kind: "retry", ActorKind: actorKind, Actor: actor, NodeID: old.NodeID, ServiceID: old.ServiceID, OperationID: old.OperationID, OperationVersion: &old.Version, State: old.State, Code: "request_replayed", Changes: input.Changes}, "audit", id)
+			return err
 		}
 		if !errors.Is(err, ErrNotFound) {
 			return err
@@ -314,6 +333,7 @@ func (s *Store) TransitionConfigOperation(ctx context.Context, id string, input 
 		if o.CandidateDigest == "" && (input.NextState == "validated" || input.NextState == "prepared" || input.NextState == "applying" || input.NextState == "verifying" || input.NextState == "confirmed" || input.NextState == "rolling_back" || input.NextState == "rolled_back") {
 			return fmt.Errorf("%w: validated candidate digest required", ErrInvalid)
 		}
+		observedDrift := input.Agent != nil && input.Agent.ErrorCode == "source_drift" && (o.Agent == nil || o.Agent.ErrorCode != input.Agent.ErrorCode || o.Agent.UpdatedAtMS != input.Agent.UpdatedAtMS)
 		if input.Agent != nil {
 			if input.Agent.BaseRevision != o.BaseRevision || input.Agent.CandidateDigest != o.CandidateDigest || (o.Agent != nil && (o.Agent.ContextRevision != input.Agent.ContextRevision || o.Agent.OldDigest != input.Agent.OldDigest || o.Agent.CreatedAtMS != input.Agent.CreatedAtMS || o.Agent.UpdatedAtMS > input.Agent.UpdatedAtMS)) {
 				return ErrConflict
@@ -338,6 +358,16 @@ func (s *Store) TransitionConfigOperation(ctx context.Context, id string, input 
 		}
 		if err = appendConfigOperationEvent(tx, o, input.Code, changes, now, actor); err != nil {
 			return err
+		}
+		if observedDrift {
+			id, err := shared.NewConfigOperationID()
+			if err != nil {
+				return err
+			}
+			_, err = appendAuditTx(tx, now, AuditInput{Kind: "external_drift", ActorKind: "unknown", Observer: actor, NodeID: o.NodeID, ServiceID: o.ServiceID, OperationID: o.OperationID, OperationVersion: &o.Version, State: o.State, Code: "source_drift"}, "audit", id)
+			if err != nil {
+				return err
+			}
 		}
 		result = o
 		return nil

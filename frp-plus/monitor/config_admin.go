@@ -131,6 +131,10 @@ func (s *Service) handleConfigAdmin(w http.ResponseWriter, r *http.Request, path
 			adminJSON(w, 503, map[string]string{"code": result.Code})
 			return true
 		}
+		if err := s.control.ObserveAuditContext(ctx, nodeID, result.ServiceID, result.Inventory.ContextRevision, actor); err != nil {
+			configHTTPError(w, err)
+			return true
+		}
 		adminJSON(w, 200, struct {
 			Code         string                  `json:"code"`
 			NodeID       string                  `json:"node_id"`
@@ -215,8 +219,15 @@ func (s *Service) handleConfigAdmin(w http.ResponseWriter, r *http.Request, path
 
 // Retry only an explicit local busy rejection, which guarantees the command
 // was not queued. Never retry an operation after a timeout or lost response.
-func (s *Service) pacedConfigCommand(ctx context.Context, node string, c shared.ConfigCommand) (shared.ConfigResult, error) {
+func (s *Service) pacedConfigCommand(ctx context.Context, node string, c shared.ConfigCommand, operation *control.ConfigOperation, actor string) (shared.ConfigResult, error) {
 	for attempts := 0; attempts < 3; attempts++ {
+		kind, code := "dispatch", "dispatch_"+c.Action
+		if attempts > 0 {
+			kind, code = "retry", "busy"
+		}
+		if err := s.recordConfigurationAudit(ctx, operation, kind, code, actor, nil, nil); err != nil {
+			return shared.ConfigResult{}, errors.Join(ErrConfigNotSent, err)
+		}
 		r, err := s.configCoordinator.invoke(ctx, node, c)
 		if !errors.Is(err, ErrConfigBusy) || attempts == 2 {
 			return r, err
@@ -272,7 +283,7 @@ func (s *Service) createConfigOperation(w http.ResponseWriter, r *http.Request, 
 	var preview *shared.ConfigPreview
 	for i := range input.SecretValues {
 		secret := input.SecretValues[i]
-		result, e := s.pacedConfigCommand(ctx, node, shared.ConfigCommand{Action: "secret", ServiceID: input.ServiceID, Secret: &secret})
+		result, e := s.pacedConfigCommand(ctx, node, shared.ConfigCommand{Action: "secret", ServiceID: input.ServiceID, Secret: &secret}, o, actor)
 		input.SecretValues[i].Value = ""
 		secret.Value = ""
 		if e != nil {
@@ -293,7 +304,7 @@ func (s *Service) createConfigOperation(w http.ResponseWriter, r *http.Request, 
 		// A deadline shorter than the command must be clipped before transport
 		// validation; persistent operation deadlines are never silently extended.
 		prepareCtx, done := context.WithDeadline(ctx, time.UnixMilli(input.DeadlineAtMS))
-		result, e := s.pacedConfigCommand(prepareCtx, node, shared.ConfigCommand{Action: "prepare", ServiceID: input.ServiceID, OperationID: o.OperationID, BaseRevision: input.BaseRevision, IdempotencyKey: input.IdempotencyKey, OperationDeadlineAtMS: input.DeadlineAtMS, Changes: input.Changes})
+		result, e := s.pacedConfigCommand(prepareCtx, node, shared.ConfigCommand{Action: "prepare", ServiceID: input.ServiceID, OperationID: o.OperationID, BaseRevision: input.BaseRevision, IdempotencyKey: input.IdempotencyKey, OperationDeadlineAtMS: input.DeadlineAtMS, Changes: input.Changes}, o, actor)
 		done()
 		if e != nil {
 			code = configFailureCode(e)
@@ -318,6 +329,10 @@ func (s *Service) createConfigOperation(w http.ResponseWriter, r *http.Request, 
 				o = updated
 				if e == nil {
 					preview = result.Preview
+					if err := s.recordConfigurationPreview(ctx, o, preview, actor, configChangeSummary(input.Changes)); err != nil {
+						configHTTPError(w, err)
+						return
+					}
 				} else {
 					code = "conflict"
 					o = s.configUnknown(o, code, actor)
@@ -404,7 +419,7 @@ func (s *Service) actionConfigOperation(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 	}
-	result, err := s.pacedConfigCommand(ctx, o.NodeID, shared.ConfigCommand{Action: action, ServiceID: o.ServiceID, OperationID: o.OperationID, BaseRevision: o.BaseRevision, ContextRevision: input.ContextRevision, CandidateDigest: input.CandidateDigest})
+	result, err := s.pacedConfigCommand(ctx, o.NodeID, shared.ConfigCommand{Action: action, ServiceID: o.ServiceID, OperationID: o.OperationID, BaseRevision: o.BaseRevision, ContextRevision: input.ContextRevision, CandidateDigest: input.CandidateDigest}, o, actor)
 	code := "ok"
 	if err != nil {
 		code = configFailureCode(err)

@@ -1,0 +1,33 @@
+{{define "admin/audit.html"}}
+<section data-admin-panel="audit" id="audit-panel" aria-labelledby="audit-title" hidden>
+  <div class="fa-page-heading"><div><h1 id="audit-title">配置审计</h1><p>查询配置预览、状态变化、命令下发与恢复记录。</p></div></div>
+  <form id="audit-filters" class="wsk-panel fa-panel" autocomplete="off">
+    <div class="fa-audit-filters">
+      <label class="wsk-field"><span>开始时间（含）</span><input class="wsk-control" type="datetime-local" name="from_ms"></label>
+      <label class="wsk-field"><span>结束时间（不含）</span><input class="wsk-control" type="datetime-local" name="to_ms"></label>
+      <label class="wsk-field"><span>节点 ID</span><input class="wsk-control" name="node_id" inputmode="numeric" maxlength="19" placeholder="全部节点，包括已移除节点"></label>
+      <label class="wsk-field"><span>记录类型</span><select class="wsk-control" name="kind"><option value="">全部类型</option></select></label>
+    </div>
+    <details class="fa-audit-more"><summary>操作者、对象及操作筛选</summary><div class="fa-audit-filters">
+      <label class="wsk-field"><span>操作者类型</span><select class="wsk-control" name="actor_kind"><option value="">全部操作者</option></select></label>
+      <label class="wsk-field"><span>操作者标识</span><input class="wsk-control" name="actor" maxlength="128" placeholder="精确匹配"></label>
+      <label class="wsk-field"><span>对象类型</span><select class="wsk-control" name="object_kind"><option value="">全部对象</option><option value="proxy">Proxy</option><option value="visitor">Visitor</option></select></label>
+      <label class="wsk-field"><span>对象名称</span><input class="wsk-control" name="object_name" maxlength="256" placeholder="原始名称，精确匹配"></label>
+      <label class="wsk-field"><span>操作 ID</span><input class="wsk-control" name="operation_id" maxlength="36"></label>
+      <label class="wsk-field"><span>事件时的操作结果</span><select class="wsk-control" name="state"><option value="">全部结果</option></select></label>
+      <label class="wsk-field"><span>Service ID</span><input class="wsk-control" name="service_id" maxlength="128"></label>
+    </div></details>
+    <p class="fa-muted">时间使用浏览器时区。留空时查询最近 90 天；单次范围最多 366 天。结果不会自动刷新，翻页保持同一次查询范围。</p>
+    <div class="fa-actions"><button class="wsk-button fa-primary" type="submit" id="audit-search">查询</button><button class="wsk-button wsk-secondary" type="button" id="audit-reset">重置筛选</button><button class="wsk-button wsk-secondary" type="button" id="audit-export" disabled>导出本次查询</button></div>
+    <p class="fa-muted">导出全部匹配记录，最多 10000 条或 8 MiB，使用已查询的筛选条件。文件仅含脱敏摘要，不含配置值或恢复材料；导出行为也会记录。</p>
+  </form>
+  <p id="audit-message" role="status" aria-live="polite"></p>
+  <p id="audit-range" class="fa-muted"></p>
+  <div class="fa-audit-layout">
+    <section class="wsk-panel fa-panel" aria-labelledby="audit-records-title"><h2 id="audit-records-title">事件记录</h2><p id="audit-empty" class="fa-muted">进入页面后开始查询。</p><ol id="audit-list" class="fa-audit-list"></ol><div class="fa-actions"><button class="wsk-button wsk-secondary" id="audit-previous" type="button" disabled>上一页</button><span id="audit-page"></span><button class="wsk-button wsk-secondary" id="audit-next" type="button" disabled>下一页</button></div></section>
+    <section class="wsk-panel fa-panel fa-audit-detail" aria-labelledby="audit-detail-title"><h2 id="audit-detail-title">记录详情</h2><div id="audit-detail"><p class="fa-muted">选择一条记录查看脱敏摘要。</p></div></section>
+  </div>
+  <p id="audit-retention" class="fa-muted"></p>
+  <p class="fa-muted">记录时间为主控落库时间；发生时间缺失时保持未知。外部变更无法确定操作者时标记未知。审计用于追溯，不提供不可篡改保证。</p>
+</section>
+{{end}}

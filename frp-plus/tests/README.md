@@ -112,6 +112,12 @@ Store 创建/读取/删除、文件 PUT 只落盘以及显式 reload 后文件/S
 原生进程、管理端和浏览器使用临时回环端口及一次性凭据。浏览器凭据由 stdin 传递，
 失败只输出固定阶段名，不打印异常 DOM、请求体或私有日志。
 
+审计页面使用 `monitor/audit_browser_test.go` 的 `TestAuditBrowserEndToEnd`；设置同一组
+Node/Playwright/Chromium 参数，并将 `FRP_AUDIT_BROWSER_HELPER` 指向
+`tests/audit_browser_e2e.mjs`。它连接实际 Handler、认证、审计 API 和 SQLite，验证分页、
+未知操作者、旧 Service ID、筛选、脱敏 JSONL 下载及会话清理；事件由测试种入，
+不将该测试描述为原生配置执行流程的验收。
+
 ## 最小托管备份与真实恢复接管
 
 `monitor/config_restore_native_test.go` 在真实配置联合测试后保留一个 prepared 事务，

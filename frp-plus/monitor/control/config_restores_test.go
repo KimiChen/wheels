@@ -235,7 +235,7 @@ func TestConfigRestoreSchemaNineMigrationPreservesWALAndPrivateRecoveryImage(t *
 	}
 	defer store.Close()
 	var version, count int
-	if err := store.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 9 {
+	if err := store.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 10 {
 		t.Fatal("schema not upgraded", version, err)
 	}
 	if err := store.db.QueryRow("SELECT count(*) FROM nodes WHERE id=7").Scan(&count); err != nil || count != 1 {

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"math"
+	"strconv"
 
 	"github.com/fatedier/frp/extension/frpmonitor/shared"
 )
@@ -121,7 +122,13 @@ func (s *Store) ClaimConfigRestore(ctx context.Context, input ClaimConfigRestore
 			// Another administrator may resume the same receipt. The original
 			// creator, acknowledgement ID and prior supersession event remain.
 			result, replayed = old, true
-			return nil
+			actorKind, actor := auditActor(input.Creator)
+			id, err := shared.NewConfigOperationID()
+			if err != nil {
+				return err
+			}
+			_, err = appendAuditTx(tx, s.cfg.Now().UnixMilli(), AuditInput{Kind: "retry", ActorKind: actorKind, Actor: actor, NodeID: old.NodeID, ServiceID: old.ServiceID, State: old.State, Code: "request_replayed"}, "audit", id)
+			return err
 		}
 		if !errors.Is(err, ErrNotFound) {
 			return err
@@ -153,7 +160,10 @@ func (s *Store) ClaimConfigRestore(ctx context.Context, input ClaimConfigRestore
 		}
 		result = &ConfigRestore{ID: input.ID, NodeID: input.NodeID, ServiceID: input.ServiceID, Epoch: input.Epoch, BackupServiceID: input.BackupServiceID, ReplacedServiceID: input.ReplacedServiceID, ManifestDigest: input.ManifestDigest, ContextRevision: input.ContextRevision, StoreDigest: input.StoreDigest, State: "pending", Creator: input.Creator, CreatedAtMS: now, UpdatedAtMS: now, Version: 1, TokenSHA256: input.ExpectedTokenSHA256}
 		_, err = tx.Exec("INSERT INTO config_restores("+restoreColumns+") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", result.ID, result.NodeID, result.ServiceID, result.Epoch, result.BackupServiceID, result.ReplacedServiceID, result.ManifestDigest, result.ContextRevision, result.StoreDigest, result.State, result.Creator, result.CreatedAtMS, result.UpdatedAtMS, result.Version, result.TokenSHA256)
-		return err
+		if err != nil {
+			return err
+		}
+		return auditRestoreTx(tx, result, input.Creator)
 	})
 	if err != nil {
 		return nil, false, err
@@ -179,8 +189,8 @@ func (s *Store) GetConfigRestore(ctx context.Context, nodeID, epoch string) (*Co
 	return result, nil
 }
 
-func (s *Store) ConfirmConfigRestore(ctx context.Context, id string, expectedVersion int64) (*ConfigRestore, error) {
-	if !shared.ValidConfigOperationID(id) || expectedVersion < 1 {
+func (s *Store) ConfirmConfigRestore(ctx context.Context, id string, expectedVersion int64, actors ...string) (*ConfigRestore, error) {
+	if !shared.ValidConfigOperationID(id) || expectedVersion < 1 || len(actors) > 1 || (len(actors) == 1 && !operationText(actors[0], 128)) {
 		return nil, ErrInvalid
 	}
 	var result *ConfigRestore
@@ -215,10 +225,24 @@ func (s *Store) ConfirmConfigRestore(ctx context.Context, id string, expectedVer
 			return ErrConflict
 		}
 		result = r
-		return nil
+		actor := r.Creator
+		if len(actors) > 0 {
+			actor = actors[0]
+		}
+		return auditRestoreTx(tx, r, actor)
 	})
 	if err != nil {
 		return nil, err
 	}
 	return result, nil
+}
+
+func auditRestoreTx(tx *sql.Tx, r *ConfigRestore, actor string) error {
+	actorKind, actor := auditActor(actor)
+	code := "restore_pending"
+	if r.State == "acknowledged" {
+		code = "restore_acknowledged"
+	}
+	_, err := appendAuditTx(tx, r.UpdatedAtMS, AuditInput{Kind: "restore", ActorKind: actorKind, Actor: actor, NodeID: r.NodeID, ServiceID: r.ServiceID, State: r.State, Code: code, Summary: &AuditSummary{ContextRevision: r.ContextRevision, CandidateDigest: r.StoreDigest, Warnings: []string{}}}, "restore_receipt", r.ID+":"+strconv.FormatInt(r.Version, 10))
+	return err
 }

@@ -116,7 +116,62 @@ CREATE TABLE config_restores (
  UNIQUE(node_id,epoch)
 );
 CREATE INDEX config_restores_node ON config_restores(node_id,created_at_ms DESC);
+-- Configuration audit ledger (schema v10).
+CREATE TABLE config_audit_entries (
+ audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
+ recorded_at_ms INTEGER NOT NULL CHECK (recorded_at_ms > 0),
+ occurred_at_ms INTEGER,
+ kind TEXT NOT NULL CHECK (kind IN ('state','preview','dispatch','retry','restore','external_drift','export')),
+ actor_kind TEXT NOT NULL CHECK (actor_kind IN ('github','system','unknown')),
+ actor TEXT NOT NULL DEFAULT '',
+ observer TEXT NOT NULL DEFAULT '',
+ node_id INTEGER,
+ service_id TEXT NOT NULL DEFAULT '',
+ operation_id TEXT NOT NULL DEFAULT '',
+ operation_version INTEGER,
+ state TEXT NOT NULL DEFAULT '',
+ code TEXT NOT NULL,
+ object_count INTEGER NOT NULL CHECK (object_count >= 0),
+ field_count INTEGER NOT NULL CHECK (field_count >= 0),
+ summary_json TEXT CHECK (summary_json IS NULL OR (length(summary_json)<=8192 AND json_valid(summary_json) AND json_type(summary_json)='object')),
+ changes_json TEXT NOT NULL CHECK (length(changes_json)<=65536 AND json_valid(changes_json) AND json_type(changes_json)='array'),
+ origin_kind TEXT NOT NULL,
+ origin_id TEXT NOT NULL,
+ UNIQUE(origin_kind,origin_id)
+);
+CREATE INDEX config_audit_time ON config_audit_entries(recorded_at_ms DESC,audit_id DESC);
+CREATE INDEX config_audit_node ON config_audit_entries(node_id,recorded_at_ms DESC,audit_id DESC);
+CREATE INDEX config_audit_actor ON config_audit_entries(actor_kind,actor,recorded_at_ms DESC,audit_id DESC);
+CREATE INDEX config_audit_operation ON config_audit_entries(operation_id,audit_id);
+CREATE INDEX config_audit_state ON config_audit_entries(state,recorded_at_ms DESC,audit_id DESC);
+CREATE TABLE config_audit_objects (
+ audit_id INTEGER NOT NULL REFERENCES config_audit_entries(audit_id) ON DELETE CASCADE,
+ kind TEXT NOT NULL CHECK (kind IN ('proxy','visitor')),
+ name TEXT NOT NULL,
+ action TEXT NOT NULL,
+ PRIMARY KEY(audit_id,kind,name)
+);
+CREATE INDEX config_audit_object_name ON config_audit_objects(kind,name,audit_id);
+CREATE TABLE config_audit_observations (
+ node_id INTEGER NOT NULL CHECK (node_id > 0),
+ service_id TEXT NOT NULL,
+ context_revision TEXT NOT NULL,
+ updated_at_ms INTEGER NOT NULL,
+ PRIMARY KEY(node_id,service_id)
+);
+-- Old events retain their original facts; unavailable previews stay NULL.
+WITH event_targets AS (
+ SELECT e.*,COALESCE(NULLIF(e.changes_json,'[]'),(SELECT first.changes_json FROM config_operation_events first WHERE first.operation_id=e.operation_id AND first.changes_json<>'[]' ORDER BY first.event_id LIMIT 1),'[]') AS targets FROM config_operation_events e
+)
+INSERT OR IGNORE INTO config_audit_entries(recorded_at_ms,kind,actor_kind,actor,node_id,service_id,operation_id,operation_version,state,code,object_count,field_count,changes_json,origin_kind,origin_id)
+ SELECT e.created_at_ms,'state',CASE WHEN e.actor='' THEN 'unknown' WHEN e.actor LIKE 'system:%' THEN 'system' ELSE 'github' END,e.actor,o.node_id,o.service_id,e.operation_id,e.version,e.state,e.code,json_array_length(e.targets),COALESCE((SELECT sum(json_array_length(json_extract(j.value,'$.fields'))) FROM json_each(e.targets) j),0),e.targets,'operation_event',CAST(e.event_id AS TEXT)
+ FROM event_targets e JOIN config_operations o ON o.operation_id=e.operation_id ORDER BY e.event_id;
+INSERT OR IGNORE INTO config_audit_objects(audit_id,kind,name,action)
+ SELECT a.audit_id,json_extract(j.value,'$.kind'),json_extract(j.value,'$.name'),json_extract(j.value,'$.action')
+ FROM config_audit_entries a,json_each(a.changes_json) j WHERE a.origin_kind='operation_event';
+INSERT OR IGNORE INTO config_audit_entries(recorded_at_ms,kind,actor_kind,actor,node_id,service_id,state,code,object_count,field_count,changes_json,origin_kind,origin_id)
+ SELECT updated_at_ms,'restore',CASE WHEN creator='' THEN 'unknown' WHEN creator LIKE 'system:%' THEN 'system' ELSE 'github' END,creator,node_id,service_id,state,CASE WHEN state='pending' THEN 'restore_pending' ELSE 'restore_acknowledged' END,0,0,'[]','restore_receipt',id||':'||version FROM config_restores;
 -- Database identity; must match the restore check in scripts/ops.py
 -- and the startup check in monitor/control/store.go.
 PRAGMA application_id=1179798836;
-PRAGMA user_version=9;
+PRAGMA user_version=10;

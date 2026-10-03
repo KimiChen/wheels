@@ -1,5 +1,6 @@
 import {value, bytes, uint64, quality} from "./format.mjs";
 import {validNodeID} from "./node-data.mjs";
+import {auditFilters, maxAuditExportBytes} from "./admin-audit-data.mjs";
 
 export const reconciliationLabels = {matched: "已核对", unbound: "未设可信绑定", conflict: "归属冲突", mismatch: "报告与绑定不一致", missing: "服务端未登记", stale: "节点报告已过期", transient: "未配置稳定 ID", unavailable: "服务端快照不可用", ready: "可用", disabled: "未启用"};
 export const clientProxyLabels = {unknown: "未知", disabled: "未启用", starting: "启动中", running: "运行中", error: "错误", closed: "已关闭"};
@@ -90,14 +91,14 @@ export function adminClient({fetcher = globalThis.fetch, onExpired = () => {}, t
   let csrf = null, epoch = 0;
   const active = new Set();
   function clear() { epoch++; csrf = null; for (const controller of active) controller.abort(); active.clear(); }
-  async function request(path, {method = "GET", body} = {}) {
+  async function perform(path, {method = "GET", body} = {}, download = false) {
     if (!path.startsWith("/api/admin/v1/")) throw new Error("invalid_admin_path");
     const write = method !== "GET", generation = epoch, controller = new AbortController();
     if (write && !csrf) throw Object.assign(new Error("unauthorized"), {status: 401});
     active.add(controller);
     const timeout = timer(() => controller.abort(), 10000);
     try {
-      const headers = {Accept: "application/json"};
+      const headers = {Accept: download ? "application/x-ndjson" : "application/json"};
       if (body !== undefined) headers["Content-Type"] = "application/json";
       if (write) headers["X-CSRF-Token"] = csrf;
       const response = await fetcher(path, {method, headers, body: body === undefined ? undefined : JSON.stringify(body), credentials: "same-origin", cache: "no-store", signal: controller.signal, redirect: "error"});
@@ -109,14 +110,34 @@ export function adminClient({fetcher = globalThis.fetch, onExpired = () => {}, t
         if (generation !== epoch || controller.signal.aborted) throw Object.assign(new Error("cancelled"), {name: "AbortError"});
         throw Object.assign(new Error("request_failed"), {status: response.status, code});
       }
-      const data = response.status === 204 ? null : await response.json();
+      let data;
+      if (download) {
+        if (response.status !== 200 || response.headers.get("content-type")?.split(";")[0].trim().toLowerCase() !== "application/x-ndjson" || !response.body?.getReader) throw new Error("invalid_audit_response");
+        const size = response.headers.get("content-length");
+        if (size && (!/^[0-9]+$/.test(size) || Number(size) > maxAuditExportBytes)) { await response.body.cancel(); throw new Error("invalid_audit_response"); }
+        const reader = response.body.getReader(), buffer = new Uint8Array(maxAuditExportBytes);
+        let bytes = 0, done = false;
+        try {
+          while (!done) {
+            const chunk = await reader.read(); done = chunk.done;
+            if (generation !== epoch || controller.signal.aborted) throw Object.assign(new Error("cancelled"), {name:"AbortError"});
+            if (!done) {
+              if (bytes + chunk.value.byteLength > maxAuditExportBytes) throw new Error("invalid_audit_response");
+              buffer.set(chunk.value,bytes); bytes += chunk.value.byteLength;
+            }
+          }
+          data = new TextDecoder("utf-8", {fatal:true,ignoreBOM:true}).decode(buffer.subarray(0,bytes));
+        } finally { if (!done) await reader.cancel().catch(()=>{}); reader.releaseLock(); }
+      } else data = response.status === 204 ? null : await response.json();
       if (generation !== epoch || controller.signal.aborted) throw Object.assign(new Error("cancelled"), {name: "AbortError"});
       return data;
-    } finally { cancel(timeout); active.delete(controller); }
+    } catch (error) { controller.abort(); throw error; }
+    finally { cancel(timeout); active.delete(controller); }
   }
+  const request = (path, options) => perform(path, options);
   function acceptSession(data) {
     if (!data || typeof data.csrf_token !== "string" || data.csrf_token.length < 16 || data.csrf_token.length > 256 || !Number.isFinite(Date.parse(data.expires_at))) throw new Error("invalid_session");
     csrf = data.csrf_token; return data;
   }
-  return {request, clear, session: async () => acceptSession(await request("/api/admin/v1/session")), logout: async () => { try { await request("/api/admin/v1/logout", {method: "POST"}); } finally { clear(); } }};
+  return {request, clear, downloadAudit: filters => perform("/api/admin/v1/configuration/audit/export", {method:"POST",body:{filters:auditFilters(filters)}}, true), session: async () => acceptSession(await request("/api/admin/v1/session")), logout: async () => { try { await request("/api/admin/v1/logout", {method: "POST"}); } finally { clear(); } }};
 }

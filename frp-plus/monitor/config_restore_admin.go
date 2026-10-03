@@ -185,7 +185,7 @@ func (s *Service) handleConfigRestore(w http.ResponseWriter, r *http.Request, ct
 	} else {
 		code = result.Code
 		if code == "ok" && result.ServiceID == observed.ServiceID && result.Restore != nil && result.Restore.Validate() == nil && result.Restore.Epoch == info.Epoch && result.Restore.ManifestDigest == info.ManifestDigest && result.Restore.ContextRevision == info.ContextRevision && result.Restore.StoreDigest == info.StoreDigest && result.Restore.AcknowledgementID == receipt.ID && (result.Restore.State == "acknowledged" || result.Restore.State == "confirmed") {
-			if _, err = s.control.ConfirmConfigRestore(ctx, receipt.ID, receipt.Version); err != nil {
+			if _, err = s.control.ConfirmConfigRestore(ctx, receipt.ID, receipt.Version, actor); err != nil {
 				configHTTPError(w, err)
 				return
 			}

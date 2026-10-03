@@ -371,7 +371,7 @@ func TestLegacyMigrationPreservesNodeDataAndSequences(t *testing.T) {
 				if err := tx.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 					return err
 				}
-				if version != 9 {
+				if version != 10 {
 					return fmt.Errorf("unexpected migration version %d", version)
 				}
 				return nil
@@ -383,7 +383,7 @@ func TestLegacyMigrationPreservesNodeDataAndSequences(t *testing.T) {
 }
 
 func TestMigrationRejectsUnknownIdentityAndRollsBackDDL(t *testing.T) {
-	for _, tt := range []struct{ version, application int }{{3, 1179798836}, {10, 1179798836}, {4, 123}, {5, 123}} {
+	for _, tt := range []struct{ version, application int }{{3, 1179798836}, {11, 1179798836}, {4, 123}, {5, 123}} {
 		t.Run(fmt.Sprint(tt), func(t *testing.T) {
 			path, db := legacyDatabase(t)
 			if _, err := db.Exec(fmt.Sprintf("PRAGMA user_version=%d; PRAGMA application_id=%d", tt.version, tt.application)); err != nil {
