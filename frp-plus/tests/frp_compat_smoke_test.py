@@ -96,6 +96,54 @@ class CompatibilityTests(unittest.TestCase):
         self.assertIn(baseline.BASELINE_COMMIT + ":frp-plus", args)
         self.assertEqual(command.call_args.kwargs["cwd"], Path("/fixture"))
 
+    def initializer_fixture(self):
+        # The archived initializer uses a schema relative to its own source,
+        # just as the real baseline does. It must not import today's local.py.
+        files = {
+            "scripts/local.py": b"from pathlib import Path\nimport sqlite3\nROOT = Path(__file__).resolve().parents[1]\n"
+                                b"def initialize(path):\n    db = sqlite3.connect(path)\n"
+                                b"    db.executescript((ROOT / 'monitor/control/schema.sql').read_text())\n"
+                                b"    db.close()\n",
+            "monitor/control/schema.sql": b"CREATE TABLE old_fixture(value TEXT);\nPRAGMA user_version=6;\n",
+        }
+        stream = io.BytesIO()
+        with tarfile.open(fileobj=stream, mode="w") as archive:
+            for name, value in files.items():
+                entry = tarfile.TarInfo(name)
+                entry.size = len(value)
+                archive.addfile(entry, io.BytesIO(value))
+        archive = stream.getvalue()
+        manifest = {"plus_baseline": {"commit": baseline.BASELINE_COMMIT, "source_verified_clean": True,
+                                      "archive_sha256": baseline.frp.digest(archive)}}
+        return archive, manifest
+
+    def test_pair_initializer_uses_verified_archive_schema_and_cleans_source(self):
+        archive, manifest = self.initializer_fixture()
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(compat, "baseline_archive", return_value=archive):
+            database = Path(temporary).resolve() / "control.sqlite"
+            with compat.baseline_initializer(manifest) as initializer:
+                source = initializer.ROOT
+                self.assertNotEqual(source, baseline.ROOT)
+                initializer.initialize(database)
+                self.assertEqual(compat.database_version(database), 6)
+                # Nothing modifies the original fixture, even after an upgrade.
+                with compat.sqlite3.connect(database) as current:
+                    current.execute("PRAGMA user_version=9")
+                self.assertEqual(compat.database_version(database), 9)
+                self.assertIn("user_version=6", (source / "monitor/control/schema.sql").read_text())
+            self.assertFalse(source.exists())
+
+    def test_initializer_refuses_archive_drift_before_loading_code(self):
+        archive, manifest = self.initializer_fixture()
+        for changes in ({"archive_sha256": "0" * 64}, {"commit": "0" * 40}, {"source_verified_clean": False}):
+            changed = copy.deepcopy(manifest)
+            changed["plus_baseline"].update(changes)
+            with self.subTest(changes=changes), mock.patch.object(compat, "baseline_archive", return_value=archive), \
+                 mock.patch.object(compat.importlib.util, "spec_from_file_location") as loader:
+                with self.assertRaises(SmokeFailure), compat.baseline_initializer(changed):
+                    self.fail("invalid baseline initializer was loaded")
+                loader.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -9,23 +9,51 @@ bypass, production credentials, or remote service is used.
 from __future__ import annotations
 
 import argparse
-from contextlib import ExitStack
+from contextlib import ExitStack, closing, contextmanager
+import importlib.util
 import json
 import os
 from pathlib import Path
 import signal
+import sqlite3
 import sys
 import tempfile
 import threading
 import time
 
-from build_compat_baseline import BASELINE_COMMIT, verify_baseline, frp
+from build_compat_baseline import BASELINE_COMMIT, baseline_archive, verify_baseline, frp
 from smoke import (Bridge, LOOPBACK, PublicAPI, SmokeFailure, child, echo_matches,
                    echo_server, interrupted, port_open, positive_timeout,
                    reserve_port, verify, wait_for, write_private)
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-import local
+@contextmanager
+def baseline_initializer(manifest: dict):
+    """Load the initializer and its schema from the verified old Git archive.
+
+    All pairs start with a genuine old database. The new server performs its
+    normal upgrade; no current-schema database is presented to the old server.
+    The mutable baseline build cache is never used as the source of this code.
+    """
+    archive = baseline_archive()
+    provenance = manifest.get("plus_baseline", {})
+    if (provenance.get("commit") != BASELINE_COMMIT or provenance.get("source_verified_clean") is not True
+            or provenance.get("archive_sha256") != frp.digest(archive)):
+        raise SmokeFailure("compatibility initializer does not match the verified old Git archive")
+    with tempfile.TemporaryDirectory(prefix="frp-plus-compat-source-") as temporary:
+        source = Path(temporary)
+        frp.extract_archive(archive, source)
+        # Both paths must be regular archived inputs before executing local code.
+        frp.read_regular(source / "scripts/local.py")
+        frp.read_regular(source / "monitor/control/schema.sql")
+        spec = importlib.util.spec_from_file_location("compat_baseline_local", source / "scripts/local.py")
+        initializer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(initializer)
+        yield initializer
+
+
+def database_version(path: Path) -> int:
+    with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as database:
+        return database.execute("PRAGMA user_version").fetchone()[0]
 
 
 class CountedBridge(Bridge):
@@ -61,15 +89,17 @@ def require_fresh(node: dict, counts: tuple[int, int]) -> None:
         raise SmokeFailure("fresh public metrics have no report timestamps")
 
 
-def run_pair(agent: Path, server: Path, label: str, timeout: float, duration: float) -> None:
+def run_pair(agent: Path, server: Path, label: str, timeout: float, duration: float,
+             initializer, *, expect_upgrade: bool) -> None:
     with tempfile.TemporaryDirectory(prefix="frp-plus-compat-") as temporary, ExitStack() as stack:
         root = Path(temporary).resolve()
         reservations = [stack.enter_context(reserve_port()) for _ in range(3)]
         control_port, monitor_port, remote_port = [sock.getsockname()[1] for sock in reservations]
         echo_port = stack.enter_context(echo_server())
-        settings = local.settings(root, {"FRP_SERVER_PORT": str(control_port), "FRP_MONITOR_PORT": str(monitor_port),
+        settings = initializer.settings(root, {"FRP_SERVER_PORT": str(control_port), "FRP_MONITOR_PORT": str(monitor_port),
                                          "FRP_MONITOR_INTERVAL_SECONDS": "1", "FRP_AGENT_NAME": "Compatibility node"})
-        folder = local.initialize(root / "runtime", probes=True, config=settings)
+        folder = initializer.initialize(root / "runtime", probes=True, config=settings)
+        initial_schema = database_version(folder / "control.sqlite")
         bridge = CountedBridge(monitor_port)
         bridge.start()
         stack.callback(bridge.stop)
@@ -87,6 +117,10 @@ def run_pair(agent: Path, server: Path, label: str, timeout: float, duration: fl
             sock.close()
         service = stack.enter_context(child(label + " server", [str(server), "-c", str(server_config)], folder))
         wait_for(label + " listeners", lambda: port_open(control_port) and port_open(monitor_port), (service,), timeout)
+        running_schema = database_version(folder / "control.sqlite")
+        if ((expect_upgrade and running_schema <= initial_schema)
+                or (not expect_upgrade and running_schema != initial_schema)):
+            raise SmokeFailure("compatibility database did not follow the expected old-to-current upgrade path")
         client = stack.enter_context(child(label + " agent", [str(agent), "-c", str(agent_config)], folder))
         processes = (service, client)
         api = PublicAPI(monitor_port, folder / "local.crt")
@@ -116,7 +150,8 @@ def run_pair(agent: Path, server: Path, label: str, timeout: float, duration: fl
         require_fresh(api.node(), bridge.counts())
         if len(metric_times) < 4 or len(seen_times) < 4 or echoes < 10:
             raise SmokeFailure("insufficient fresh report progression or TCP observations")
-        print(f"PASS {label}: {len(metric_times)} fresh metrics, {echoes} TCP payloads, 1 monitor connection, 0 reconnects ({duration:g}s)", flush=True)
+        print(f"PASS {label}: {len(metric_times)} fresh metrics, {echoes} TCP payloads, 1 monitor connection, "
+              f"0 reconnects, schema {initial_schema}->{running_schema} ({duration:g}s)", flush=True)
 
 
 def verify_new_pair(agent: Path, server: Path) -> dict:
@@ -157,9 +192,10 @@ def main(argv=None):
     if any(new_manifest["binaries"][name] == old_manifest["binaries"][name] for name in ("frp-plus-agent", "frp-plus-server")):
         raise SmokeFailure("old and new compatibility inputs must be different builds")
     print(f"PASS old Plus provenance: {BASELINE_COMMIT}; exact Git archive inputs and binary hashes match", flush=True)
-    for a, s, label in ((old_agent, old_server, "old-to-old"), (agent, old_server, "new-to-old"),
-                        (old_agent, server, "old-to-new"), (agent, server, "new-to-new")):
-        run_pair(a, s, label, args.timeout, args.duration)
+    with baseline_initializer(old_manifest) as initializer:
+        for a, s, label, upgrade in ((old_agent, old_server, "old-to-old", False), (agent, old_server, "new-to-old", False),
+                                    (old_agent, server, "old-to-new", True), (agent, server, "new-to-new", True)):
+            run_pair(a, s, label, args.timeout, args.duration, initializer, expect_upgrade=upgrade)
     return 0
 
 
