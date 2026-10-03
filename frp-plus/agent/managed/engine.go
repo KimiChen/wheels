@@ -26,10 +26,11 @@ var serviceIdentity = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-
 type record struct {
 	Version int `json:"version"`
 	Operation
-	KeyDigest    string `json:"key_digest"`
-	Fingerprint  string `json:"fingerprint"`
-	OldExists    bool   `json:"old_exists"`
-	NeedsRuntime bool   `json:"needs_runtime"`
+	KeyDigest    string     `json:"key_digest"`
+	Fingerprint  string     `json:"fingerprint"`
+	OldExists    bool       `json:"old_exists"`
+	NeedsRuntime bool       `json:"needs_runtime"`
+	TerminalAt   *time.Time `json:"terminal_at,omitempty"`
 }
 
 type workerResult struct {
@@ -64,7 +65,8 @@ type Engine struct {
 	restoreVerified  bool
 	// Tests inject persistence failures/crashes at named boundaries only. No
 	// production option enables this hook or exposes private data to it.
-	testHook func(string) error
+	testRetentionNow func() time.Time
+	testHook         func(string) error
 }
 
 // Open must run before the native Store loader. An interrupted transaction is
@@ -72,6 +74,15 @@ type Engine struct {
 // Runtime recovery remains visibly rolling_back until AttachRuntime verifies
 // the freshly started native service; Open alone never claims runtime health.
 func Open(options Options) (_ *Engine, resultErr error) {
+	if options.SnapshotRetentionDays == 0 {
+		options.SnapshotRetentionDays = 30
+	}
+	if options.MaxSnapshotBytes == 0 {
+		options.MaxSnapshotBytes = 32 << 20
+	}
+	if options.SnapshotRetentionDays < 1 || options.SnapshotRetentionDays > 366 || options.MaxSnapshotBytes < 1<<20 || options.MaxSnapshotBytes > 1<<30 {
+		return nil, ErrInvalid
+	}
 	if options.MaxBytes == 0 {
 		options.MaxBytes = 1024 * 1024
 	}
@@ -84,7 +95,7 @@ func Open(options Options) (_ *Engine, resultErr error) {
 	if options.CloseTimeout == 0 {
 		options.CloseTimeout = time.Second
 	}
-	if options.MaxBytes < 1 || options.MaxBytes > 16*1024*1024 || options.MaxOperations < 1 || options.MaxOperations > 4096 || options.RollbackTimeout <= 0 || options.CloseTimeout <= 0 {
+	if options.MaxBytes < 1 || options.MaxBytes > 16*1024*1024 || options.MaxOperations < 1 || options.MaxOperations > MaxManagedOperations || options.RollbackTimeout <= 0 || options.CloseTimeout <= 0 {
 		return nil, ErrInvalid
 	}
 	if !filepath.IsAbs(options.Root) || filepath.Clean(options.Root) != options.Root || !filepath.IsAbs(options.StorePath) || filepath.Clean(options.StorePath) != options.StorePath || filepath.Dir(options.StorePath) != options.Root {
@@ -244,6 +255,7 @@ func (e *Engine) save(r *record) error {
 // persist preserves the exact historical operation when a rollback CAS lost
 // before replacing the Store and only its intent journal needs cancellation.
 func (e *Engine) persist(r *record) error {
+	normalizeRecordRetention(r, e.retentionNow())
 	data, err := json.Marshal(r)
 	if err != nil || len(data) > journalLimit {
 		return ErrStorage
@@ -254,6 +266,10 @@ func (e *Engine) persist(r *record) error {
 	return nil
 }
 func (e *Engine) state(r *record, state, code string) error {
+	if terminal(state) && !terminal(r.State) {
+		at := e.retentionNow()
+		r.TerminalAt = &at
+	}
 	r.State, r.ErrorCode = state, code
 	if err := e.save(r); err != nil {
 		r.State, r.ErrorCode = OutcomeUnknown, "journal_failed"
@@ -268,30 +284,32 @@ func (e *Engine) state(r *record, state, code string) error {
 
 func (e *Engine) load() error {
 	names, err := e.operations.names()
-	if err != nil || len(names) > e.opts.MaxOperations*4+32 {
+	if err != nil || len(names) > MaxManagedOperations*4+32 {
 		return ErrRecovery
 	}
 	for _, name := range names {
 		if !strings.HasSuffix(name, ".json") {
 			continue
 		}
-		if len(e.records) >= e.opts.MaxOperations {
+		if len(e.records) >= MaxManagedOperations {
 			return ErrRecovery
 		}
 		file, err := e.operations.read(name, journalLimit)
 		if err != nil || !file.Exists {
 			return ErrRecovery
 		}
-		var r record
-		decoder := json.NewDecoder(bytes.NewReader(file.Bytes))
-		decoder.DisallowUnknownFields()
-		if decoder.Decode(&r) != nil || decoder.Decode(new(any)) != io.EOF || r.Version != 1 || !safeID.MatchString(r.ID) || name != idHash(r.ID)+".json" || !knownState(r.State) || !digestString(r.BaseRevision) || !digestString(r.ContextRevision) || !digestString(r.RequestDigest) || !digestString(r.OldDigest) || !digestString(r.NewDigest) || !digestString(r.KeyDigest) || !digestString(r.Fingerprint) || r.CreatedAt.IsZero() || r.Deadline.IsZero() {
+		r, policy, err := decodeManagedRecord(file.Bytes, name)
+		if err != nil {
 			return ErrRecovery
 		}
 		if _, found := e.keys[r.KeyDigest]; found {
 			return ErrRecovery
 		}
-		if _, _, err := e.snapshots(&r); err != nil {
+		if policy == snapshotsRequired {
+			if _, _, err := e.snapshots(&r); err != nil {
+				return ErrRecovery
+			}
+		} else if err := e.checkExpiredResidues(&r); err != nil {
 			return ErrRecovery
 		}
 		e.records[r.ID], e.keys[r.KeyDigest] = &r, r.ID
@@ -306,6 +324,9 @@ func (e *Engine) load() error {
 }
 
 func (e *Engine) snapshots(r *record) (StoreSnapshot, StoreSnapshot, error) {
+	if r.MaterialsState == MaterialsExpired {
+		return StoreSnapshot{}, StoreSnapshot{}, ErrNotFound
+	}
 	old, err := e.operations.read(idHash(r.ID)+".old", e.opts.MaxBytes)
 	if err != nil || !old.Exists {
 		return StoreSnapshot{}, StoreSnapshot{}, ErrRecovery
@@ -341,9 +362,9 @@ func (e *Engine) Prepare(ctx context.Context, request Request) (Operation, error
 	}
 	if r, ok := e.records[request.ID]; ok {
 		if r.KeyDigest != key || r.Fingerprint != fingerprint {
-			return r.Operation, ErrConflict
+			return visibleOperation(r), ErrConflict
 		}
-		return r.Operation, nil
+		return visibleOperation(r), nil
 	}
 	if _, used := e.keys[key]; used {
 		return Operation{}, ErrConflict
@@ -352,7 +373,7 @@ func (e *Engine) Prepare(ctx context.Context, request Request) (Operation, error
 		return Operation{}, ErrBusy
 	}
 	if len(e.records) >= e.opts.MaxOperations {
-		return Operation{}, ErrStorage
+		return Operation{}, ErrCapacity
 	}
 	now := time.Now().UTC()
 	if !request.Deadline.After(now) {
@@ -368,13 +389,20 @@ func (e *Engine) Prepare(ctx context.Context, request Request) (Operation, error
 	if Digest(old) != request.ExpectedDigest {
 		return Operation{}, ErrConflict
 	}
+	usage, err := e.snapshotUsageLocked()
+	if err != nil {
+		return Operation{}, err
+	}
+	if usage+int64(len(old.Bytes))+int64(len(newValue.Bytes)) > e.opts.MaxSnapshotBytes {
+		return Operation{}, ErrCapacity
+	}
 	journal, err := e.operations.read(idHash(request.ID)+".json", journalLimit)
 	if err != nil || journal.Exists {
 		e.recoveryGate = true
 		return Operation{}, ErrRecovery
 	}
-	r := &record{Version: 1, KeyDigest: key, Fingerprint: fingerprint, OldExists: old.Exists,
-		Operation: Operation{ID: request.ID, BaseRevision: request.BaseRevision, ContextRevision: request.ContextRevision, RequestDigest: request.RequestDigest, OldDigest: Digest(old), NewDigest: Digest(newValue), State: Prepared, CreatedAt: now, UpdatedAt: now, Deadline: request.Deadline.UTC()}}
+	r := &record{Version: 2, KeyDigest: key, Fingerprint: fingerprint, OldExists: old.Exists,
+		Operation: Operation{MaterialsState: MaterialsRetained, ID: request.ID, BaseRevision: request.BaseRevision, ContextRevision: request.ContextRevision, RequestDigest: request.RequestDigest, OldDigest: Digest(old), NewDigest: Digest(newValue), State: Prepared, CreatedAt: now, UpdatedAt: now, Deadline: request.Deadline.UTC()}}
 	// Reserve the ID and gate before the first recovery write. A failed fsync
 	// may still have installed a journal; no second transaction may assume it
 	// was absent or overwrite its snapshots with a different request.
@@ -387,15 +415,15 @@ func (e *Engine) Prepare(ctx context.Context, request Request) (Operation, error
 			// Orphan snapshots without a journal never authorize native loading
 			// or replay. This process remains gated; Open ignores such orphans.
 			r.State, r.ErrorCode = OutcomeUnknown, "snapshot_write_failed"
-			return r.Operation, ErrStorage
+			return visibleOperation(r), ErrStorage
 		}
 	}
 	if err := e.save(r); err != nil {
 		r.State, r.ErrorCode = OutcomeUnknown, "journal_failed"
-		return r.Operation, ErrStorage
+		return visibleOperation(r), ErrStorage
 	}
 	go e.expirePrepared(r.ID, r.Deadline)
-	return r.Operation, nil
+	return visibleOperation(r), nil
 }
 
 func (e *Engine) expirePrepared(id string, deadline time.Time) {
@@ -426,7 +454,7 @@ func (e *Engine) Query(ctx context.Context, id string) (Operation, error) {
 	if !ok {
 		return Operation{}, ErrNotFound
 	}
-	return r.Operation, nil
+	return visibleOperation(r), nil
 }
 
 // AttachRuntime never treats startup as confirmation. Pending recovery is
@@ -444,6 +472,7 @@ func (e *Engine) AttachRuntime(runtime Runtime) error {
 		return ErrConflict
 	}
 	e.runtime, e.attached = runtime, true
+	go e.retentionLoop()
 	if e.active != "" && e.records[e.active].NeedsRuntime {
 		r := e.records[e.active]
 		e.launch(r, func() error { e.rollbackWorker(r.ID, true); return nil })
@@ -462,7 +491,7 @@ func (e *Engine) launch(r *record, work func() error) {
 		e.mu.Lock()
 		defer e.mu.Unlock()
 		worker.err = err
-		worker.operation = e.records[r.ID].Operation
+		worker.operation = visibleOperation(e.records[r.ID])
 		e.running, e.cancel = false, nil
 		if terminal(worker.operation.State) {
 			e.active = ""
@@ -479,7 +508,7 @@ func (e *Engine) wait(ctx context.Context, id string, worker *workerResult) (Ope
 	case <-ctx.Done():
 		e.mu.Lock()
 		defer e.mu.Unlock()
-		return e.records[id].Operation, ctx.Err()
+		return visibleOperation(e.records[id]), ctx.Err()
 	case <-worker.done:
 		if worker.err != nil {
 			return worker.operation, worker.err
@@ -512,24 +541,29 @@ func (e *Engine) Apply(ctx context.Context, id string) (Operation, error) {
 		e.mu.Unlock()
 		return Operation{}, ErrNotFound
 	}
+	if r.MaterialsState == MaterialsExpired {
+		result := visibleOperation(r)
+		e.mu.Unlock()
+		return result, ErrNotFound
+	}
 	if e.running && e.active == id {
 		worker := e.worker
 		e.mu.Unlock()
 		return e.wait(ctx, id, worker)
 	}
 	if r.State != Prepared {
-		result := r.Operation
+		result := visibleOperation(r)
 		e.mu.Unlock()
 		return result, nil
 	}
 	if !e.attached {
-		result := r.Operation
+		result := visibleOperation(r)
 		e.mu.Unlock()
 		return result, ErrRuntime
 	}
 	if !time.Now().Before(r.Deadline) {
 		err := e.state(r, Cancelled, "deadline_expired")
-		result := r.Operation
+		result := visibleOperation(r)
 		e.mu.Unlock()
 		if err != nil {
 			return result, err
@@ -539,12 +573,12 @@ func (e *Engine) Apply(ctx context.Context, id string) (Operation, error) {
 	current, err := e.readStore()
 	if err != nil || Digest(current) != r.OldDigest {
 		_ = e.state(r, Conflict, "store_drift")
-		result := r.Operation
+		result := visibleOperation(r)
 		e.mu.Unlock()
 		return result, ErrConflict
 	}
 	if err := e.state(r, Applying, ""); err != nil {
-		result := r.Operation
+		result := visibleOperation(r)
 		e.mu.Unlock()
 		return result, err
 	}
@@ -574,9 +608,14 @@ func (e *Engine) Rollback(ctx context.Context, id string) (Operation, error) {
 		e.mu.Unlock()
 		return Operation{}, ErrNotFound
 	}
+	if r.MaterialsState == MaterialsExpired {
+		result := visibleOperation(r)
+		e.mu.Unlock()
+		return result, ErrNotFound
+	}
 	if e.running {
 		if e.active != id {
-			result := r.Operation
+			result := visibleOperation(r)
 			e.mu.Unlock()
 			return result, ErrBusy
 		}
@@ -592,17 +631,17 @@ func (e *Engine) Rollback(ctx context.Context, id string) (Operation, error) {
 	}
 	if r.State == Prepared {
 		err := e.state(r, Cancelled, "cancelled_before_apply")
-		result := r.Operation
+		result := visibleOperation(r)
 		e.mu.Unlock()
 		return result, err
 	}
 	if r.State == RolledBack || r.State == Cancelled || r.State == Conflict {
-		result := r.Operation
+		result := visibleOperation(r)
 		e.mu.Unlock()
 		return result, nil
 	}
 	if e.active != "" && e.active != id {
-		result := r.Operation
+		result := visibleOperation(r)
 		e.mu.Unlock()
 		return result, ErrBusy
 	}
@@ -612,18 +651,18 @@ func (e *Engine) Rollback(ctx context.Context, id string) (Operation, error) {
 	// bytes (ABA) plus unchanged context remain eligible for an explicit undo.
 	if r.State == Confirmed {
 		if !e.attached {
-			result := r.Operation
+			result := visibleOperation(r)
 			e.mu.Unlock()
 			return result, ErrRuntime
 		}
 		current, err := e.readStore()
 		if err != nil || Digest(current) != r.NewDigest {
-			result := r.Operation
+			result := visibleOperation(r)
 			e.mu.Unlock()
 			return result, ErrConflict
 		}
 		if _, _, err = e.snapshots(r); err != nil {
-			result := r.Operation
+			result := visibleOperation(r)
 			e.mu.Unlock()
 			return result, ErrStorage
 		}
@@ -639,18 +678,18 @@ func (e *Engine) Rollback(ctx context.Context, id string) (Operation, error) {
 		journal, journalErr := e.operations.read(idHash(r.ID)+".json", journalLimit)
 		if journalErr == nil && !journal.Exists {
 			r.State, r.ErrorCode = RollbackFailed, "snapshot_invalid"
-			result := r.Operation
+			result := visibleOperation(r)
 			e.mu.Unlock()
 			return result, ErrOutcomeUnknown
 		}
 	}
 	if !e.attached {
-		result := r.Operation
+		result := visibleOperation(r)
 		e.mu.Unlock()
 		return result, ErrRuntime
 	}
 	if err := e.state(r, RollingBack, "rollback_requested"); err != nil {
-		result := r.Operation
+		result := visibleOperation(r)
 		e.mu.Unlock()
 		return result, err
 	}

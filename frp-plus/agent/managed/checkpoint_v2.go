@@ -39,11 +39,20 @@ func variantsFromPayload(payload []checkpointPayload) ([]StoreVariant, error) {
 		if !strings.HasPrefix(file.entry.Path, "managed/operations/") || !strings.HasSuffix(file.entry.Path, ".json") {
 			continue
 		}
-		var r record
-		if decodeCheckpointJSON(file.data, &r) != nil {
+		r, policy, err := decodeManagedRecord(file.data, filepath.Base(file.entry.Path))
+		if err != nil {
 			return nil, ErrRecovery
 		}
 		prefix := strings.TrimSuffix(file.entry.Path, ".json")
+		if policy == snapshotsExpired {
+			if _, ok := byPath[prefix+".old"]; ok {
+				return nil, ErrRecovery
+			}
+			if _, ok := byPath[prefix+".new"]; ok {
+				return nil, ErrRecovery
+			}
+			continue
+		}
 		old, ok := byPath[prefix+".old"]
 		if !ok || Digest(StoreSnapshot{Exists: r.OldExists, Bytes: old}) != r.OldDigest {
 			return nil, ErrRecovery

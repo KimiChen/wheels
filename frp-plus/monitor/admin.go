@@ -146,6 +146,9 @@ func (s *Service) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "CSRF token required", http.StatusForbidden)
 		return
 	}
+	if s.handleTunnelAdmin(w, r, path) {
+		return
+	}
 	if s.handleAuditAdmin(w, r, path, session.Login) {
 		return
 	}

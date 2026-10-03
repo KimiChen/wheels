@@ -131,3 +131,59 @@ func TestRestoreAdminExplicitlySupersedesOnlyMissingOldJournal(t *testing.T) {
 		t.Fatal("takeover left active lease")
 	}
 }
+
+func TestRestoreAdminPersistsOnlyMatchingConfirmedObservation(t *testing.T) {
+	s, _, admin := testAdmin(t)
+	cookie, _ := login(t, s, admin)
+	node, err := s.control.Get(context.Background(), "1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	info := shared.RestoreInfo{State: "acknowledged", Epoch: configAdminID(0), BackupServiceID: configTestService, ManifestDigest: strings.Repeat("a", 64), ContextRevision: strings.Repeat("b", 64), StoreDigest: strings.Repeat("c", 64), RuntimeLoaded: true, ResourcesReady: true}
+	service := configAdminID(0)
+	receipt, _, err := s.control.ClaimConfigRestore(context.Background(), control.ClaimConfigRestoreRequest{ID: configAdminID(0), NodeID: node.ID, ServiceID: service, Epoch: info.Epoch, BackupServiceID: info.BackupServiceID, ManifestDigest: info.ManifestDigest, ContextRevision: info.ContextRevision, StoreDigest: info.StoreDigest, Creator: "system:test", ExpectedTokenSHA256: node.TokenSHA256})
+	if err != nil {
+		t.Fatal(err)
+	}
+	info.AcknowledgementID = receipt.ID
+	s.configCoordinator.restoreCommand = func(ctx context.Context, node string, c shared.RestoreCommand) (shared.RestoreResult, error) {
+		copy := info
+		return shared.RestoreResult{ServiceID: service, Code: "ok", Restore: &copy}, nil
+	}
+	count := func() int {
+		page, err := s.control.ListAudit(context.Background(), control.AuditFilter{Kind: "restore"}, "", 50)
+		if err != nil {
+			t.Fatal(err)
+		}
+		n := 0
+		for _, item := range page.Items {
+			if item.Code == "restore_confirmed" {
+				n++
+			}
+		}
+		return n
+	}
+	r := adminRequest(t, s, "GET", configAdminPath+"/restore", "", cookie, "", nil)
+	expectStatus(t, r, 200)
+	r.Body.Close()
+	if count() != 0 {
+		t.Fatal("acknowledgement claimed completed restore")
+	}
+	info.State = "confirmed"
+	info.AcknowledgementID = configAdminID(0)
+	r = adminRequest(t, s, "GET", configAdminPath+"/restore", "", cookie, "", nil)
+	expectStatus(t, r, 409)
+	r.Body.Close()
+	if count() != 0 {
+		t.Fatal("mismatched confirmation persisted")
+	}
+	info.AcknowledgementID = receipt.ID
+	for i := 0; i < 2; i++ {
+		r = adminRequest(t, s, "GET", configAdminPath+"/restore", "", cookie, "", nil)
+		expectStatus(t, r, 200)
+		r.Body.Close()
+	}
+	if count() != 1 {
+		t.Fatal("confirmed proof missing or replayed")
+	}
+}

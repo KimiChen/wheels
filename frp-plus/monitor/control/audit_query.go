@@ -32,14 +32,20 @@ type AuditFilter struct {
 	Kind        string `json:"kind"`
 }
 
-// The first increment advertises the policy proposal, but performs no deletion.
+// AuditRetention reports local controller policy and observed logical usage.
+// SnapshotDays is the Agent default, not a claim about a remote Agent override.
 type AuditRetention struct {
-	AuditDays      int  `json:"audit_days"`
-	SnapshotDays   int  `json:"snapshot_days"`
-	CleanupEnabled bool `json:"cleanup_enabled"`
+	AuditDays       int    `json:"audit_days"`
+	SnapshotDays    int    `json:"snapshot_days"`
+	CleanupEnabled  bool   `json:"cleanup_enabled"`
+	MaxRows         int64  `json:"max_rows"`
+	MaxBytes        int64  `json:"max_bytes"`
+	Rows            int64  `json:"rows"`
+	Bytes           int64  `json:"bytes"`
+	CapacityBlocked bool   `json:"capacity_blocked"`
+	Generation      string `json:"generation"`
+	LastGCAtMS      int64  `json:"last_gc_at_ms"`
 }
-
-func auditRetention() AuditRetention { return AuditRetention{AuditDays: 90, SnapshotDays: 30} }
 
 type AuditPage struct {
 	Items       []AuditItem    `json:"items"`
@@ -58,6 +64,7 @@ type auditCursor struct {
 	FromMS      int64  `json:"f"`
 	ToMS        int64  `json:"u"`
 	FilterHash  string `json:"h"`
+	Generation  string `json:"g"`
 }
 
 func NormalizeAuditFilter(input AuditFilter, now int64) (AuditFilter, error) {
@@ -90,7 +97,7 @@ func parseAuditCursor(raw string) (*auditCursor, error) {
 	decoder := json.NewDecoder(strings.NewReader(string(data)))
 	decoder.DisallowUnknownFields()
 	cursor := new(auditCursor)
-	if decoder.Decode(cursor) != nil || decoder.Decode(new(any)) != io.EOF || cursor.Version != 1 || !auditDecimal(cursor.WatermarkID, false) || !auditDecimal(cursor.LastID, false) || !shared.ValidConfigDigest(cursor.FilterHash) || cursor.LastAtMS < cursor.FromMS || cursor.LastAtMS >= cursor.ToMS {
+	if decoder.Decode(cursor) != nil || decoder.Decode(new(any)) != io.EOF || cursor.Version != 2 || !auditDecimal(cursor.Generation, true) || !auditDecimal(cursor.WatermarkID, false) || !auditDecimal(cursor.LastID, false) || !shared.ValidConfigDigest(cursor.FilterHash) || cursor.LastAtMS < cursor.FromMS || cursor.LastAtMS >= cursor.ToMS {
 		return nil, ErrInvalid
 	}
 	w, _ := strconv.ParseInt(cursor.WatermarkID, 10, 64)
@@ -160,8 +167,16 @@ func (s *Store) ListAudit(ctx context.Context, filter AuditFilter, rawCursor str
 	if err != nil || (cursor != nil && cursor.FilterHash != auditFilterHash(filter)) {
 		return nil, ErrInvalid
 	}
-	page := &AuditPage{Items: []AuditItem{}, Filters: filter, Retention: auditRetention()}
+	page := &AuditPage{Items: []AuditItem{}, Filters: filter}
 	err = s.call(ctx, func(tx *sql.Tx) error {
+		retention, err := s.auditRetentionTx(tx)
+		if err != nil {
+			return err
+		}
+		page.Retention = retention
+		if cursor != nil && cursor.Generation != retention.Generation {
+			return ErrAuditCursorExpired
+		}
 		watermark, err := auditWatermark(tx)
 		if err != nil {
 			return err
@@ -197,7 +212,7 @@ func (s *Store) ListAudit(ctx context.Context, filter AuditFilter, rawCursor str
 	if len(page.Items) > limit {
 		page.HasMore, page.Items = true, page.Items[:limit]
 		last := page.Items[len(page.Items)-1]
-		data, _ := json.Marshal(auditCursor{Version: 1, WatermarkID: page.WatermarkID, LastAtMS: last.RecordedAtMS, LastID: last.AuditID, FromMS: filter.FromMS, ToMS: filter.ToMS, FilterHash: auditFilterHash(filter)})
+		data, _ := json.Marshal(auditCursor{Version: 2, Generation: page.Retention.Generation, WatermarkID: page.WatermarkID, LastAtMS: last.RecordedAtMS, LastID: last.AuditID, FromMS: filter.FromMS, ToMS: filter.ToMS, FilterHash: auditFilterHash(filter)})
 		page.NextCursor = base64.RawURLEncoding.EncodeToString(data)
 	}
 	return page, nil

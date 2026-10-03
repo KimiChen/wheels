@@ -18,11 +18,13 @@ var (
 )
 
 type Config struct {
-	Path           string
-	ReportInterval time.Duration
-	Location       *time.Location
-	QueueCapacity  int
-	Now            func() time.Time
+	TunnelRetentionDays int
+	Audit               shared.AuditConfig
+	Path                string
+	ReportInterval      time.Duration
+	Location            *time.Location
+	QueueCapacity       int
+	Now                 func() time.Time
 }
 
 // NodeConfig contains only administrator-editable values. Call DefaultNodeConfig

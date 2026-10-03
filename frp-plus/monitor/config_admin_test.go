@@ -108,6 +108,11 @@ func (a *configAdminAgent) handle(ctx context.Context, node string, c shared.Con
 		case "cancel":
 			v.State = "cancelled"
 		case "rollback":
+			if v.MaterialsState == "expired" {
+				r.Code = "operation_not_found"
+				r.Operation = &v
+				return r, nil
+			}
 			if a.refuseRollback {
 				r.Code = "conflict"
 				r.Operation = &v
@@ -501,5 +506,86 @@ func TestConfigAdminUndispatchedPrepareDoesNotStrandOfflineNode(t *testing.T) {
 	}
 	if len(result.Events) < 2 || result.Events[0].State != "draft" {
 		t.Fatal("rejected offline request omitted its audit")
+	}
+}
+
+func TestConfigAdminCapacityRejectionReleasesLease(t *testing.T) {
+	s, _, admin := testAdmin(t)
+	agent := installConfigAgent(s)
+	cookie, session := login(t, s, admin)
+	agent.mu.Lock()
+	agent.prepareCode = "managed_capacity"
+	agent.mu.Unlock()
+	r := adminRequest(t, s, "POST", configAdminPath+"/operations", configBody(t, configAdminInput()), cookie, session.CSRF, nil)
+	expectStatus(t, r, 201)
+	out := decodeConfigResponse(t, r)
+	if out.Code != "managed_capacity" || out.Operation.State != "rejected" || out.Agent != nil {
+		t.Fatal("capacity rejection is uncertain", out)
+	}
+	active, err := s.control.ListActiveConfigOperations(context.Background(), "", 16)
+	if err != nil || len(active) != 0 {
+		t.Fatal("capacity retained lease", err)
+	}
+}
+
+func TestConfigAdminExpiredRollbackNeverStrandsConfirmedOperation(t *testing.T) {
+	for _, known := range []bool{false, true} {
+		t.Run(map[bool]string{false: "first_observation", true: "known_expired"}[known], func(t *testing.T) {
+			s, _, admin := testAdmin(t)
+			agent := installConfigAgent(s)
+			cookie, session := login(t, s, admin)
+			r := adminRequest(t, s, "POST", configAdminPath+"/operations", configBody(t, configAdminInput()), cookie, session.CSRF, nil)
+			expectStatus(t, r, 201)
+			out := decodeConfigResponse(t, r)
+			action := configActionRequest{ExpectedVersion: out.Operation.Version, ContextRevision: out.Agent.ContextRevision, CandidateDigest: out.Operation.CandidateDigest}
+			path := configAdminPath + "/operations/" + out.Operation.OperationID
+			r = adminRequest(t, s, "POST", path+"/apply", configBody(t, action), cookie, session.CSRF, nil)
+			expectStatus(t, r, 200)
+			out = decodeConfigResponse(t, r)
+			agent.mu.Lock()
+			v := agent.operations[out.Operation.OperationID]
+			at := v.UpdatedAtMS + 1
+			v.MaterialsState = "expired"
+			v.MaterialsExpiredAtMS = &at
+			v.MaterialsExpiryReason = "ttl"
+			agent.operations[out.Operation.OperationID] = v
+			agent.mu.Unlock()
+			if known {
+				updated, code := s.queryConfigOperation(context.Background(), out.Operation, "system:test")
+				if code != "ok" {
+					t.Fatal(code)
+				}
+				out.Operation = updated
+				out.Agent = updated.Agent
+			}
+			agent.mu.Lock()
+			before := len(agent.calls)
+			agent.mu.Unlock()
+			action.ExpectedVersion = out.Operation.Version
+			r = adminRequest(t, s, "POST", path+"/rollback", configBody(t, action), cookie, session.CSRF, nil)
+			expectStatus(t, r, 200)
+			out = decodeConfigResponse(t, r)
+			if out.Code != "operation_not_found" || out.Operation.State != "confirmed" || out.Agent.MaterialsState != "expired" || !out.Agent.StorePersisted {
+				t.Fatal("expired rollback corrupted terminal facts", out)
+			}
+			active, err := s.control.ListActiveConfigOperations(context.Background(), "", 16)
+			if err != nil || len(active) != 0 {
+				t.Fatal("expired rollback retained lease", err)
+			}
+			agent.mu.Lock()
+			after := len(agent.calls)
+			agent.mu.Unlock()
+			if known && before != after {
+				t.Fatal("known expiry still dispatched rollback")
+			}
+			retained := *out.Agent
+			retained.MaterialsState = "retained"
+			retained.MaterialsExpiredAtMS = nil
+			retained.MaterialsExpiryReason = ""
+			out.Operation.Agent = out.Agent
+			if configResultMatches(out.Operation, shared.ConfigResult{ServiceID: out.Operation.ServiceID, OperationID: out.Operation.OperationID, Operation: &retained}) {
+				t.Fatal("expired materials resurrected")
+			}
+		})
 	}
 }

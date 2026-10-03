@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {fieldSpecs, fieldValue, makeEdit, readInventory, proxyTypes, visitorTypes, canApply, resultFacts, resultReason, createConfigController, readRestore, canAcknowledgeRestore, restoreAcknowledgement} from '../src/admin-configuration-data.mjs';
+import {fieldSpecs, fieldValue, makeEdit, readInventory, proxyTypes, visitorTypes, canApply, resultFacts, resultReason, operationMaterials, canRollback, configErrors, createConfigController, readRestore, canAcknowledgeRestore, restoreAcknowledgement} from '../src/admin-configuration-data.mjs';
 const service = '10000000-0000-4000-8000-000000000001', operation = '20000000-0000-4000-8000-000000000001', reference = '30000000-0000-4000-8000-000000000001';
 const base = 'a'.repeat(64), context = 'b'.repeat(64), candidate = 'c'.repeat(64);
 const object = {kind: 'proxy', name: 'existing', type: 'tcp', source: 'store', writable: true, active: true, fields: [{path: 'localIP', value: '127.0.0.1'}, {path: 'localPort', value: 8080}], secrets: [{path: 'loadBalancer.groupKey', present: true}], read_only_fields: ['healthCheck'], issues: []};
@@ -155,4 +155,32 @@ test('operation reasons separate runtime failure and recovery without exposing u
   assert.equal(resultReason(null), '');
   const privateError='untrusted-private-error';
   assert(!resultReason({error_code:privateError}).includes(privateError));
+});
+
+test('expired materials preserve the terminal result and suppress rollback dispatch', async () => {
+  const calls=[];
+  const expired={...result('confirmed'),code:'operation_not_found',agent:{materials_state:'expired',materials_expired_at_ms:120000,materials_expiry_reason:'ttl'}};
+  const controller=createConfigController({request:async(path,options)=>{
+    calls.push({path,options});
+    if(path.endsWith('/configuration'))return inventory();
+    if(path.endsWith('/operations'))return {operations:[expired.operation]};
+    return expired;
+  }});
+  await controller.open('1',true);await controller.query(operation);
+  assert.equal(controller.state.result.operation.state,'confirmed');
+  assert.match(controller.state.message,/回退材料已过保留期限/);
+  assert.equal(canRollback(expired),false);
+  assert.deepEqual(operationMaterials(expired),{state:'expired',expiredAt:120000});
+  await controller.action('rollback');assert.equal(calls.length,3);
+  assert.equal(resultFacts(expired.agent)[4][1],'已按保留期限清理');
+  assert.match(configErrors.managed_capacity,/本次配置未应用/);
+});
+
+test('legacy material status remains unknown and only valid expiry facts suppress rollback', () => {
+  const legacy=result('confirmed');
+  assert.deepEqual(operationMaterials(legacy),{state:'unknown'});assert.equal(canRollback(legacy),true);
+  legacy.agent.materials_state='retained';assert.deepEqual(operationMaterials(legacy),{state:'retained'});
+  legacy.agent={materials_state:'expired',materials_expired_at_ms:120000,materials_expiry_reason:'ttl'};
+  assert.equal(canRollback(legacy),false);
+  legacy.agent.materials_expired_at_ms='120000';assert.deepEqual(operationMaterials(legacy),{state:'unknown'});
 });

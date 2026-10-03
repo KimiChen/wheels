@@ -171,7 +171,98 @@ INSERT OR IGNORE INTO config_audit_objects(audit_id,kind,name,action)
  FROM config_audit_entries a,json_each(a.changes_json) j WHERE a.origin_kind='operation_event';
 INSERT OR IGNORE INTO config_audit_entries(recorded_at_ms,kind,actor_kind,actor,node_id,service_id,state,code,object_count,field_count,changes_json,origin_kind,origin_id)
  SELECT updated_at_ms,'restore',CASE WHEN creator='' THEN 'unknown' WHEN creator LIKE 'system:%' THEN 'system' ELSE 'github' END,creator,node_id,service_id,state,CASE WHEN state='pending' THEN 'restore_pending' ELSE 'restore_acknowledged' END,0,0,'[]','restore_receipt',id||':'||version FROM config_restores;
+-- Tunnel history (schema v11).
+-- Bindings are immutable intervals. Comparison excludes ordinary counter saves.
+CREATE TABLE tunnel_binding_epochs (
+ binding_epoch INTEGER PRIMARY KEY AUTOINCREMENT,
+ node_id INTEGER NOT NULL,
+ binding_json TEXT,
+ started_at_ms INTEGER NOT NULL,
+ ended_at_ms INTEGER
+);
+CREATE UNIQUE INDEX tunnel_binding_current ON tunnel_binding_epochs(node_id) WHERE ended_at_ms IS NULL;
+INSERT INTO tunnel_binding_epochs(node_id,binding_json,started_at_ms) SELECT id,frp_binding,updated_at_ms FROM nodes;
+CREATE TRIGGER tunnel_binding_insert AFTER INSERT ON nodes BEGIN
+ INSERT INTO tunnel_binding_epochs(node_id,binding_json,started_at_ms) VALUES(NEW.id,NEW.frp_binding,NEW.created_at_ms);
+END;
+CREATE TRIGGER tunnel_binding_update AFTER UPDATE OF frp_binding ON nodes WHEN OLD.frp_binding IS NOT NEW.frp_binding BEGIN
+ UPDATE tunnel_binding_epochs SET ended_at_ms=NEW.updated_at_ms WHERE node_id=NEW.id AND ended_at_ms IS NULL;
+ INSERT INTO tunnel_binding_epochs(node_id,binding_json,started_at_ms) VALUES(NEW.id,NEW.frp_binding,NEW.updated_at_ms);
+END;
+CREATE TRIGGER tunnel_binding_delete AFTER DELETE ON nodes BEGIN
+ UPDATE tunnel_binding_epochs SET ended_at_ms=CAST(unixepoch('subsec')*1000 AS INTEGER) WHERE node_id=OLD.id AND ended_at_ms IS NULL;
+END;
+CREATE TABLE tunnels (
+ tunnel_id INTEGER PRIMARY KEY AUTOINCREMENT,
+ logical_key TEXT NOT NULL UNIQUE,
+ node_id INTEGER,
+ binding_epoch INTEGER NOT NULL DEFAULT 0,
+ server_id TEXT NOT NULL,
+ user_name TEXT NOT NULL,
+ raw_client_id TEXT,
+ kind TEXT NOT NULL CHECK(kind IN ('proxy','visitor')),
+ raw_name TEXT NOT NULL,
+ identity_quality TEXT NOT NULL CHECK(identity_quality IN ('stable','instance_only')),
+ created_at_ms INTEGER NOT NULL
+);
+CREATE INDEX tunnels_node ON tunnels(node_id,tunnel_id);
+CREATE TABLE tunnel_generations (
+ tunnel_id INTEGER NOT NULL REFERENCES tunnels(tunnel_id),
+ source TEXT NOT NULL,
+ generation INTEGER NOT NULL,
+ PRIMARY KEY(tunnel_id,source)
+);
+CREATE TABLE tunnel_instances (
+ instance_id INTEGER PRIMARY KEY AUTOINCREMENT,
+ tunnel_id INTEGER NOT NULL REFERENCES tunnels(tunnel_id),
+ source_key TEXT NOT NULL,
+ source TEXT NOT NULL CHECK(source IN ('server','client')),
+ process_epoch TEXT NOT NULL,
+ native_instance_id TEXT NOT NULL,
+ generation INTEGER NOT NULL,
+ origin_json TEXT NOT NULL,
+ object_json TEXT NOT NULL,
+ state_key TEXT NOT NULL,
+ created_at_ms INTEGER NOT NULL,
+ closed_at_ms INTEGER,
+ last_observed_at_ms INTEGER NOT NULL,
+ UNIQUE(source_key,process_epoch,native_instance_id),
+ UNIQUE(tunnel_id,source,generation)
+);
+CREATE INDEX tunnel_instances_tunnel ON tunnel_instances(tunnel_id,instance_id);
+CREATE TABLE tunnel_sources (
+ source_key TEXT NOT NULL,
+ process_epoch TEXT NOT NULL,
+ collector_epoch TEXT NOT NULL,
+ last_sequence TEXT NOT NULL,
+ dropped_events TEXT NOT NULL,
+ snapshot_state TEXT NOT NULL,
+ updated_at_ms INTEGER NOT NULL,
+ PRIMARY KEY(source_key,process_epoch)
+);
+CREATE TABLE tunnel_events (
+ event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+ tunnel_id INTEGER REFERENCES tunnels(tunnel_id),
+ instance_id INTEGER REFERENCES tunnel_instances(instance_id),
+ source_key TEXT NOT NULL,
+ process_epoch TEXT NOT NULL,
+ native_sequence TEXT,
+ code TEXT NOT NULL,
+ state_json TEXT,
+ time_basis TEXT NOT NULL,
+ occurred_at_ms INTEGER,
+ received_at_ms INTEGER NOT NULL,
+ UNIQUE(source_key,process_epoch,native_sequence)
+);
+CREATE INDEX tunnel_events_tunnel ON tunnel_events(tunnel_id,event_id DESC);
+CREATE INDEX tunnel_events_source ON tunnel_events(source_key,process_epoch,event_id DESC);
+CREATE TABLE tunnel_retention (
+ id INTEGER PRIMARY KEY CHECK(id=1),
+ pruned_through_ms INTEGER NOT NULL DEFAULT 0,
+ pruned_events INTEGER NOT NULL DEFAULT 0
+);
+INSERT INTO tunnel_retention(id) VALUES(1);
 -- Database identity; must match the restore check in scripts/ops.py
 -- and the startup check in monitor/control/store.go.
 PRAGMA application_id=1179798836;
-PRAGMA user_version=10;
+PRAGMA user_version=11;

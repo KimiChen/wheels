@@ -80,7 +80,7 @@ func ConfigOperationTransitionAllowed(from, to string) bool {
 // Event codes are a closed vocabulary. Raw native, filesystem or peer errors
 // must never enter the persisted administrative audit through this field.
 func ValidConfigEventCode(code string) bool {
-	return detailEnum(code, "created", "validated", "prepared", "applying", "persisted", "runtime_loaded", "verifying", "confirmed", "cancelled", "rejected", "conflict", "failed", "invalid_config", "validation_failed", "unsupported", "source_conflict", "source_drift", "expired", "busy", "write_failed", "runtime_failed", "verify_failed", "timeout", "connection_lost", "outcome_unknown", "recovery_started", "rolling_back", "rolled_back", "rollback_failed", "recovered", "revoked", "secret_stored", "external_change", "service_mismatch", "operation_not_found", "restore_superseded")
+	return detailEnum(code, "created", "validated", "prepared", "applying", "persisted", "runtime_loaded", "verifying", "confirmed", "cancelled", "rejected", "conflict", "failed", "invalid_config", "validation_failed", "unsupported", "source_conflict", "source_drift", "expired", "busy", "write_failed", "runtime_failed", "verify_failed", "timeout", "connection_lost", "outcome_unknown", "recovery_started", "rolling_back", "rolled_back", "rollback_failed", "recovered", "revoked", "secret_stored", "external_change", "service_mismatch", "operation_not_found", "restore_superseded", "managed_capacity")
 }
 
 // ConfigChange is an edit instruction, never a redacted native configuration

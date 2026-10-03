@@ -302,3 +302,16 @@ func TestProviderInputErrorKeepsSafeBusyClassification(t *testing.T) {
 		})
 	}
 }
+
+func TestOperationViewRetainsExpiredMaterialFactAndCapacityCode(t *testing.T) {
+	now := time.Now().UTC()
+	expired := now.Add(30 * 24 * time.Hour)
+	op := managed.Operation{ID: secretID, BaseRevision: strings.Repeat("a", 64), ContextRevision: strings.Repeat("b", 64), OldDigest: strings.Repeat("c", 64), NewDigest: strings.Repeat("d", 64), State: "confirmed", CreatedAt: now, UpdatedAt: now, Deadline: now.Add(time.Minute), StorePersisted: true, RuntimeApplied: true, Verification: managed.Verification{RuntimeLoaded: true, ResourcesReady: true}, MaterialsState: managed.MaterialsExpired, MaterialsExpiredAt: &expired, MaterialsExpiryReason: "ttl"}
+	view := operationView(op)
+	if view.Validate() != nil || view.State != "confirmed" || view.MaterialsState != "expired" || view.MaterialsExpiredAtMS == nil || *view.MaterialsExpiredAtMS != expired.UnixMilli() || !view.StorePersisted || !view.RuntimeLoaded {
+		t.Fatal("projection changed historical facts", view)
+	}
+	if resultCode(managed.ErrNotFound) != "operation_not_found" || resultCode(managed.ErrCapacity) != "managed_capacity" {
+		t.Fatal("bounded local failure was hidden")
+	}
+}

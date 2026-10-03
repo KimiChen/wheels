@@ -288,9 +288,10 @@ func (l *OfflineLease) payload(ctx context.Context) ([]checkpointPayload, string
 	if err != nil || len(names) > 3*l.options.MaxOperations {
 		return nil, "", StoreSnapshot{}, ErrRecovery
 	}
-	expected := map[string]bool{}
+	required, allowed, present := map[string]bool{}, map[string]bool{}, map[string]bool{}
 	engine := &Engine{opts: l.options, root: l.root, operations: l.operations, storeName: id.StoreName, records: map[string]*record{}, keys: map[string]string{}}
 	for _, name := range names {
+		present[name] = true
 		if len(name) < 65 || !digestString(name[:64]) {
 			return nil, "", StoreSnapshot{}, ErrRecovery
 		}
@@ -300,20 +301,29 @@ func (l *OfflineLease) payload(ctx context.Context) ([]checkpointPayload, string
 		}
 		if suffix == ".json" {
 			data, _, err := l.operations.readMetadata(name, journalLimit)
-			var record record
-			if err != nil || decodeCheckpointJSON(data.Bytes, &record) != nil {
+			if err != nil {
 				return nil, "", StoreSnapshot{}, ErrRecovery
 			}
+			_, policy, err := decodeManagedRecord(data.Bytes, name)
+			if err != nil {
+				return nil, "", StoreSnapshot{}, ErrRecovery
+			}
+			required[name] = true
 			for _, suffix := range []string{".json", ".old", ".new"} {
-				expected[name[:64]+suffix] = true
+				allowed[name[:64]+suffix] = true
+				if policy == snapshotsRequired {
+					required[name[:64]+suffix] = true
+				}
 			}
 		}
 	}
-	if len(expected) != len(names) {
-		return nil, "", StoreSnapshot{}, ErrRecovery
-	}
 	for _, name := range names {
-		if !expected[name] {
+		if !allowed[name] {
+			return nil, "", StoreSnapshot{}, ErrRecovery
+		}
+	}
+	for name := range required {
+		if !present[name] {
 			return nil, "", StoreSnapshot{}, ErrRecovery
 		}
 	}
@@ -364,6 +374,9 @@ func (l *OfflineLease) payload(ctx context.Context) ([]checkpointPayload, string
 		}
 	}
 	for _, name := range names {
+		if !required[name] {
+			continue
+		} // Expired residual snapshots are never archived.
 		limit := l.options.MaxBytes
 		if strings.HasSuffix(name, ".json") {
 			limit = journalLimit

@@ -122,21 +122,24 @@ type ConfigPreview struct {
 // implies business connectivity. OutcomeUnknown/RollbackFailed are results,
 // not reasons to discard the operation or release its durable reservation.
 type ConfigOperationView struct {
-	OperationID     string `json:"operation_id"`
-	BaseRevision    string `json:"base_revision"`
-	ContextRevision string `json:"context_revision"`
-	OldDigest       string `json:"old_digest"`
-	CandidateDigest string `json:"candidate_digest"`
-	State           string `json:"state"`
-	ErrorCode       string `json:"error_code"`
-	CreatedAtMS     int64  `json:"created_at_ms"`
-	UpdatedAtMS     int64  `json:"updated_at_ms"`
-	DeadlineAtMS    int64  `json:"deadline_at_ms"`
-	StorePersisted  bool   `json:"store_persisted"`
-	RuntimeApplied  bool   `json:"runtime_applied"`
-	RuntimeLoaded   bool   `json:"runtime_loaded"`
-	ResourcesReady  bool   `json:"resources_ready"`
-	BusinessChecked bool   `json:"business_checked"`
+	MaterialsState        string `json:"materials_state,omitempty"`
+	MaterialsExpiredAtMS  *int64 `json:"materials_expired_at_ms,omitempty"`
+	MaterialsExpiryReason string `json:"materials_expiry_reason,omitempty"`
+	OperationID           string `json:"operation_id"`
+	BaseRevision          string `json:"base_revision"`
+	ContextRevision       string `json:"context_revision"`
+	OldDigest             string `json:"old_digest"`
+	CandidateDigest       string `json:"candidate_digest"`
+	State                 string `json:"state"`
+	ErrorCode             string `json:"error_code"`
+	CreatedAtMS           int64  `json:"created_at_ms"`
+	UpdatedAtMS           int64  `json:"updated_at_ms"`
+	DeadlineAtMS          int64  `json:"deadline_at_ms"`
+	StorePersisted        bool   `json:"store_persisted"`
+	RuntimeApplied        bool   `json:"runtime_applied"`
+	RuntimeLoaded         bool   `json:"runtime_loaded"`
+	ResourcesReady        bool   `json:"resources_ready"`
+	BusinessChecked       bool   `json:"business_checked"`
 }
 
 func validConfigAction(action string) bool {
@@ -227,7 +230,7 @@ func ValidConfigIssueCode(code string) bool {
 	return detailEnum(code, "limit_exceeded", "unsupported_dependency", "invalid_template", "invalid_source", "unsupported_source", "legacy_read_only", "source_drift", "store_unavailable", "duplicate_name", "ownership_conflict", "source_read_only", "advanced_read_only", "native_warning", "start_filtered", "invalid_memory", "invalid_change", "field_read_only", "invalid_secret", "invalid_secret_reference", "secret_reference_unavailable", "validation_failed", "runtime_capability_required", "dependency_conflict", "revision_conflict", "duplicate_change", "already_exists", "invalid_type", "not_found", "invalid_field", "duplicate_key", "invalid_kind", "invalid_name", "source_changed")
 }
 func ValidConfigResultCode(code string) bool {
-	return code == "ok" || ValidConfigEventCode(code) || ValidConfigIssueCode(code) || detailEnum(code, "invalid_request", "unauthorized", "unavailable", "internal_error", "too_large")
+	return code == "ok" || ValidConfigEventCode(code) || ValidConfigIssueCode(code) || detailEnum(code, "managed_capacity", "invalid_request", "unauthorized", "unavailable", "internal_error", "too_large")
 }
 func ValidConfigReadOnlyField(path string) bool {
 	return detailEnum(path, "annotations", "metadatas", "loadBalancer", "healthCheck", "plugin", "natTraversal", "requestHeaders", "responseHeaders")
@@ -354,6 +357,18 @@ func (p ConfigPreview) Validate() error {
 func (o ConfigOperationView) Validate() error {
 	invalid := errors.New("invalid configuration operation view")
 	if !ValidConfigOperationID(o.OperationID) || !ValidConfigDigest(o.BaseRevision) || !ValidConfigDigest(o.ContextRevision) || !ValidConfigDigest(o.OldDigest) || !ValidConfigDigest(o.CandidateDigest) || !ValidConfigOperationState(o.State) || (o.ErrorCode != "" && (o.ErrorCode == "ok" || !ValidConfigResultCode(o.ErrorCode))) || !configMillis(o.CreatedAtMS) || !configMillis(o.UpdatedAtMS) || !configMillis(o.DeadlineAtMS) || o.UpdatedAtMS < o.CreatedAtMS || o.DeadlineAtMS <= o.CreatedAtMS || o.DeadlineAtMS-o.CreatedAtMS > MaxConfigOperationDuration.Milliseconds() || (o.ResourcesReady && !o.RuntimeLoaded) {
+		return invalid
+	}
+	switch o.MaterialsState {
+	case "", "retained":
+		if o.MaterialsExpiredAtMS != nil || o.MaterialsExpiryReason != "" {
+			return invalid
+		}
+	case "expired":
+		if ConfigOperationActive(o.State) || o.MaterialsExpiredAtMS == nil || !configMillis(*o.MaterialsExpiredAtMS) || *o.MaterialsExpiredAtMS < o.CreatedAtMS || o.MaterialsExpiryReason != "ttl" {
+			return invalid
+		}
+	default:
 		return invalid
 	}
 	if o.State == "confirmed" && (!o.StorePersisted || !o.RuntimeApplied || !o.RuntimeLoaded || !o.ResourcesReady) {

@@ -33,6 +33,13 @@ test("audit pages reject inconsistent cursors, duplicates, unknown range and wat
   assert.equal(readAuditPage(page()).items.length,1);
   for(const input of [page({items:[item,item]}),page({watermark_id:"1"}),page({next_cursor:"next"}),page({has_more:true}),page({filters:null})])assert.throws(()=>readAuditPage(input));
 });
+test("audit retention capacity remains explicit and an expired cursor requires a new query",async()=>{
+  const policy={...retention,cleanup_enabled:true,max_rows:100000,max_bytes:268435456,rows:100002,bytes:270000000,capacity_blocked:true,generation:"9007199254740993",last_gc_at_ms:1791000000000};
+  assert.deepEqual(readAuditPage(page({retention:{...policy,private_path:"must-strip"}})).retention,policy);
+  for(const bad of [{...policy,generation:9007199254740993},{...policy,rows:-1},{...retention,max_rows:10}])assert.throws(()=>readAuditPage(page({retention:bad})));
+  let calls=0;const c=createAuditController({request:async()=>{if(++calls===1)return page({has_more:true,next_cursor:"next",retention:policy});throw {status:409,code:"audit_cursor_expired"};}});
+  await c.search({});await c.next();assert.match(c.state.message,/重新查询第一页/);assert.equal(c.state.pageIndex,0);assert.equal(c.state.pending,false);
+});
 test("detail and JSONL export whitelist fields and never include submitted values",()=>{
   const raw=detail({changes:[{...changes[0],before:"private-value",after:"private-value"}]});
   assert(!JSON.stringify(readAuditDetail(raw,item.audit_id)).includes("private-value"));

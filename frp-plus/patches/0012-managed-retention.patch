@@ -1,0 +1,80 @@
+diff --git a/cmd/frpc/sub/managed.go b/cmd/frpc/sub/managed.go
+--- a/cmd/frpc/sub/managed.go
++++ b/cmd/frpc/sub/managed.go
+@@ -44,7 +44,7 @@
+ 		}
+ 	}
+ 	input := configuration.Input{ConfigFile: configFile, StoreFile: storePath, WorkingDir: cwd, StartupCommon: result.Common, ReloadCommon: result.Common, FileMemory: configuration.Objects{Proxies: ps, Visitors: vs}, TemplateEnv: config.GetValues().Envs, HTTPProxy: os.Getenv("http_proxy"), UnsafeFeatures: features}
+-	engine, err := managed.Open(managed.Options{Root: opt.Root, StorePath: storePath, RestoreCheck: func(ctx context.Context, expected string) error {
++	engine, err := managed.Open(managed.Options{Root: opt.Root, StorePath: storePath, SnapshotRetentionDays: opt.SnapshotRetentionDays, MaxSnapshotBytes: opt.MaxSnapshotBytes, RestoreCheck: func(ctx context.Context, expected string) error {
+ 		if ctx.Err() != nil {
+ 			return ctx.Err()
+ 		}
+diff --git a/cmd/frpc/sub/managed_retention_test.go b/cmd/frpc/sub/managed_retention_test.go
+new file mode 100644
+--- /dev/null
++++ b/cmd/frpc/sub/managed_retention_test.go
+@@ -0,0 +1,63 @@
++package sub
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/fatedier/frp/extension/frpmonitor/agent/managed"
++	"github.com/fatedier/frp/extension/frpmonitor/shared"
++	"github.com/fatedier/frp/pkg/config"
++	"github.com/fatedier/frp/pkg/config/source"
++	"github.com/fatedier/frp/pkg/policy/security"
++)
++
++func TestManagedCommandSnapshotCapacity(t *testing.T) {
++	dir, err := filepath.EvalSymlinks(t.TempDir())
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err = os.Chmod(dir, 0700); err != nil {
++		t.Fatal(err)
++	}
++	store := filepath.Join(dir, "store.json")
++	file := filepath.Join(dir, "frpc.json")
++	telemetry := shared.AgentConfig{Enabled: true, Endpoint: "ws://127.0.0.1:1/agent/v1/ws", TokenFile: filepath.Join(dir, "token"), AllowInsecureLoopback: true, ConfigManagement: &shared.ConfigManagementConfig{Enabled: true, Root: dir, SnapshotRetentionDays: 1, MaxSnapshotBytes: 1 << 20}}
++	data, _ := json.Marshal(map[string]any{"serverAddr": "127.0.0.1", "store": map[string]any{"path": store}, "telemetry": telemetry})
++	if err = os.WriteFile(file, data, 0600); err != nil {
++		t.Fatal(err)
++	}
++	result, err := config.LoadClientConfigResult(file, true)
++	if err != nil {
++		t.Fatal(err)
++	}
++	fs := source.NewConfigSource()
++	if err = fs.ReplaceAll(result.Proxies, result.Visitors); err != nil {
++		t.Fatal(err)
++	}
++	engine, err := openManagedEngine(result, fs, store, security.NewUnsafeFeatures(nil), file)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer engine.Close()
++	defer managedCommandInUse.Store(false)
++	req := managed.Request{ID: "one", IdempotencyKey: "one", BaseRevision: strings.Repeat("a", 64), ContextRevision: strings.Repeat("b", 64), RequestDigest: strings.Repeat("c", 64), ExpectedDigest: managed.Digest(managed.StoreSnapshot{}), Candidate: []byte(strings.Repeat("x", 900000)), Deadline: time.Now().Add(time.Minute)}
++	if _, err = engine.Prepare(context.Background(), req); err != nil {
++		t.Fatal(err)
++	}
++	if _, err = engine.Rollback(context.Background(), req.ID); err != nil {
++		t.Fatal(err)
++	}
++	req.ID, req.IdempotencyKey, req.Candidate = "two", "two", []byte(strings.Repeat("y", 200000))
++	if _, err = engine.Prepare(context.Background(), req); !errors.Is(err, managed.ErrCapacity) {
++		t.Fatal("native policy did not reach engine", err)
++	}
++	if _, err = os.Stat(store); !os.IsNotExist(err) {
++		t.Fatal("capacity test changed native Store", err)
++	}
++}

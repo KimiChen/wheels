@@ -67,6 +67,8 @@ var publicFiles = map[string]string{
 	"/src/admin-data.mjs":               "src/admin-data.mjs",
 	"/src/admin-audit.mjs":              "src/admin-audit.mjs",
 	"/src/admin-audit-data.mjs":         "src/admin-audit-data.mjs",
+	"/src/admin-tunnels.mjs":            "src/admin-tunnels.mjs",
+	"/src/admin-tunnels-data.mjs":       "src/admin-tunnels-data.mjs",
 	"/src/admin-frp.mjs":                "src/admin-frp.mjs",
 	"/src/admin-configuration.mjs":      "src/admin-configuration.mjs",
 	"/src/admin-configuration-data.mjs": "src/admin-configuration-data.mjs",

@@ -48,6 +48,8 @@ func (s *Service) configResponse(ctx context.Context, o *control.ConfigOperation
 func configHTTPError(w http.ResponseWriter, err error) {
 	status, code := http.StatusServiceUnavailable, "unavailable"
 	switch {
+	case errors.Is(err, control.ErrAuditCapacity):
+		status, code = 503, "audit_capacity"
 	case errors.Is(err, control.ErrInvalid), errors.Is(err, ErrConfigInvalid):
 		status, code = 400, "invalid_request"
 	case errors.Is(err, control.ErrNotFound):
@@ -391,6 +393,15 @@ func (s *Service) actionConfigOperation(w http.ResponseWriter, r *http.Request, 
 		configHTTPError(w, control.ErrConflict)
 		return
 	}
+	if action == "rollback" && o.Agent != nil && o.Agent.MaterialsState == "expired" {
+		response, err := s.configResponse(ctx, o, "operation_not_found", nil, false)
+		if err != nil {
+			configHTTPError(w, err)
+		} else {
+			adminJSON(w, 200, response)
+		}
+		return
+	}
 	state := o.State
 	switch action {
 	case "apply":
@@ -452,7 +463,7 @@ func configPrepareFailureState(code string) string {
 	switch code {
 	case "conflict", "source_conflict", "source_drift", "revision_conflict", "ownership_conflict", "dependency_conflict", "source_changed", "already_exists":
 		return "conflict"
-	case "invalid_request", "unauthorized", "unsupported", "expired", "invalid_config", "validation_failed":
+	case "invalid_request", "unauthorized", "unsupported", "expired", "invalid_config", "validation_failed", "managed_capacity":
 		return "rejected"
 	}
 	if shared.ValidConfigIssueCode(code) && code != "native_warning" && code != "start_filtered" {

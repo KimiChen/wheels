@@ -48,9 +48,13 @@ func (s *Store) ExportAudit(ctx context.Context, filter AuditFilter, actor strin
 	kind, actor := auditActor(actor)
 	summary := &AuditSummary{ExportID: id, FilterDigest: auditFilterHash(filter), Warnings: []string{}}
 	input := AuditInput{Kind: "export", ActorKind: kind, Actor: actor, Code: "export_requested", Summary: summary}
-	header := auditExportHeader{Schema: 1, Kind: "audit_export", ExportID: id, CreatedAtMS: s.cfg.Now().UnixMilli(), Filters: filter, Retention: auditRetention()}
+	header := auditExportHeader{Schema: 1, Kind: "audit_export", ExportID: id, CreatedAtMS: s.cfg.Now().UnixMilli(), Filters: filter}
 	err = s.call(ctx, func(tx *sql.Tx) error {
 		watermark, err := auditWatermark(tx)
+		if err != nil {
+			return err
+		}
+		header.Retention, err = s.auditRetentionTx(tx)
 		if err != nil {
 			return err
 		}
@@ -76,6 +80,13 @@ func (s *Store) ExportAudit(ctx context.Context, filter AuditFilter, actor strin
 	_ = encoder.Encode(header)
 	count := 0
 	err = s.readAuditSnapshot(ctx, func(tx *sql.Tx) error {
+		retention, err := s.auditRetentionTx(tx)
+		if err != nil {
+			return err
+		}
+		if retention.Generation != header.Retention.Generation {
+			return ErrAuditCursorExpired
+		}
 		where, args := auditWhere(filter, header.WatermarkID, nil)
 		args = append(args, MaxAuditExportRows+1)
 		rows, err := tx.Query("SELECT audit_id FROM config_audit_entries WHERE "+where+" ORDER BY recorded_at_ms DESC,audit_id DESC LIMIT ?", args...)

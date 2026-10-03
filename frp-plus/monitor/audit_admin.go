@@ -15,6 +15,8 @@ import (
 func auditHTTPError(w http.ResponseWriter, err error) {
 	status, code := http.StatusServiceUnavailable, "unavailable"
 	switch {
+	case errors.Is(err, control.ErrAuditCursorExpired):
+		status, code = 409, "audit_cursor_expired"
 	case errors.Is(err, control.ErrInvalid):
 		status, code = 400, "invalid_request"
 	case errors.Is(err, control.ErrNotFound):

@@ -88,6 +88,9 @@ func configResultMatches(o *control.ConfigOperation, r shared.ConfigResult) bool
 		return false
 	}
 	v := r.Operation
+	if o.Agent != nil && o.Agent.MaterialsState == "expired" && (v.MaterialsState != "expired" || v.MaterialsExpiredAtMS == nil || o.Agent.MaterialsExpiredAtMS == nil || *v.MaterialsExpiredAtMS != *o.Agent.MaterialsExpiredAtMS || v.MaterialsExpiryReason != o.Agent.MaterialsExpiryReason) {
+		return false
+	}
 	return v.OperationID == o.OperationID && v.BaseRevision == o.BaseRevision && (o.CandidateDigest == "" || o.CandidateDigest == v.CandidateDigest) && (o.Agent == nil || (o.Agent.ContextRevision == v.ContextRevision && o.Agent.OldDigest == v.OldDigest && o.Agent.CreatedAtMS == v.CreatedAtMS && o.Agent.UpdatedAtMS <= v.UpdatedAtMS)) && v.DeadlineAtMS == o.DeadlineAtMS
 }
 

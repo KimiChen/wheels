@@ -44,8 +44,8 @@ func validateManagedCheckpointPayload(manifest CheckpointManifest, payload []che
 		if !strings.HasPrefix(file.entry.Path, "managed/operations/") || !strings.HasSuffix(file.entry.Path, ".json") {
 			continue
 		}
-		var r record
-		if decodeCheckpointJSON(file.data, &r) != nil || r.Version != 1 || !safeID.MatchString(r.ID) || file.entry.Path != "managed/operations/"+idHash(r.ID)+".json" || !knownState(r.State) || !digestString(r.BaseRevision) || !digestString(r.ContextRevision) || !digestString(r.RequestDigest) || !digestString(r.KeyDigest) || keys[r.KeyDigest] || !digestString(r.Fingerprint) || r.CreatedAt.IsZero() || r.Deadline.IsZero() {
+		r, policy, err := decodeManagedRecord(file.data, filepath.Base(file.entry.Path))
+		if err != nil || keys[r.KeyDigest] {
 			return ErrRecovery
 		}
 		keys[r.KeyDigest] = true
@@ -57,6 +57,15 @@ func validateManagedCheckpointPayload(manifest CheckpointManifest, payload []che
 			}
 		}
 		prefix := "managed/operations/" + idHash(r.ID)
+		if policy == snapshotsExpired {
+			if _, ok := dataByPath[prefix+".old"]; ok {
+				return ErrRecovery
+			}
+			if _, ok := dataByPath[prefix+".new"]; ok {
+				return ErrRecovery
+			}
+			continue
+		}
 		old, ok := dataByPath[prefix+".old"]
 		if !ok || (!r.OldExists && len(old) != 0) || Digest(StoreSnapshot{Exists: r.OldExists, Bytes: old}) != r.OldDigest {
 			return ErrRecovery

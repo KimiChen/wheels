@@ -1,0 +1,21 @@
+{{define "admin/tunnels.html"}}
+<section id="tunnels-panel" data-admin-panel="tunnels" aria-labelledby="tunnels-title" hidden>
+  <header class="fa-page-heading"><div><h1 id="tunnels-title">隧道历史</h1><p>按对象、绑定和运行实例查看趋势与事件。同名重建、重新绑定和不同来源分别保留。</p></div></header>
+  <form id="tunnel-filters" class="wsk-panel fa-panel fa-audit-filters">
+    <label class="wsk-field">节点 ID<input class="wsk-control" name="node_id" inputmode="numeric" placeholder="全部节点" maxlength="19"></label>
+    <label class="wsk-field">对象类型<select class="wsk-control" name="kind"><option value="">全部类型</option><option value="proxy">Proxy</option><option value="visitor">Visitor</option></select></label>
+    <div class="fa-actions"><button class="wsk-button" type="submit" id="tunnel-search">查询历史</button></div>
+  </form>
+  <p id="tunnel-message" role="status" aria-live="polite"></p><p id="tunnel-list-status" class="fa-muted"></p>
+  <div class="fa-tunnel-layout">
+    <section class="wsk-panel fa-panel"><h2>隧道对象</h2><p id="tunnel-empty" class="fa-muted">尚未查询。</p><ol id="tunnel-list" class="fa-audit-list"></ol><div class="fa-actions"><button class="wsk-button wsk-secondary" type="button" id="tunnel-previous" disabled>上一页</button><button class="wsk-button wsk-secondary" type="button" id="tunnel-next" disabled>下一页</button></div></section>
+    <section class="wsk-panel fa-panel"><h2>实例与时间线</h2><div id="tunnel-identity"></div><div id="tunnel-selection" hidden>
+      <label class="wsk-field">运行实例<select id="tunnel-instance" class="wsk-control"></select></label><button class="wsk-button wsk-secondary fa-small-button" type="button" id="tunnel-more-instances" disabled>更多实例</button>
+      <div id="tunnel-instance-facts"></div>
+      <h3>历史趋势</h3><label class="wsk-field">时间范围<select id="tunnel-window" class="wsk-control"></select></label>
+      <p class="fa-muted">实例累计与主机网卡、今日流量、套餐账本独立。连接关闭时入账的速率是区间估算，不能代表实时带宽或精确计费。</p><div id="tunnel-history"></div>
+      <h3>最近事件</h3><p class="fa-muted">事件独立于趋势时间范围，按实例查询；来源缺失不表示隧道已删除。</p><div id="tunnel-events"></div><button class="wsk-button wsk-secondary" type="button" id="tunnel-more-events" disabled>更多事件</button>
+    </div></section>
+  </div>
+</section>
+{{end}}

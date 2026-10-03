@@ -1,0 +1,333 @@
+{
+  "enums": {
+    "storage_state": [
+      "ready",
+      "disabled",
+      "degraded",
+      "capacity_limited"
+    ],
+    "freshness": [
+      "fresh",
+      "stale"
+    ],
+    "quality": [
+      "ok",
+      "partial",
+      "unknown",
+      "unsupported"
+    ],
+    "event_code": [
+      "created",
+      "registered",
+      "state_changed",
+      "closed",
+      "settled",
+      "counter_invalid",
+      "collector_gap",
+      "event_gap",
+      "source_overflow",
+      "source_truncated",
+      "source_unavailable"
+    ],
+    "operation_relation": [
+      "none",
+      "declared_change"
+    ],
+    "gap_reason": [
+      "collection_gap",
+      "counter_reset",
+      "collector_gap",
+      "invalid_sample"
+    ]
+  },
+  "list": {
+    "code": "ok",
+    "generated_at_ms": 1791000061000,
+    "event_storage": {
+      "state": "ready",
+      "retention_days": 30,
+      "max_events": 100000
+    },
+    "metric_storage": {
+      "state": "ready",
+      "retention_days": 7
+    },
+    "items": [
+      {
+        "tunnel_id": "7",
+        "node_id": "1",
+        "binding_epoch": "3",
+        "server_id": "example-server",
+        "user": "demo",
+        "raw_client_id": "demo-client",
+        "kind": "proxy",
+        "raw_name": "sample-tcp",
+        "identity_quality": "stable",
+        "current_instances": [
+          {
+            "instance_id": "12",
+            "tunnel_id": "7",
+            "native_instance_id": "22222222-2222-4222-8222-222222222222",
+            "source": "server",
+            "process_epoch": "33333333-3333-4333-8333-333333333333",
+            "generation": "2",
+            "protocol": "tcp",
+            "state": {
+              "status": "registered",
+              "local_state": "unknown",
+              "remote_state": "unknown",
+              "p2p_state": "unknown",
+              "fallback_state": "unknown",
+              "error_code": ""
+            },
+            "counters": {
+              "quality": "ok",
+              "connections_quality": "ok",
+              "epoch": "11111111-1111-4111-8111-111111111111",
+              "accounting": "connection_close",
+              "byte_scope": "forwarded_stream",
+              "connections": "1",
+              "rx_bytes": "4096",
+              "tx_bytes": "2048"
+            },
+            "accounting": "connection_close",
+            "byte_scope": "forwarded_stream",
+            "service_id": "",
+            "created_at_ms": 1791000000000,
+            "closed_at_ms": null,
+            "last_observed_at_ms": 1791000060000,
+            "freshness": "fresh"
+          }
+        ],
+        "retained_from_ms": 0
+      },
+      {
+        "tunnel_id": "8",
+        "node_id": null,
+        "binding_epoch": "0",
+        "server_id": "example-server",
+        "user": "demo",
+        "raw_client_id": null,
+        "kind": "proxy",
+        "raw_name": "unbound-tcp",
+        "identity_quality": "instance_only",
+        "current_instances": [
+          {
+            "instance_id": "13",
+            "tunnel_id": "8",
+            "native_instance_id": "55555555-5555-4555-8555-555555555555",
+            "source": "server",
+            "process_epoch": "33333333-3333-4333-8333-333333333333",
+            "generation": "1",
+            "protocol": "tcp",
+            "state": {
+              "status": "registered",
+              "local_state": "unknown",
+              "remote_state": "unknown",
+              "p2p_state": "unknown",
+              "fallback_state": "unknown",
+              "error_code": ""
+            },
+            "counters": {
+              "quality": "ok",
+              "connections_quality": "ok",
+              "epoch": "11111111-1111-4111-8111-111111111111",
+              "accounting": "connection_close",
+              "byte_scope": "forwarded_stream",
+              "connections": "1",
+              "rx_bytes": "4096",
+              "tx_bytes": "2048"
+            },
+            "accounting": "connection_close",
+            "byte_scope": "forwarded_stream",
+            "service_id": "",
+            "created_at_ms": 1791000000000,
+            "closed_at_ms": null,
+            "last_observed_at_ms": 1791000060000,
+            "freshness": "fresh"
+          }
+        ],
+        "retained_from_ms": 0
+      }
+    ],
+    "next_cursor": "",
+    "retained_from_ms": 0,
+    "events_pruned": false
+  },
+  "instances": {
+    "code": "ok",
+    "generated_at_ms": 1791000061000,
+    "event_storage": {
+      "state": "ready",
+      "retention_days": 30,
+      "max_events": 100000
+    },
+    "metric_storage": {
+      "state": "ready",
+      "retention_days": 7
+    },
+    "items": [
+      {
+        "instance_id": "12",
+        "tunnel_id": "7",
+        "native_instance_id": "22222222-2222-4222-8222-222222222222",
+        "source": "server",
+        "process_epoch": "33333333-3333-4333-8333-333333333333",
+        "generation": "2",
+        "protocol": "tcp",
+        "state": {
+          "status": "registered",
+          "local_state": "unknown",
+          "remote_state": "unknown",
+          "p2p_state": "unknown",
+          "fallback_state": "unknown",
+          "error_code": ""
+        },
+        "counters": {
+          "quality": "ok",
+          "connections_quality": "ok",
+          "epoch": "11111111-1111-4111-8111-111111111111",
+          "accounting": "connection_close",
+          "byte_scope": "forwarded_stream",
+          "connections": "1",
+          "rx_bytes": "4096",
+          "tx_bytes": "2048"
+        },
+        "accounting": "connection_close",
+        "byte_scope": "forwarded_stream",
+        "service_id": "",
+        "created_at_ms": 1791000000000,
+        "closed_at_ms": null,
+        "last_observed_at_ms": 1791000060000,
+        "freshness": "fresh"
+      }
+    ],
+    "next_cursor": "",
+    "retained_from_ms": 0,
+    "events_pruned": false
+  },
+  "events": {
+    "code": "ok",
+    "generated_at_ms": 1791000061000,
+    "event_storage": {
+      "state": "ready",
+      "retention_days": 30,
+      "max_events": 100000
+    },
+    "metric_storage": {
+      "state": "ready",
+      "retention_days": 7
+    },
+    "items": [
+      {
+        "event_id": "9007199254740993",
+        "instance_id": "12",
+        "generation": "2",
+        "source": "server",
+        "code": "registered",
+        "state": {
+          "status": "registered",
+          "local_state": "unknown",
+          "remote_state": "unknown",
+          "p2p_state": "unknown",
+          "fallback_state": "unknown",
+          "error_code": ""
+        },
+        "time_basis": "native",
+        "occurred_at_ms": 1791000000000,
+        "received_at_ms": 1791000001000,
+        "operation_id": "",
+        "operation_relation": "none"
+      },
+      {
+        "event_id": "11",
+        "instance_id": null,
+        "generation": null,
+        "source": "server",
+        "code": "collector_gap",
+        "state": null,
+        "time_basis": "observed",
+        "occurred_at_ms": null,
+        "received_at_ms": 1790999999000,
+        "operation_id": "",
+        "operation_relation": "none"
+      }
+    ],
+    "next_cursor": "",
+    "retained_from_ms": 0,
+    "events_pruned": false,
+    "operation_links": [
+      {
+        "operation_id": "44444444-4444-4444-8444-444444444444",
+        "state": "confirmed",
+        "relation": "declared_change",
+        "created_at_ms": 1790999990000,
+        "changes": [
+          {
+            "action": "update",
+            "kind": "proxy",
+            "name": "sample-tcp",
+            "fields": [
+              "remotePort"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "history": {
+    "code": "ok",
+    "generated_at_ms": 1791000061000,
+    "event_storage": {
+      "state": "ready",
+      "retention_days": 30,
+      "max_events": 100000
+    },
+    "metric_storage": {
+      "state": "ready",
+      "retention_days": 7
+    },
+    "instance_id": "12",
+    "generation": "2",
+    "step_seconds": 60,
+    "accounting": "connection_close",
+    "byte_scope": "forwarded_stream",
+    "precision": "approximate",
+    "points": [
+      {
+        "at_ms": 1791000000000,
+        "quality": "partial",
+        "connections_quality": "ok",
+        "samples": 30,
+        "coverage_seconds": 30,
+        "connections": 1,
+        "rx_recorded_bytes": "4096",
+        "tx_recorded_bytes": "2048",
+        "rx_estimated_bytes_per_second": 136.5333333333,
+        "tx_estimated_bytes_per_second": 68.2666666667
+      },
+      {
+        "at_ms": 1791000060000,
+        "quality": "unknown",
+        "connections_quality": "unknown",
+        "samples": 0,
+        "coverage_seconds": 0,
+        "connections": null,
+        "rx_recorded_bytes": null,
+        "tx_recorded_bytes": null,
+        "rx_estimated_bytes_per_second": null,
+        "tx_estimated_bytes_per_second": null
+      }
+    ],
+    "gap_intervals": [
+      {
+        "from_ms": 1791000030000,
+        "to_ms": 1791000060000,
+        "reason": "collection_gap",
+        "rx_recorded_bytes": "128",
+        "tx_recorded_bytes": "64",
+        "quality": "partial"
+      }
+    ]
+  }
+}

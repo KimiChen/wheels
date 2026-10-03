@@ -199,6 +199,9 @@ func (l *OfflineLease) variantsForContext() ([]StoreVariant, *Engine, error) {
 	}
 	out := []StoreVariant{{Path: "managed/store.json", Snapshot: store}}
 	for _, r := range e.records {
+		if r.MaterialsState == MaterialsExpired {
+			continue
+		} // e.load already applied the strict record policy.
 		for _, suffix := range []string{".old", ".new"} {
 			name := idHash(r.ID) + suffix
 			data, _, err := l.operations.readMetadata(name, l.options.MaxBytes)

@@ -36,7 +36,7 @@ func restoreRequestMatches(input configRestoreRequest, r shared.RestoreResult) b
 	value := r.Restore
 	return r.Code == "ok" && r.ServiceID == input.ServiceID && value != nil && value.Validate() == nil && value.Epoch == input.Epoch && value.ManifestDigest == input.ManifestDigest && value.ContextRevision == input.ContextRevision && value.StoreDigest == input.StoreDigest && (value.State == "verified" || value.State == "acknowledged" || value.State == "confirmed")
 }
-func (s *Service) restoreResponse(ctx context.Context, node string, r shared.RestoreResult, code string) (configRestoreResponse, error) {
+func (s *Service) restoreResponse(ctx context.Context, node string, r shared.RestoreResult, code, token string) (configRestoreResponse, error) {
 	out := configRestoreResponse{Code: code, NodeID: node, ServiceID: r.ServiceID, ReceivedAtMS: time.Now().UnixMilli(), Restore: r.Restore}
 	if r.Restore != nil && r.Restore.Epoch != "" {
 		receipt, err := s.control.GetConfigRestore(ctx, node, r.Restore.Epoch)
@@ -44,6 +44,11 @@ func (s *Service) restoreResponse(ctx context.Context, node string, r shared.Res
 			return out, err
 		}
 		out.Receipt = receipt
+		if receipt != nil && r.Code == "ok" && r.Restore.State == "confirmed" {
+			if err := s.control.ObserveConfigRestoreConfirmed(ctx, node, r.ServiceID, token, *r.Restore); err != nil {
+				return out, err
+			}
+		}
 	}
 	active, err := s.control.GetActiveConfigOperation(ctx, node)
 	if err != nil && !errors.Is(err, control.ErrNotFound) {
@@ -88,7 +93,7 @@ func (s *Service) handleConfigRestore(w http.ResponseWriter, r *http.Request, ct
 		return
 	}
 	if inspect {
-		out, err := s.restoreResponse(ctx, node, observed, "ok")
+		out, err := s.restoreResponse(ctx, node, observed, "ok", identity.TokenSHA256)
 		if err != nil {
 			configHTTPError(w, err)
 		} else {
@@ -198,7 +203,7 @@ func (s *Service) handleConfigRestore(w http.ResponseWriter, r *http.Request, ct
 	// this explicit request reuses its ID. It never sends apply or rollback.
 	responseCtx, done := context.WithTimeout(s.ctx, time.Second)
 	defer done()
-	out, err := s.restoreResponse(responseCtx, node, observed, code)
+	out, err := s.restoreResponse(responseCtx, node, observed, code, identity.TokenSHA256)
 	if err != nil {
 		configHTTPError(w, err)
 		return

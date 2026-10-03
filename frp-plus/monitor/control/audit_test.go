@@ -64,11 +64,19 @@ func TestAuditMigrationFromNineBackfillsIdempotentlyAndRetainsLegacyService(t *t
 	}
 	defer s.Close()
 	var version int
-	if err = s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 10 {
+	if err = s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 12 {
 		t.Fatal(version, err)
 	}
 	if s.MigrationBackupPath() == "" {
 		t.Fatal("missing pre-migration recovery image")
+	}
+	var retainedTargets string
+	if err = s.db.QueryRow("SELECT changes_json FROM config_operation_targets WHERE operation_id=?", id).Scan(&retainedTargets); err != nil || retainedTargets != changes {
+		t.Fatal("migration omitted durable targets", retainedTargets, err)
+	}
+	rows, bytes, _ := auditCounts(t, s)
+	if rows != 2 || bytes <= 0 {
+		t.Fatal("migration omitted initial usage", rows, bytes)
 	}
 	page, err := s.ListAudit(context.Background(), AuditFilter{ObjectKind: "proxy", ObjectName: "audit-web"}, "", 50)
 	if err != nil || len(page.Items) != 2 {
@@ -79,7 +87,7 @@ func TestAuditMigrationFromNineBackfillsIdempotentlyAndRetainsLegacyService(t *t
 			t.Fatal(item)
 		}
 	}
-	section, err := schemaSection(auditSchemaMarker, identitySchemaMarker)
+	section, err := schemaSection(auditSchemaMarker, tunnelSchemaMarker)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -320,7 +328,7 @@ func TestAuditExportHasDurableOwnAuditAndNoConfigurationValues(t *testing.T) {
 		t.Fatal("export included its own newer audit", len(lines))
 	}
 	var header auditExportHeader
-	if json.Unmarshal([]byte(lines[0]), &header) != nil || header.Kind != "audit_export" || header.WatermarkID != "1" || header.Retention.CleanupEnabled {
+	if json.Unmarshal([]byte(lines[0]), &header) != nil || header.Kind != "audit_export" || header.WatermarkID != "1" || !header.Retention.CleanupEnabled {
 		t.Fatal(header)
 	}
 	var entry struct {

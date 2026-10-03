@@ -1,0 +1,44 @@
+// Optional helper for TestTunnelBrowserEndToEnd; every API uses real handlers.
+import assert from "node:assert/strict";
+import {pathToFileURL} from "node:url";
+let input="";for await(const chunk of process.stdin)input+=chunk;
+const fixture=JSON.parse(input);input="";
+const report={ok:false,stage:"launch"};let browser;
+try{
+  const {chromium}=await import(pathToFileURL(process.env.PLAYWRIGHT_MODULE).href);
+  browser=await chromium.launch({headless:true,executablePath:process.env.BROWSER_EXECUTABLE});
+  const context=await browser.newContext({viewport:{width:390,height:900},colorScheme:"dark"});
+  await context.addCookies([{...fixture.cookie,url:fixture.url,httpOnly:true,sameSite:"Strict"}]);
+  const page=await context.newPage();page.setDefaultTimeout(10000);let errors=0;
+  page.on("pageerror",()=>errors++);
+  report.stage="query";await page.goto(fixture.url+"/admin/#tunnels");
+  await page.locator("#tunnel-list button").first().waitFor();
+  assert.equal(await page.locator("#tunnel-list button").count(),1);
+  await page.locator("#tunnel-list button").click();
+  report.stage="instances";
+  await page.waitForFunction(()=>document.querySelectorAll("#tunnel-instance option").length===2);
+  await page.locator("#tunnel-instance-facts details").waitFor();
+  assert((await page.locator("#tunnel-identity").innerText()).includes("fixture-client"));
+  report.stage="history";
+  await page.waitForFunction(()=>document.querySelectorAll("#tunnel-history svg").length===2);
+  assert((await page.locator("#tunnel-history").innerText()).includes("历史采用近似值"));
+  assert((await page.locator("#tunnel-events").innerText()).includes("代理登记"));
+  await page.locator("#tunnel-history details").first().locator("summary").click();
+  assert(await page.locator("#tunnel-history tbody tr").count()>0);
+  const overflow=await page.evaluate(()=>[...document.querySelectorAll("#tunnels-panel,#tunnels-panel *")].some(e=>e.getClientRects().length&&e.scrollWidth>e.clientWidth+2&&getComputedStyle(e).overflowX==="visible"));
+  assert.equal(overflow,false);
+  report.stage="switch_instance";
+  const old=await page.locator("#tunnel-instance option").evaluateAll(options=>options.find(o=>o.textContent.includes("已关闭")).value);
+  await page.locator("#tunnel-instance").selectOption(old);
+  await page.waitForFunction(()=>document.querySelector("#tunnel-events").textContent.includes("实例关闭"));
+  report.stage="window";const request=page.waitForResponse(r=>r.url().includes("/history?")&&r.url().includes("window=7d"));
+  await page.locator("#tunnel-window").selectOption("7d");assert.equal((await request).status(),200);
+  await page.waitForFunction(()=>document.querySelectorAll("#tunnel-history svg").length===2);
+  report.stage="filter";
+  await page.locator("#tunnel-filters [name=kind]").selectOption("visitor");await page.locator("#tunnel-search").click();
+  await page.waitForFunction(()=>document.querySelector("#tunnel-empty").textContent.includes("没有匹配")&&!document.querySelector("#tunnel-empty").hidden);
+  assert.equal(await page.locator("#tunnel-instance option").count(),0);
+  report.stage="logout";await page.locator("#logout").click();await page.locator("#login-panel").waitFor();
+  assert.equal(await page.locator("#tunnel-list").innerText(),"");assert.equal(await page.locator("#tunnel-history").innerText(),"");assert.equal(await page.locator("#tunnel-filters [name=kind]").inputValue(),"");assert.equal(errors,0);
+  report.ok=true;report.stage="complete";
+}catch{process.exitCode=1;}finally{if(browser)await browser.close();process.stdout.write(JSON.stringify(report));}

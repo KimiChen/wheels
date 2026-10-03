@@ -364,7 +364,7 @@ func TestConfigOperationMigrationBacksUpCommittedWALBeforeV7(t *testing.T) {
 	if err := saved.QueryRow("SELECT count(*) FROM sqlite_master WHERE name='config_operations'").Scan(&operations); err != nil || operations != 0 {
 		t.Fatal("backup was created after migration", operations, err)
 	}
-	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 10 {
+	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 12 {
 		t.Fatal("v7 migration did not complete", version, err)
 	}
 	if err := s.Close(); err != nil {

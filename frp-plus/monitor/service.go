@@ -103,6 +103,7 @@ type Service struct {
 	serverSnapshot       atomic.Pointer[shared.ServerSnapshot]
 	tunnelProvider       shared.TunnelProvider
 	serverTunnelSnapshot atomic.Pointer[shared.TunnelSnapshot]
+	tunnelHistory        *tunnelObserver
 }
 
 func Start(ctx context.Context, cfg shared.MonitorConfig, providers ...shared.ServerProvider) (*Service, error) {
@@ -122,7 +123,7 @@ func StartWithTunnelProvider(ctx context.Context, cfg shared.MonitorConfig, serv
 	}
 	// Pass the accounting timezone explicitly so the control store and the
 	// today-traffic DTO below can never disagree on day boundaries.
-	db, err := control.Open(control.Config{Path: cfg.DatabaseFile, ReportInterval: time.Duration(cfg.ReportIntervalSeconds) * time.Second, Location: time.Local})
+	db, err := control.Open(control.Config{TunnelRetentionDays: cfg.RetentionDays, Audit: cfg.Audit, Path: cfg.DatabaseFile, ReportInterval: time.Duration(cfg.ReportIntervalSeconds) * time.Second, Location: time.Local})
 	if err != nil {
 		return nil, errors.New("control database unavailable")
 	}
@@ -183,7 +184,10 @@ func StartWithTunnelProvider(ctx context.Context, cfg shared.MonitorConfig, serv
 	s.publishSnapshot(time.Now())
 	s.publishAdminSnapshot()
 	s.configCoordinator = newConfigCoordinator(s)
-	s.wg.Add(5)
+	s.tunnelHistory = newTunnelObserver()
+	s.wg.Add(7)
+	go s.tunnelObserveLoop()
+	go func() { defer s.wg.Done(); s.control.RunAuditMaintenance(s.ctx) }()
 	go s.configReconcileLoop()
 	go s.serverLoop()
 	go s.taskLoop()

@@ -37,18 +37,21 @@ var (
 	ErrRecovery       = errors.New("managed Store recovery requires local repair")
 	ErrRuntime        = errors.New("managed Store runtime is unavailable")
 	ErrOutcomeUnknown = errors.New("managed Store runtime outcome remains unknown")
+	ErrCapacity       = errors.New("managed Store retention capacity reached")
 	ErrClosed         = errors.New("managed Store engine is closed")
 )
 
 type Options struct {
 	// Root is an absolute private directory; StorePath is its fixed direct child.
 	// No request can select a path. Existing permissions are checked, not fixed.
-	Root            string
-	StorePath       string
-	MaxBytes        int64
-	MaxOperations   int
-	RollbackTimeout time.Duration
-	CloseTimeout    time.Duration
+	Root                  string
+	StorePath             string
+	MaxBytes              int64
+	SnapshotRetentionDays int
+	MaxSnapshotBytes      int64
+	MaxOperations         int
+	RollbackTimeout       time.Duration
+	CloseTimeout          time.Duration
 	// RecoveryCheck validates the saved non-Store context before an interrupted
 	// operation can restore disk, and therefore before the native Store loader.
 	// It is required when recovery material contains an unfinished operation.
@@ -110,20 +113,23 @@ type Runtime struct {
 // Operation is safe metadata. It never contains candidate bytes, paths, native
 // error strings, credentials, or snapshots. ErrorCode is a fixed local code.
 type Operation struct {
-	ID              string       `json:"id"`
-	BaseRevision    string       `json:"base_revision"`
-	ContextRevision string       `json:"context_revision"`
-	RequestDigest   string       `json:"request_digest"`
-	OldDigest       string       `json:"old_digest"`
-	NewDigest       string       `json:"new_digest"`
-	State           string       `json:"state"`
-	ErrorCode       string       `json:"error_code,omitempty"`
-	CreatedAt       time.Time    `json:"created_at"`
-	UpdatedAt       time.Time    `json:"updated_at"`
-	Deadline        time.Time    `json:"deadline"`
-	StorePersisted  bool         `json:"store_persisted"`
-	RuntimeApplied  bool         `json:"runtime_applied"`
-	Verification    Verification `json:"verification"`
+	MaterialsState        string       `json:"materials_state,omitempty"`
+	MaterialsExpiredAt    *time.Time   `json:"materials_expired_at,omitempty"`
+	MaterialsExpiryReason string       `json:"materials_expiry_reason,omitempty"`
+	ID                    string       `json:"id"`
+	BaseRevision          string       `json:"base_revision"`
+	ContextRevision       string       `json:"context_revision"`
+	RequestDigest         string       `json:"request_digest"`
+	OldDigest             string       `json:"old_digest"`
+	NewDigest             string       `json:"new_digest"`
+	State                 string       `json:"state"`
+	ErrorCode             string       `json:"error_code,omitempty"`
+	CreatedAt             time.Time    `json:"created_at"`
+	UpdatedAt             time.Time    `json:"updated_at"`
+	Deadline              time.Time    `json:"deadline"`
+	StorePersisted        bool         `json:"store_persisted"`
+	RuntimeApplied        bool         `json:"runtime_applied"`
+	Verification          Verification `json:"verification"`
 }
 
 func cloneSnapshot(s StoreSnapshot) StoreSnapshot {

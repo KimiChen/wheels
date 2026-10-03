@@ -1,4 +1,4 @@
-import {proxyTypes, visitorTypes, operationLabels, activeStates, configErrors, fieldSpecs, secretPaths, inputText, makeEdit, resultFacts, resultReason, canApply, canAcknowledgeRestore, createConfigController} from "./admin-configuration-data.mjs";
+import {proxyTypes, visitorTypes, operationLabels, activeStates, configErrors, fieldSpecs, secretPaths, inputText, makeEdit, resultFacts, resultReason, operationMaterials, canRollback, canApply, canAcknowledgeRestore, createConfigController} from "./admin-configuration-data.mjs";
 
 const labels = {enabled: "启用", localIP: "本地目标地址", localPort: "本地目标端口", remotePort: "远端端口（0 为动态）", customDomains: "域名（每行一个）", subdomain: "子域名", locations: "HTTP 路径（每行一个）", httpUser: "HTTP 用户", hostHeaderRewrite: "Host 重写", routeByHTTPUser: "按 HTTP 用户路由", multiplexer: "复用协议（httpconnect）", allowUsers: "允许用户（每行一个）", serverUser: "远端用户", serverName: "远端代理名称", bindAddr: "Visitor 本地监听地址", bindPort: "Visitor 端口（-1 为内部模式）", protocol: "Visitor 协议", keepTunnelOpen: "保持隧道", maxRetriesAnHour: "每小时最大重试", minRetryInterval: "最短重试间隔", fallbackTo: "fallback Visitor 名称", fallbackTimeoutMs: "fallback 超时（毫秒）", "transport.useEncryption": "代理加密", "transport.useCompression": "代理压缩", "transport.bandwidthLimit": "限速（如 1MB）", "transport.bandwidthLimitMode": "限速位置（client/server）", "transport.proxyProtocolVersion": "PROXY 协议版本", secretKey: "隧道密钥", httpPassword: "HTTP 密码", "loadBalancer.groupKey": "负载均衡密钥"};
 const modes = {create: "新建", update: "编辑", clone: "复制", rename: "改名", delete: "删除", enable: "启用", disable: "禁用"};
@@ -190,12 +190,14 @@ export function createConfigPanel(container, {request}) {
     resultBox.append(element("h4", operationLabels[op.state] ?? "状态未知"), element("p", `操作 ${op.operation_id} · ${date(op.updated_at_ms)}`, "fa-muted fa-config-digest"));
     resultBox.append(element("p", `预览 / 确认期限：${date(op.deadline_at_ms)}。到期后只能查询或处理恢复，不能继续应用旧预览。`, "fa-muted"));
     const facts = element("dl", undefined, "fa-detail-list"); for (const [label, text] of resultFacts(result.agent)) row(facts, label, text); resultBox.append(facts);
+    const materials = operationMaterials(result);
+    if (materials.state === "expired") resultBox.append(element("p", `回退材料于 ${date(materials.expiredAt)} 按保留期限清理。操作结果与审计仍保留；需要恢复旧配置时请使用另存的完整备份并走本机恢复流程。`, "wsk-alert wsk-warning"));
     resultBox.append(element("p", `Agent 事实记录于 ${date(result.agent_received_at_ms)}；历史成功不代表后续配置仍保持该版本。业务连通需另行实际验证。`, "fa-muted"));
     const reason = resultReason(result.agent); if (reason) resultBox.append(element("p", reason, "wsk-alert wsk-warning"));
     if (op.state === "verifying") resultBox.append(element("p", "正在等待实际登记与本地资源。本次明确注册或启动失败会触发回退；正常等待连接仍按操作期限核对，业务可达性需另行测试。", "fa-muted"));
     const actions = element("div", undefined, "fa-actions"); actions.append(button("查询实际结果", () => void controller.query()));
     if (["prepared", "draft", "validated"].includes(op.state)) actions.append(button("取消未应用操作", () => void controller.action("cancel"), true));
-    if (["confirmed", "rollback_failed"].includes(op.state)) {
+    if (canRollback(result)) {
       const rollback = button("准备回退", () => {
         rollback.disabled = true;
         const confirm = button("确认恢复此操作前的配置", () => void controller.action("rollback"), true);

@@ -29,6 +29,7 @@ var settingsOnce sync.Once
 var readMemoryLimit = platformMemoryLimit
 
 type event struct {
+	tunnel     *tunnelSample
 	node, task string
 	at         time.Time
 	values     map[string]float64
@@ -52,9 +53,10 @@ type Store struct {
 	// seen node instead of rejecting every new node.
 	maxTracked int
 	// Only the worker accesses coverage baselines and its bounded write batch.
-	lastObserved map[string]map[string]int64
-	lastSeen     map[string]int64
-	rows         []storage.MetricRow
+	tunnelBaselines map[string]tunnelBaseline
+	lastObserved    map[string]map[string]int64
+	lastSeen        map[string]int64
+	rows            []storage.MetricRow
 }
 
 func memoryBudget(limit uint64) (int, error) {
@@ -367,6 +369,10 @@ func (s *Store) consume(e event) {
 	}
 	if s.db.IsReadOnly() {
 		s.drop("disk_space_low")
+		return
+	}
+	if e.tunnel != nil {
+		s.consumeTunnel(*e.tunnel)
 		return
 	}
 	limit := s.maxTracked

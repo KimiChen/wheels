@@ -226,6 +226,8 @@ func resultCode(err error) string {
 		return e.Code
 	}
 	switch {
+	case errors.Is(err, managed.ErrCapacity):
+		return "managed_capacity"
 	case errors.Is(err, managed.ErrConflict):
 		return "conflict"
 	case errors.Is(err, managed.ErrBusy):
@@ -277,7 +279,12 @@ func operationCode(code string) string {
 }
 
 func operationView(op managed.Operation) *shared.ConfigOperationView {
-	return &shared.ConfigOperationView{OperationID: op.ID, BaseRevision: op.BaseRevision, ContextRevision: op.ContextRevision,
+	var expiredAt *int64
+	if op.MaterialsExpiredAt != nil {
+		at := op.MaterialsExpiredAt.UnixMilli()
+		expiredAt = &at
+	}
+	return &shared.ConfigOperationView{MaterialsState: op.MaterialsState, MaterialsExpiredAtMS: expiredAt, MaterialsExpiryReason: op.MaterialsExpiryReason, OperationID: op.ID, BaseRevision: op.BaseRevision, ContextRevision: op.ContextRevision,
 		OldDigest: op.OldDigest, CandidateDigest: op.NewDigest, State: op.State, ErrorCode: operationCode(op.ErrorCode),
 		CreatedAtMS: op.CreatedAt.UnixMilli(), UpdatedAtMS: op.UpdatedAt.UnixMilli(), DeadlineAtMS: op.Deadline.UnixMilli(),
 		StorePersisted: op.StorePersisted, RuntimeApplied: op.RuntimeApplied, RuntimeLoaded: op.Verification.RuntimeLoaded,

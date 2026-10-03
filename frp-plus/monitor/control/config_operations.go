@@ -206,6 +206,9 @@ func (s *Store) CreateConfigOperation(ctx context.Context, input CreateConfigOpe
 		if !errors.Is(err, ErrNotFound) {
 			return err
 		}
+		if err := s.auditAdmissionTx(tx); err != nil {
+			return err
+		}
 		now := s.cfg.Now().UnixMilli()
 		if input.DeadlineAtMS <= now || input.DeadlineAtMS > now+int64((24*time.Hour)/time.Millisecond) {
 			return fmt.Errorf("%w: configuration deadline", ErrInvalid)
@@ -220,6 +223,9 @@ func (s *Store) CreateConfigOperation(ctx context.Context, input CreateConfigOpe
 		result = &ConfigOperation{OperationID: input.OperationID, NodeID: input.NodeID, ServiceID: input.ServiceID, BaseRevision: input.BaseRevision, CandidateDigest: input.CandidateDigest, Creator: input.Creator, DeadlineAtMS: input.DeadlineAtMS, IdempotencyKey: input.IdempotencyKey, RequestDigest: input.RequestDigest, State: "draft", Version: 1, CreatedAtMS: now, UpdatedAtMS: now}
 		_, err = tx.Exec("INSERT INTO config_operations("+operationColumns+") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", result.OperationID, result.NodeID, result.ServiceID, result.BaseRevision, result.CandidateDigest, result.Creator, result.DeadlineAtMS, result.IdempotencyKey, result.RequestDigest, result.State, result.Version, result.CreatedAtMS, result.UpdatedAtMS, nil, nil)
 		if err != nil {
+			return err
+		}
+		if _, err = tx.Exec("INSERT INTO config_operation_targets(operation_id,changes_json) VALUES(?,?)", result.OperationID, string(changes)); err != nil {
 			return err
 		}
 		return appendConfigOperationEvent(tx, result, "created", changes, now, result.Creator)
@@ -335,6 +341,9 @@ func (s *Store) TransitionConfigOperation(ctx context.Context, id string, input 
 		}
 		observedDrift := input.Agent != nil && input.Agent.ErrorCode == "source_drift" && (o.Agent == nil || o.Agent.ErrorCode != input.Agent.ErrorCode || o.Agent.UpdatedAtMS != input.Agent.UpdatedAtMS)
 		if input.Agent != nil {
+			if o.Agent != nil && o.Agent.MaterialsState == "expired" && (input.Agent.MaterialsState != "expired" || input.Agent.MaterialsExpiredAtMS == nil || o.Agent.MaterialsExpiredAtMS == nil || *input.Agent.MaterialsExpiredAtMS != *o.Agent.MaterialsExpiredAtMS || input.Agent.MaterialsExpiryReason != o.Agent.MaterialsExpiryReason) {
+				return ErrConflict
+			}
 			if input.Agent.BaseRevision != o.BaseRevision || input.Agent.CandidateDigest != o.CandidateDigest || (o.Agent != nil && (o.Agent.ContextRevision != input.Agent.ContextRevision || o.Agent.OldDigest != input.Agent.OldDigest || o.Agent.CreatedAtMS != input.Agent.CreatedAtMS || o.Agent.UpdatedAtMS > input.Agent.UpdatedAtMS)) {
 				return ErrConflict
 			}

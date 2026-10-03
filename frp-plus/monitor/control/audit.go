@@ -71,7 +71,7 @@ func validAuditCode(value string) bool {
 		return true
 	}
 	switch value {
-	case "preview_available", "command_dispatched", "dispatch_prepare", "dispatch_apply", "dispatch_rollback", "dispatch_cancel", "dispatch_secret", "dispatch_query", "request_replayed", "restore_pending", "restore_acknowledged", "export_requested", "export_prepared", "export_failed":
+	case "audit_gc", "preview_available", "command_dispatched", "dispatch_prepare", "dispatch_apply", "dispatch_rollback", "dispatch_cancel", "dispatch_secret", "dispatch_query", "request_replayed", "restore_pending", "restore_acknowledged", "restore_confirmed", "export_requested", "export_prepared", "export_failed":
 		return true
 	}
 	return false
@@ -145,7 +145,7 @@ func appendAuditTx(tx *sql.Tx, now int64, input AuditInput, originKind, originID
 	// entries. These are affected-object names, never a claimed second mutation.
 	if len(input.Changes) == 0 && input.OperationID != "" {
 		var initial string
-		err := tx.QueryRow("SELECT changes_json FROM config_operation_events WHERE operation_id=? AND changes_json<>'[]' ORDER BY event_id LIMIT 1", input.OperationID).Scan(&initial)
+		err := tx.QueryRow("SELECT changes_json FROM config_operation_targets WHERE operation_id=?", input.OperationID).Scan(&initial)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return nil, err
 		}

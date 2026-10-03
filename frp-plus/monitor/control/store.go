@@ -21,13 +21,16 @@ import (
 // Schema is also used by the development initializer to build an empty database.
 //
 //go:embed schema.sql
-var Schema string
+var baseSchema string
+
+var Schema = baseSchema + "\n" + AuditRetentionMigration + "\nPRAGMA user_version=12;\n"
 
 const groupSchemaMarker = "-- Node groups (schema v5).\n"
 const operationSchemaMarker = "-- Configuration operations (schema v7).\n"
 const observationSchemaMarker = "-- Configuration observations (schema v8).\n"
 const restoreSchemaMarker = "-- Configuration restoration takeovers (schema v9).\n"
 const auditSchemaMarker = "-- Configuration audit ledger (schema v10).\n"
+const tunnelSchemaMarker = "-- Tunnel history (schema v11).\n"
 const identitySchemaMarker = "-- Database identity;"
 
 type request struct {
@@ -61,6 +64,13 @@ func Open(cfg Config) (*Store, error) {
 // The backup callback makes failure-before-DDL testable without injecting a
 // filesystem or SQLite replacement into ordinary traffic/configuration paths.
 func openWithMigrationBackup(cfg Config, backup func(context.Context, *sql.DB, string, int) (string, error)) (*Store, error) {
+	if cfg.TunnelRetentionDays < 0 || cfg.TunnelRetentionDays > 365 {
+		return nil, ErrInvalid
+	}
+	cfg.Audit.Complete()
+	if cfg.Audit.Validate() != nil {
+		return nil, ErrInvalid
+	}
 	if cfg.ReportInterval == 0 {
 		cfg.ReportInterval = time.Second
 	}
@@ -116,9 +126,9 @@ func openWithMigrationBackup(cfg Config, backup func(context.Context, *sql.DB, s
 			return fail(errors.New("control database must be a new empty database"))
 		}
 		schemaChange = Schema
-	} else if application != 1179798836 || (version < 4 || version > 10) {
+	} else if application != 1179798836 || (version < 4 || version > 12) {
 		return fail(errors.New("unsupported control database"))
-	} else if version < 10 {
+	} else if version < 12 {
 		if version == 4 {
 			groups, e := schemaSection(groupSchemaMarker, operationSchemaMarker)
 			if e != nil {
@@ -150,11 +160,21 @@ func openWithMigrationBackup(cfg Config, backup func(context.Context, *sql.DB, s
 		if version < 9 {
 			schemaChange += restores
 		}
-		audit, e := schemaSection(auditSchemaMarker, identitySchemaMarker)
+		audit, e := schemaSection(auditSchemaMarker, tunnelSchemaMarker)
 		if e != nil {
 			return fail(e)
 		}
-		schemaChange += audit + "PRAGMA user_version=10;"
+		if version < 10 {
+			schemaChange += audit
+		}
+		tunnels, e := schemaSection(tunnelSchemaMarker, identitySchemaMarker)
+		if e != nil {
+			return fail(e)
+		}
+		if version < 11 {
+			schemaChange += tunnels
+		}
+		schemaChange += AuditRetentionMigration + "PRAGMA user_version=12;"
 		migrationBackup, err = backup(ctx, db, path, version)
 		if err != nil {
 			return fail(fmt.Errorf("control migration backup failed: %w", err))
@@ -205,7 +225,7 @@ func (s *Store) MigrationBackupPath() string { return s.migrationBackup }
 // copying the main file would silently omit those records. Delete incomplete
 // images, and durably finish a private recovery image before running any DDL.
 func backupBeforeMigration(ctx context.Context, db *sql.DB, path string, version int) (string, error) {
-	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+fmt.Sprintf(".pre-v10-v%d-", version)+"*.sqlite")
+	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+fmt.Sprintf(".pre-v12-v%d-", version)+"*.sqlite")
 	if err != nil {
 		return "", errors.New("cannot create private migration backup")
 	}

@@ -63,7 +63,13 @@ export function readAuditItem(raw) {
 }
 function retention(raw) {
   if (!raw || !number(raw.audit_days,3650) || !number(raw.snapshot_days,3650) || typeof raw.cleanup_enabled !== "boolean") invalid();
-  return {audit_days:raw.audit_days,snapshot_days:raw.snapshot_days,cleanup_enabled:raw.cleanup_enabled};
+  const out = {audit_days:raw.audit_days,snapshot_days:raw.snapshot_days,cleanup_enabled:raw.cleanup_enabled};
+  const fields = ["max_rows","max_bytes","rows","bytes","capacity_blocked","generation","last_gc_at_ms"];
+  if (fields.some(key=>Object.hasOwn(raw,key))) {
+    if (!["max_rows","max_bytes","rows","bytes","last_gc_at_ms"].every(key=>number(raw[key])) || raw.max_rows===0 || raw.max_bytes===0 || !id(raw.generation) || typeof raw.capacity_blocked!=="boolean") invalid();
+    for (const key of fields) out[key]=raw[key];
+  }
+  return out;
 }
 export function readAuditPage(raw) {
   if (!raw || !raw.filters || !Array.isArray(raw.items) || raw.items.length > 100 || typeof raw.has_more !== "boolean" || !text(raw.next_cursor,1024) || raw.has_more !== Boolean(raw.next_cursor) || !id(raw.watermark_id)) invalid();
@@ -113,7 +119,7 @@ export function createAuditController({request,download,onChange=()=>{},onExport
   let epoch=0, detailEpoch=0;
   const state={filters:{},pages:[],pageIndex:0,detail:null,selectedID:null,pending:false,detailPending:false,exporting:false,message:"",loaded:false};
   function clear() { epoch++; detailEpoch++; Object.assign(state,{filters:{},pages:[],pageIndex:0,detail:null,selectedID:null,pending:false,detailPending:false,exporting:false,message:"",loaded:false});onChange(); }
-  const fail = error => error?.code === "export_limit" ? "导出超过 10000 条或 8 MiB，请缩小筛选范围后再试。" : error?.status === 404 ? "所选记录已不可用，请重新查询。" : error?.message === "invalid_audit_response" ? "审计响应不完整，已停止显示和导出。" : "审计请求失败，请重新查询。";
+  const fail = error => error?.code === "audit_cursor_expired" ? "查询期间历史记录已清理，请重新查询第一页。" : error?.code === "export_limit" ? "导出超过 10000 条或 8 MiB，请缩小筛选范围后再试。" : error?.status === 404 ? "所选记录已不可用，请重新查询。" : error?.message === "invalid_audit_response" ? "审计响应不完整，已停止显示和导出。" : "审计请求失败，请重新查询。";
   return {state,clear,
     async search(input={}) {
       let filters; try { filters=auditFilters(input); } catch(error) {state.message=error.message;onChange();return;}

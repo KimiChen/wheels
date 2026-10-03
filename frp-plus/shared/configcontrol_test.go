@@ -374,3 +374,61 @@ func TestConfigCloneWireIsAnIdentityInstructionOnly(t *testing.T) {
 		}
 	}
 }
+
+func TestConfigOperationMaterialsAreIndependentOfBusinessTerminalState(t *testing.T) {
+	for _, state := range []string{"confirmed", "rolled_back", "cancelled", "conflict"} {
+		r := controlResult("query")
+		v := r.Operation
+		v.State = state
+		v.RuntimeLoaded = true
+		v.ResourcesReady = true
+		if state == "confirmed" {
+			v.StorePersisted = true
+			v.RuntimeApplied = true
+		}
+		for _, materials := range []string{"", "retained", "expired"} {
+			v.MaterialsState = materials
+			if materials == "expired" {
+				at := v.UpdatedAtMS + 30*24*60*60*1000
+				v.MaterialsExpiredAtMS = &at
+				v.MaterialsExpiryReason = "ttl"
+			}
+			if _, err := DecodeFrame(encodeFrame(t, "config.result", r)); err != nil {
+				t.Fatal(state, materials, err)
+			}
+		}
+	}
+	for _, which := range []string{"active", "unknown", "missing_time", "early_time", "missing_reason", "retained_time"} {
+		r := controlResult("query")
+		v := r.Operation
+		v.State = "cancelled"
+		v.MaterialsState = "expired"
+		at := v.UpdatedAtMS + 1000
+		v.MaterialsExpiredAtMS = &at
+		v.MaterialsExpiryReason = "ttl"
+		switch which {
+		case "active":
+			v.State = "prepared"
+		case "unknown":
+			v.MaterialsState = "deleted"
+		case "missing_time":
+			v.MaterialsExpiredAtMS = nil
+		case "early_time":
+			at = v.CreatedAtMS - 1
+		case "missing_reason":
+			v.MaterialsExpiryReason = ""
+		case "retained_time":
+			v.MaterialsState = "retained"
+		}
+		if _, err := DecodeFrame(encodeFrame(t, "config.result", r)); err == nil {
+			t.Fatal("accepted invalid materials", which)
+		}
+	}
+	r := controlResult("prepare")
+	r.Code = "managed_capacity"
+	r.Operation = nil
+	r.Preview = nil
+	if _, err := DecodeFrame(encodeFrame(t, "config.result", r)); err != nil {
+		t.Fatal("capacity rejection invalid", err)
+	}
+}

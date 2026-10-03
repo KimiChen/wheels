@@ -7,6 +7,7 @@ import {membershipDraft, membershipChanges, saveNodeChanges, retainAcknowledgedS
 import {renderFRPDetail, clearFRPDetail, serverEndpointText, createFRPDetailReader, renderNativeRegistryAccess} from "./admin-frp.mjs";
 import {createConfigPanel} from "./admin-configuration.mjs";
 import {createAuditPanel} from "./admin-audit.mjs";
+import {createTunnelPanel} from "./admin-tunnels.mjs";
 
 const $ = id => document.getElementById(id);
 const client = adminClient({onExpired: () => locked("管理会话已失效，请重新登录。")});
@@ -20,6 +21,7 @@ const acknowledgedSettings = new Map();
 const frpDetails = createFRPDetailReader({request: path => client.request(path), onChange: () => renderSelectedFRPDetail()});
 const configuration = createConfigPanel($("node-configuration"), {request: (path, options) => client.request(path, options)});
 const audit = createAuditPanel($("audit-panel"), {request: path => client.request(path), download: filters => client.downloadAudit(filters)});
+const tunnels = createTunnelPanel($("tunnels-panel"), {request:path=>client.request(path),onAudit:operationID=>{audit.showOperation(operationID);location.hash="audit";}});
 const el = (tag, text, className) => { const node = document.createElement(tag); if (text !== undefined) node.textContent = text; if (className) node.className = className; return node; };
 const safe = raw => typeof raw === "string" || (typeof raw === "number" && Number.isFinite(raw)) ? String(raw) : "—";
 function notice(text, state = "ready") {
@@ -43,6 +45,7 @@ function locked(message = "请使用 GitHub 登录。", disabled = false) {
   frpDetails.clear();
   configuration.clear();
   audit.clear();
+  tunnels.clear();
   groupsEpoch++; groups = []; groupsReady = false; draft = groupDraft(); groupDirty = false; groupMessage = ""; pendingGroupDelete = null;
   groupRows.clear(); groupMembers.clear(); $("group-list").replaceChildren(); $("group-members").replaceChildren(); $("group-form").reset(); $("group-confirm").hidden = true;
   $("group-editor-title").textContent = "新建分组"; $("group-save").textContent = "创建分组";
@@ -291,7 +294,7 @@ function renderSelectedFRPDetail() {
   renderFRPDetail($("node-frp-details"), frpDetails.view(node), rec, snapshot.native_access);
 }
 function showView() {
-  const key = ["dashboard", "nodes", "groups", "probes", "frp", "audit", "access"].includes(location.hash.slice(1)) ? location.hash.slice(1) : "dashboard";
+  const key = ["dashboard", "nodes", "groups", "probes", "frp", "audit", "tunnels", "access"].includes(location.hash.slice(1)) ? location.hash.slice(1) : "dashboard";
   for (const panel of document.querySelectorAll("[data-admin-panel]")) panel.hidden = panel.dataset.adminPanel !== key;
   for (const link of document.querySelectorAll("[data-admin-view]")) {
     const selected = link.dataset.adminView === key;
@@ -299,6 +302,7 @@ function showView() {
     link.classList.toggle("wsk-active", selected);
   }
   if (loggedIn && key === "audit") audit.open();
+  if (loggedIn && key === "tunnels") tunnels.open();
 }
 function renderDetail() {
   const node = snapshot?.nodes.find(item => item.id === selectedID); if (!node) return;

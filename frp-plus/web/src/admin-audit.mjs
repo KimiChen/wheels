@@ -36,6 +36,7 @@ export function createAuditPanel(root, {request,download}) {
       const values=[["需要重新加载",preview.reload_required?"是":"否"]];
       for(const [key,label] of [["base_revision","基础修订"],["context_revision","上下文修订"],["candidate_digest","候选摘要"],["filter_digest","筛选摘要"],["export_id","导出 ID"],["watermark_id","导出上界 ID"]])if(preview[key])values.push([label,preview[key]]);
       if(preview.export_id)values.push(["导出条数",preview.rows],["生成字节数",preview.bytes]);
+      if(item.code==="audit_gc")values.push(["清理记录数",preview.rows],["释放逻辑字节数",preview.bytes]);
       details.append(facts(values));
       if(preview.warnings.length)details.append(element("p",`提示代码：${preview.warnings.join("、")}`));box.append(details);
     }
@@ -56,7 +57,8 @@ export function createAuditPanel(root, {request,download}) {
     $("audit-page").textContent=page?`本页 ${page.items.length} 条`:"";
     $("audit-range").textContent=page?`已查询 ${time(page.filters.from_ms)} 至 ${time(page.filters.to_ms)}（不含结束时间） · 查询上界 #${page.watermark_id}`:"";
     if(page)$("audit-range").textContent += Object.entries(page.filters).filter(([key])=>filterLabels[key]).map(([key,value])=>` · ${filterLabels[key]}：${value}`).join("");
-    $("audit-retention").textContent=page?`保留目标：审计 ${page.retention.audit_days} 天，已完成操作的私有快照 ${page.retention.snapshot_days} 天。${page.retention.cleanup_enabled?"按服务端策略清理。":"自动清理尚未启用。"}`:"";
+    $("audit-retention").textContent=page?`保留目标：审计 ${page.retention.audit_days} 天；Agent 私有快照默认 ${page.retention.snapshot_days} 天，以该 Agent 启动配置为准。${page.retention.cleanup_enabled?"按服务端策略清理。":"自动清理尚未启用。"}`:"";
+    if(page?.retention.generation!=null){const r=page.retention;$("audit-retention").textContent+=` 审计逻辑用量 ${r.rows} / ${r.max_rows} 条，${(r.bytes/1048576).toFixed(1)} / ${(r.max_bytes/1048576).toFixed(1)} MiB；清理代际 ${r.generation}${r.last_gc_at_ms?`，最近清理 ${time(r.last_gc_at_ms)}`:""}。${r.capacity_blocked?"已达到新操作准入上限；已有操作仍可查询和恢复。":""}`;}
     const list=$("audit-list"), focus=list.contains(document.activeElement)?document.activeElement.dataset.auditID:null;
     list.replaceChildren();
     for(const item of page?.items??[]){
@@ -73,5 +75,5 @@ export function createAuditPanel(root, {request,download}) {
   $("audit-previous").addEventListener("click",()=>controller.previous());
   $("audit-next").addEventListener("click",()=>void controller.next());
   $("audit-export").addEventListener("click",()=>void controller.export());
-  return {state:controller.state,open(){if(!controller.state.loaded&&!controller.state.pending)void controller.search(fields());},clear(){for(const [url,timer]of links){clearTimeout(timer);URL.revokeObjectURL(url);}links.clear();form.reset();for(const details of root.querySelectorAll("details"))details.open=false;controller.clear();}};
+  return {state:controller.state,open(){if(!controller.state.loaded&&!controller.state.pending)void controller.search(fields());},showOperation(operationID){form.reset();form.elements.operation_id.value=operationID;void controller.search({operation_id:operationID});},clear(){for(const [url,timer]of links){clearTimeout(timer);URL.revokeObjectURL(url);}links.clear();form.reset();for(const details of root.querySelectorAll("details"))details.open=false;controller.clear();}};
 }

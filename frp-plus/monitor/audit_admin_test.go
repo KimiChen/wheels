@@ -48,7 +48,7 @@ func TestAuditAdminAuthenticationBoundsPaginationAndOfflineDetail(t *testing.T) 
 	res := adminRequest(t, s, "GET", auditAdminPath+"?limit=2&service_id=primary", "", cookie, "", nil)
 	expectStatus(t, res, 200)
 	page := decodeAuditPage(t, res)
-	if len(page.Items) != 2 || !page.HasMore || page.NextCursor == "" || page.Retention.CleanupEnabled {
+	if len(page.Items) != 2 || !page.HasMore || page.NextCursor == "" || !page.Retention.CleanupEnabled {
 		t.Fatal(page)
 	}
 	res = adminRequest(t, s, "GET", auditAdminPath+"?limit=2&service_id=primary&cursor="+url.QueryEscape(page.NextCursor), "", cookie, "", nil)

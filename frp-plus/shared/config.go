@@ -31,13 +31,18 @@ type AgentConfig struct {
 // native setting; the adapter requires it to be a direct child of Root.
 // Neither management requests nor the browser can choose local file paths.
 type ConfigManagementConfig struct {
-	Enabled bool   `json:"enabled,omitempty"`
-	Root    string `json:"root,omitempty"`
+	SnapshotRetentionDays int    `json:"snapshotRetentionDays,omitempty"`
+	MaxSnapshotBytes      int64  `json:"maxSnapshotBytes,omitempty"`
+	Enabled               bool   `json:"enabled,omitempty"`
+	Root                  string `json:"root,omitempty"`
 }
 
 func (c *ConfigManagementConfig) Validate(telemetryEnabled bool) error {
 	if c == nil || !c.Enabled {
 		return nil
+	}
+	if (c.SnapshotRetentionDays != 0 && (c.SnapshotRetentionDays < 1 || c.SnapshotRetentionDays > 366)) || (c.MaxSnapshotBytes != 0 && (c.MaxSnapshotBytes < 1<<20 || c.MaxSnapshotBytes > 1<<30)) {
+		return errors.New("invalid managed snapshot retention or capacity")
 	}
 	if !telemetryEnabled || !configPath(c.Root, true) || !filepath.IsAbs(c.Root) || filepath.Clean(c.Root) != c.Root || filepath.Dir(c.Root) == c.Root {
 		return errors.New("configuration management requires telemetry and an absolute private root")
@@ -111,6 +116,7 @@ type MonitorConfig struct {
 	DatabaseFile           string              `json:"databaseFile,omitempty"`
 	RetentionDays          int                 `json:"retentionDays,omitempty"`
 	HistoryDataPath        string              `json:"historyDataPath,omitempty"`
+	Audit                  AuditConfig         `json:"audit,omitempty"`
 	GitHubClientID         string              `json:"githubClientID,omitempty"`
 	GitHubClientSecretFile string              `json:"githubClientSecretFile,omitempty"`
 	GitHubCallbackURL      string              `json:"githubCallbackURL,omitempty"`
@@ -137,12 +143,16 @@ func (c *MonitorConfig) Complete() error {
 	if c.RetentionDays == 0 {
 		c.RetentionDays = 7
 	}
+	c.Audit.Complete()
 	return c.Validate()
 }
 
 func (c MonitorConfig) Validate() error {
 	if !c.Enabled {
 		return nil
+	}
+	if err := c.Audit.Validate(); err != nil {
+		return err
 	}
 	if err := c.NativeAccess.Validate(); err != nil {
 		return err
