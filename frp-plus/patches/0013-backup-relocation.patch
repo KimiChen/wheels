@@ -1,0 +1,280 @@
+diff --git a/cmd/frpc/sub/maintenance.go b/cmd/frpc/sub/maintenance.go
+--- a/cmd/frpc/sub/maintenance.go
++++ b/cmd/frpc/sub/maintenance.go
+@@ -1,6 +1,7 @@
+ package sub
+ 
+ import (
++	"context"
+ 	"encoding/json"
+ 	"errors"
+ 	"path/filepath"
+@@ -40,6 +41,9 @@
+ 	command.PersistentFlags().BoolVar(&offline, "offline", false, "Acknowledge that the local FRP agent must be stopped")
+ 	args := func(*cobra.Command, []string) error { return nil }
+ 	var output, checkpoint, root, digest, epoch string
++	var policyPath, sourcePolicyPath, envPath, sourceEnvPath string
++	command.PersistentFlags().StringVar(&policyPath, "policy", "", "Local private target/read authorization policy")
++	command.PersistentFlags().StringVar(&envPath, "env-file", "", "Local private JSON template values; never archived")
+ 	run := func(action string) func(*cobra.Command, []string) error {
+ 		return func(cmd *cobra.Command, values []string) error {
+ 			if !offline || len(values) != 0 || cfgDir != "" || !strictConfigMode || len(allowUnsafe) != 0 {
+@@ -63,10 +67,28 @@
+ 			}
+ 			capture := configuration.MaintenanceCapture(file)
+ 			options := managed.Options{Root: root, StorePath: filepath.Join(root, "store.json")}
++			var policy configuration.BackupGraphPolicy
++			if policyPath != "" {
++				env, loadErr := configuration.LoadBackupEnvironment(envPath)
++				if loadErr != nil {
++					return maintenanceError(loadErr)
++				}
++				policy, err = configuration.LoadBackupPolicy(policyPath, env)
++				if err != nil {
++					return maintenanceError(err)
++				}
++				if policy.ConfigFile != file || policy.StoreFile != options.StorePath {
++					return errors.New("maintenance_invalid_arguments")
++				}
++			} else if envPath != "" || sourcePolicyPath != "" || sourceEnvPath != "" {
++				return errors.New("maintenance_invalid_arguments")
++			}
+ 			var result any
+ 			switch action {
+ 			case "checkpoint":
+-				if dependencyGraph {
++				if policyPath != "" {
++					result, err = managed.ExportCheckpointV3(cmd.Context(), options, maintenanceCaptureV3(policy, envPath, sourceEnvPath), output)
++				} else if dependencyGraph {
+ 					result, err = managed.ExportCheckpointV2(cmd.Context(), options, configuration.CheckpointCaptureV2(file), output)
+ 				} else {
+ 					result, err = managed.ExportCheckpoint(cmd.Context(), options, capture, output)
+@@ -74,7 +96,25 @@
+ 			case "restore-install":
+ 				var version int
+ 				version, err = managed.CheckpointVersion(checkpoint, digest)
+-				if err == nil && version == 2 {
++				if err == nil && version == 3 {
++					if policyPath == "" || sourcePolicyPath == "" {
++						return errors.New("maintenance_policy_required")
++					}
++					sourceEnv := policy.TemplateEnv
++					if sourceEnvPath != "" {
++						sourceEnv, err = configuration.LoadBackupEnvironment(sourceEnvPath)
++						if err != nil {
++							return maintenanceError(err)
++						}
++					}
++					sourcePolicy, loadErr := configuration.LoadBackupPolicy(sourcePolicyPath, sourceEnv)
++					if loadErr != nil {
++						return maintenanceError(loadErr)
++					}
++					result, err = managed.InstallCheckpointV3(cmd.Context(), checkpoint, root, digest, maintenanceCaptureV3(policy, envPath, sourceEnvPath), maintenanceRelocatorV3(sourcePolicy, policy, envPath, sourceEnvPath))
++				} else if err == nil && policyPath != "" {
++					return errors.New("maintenance_invalid_arguments")
++				} else if err == nil && version == 2 {
+ 					result, err = managed.InstallCheckpointV2(cmd.Context(), checkpoint, root, digest, configuration.CheckpointCaptureV2(file), configuration.ValidateCheckpointContextV2)
+ 				} else if err == nil {
+ 					result, err = managed.InstallCheckpoint(cmd.Context(), checkpoint, root, digest, capture, configuration.ValidateMaintenanceCheckpoint)
+@@ -82,7 +122,14 @@
+ 			case "restore-confirm":
+ 				var version int
+ 				version, err = managed.RestoreCheckpointVersion(root)
+-				if err == nil && version == 2 {
++				if err == nil && version == 3 {
++					if policyPath == "" {
++						return errors.New("maintenance_policy_required")
++					}
++					result, err = managed.ConfirmRestorationV3(cmd.Context(), options, epoch, digest, maintenanceCaptureV3(policy, envPath, sourceEnvPath))
++				} else if err == nil && policyPath != "" {
++					return errors.New("maintenance_invalid_arguments")
++				} else if err == nil && version == 2 {
+ 					result, err = managed.ConfirmRestorationV2(cmd.Context(), options, epoch, digest, configuration.CheckpointCaptureV2(file))
+ 				} else if err == nil {
+ 					result, err = managed.ConfirmRestoration(cmd.Context(), options, epoch, digest, capture)
+@@ -101,8 +148,10 @@
+ 	export.Flags().BoolVar(&dependencyGraph, "dependency-graph", false, "Include sealed nested dependencies for same-path restoration")
+ 	export.Flags().StringVar(&output, "output", "", "New absolute private checkpoint directory")
+ 	install := &cobra.Command{Use: "restore-install", Args: args, RunE: run("restore-install"), SilenceUsage: true}
++	install.Flags().StringVar(&sourcePolicyPath, "source-policy", "", "Local authorization matching the archived source policy")
++	install.Flags().StringVar(&sourceEnvPath, "source-env-file", "", "Local source template values; defaults to target values")
+ 	install.Flags().StringVar(&checkpoint, "checkpoint", "", "Private checkpoint directory")
+-	install.Flags().StringVar(&root, "root", "", "Original absolute managed root; remapping is not supported")
++	install.Flags().StringVar(&root, "root", "", "Absolute destination managed root; v3 requires local source and target policies")
+ 	install.Flags().StringVar(&digest, "manifest-digest", "", "Exact checkpoint manifest SHA-256")
+ 	confirm := &cobra.Command{Use: "restore-confirm", Args: args, RunE: run("restore-confirm"), SilenceUsage: true}
+ 	confirm.Flags().StringVar(&epoch, "epoch", "", "Exact restored epoch")
+@@ -110,3 +159,59 @@
+ 	command.AddCommand(export, install, confirm)
+ 	return command
+ }
++
++// Explicit environment inputs are local only, including when a configuration
++// or administrator mapping accidentally also references that file as a token.
++func maintenanceEnvironmentCollision(path string, excluded []string) bool {
++	for _, name := range excluded {
++		if name == "" {
++			continue
++		}
++		absolute, err := filepath.Abs(name)
++		if err != nil || absolute == path {
++			return true
++		}
++	}
++	return false
++}
++func maintenanceCaptureV3(policy configuration.BackupGraphPolicy, excluded ...string) managed.ContextCaptureV3 {
++	base := configuration.CheckpointCaptureV3(policy)
++	return func(ctx context.Context, variants []managed.StoreVariant) (managed.ContextSnapshotV3, error) {
++		if maintenanceEnvironmentCollision(policy.StoreFile, excluded) {
++			return managed.ContextSnapshotV3{}, managed.ErrUnsafePath
++		}
++		out, err := base(ctx, variants)
++		if err != nil {
++			return out, err
++		}
++		for _, file := range out.Files {
++			if maintenanceEnvironmentCollision(file.Path, excluded) {
++				return managed.ContextSnapshotV3{}, managed.ErrUnsafePath
++			}
++		}
++		return out, nil
++	}
++}
++func maintenanceRelocatorV3(source, target configuration.BackupGraphPolicy, excluded ...string) managed.ContextRelocatorV3 {
++	base := configuration.PrepareRelocationV3(source, target)
++	return func(ctx context.Context, m managed.CheckpointManifestV2, files []managed.ContextFile, variants []managed.StoreVariant, graph, policy []byte) (managed.RelocationContextV3, error) {
++		if maintenanceEnvironmentCollision(source.StoreFile, excluded) || maintenanceEnvironmentCollision(target.StoreFile, excluded) {
++			return managed.RelocationContextV3{}, managed.ErrUnsafePath
++		}
++		for _, file := range files {
++			if maintenanceEnvironmentCollision(file.Path, excluded) {
++				return managed.RelocationContextV3{}, managed.ErrUnsafePath
++			}
++		}
++		out, err := base(ctx, m, files, variants, graph, policy)
++		if err != nil {
++			return out, err
++		}
++		for _, file := range out.Context.Files {
++			if maintenanceEnvironmentCollision(file.Path, excluded) {
++				return managed.RelocationContextV3{}, managed.ErrUnsafePath
++			}
++		}
++		return out, nil
++	}
++}
+diff --git a/cmd/frpc/sub/maintenance_v3_test.go b/cmd/frpc/sub/maintenance_v3_test.go
+new file mode 100644
+--- /dev/null
++++ b/cmd/frpc/sub/maintenance_v3_test.go
+@@ -0,0 +1,109 @@
++//go:build linux || darwin
++
++package sub
++
++import (
++	"bytes"
++	"encoding/json"
++	"fmt"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++
++	"github.com/fatedier/frp/extension/frpmonitor/agent/configuration"
++	"github.com/fatedier/frp/extension/frpmonitor/agent/managed"
++)
++
++func TestMaintenanceV3ExplicitPolicyAndLocalEnvironment(t *testing.T) {
++	t.Setenv("http_proxy", "")
++	prior, priorDir, priorStrict, priorUnsafe := cfgFile, cfgDir, strictConfigMode, allowUnsafe
++	defer func() { cfgFile, cfgDir, strictConfigMode, allowUnsafe = prior, priorDir, priorStrict, priorUnsafe }()
++	cfgDir, strictConfigMode, allowUnsafe = "", true, nil
++	parent, err := filepath.EvalSymlinks(t.TempDir())
++	if err != nil {
++		t.Fatal(err)
++	}
++	os.Chmod(parent, 0700)
++	installation := filepath.Join(parent, "installation")
++	root := filepath.Join(installation, "managed")
++	os.Mkdir(installation, 0700)
++	os.Mkdir(root, 0700)
++	cfgFile = filepath.Join(installation, "agent.toml")
++	main := fmt.Sprintf("serverAddr='127.0.0.1'\n[auth]\nmethod='token'\ntoken='{{ .Envs.LOCAL_TOKEN }}'\n[store]\npath=%q\n[telemetry]\nenabled=true\nendpoint='ws://127.0.0.1:17401/agent/v1/ws'\ntokenFile=%q\nallowInsecureLoopback=true\n[telemetry.configManagement]\nenabled=true\nroot=%q\n", filepath.Join(root, "store.json"), filepath.Join(installation, "agent.token"), root)
++	for name, value := range map[string]string{"agent.toml": main, "agent.token": "synthetic-monitor-token", "installation.json": `{"format":2,"roles":["agent"],"managed":{"version":1,"root":"managed","store":"store.json"}}`} {
++		if err = os.WriteFile(filepath.Join(installation, name), []byte(value), 0600); err != nil {
++			t.Fatal(err)
++		}
++	}
++	policy := configuration.BackupGraphPolicy{ConfigFile: cfgFile, WorkingDir: installation, StoreFile: filepath.Join(root, "store.json"), Roots: []configuration.BackupRoot{{ID: "installation", Path: installation}}}
++	encoded, err := configuration.EncodeBackupPolicy(policy)
++	if err != nil {
++		t.Fatal(err)
++	}
++	policyPath := filepath.Join(parent, "policy.json")
++	os.WriteFile(policyPath, encoded, 0600)
++	envPath := filepath.Join(parent, "values.json")
++	secret := "synthetic-unarchived-environment-secret"
++	os.WriteFile(envPath, []byte(`{"LOCAL_TOKEN":"`+secret+`"}`), 0600)
++	e, err := managed.Open(managed.Options{Root: root, StorePath: policy.StoreFile})
++	if err != nil {
++		t.Fatal(err)
++	}
++	e.Close()
++	out := filepath.Join(parent, "checkpoint")
++	output, err := maintenanceCLI(t, "checkpoint", "--output", out, "--offline", "--policy", policyPath, "--env-file", envPath)
++	if err != nil {
++		t.Fatal("v3 checkpoint", err)
++	}
++	var summary managed.CheckpointSummary
++	if json.Unmarshal([]byte(output), &summary) != nil {
++		t.Fatal("summary")
++	}
++	if version, err := managed.CheckpointVersion(out, summary.ManifestDigest); err != nil || version != 3 {
++		t.Fatal("version3", version, err)
++	}
++	err = filepath.WalkDir(out, func(path string, entry os.DirEntry, err error) error {
++		if err != nil {
++			return err
++		}
++		if !entry.IsDir() {
++			data, err := os.ReadFile(path)
++			if err != nil {
++				return err
++			}
++			if bytes.Contains(data, []byte(secret)) {
++				t.Fatal("rendered environment leaked")
++			}
++		}
++		return nil
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if _, err = maintenanceCLI(t, "restore-install", "--checkpoint", out, "--root", root, "--manifest-digest", summary.ManifestDigest, "--offline"); err == nil {
++		t.Fatal("v3 accepted without local authorization")
++	}
++	output, err = maintenanceCLI(t, "restore-install", "--checkpoint", out, "--root", root, "--manifest-digest", summary.ManifestDigest, "--offline", "--policy", policyPath, "--source-policy", policyPath, "--env-file", envPath)
++	if err != nil {
++		t.Fatal("v3 install", err)
++	}
++	if strings.Contains(output, parent) || strings.Contains(output, secret) {
++		t.Fatal("private CLI summary")
++	}
++}
++
++func TestMaintenanceEnvironmentFileCannotAlsoBecomeArchivedDependency(t *testing.T) {
++	policy := configuration.BackupGraphPolicy{StoreFile: "/synthetic/values.json"}
++	if !maintenanceEnvironmentCollision(policy.StoreFile, []string{policy.StoreFile}) {
++		t.Fatal("Store collision")
++	}
++	if maintenanceEnvironmentCollision("/synthetic/other", []string{policy.StoreFile}) {
++		t.Fatal("unrelated path rejected")
++	}
++	// The wrapper rejects Store aliasing before it reads configuration or writes a checkpoint.
++	_, err := maintenanceCaptureV3(policy, policy.StoreFile)(t.Context(), nil)
++	if err != managed.ErrUnsafePath {
++		t.Fatal("local input not excluded", err)
++	}
++}

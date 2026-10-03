@@ -133,6 +133,9 @@ func checkpointVariantDependencies(policy BackupGraphPolicy, variants []managed.
 		} else if !strings.HasPrefix(variant.Path, "managed/operations/") || (!strings.HasSuffix(variant.Path, ".old") && !strings.HasSuffix(variant.Path, ".new")) {
 			return nil, backupErr("source_invalid")
 		}
+		if variant.Historical {
+			continue
+		}
 		if !variant.Snapshot.Exists {
 			if len(variant.Snapshot.Bytes) != 0 {
 				return nil, backupErr("source_invalid")

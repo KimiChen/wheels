@@ -254,7 +254,7 @@ func (l *OfflineLease) payload(ctx context.Context) ([]checkpointPayload, string
 	}
 	for _, name := range roots {
 		switch name {
-		case ".lock", "store.json", "identity.json", "operations", "secrets", "restore.json", restorePlanName:
+		case ".lock", "store.json", "identity.json", "operations", "secrets", "restore.json", restorePlanName, contextHistoryName:
 		default:
 			return nil, "", StoreSnapshot{}, ErrRecovery
 		}
@@ -264,10 +264,10 @@ func (l *OfflineLease) payload(ctx context.Context) ([]checkpointPayload, string
 		return nil, "", StoreSnapshot{}, ErrRecovery
 	}
 	plan, planErr := readRestorePlan(l.root, "")
-	if planErr != nil || plan != nil && (marker == nil || marker.CheckpointVersion != 2) || marker != nil && marker.CheckpointVersion == 2 && !planMatchesMarker(plan, marker) {
+	if planErr != nil || plan != nil && (marker == nil || (marker.CheckpointVersion != 2 && marker.CheckpointVersion != 3)) || marker != nil && (marker.CheckpointVersion == 2 || marker.CheckpointVersion == 3) && !planMatchesMarker(plan, marker) {
 		return nil, "", StoreSnapshot{}, ErrRecovery
 	}
-	if marker != nil && marker.CheckpointVersion == 2 {
+	if marker != nil && (marker.CheckpointVersion == 2 || marker.CheckpointVersion == 3) {
 		if _, err := readRestorePlan(l.root, marker.PlanDigest); err != nil {
 			return nil, "", StoreSnapshot{}, err
 		}
@@ -361,10 +361,13 @@ func (l *OfflineLease) payload(ctx context.Context) ([]checkpointPayload, string
 		payload = append(payload, checkpointPayload{CheckpointFile{Path: prefix + name, Size: int64(len(data.Bytes)), SHA256: checkpointHash(data.Bytes), ModifiedNS: mtime}, data.Bytes})
 		return nil
 	}
-	for _, name := range []string{"store.json", "identity.json", "restore.json", restorePlanName} {
+	for _, name := range []string{"store.json", "identity.json", "restore.json", restorePlanName, contextHistoryName} {
 		limit := l.options.MaxBytes
 		if name == "restore.json" {
 			limit = restoreMarkerLimit
+		}
+		if name == contextHistoryName {
+			limit = contextHistoryLimit
 		}
 		if name == restorePlanName {
 			limit = MaxCheckpointManifestBytes

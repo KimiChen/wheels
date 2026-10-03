@@ -14,6 +14,8 @@ import (
 
 const (
 	Version          = 2
+	TemplateVersion  = 3
+	MaxTemplateNames = 128
 	Kind             = "frp-agent-dependency-graph"
 	MaxManifestBytes = 1 << 20
 	MaxFiles         = 128
@@ -29,16 +31,38 @@ var ErrInvalid = errors.New("backup_manifest_invalid")
 // Manifest and its per-file digests are PRIVATE. Public summaries must expose
 // only the overall digest and counts, never filenames, native fields or bytes.
 type Manifest struct {
-	Version      int         `json:"version"`
-	Kind         string      `json:"kind"`
-	PolicyDigest string      `json:"policy_digest"`
-	ConfigFile   string      `json:"config_file"`
-	WorkingDir   string      `json:"working_dir"`
-	StoreFile    string      `json:"store_file"`
-	Files        []File      `json:"files"`
-	Directories  []Directory `json:"directories"`
-	Includes     []Include   `json:"includes"`
-	References   []Reference `json:"references"`
+	Version              int                   `json:"version"`
+	Kind                 string                `json:"kind"`
+	PolicyDigest         string                `json:"policy_digest"`
+	ConfigFile           string                `json:"config_file"`
+	WorkingDir           string                `json:"working_dir"`
+	StoreFile            string                `json:"store_file"`
+	Files                []File                `json:"files"`
+	Directories          []Directory           `json:"directories"`
+	Includes             []Include             `json:"includes"`
+	References           []Reference           `json:"references"`
+	TemplateRequirements []TemplateRequirement `json:"template_requirements,omitempty"`
+}
+
+// TemplateRequirement stores only the names needed to reproduce rendering and
+// its private digest. Values and rendered configurations are never archived.
+// From is an existing main/include file, not an independently trusted path.
+type TemplateRequirement struct {
+	From           string   `json:"from"`
+	Names          []string `json:"names"`
+	RenderedSHA256 string   `json:"rendered_sha256"`
+}
+
+func ValidTemplateName(name string) bool {
+	if len(name) == 0 || len(name) > 128 {
+		return false
+	}
+	for i, c := range name {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c == '_' || i > 0 && c >= '0' && c <= '9') {
+			return false
+		}
+	}
+	return true
 }
 
 type File struct {
@@ -117,10 +141,37 @@ func Decode(data []byte) (Manifest, error) {
 	}
 	d = json.NewDecoder(bytes.NewReader(data))
 	d.DisallowUnknownFields()
-	if d.Decode(&out) != nil || out.Version != Version || out.Kind != Kind || !ValidDigest(out.PolicyDigest) ||
+	if d.Decode(&out) != nil || (out.Version != Version && out.Version != TemplateVersion) || out.Kind != Kind || !ValidDigest(out.PolicyDigest) ||
 		len(out.Files) == 0 || len(out.Files) > MaxFiles || len(out.Directories) > MaxDirectories ||
 		len(out.Includes) > MaxDirectories || len(out.References) > MaxEdges || out.Files == nil || out.Directories == nil || out.Includes == nil || out.References == nil {
 		return Manifest{}, ErrInvalid
+	}
+	if out.Version == Version && out.TemplateRequirements != nil || out.Version == TemplateVersion && (len(out.TemplateRequirements) == 0 || len(out.TemplateRequirements) > MaxFiles) {
+		return Manifest{}, ErrInvalid
+	}
+	previous := ""
+	for _, requirement := range out.TemplateRequirements {
+		if requirement.From <= previous || requirement.Names == nil || len(requirement.Names) > MaxTemplateNames || !ValidDigest(requirement.RenderedSHA256) {
+			return Manifest{}, ErrInvalid
+		}
+		previous = requirement.From
+		priorName := ""
+		for _, name := range requirement.Names {
+			if !ValidTemplateName(name) || name <= priorName {
+				return Manifest{}, ErrInvalid
+			}
+			priorName = name
+		}
+		found := false
+		for _, file := range out.Files {
+			if file.Path == requirement.From && file.Exists && (file.Kind == "main" || file.Kind == "include") {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return Manifest{}, ErrInvalid
+		}
 	}
 	entries := 0
 	for _, dir := range out.Directories {
@@ -184,7 +235,7 @@ func scan(d *json.Decoder, depth int) error {
 func canonicalKey(key string) bool {
 	switch key {
 	case "version", "kind", "policy_digest", "config_file", "working_dir", "store_file", "files", "directories", "includes", "references",
-		"id", "path", "logical_path", "exists", "size", "sha256", "mode", "modified_ns", "entries", "name", "pattern", "from", "field", "to":
+		"id", "path", "logical_path", "exists", "size", "sha256", "mode", "modified_ns", "entries", "name", "pattern", "from", "field", "to", "template_requirements", "names", "rendered_sha256":
 		return true
 	default:
 		return false

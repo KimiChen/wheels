@@ -30,6 +30,8 @@ type restoreInstallPlan struct {
 	ReplacedServiceID string             `json:"replaced_service_id"`
 	CreatedAtMS       int64              `json:"created_at_ms"`
 	Entries           []restorePlanEntry `json:"entries"`
+	TargetRoots       []string           `json:"target_roots,omitempty"`
+	TargetFiles       []string           `json:"target_files,omitempty"`
 }
 
 func validPlanTarget(path string) bool {
@@ -42,12 +44,12 @@ func validPlanTarget(path string) bool {
 	return path != "managed"
 }
 func (p restoreInstallPlan) valid() bool {
-	if p.Version != 1 || !digestString(p.ManifestDigest) || !digestString(p.ContextRevision) || !serviceIdentity.MatchString(p.Epoch) || !serviceIdentity.MatchString(p.ServiceID) || !serviceIdentity.MatchString(p.BackupServiceID) || p.ReplacedServiceID != "" && !serviceIdentity.MatchString(p.ReplacedServiceID) || p.CreatedAtMS <= 0 || len(p.Entries) < 3 || len(p.Entries) > MaxCheckpointFiles {
+	if (p.Version != 1 && p.Version != 2) || !digestString(p.ManifestDigest) || !digestString(p.ContextRevision) || !serviceIdentity.MatchString(p.Epoch) || !serviceIdentity.MatchString(p.ServiceID) || !serviceIdentity.MatchString(p.BackupServiceID) || p.ReplacedServiceID != "" && !serviceIdentity.MatchString(p.ReplacedServiceID) || p.CreatedAtMS <= 0 || len(p.Entries) < 3 || len(p.Entries) > MaxCheckpointFiles {
 		return false
 	}
 	seen := map[string]bool{}
 	for _, entry := range p.Entries {
-		if !validPlanTarget(entry.Target) || seen[entry.Target] || !digestString(entry.OldDigest) || !digestString(entry.NewDigest) || entry.OldModifiedNS < 0 || entry.NewExists && entry.NewModifiedNS <= 0 || !entry.NewExists && (entry.NewModifiedNS != 0 || entry.Payload != "" || entry.NewDigest != Digest(StoreSnapshot{})) {
+		if !p.validTarget(entry.Target) || seen[entry.Target] || !digestString(entry.OldDigest) || !digestString(entry.NewDigest) || entry.OldModifiedNS < 0 || entry.NewExists && entry.NewModifiedNS <= 0 || !entry.NewExists && (entry.NewModifiedNS != 0 || entry.Payload != "" || entry.NewDigest != Digest(StoreSnapshot{})) {
 			return false
 		}
 		if entry.NewExists && entry.Target != "managed/identity.json" && !validV2Payload(entry.Payload) {
@@ -58,7 +60,10 @@ func (p restoreInstallPlan) valid() bool {
 		}
 		seen[entry.Target] = true
 	}
-	return seen["agent.toml"] && seen["installation.json"] && seen["managed/identity.json"] && seen["managed/store.json"]
+	if p.Version == 2 {
+		return seen["managed/identity.json"] && seen["managed/store.json"] && p.validAuthorization()
+	}
+	return len(p.TargetRoots) == 0 && len(p.TargetFiles) == 0 && seen["agent.toml"] && seen["installation.json"] && seen["managed/identity.json"] && seen["managed/store.json"]
 }
 func readRestorePlan(root *privateDir, expected string) (*restoreInstallPlan, error) {
 	file, _, err := root.readMetadata(restorePlanName, MaxCheckpointManifestBytes)
@@ -92,7 +97,7 @@ func planDigest(plan restoreInstallPlan) (string, []byte, error) {
 // operation files. An interrupted plan must remain retryable even if identity
 // was absent when offline installation began.
 func checkRestorePlanStartup(root *privateDir, marker *restoreMarker) error {
-	if marker != nil && marker.CheckpointVersion == 2 {
+	if marker != nil && (marker.CheckpointVersion == 2 || marker.CheckpointVersion == 3) {
 		plan, err := readRestorePlan(root, marker.PlanDigest)
 		if err != nil || !planMatchesMarker(plan, marker) {
 			return ErrRecovery
@@ -164,7 +169,7 @@ func v2ReadTarget(installation *privateDir, path string, limit int64) (StoreSnap
 	return dir.readMetadata(name, limit)
 }
 func checkRestoreV2Sources(root *privateDir, marker *restoreMarker) error {
-	if marker == nil || marker.CheckpointVersion != 2 || marker.Activated {
+	if marker == nil || (marker.CheckpointVersion != 2 && marker.CheckpointVersion != 3) || marker.Activated {
 		return nil
 	}
 	plan, err := readRestorePlan(root, marker.PlanDigest)
@@ -180,7 +185,7 @@ func checkRestoreV2Sources(root *privateDir, marker *restoreMarker) error {
 		if strings.HasPrefix(entry.Target, "managed/") {
 			continue
 		}
-		file, stamp, err := v2ReadTarget(installation, entry.Target, MaxCheckpointFileBytes)
+		file, stamp, err := planReadTarget(installation, *plan, entry.Target, MaxCheckpointFileBytes)
 		if err != nil || Digest(file) != entry.NewDigest || stamp != entry.NewModifiedNS {
 			return ErrConflict
 		}
@@ -217,7 +222,7 @@ func (l *OfflineLease) variantsForContext() ([]StoreVariant, *Engine, error) {
 			if Digest(value) != expected {
 				return nil, nil, ErrRecovery
 			}
-			out = append(out, StoreVariant{Path: "managed/operations/" + name, Snapshot: value})
+			out = append(out, StoreVariant{Path: "managed/operations/" + name, Snapshot: value, Historical: r.contextChanged})
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
@@ -285,8 +290,8 @@ func RestoreCheckpointVersion(rootPath string) (int, error) {
 	if err != nil || marker == nil {
 		return 0, ErrRecovery
 	}
-	if marker.CheckpointVersion == 2 {
-		return 2, nil
+	if marker.CheckpointVersion == 2 || marker.CheckpointVersion == 3 {
+		return marker.CheckpointVersion, nil
 	}
 	return 1, nil
 }
@@ -331,6 +336,15 @@ func newInstallPlan(m CheckpointManifestV2, payload []checkpointPayload, install
 	if !m.StoreExists {
 		desired["managed/store.json"] = checkpointPayload{}
 	}
+	if _, exists := desired["managed/"+contextHistoryName]; !exists {
+		old, err := root.read(contextHistoryName, contextHistoryLimit)
+		if err != nil {
+			return plan, err
+		}
+		if old.Exists {
+			desired["managed/"+contextHistoryName] = checkpointPayload{}
+		}
+	}
 	for _, sub := range []string{"operations", "secrets"} {
 		dir, err := root.optionalSubdir(sub)
 		if err != nil {
@@ -361,7 +375,7 @@ func newInstallPlan(m CheckpointManifestV2, payload []checkpointPayload, install
 	sort.Strings(paths)
 	for _, target := range paths {
 		file := desired[target]
-		old, stamp, err := v2ReadTarget(installation, target, v2EntryLimit(file.entry.Path))
+		old, stamp, err := v2ReadTarget(installation, target, v2TargetLimit(restorePlanEntry{Target: target, Payload: file.entry.Path}))
 		if err != nil {
 			return plan, err
 		}

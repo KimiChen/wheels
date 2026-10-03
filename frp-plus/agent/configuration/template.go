@@ -9,18 +9,23 @@ import (
 // or printing the whole environment would make restart recovery depend on
 // unrelated service-manager variables and might expose their values.
 func (s *snapshot) templateDependencies(data []byte) error {
-	noop := func(...any) any { return nil }
-	t, err := template.New("frp").Funcs(template.FuncMap{"parseNumberRange": noop, "parseNumberRangePair": noop}).Parse(string(data))
-	if err != nil {
-		return failure("invalid_template")
-	}
-	use := func(key string) error {
+	return walkTemplateDependencies(data, func(key string) error {
 		value, ok := s.in.TemplateEnv[key]
 		if !ok {
 			return failure("unsupported_dependency")
 		}
 		s.referencedEnv[key] = value
 		return nil
+	})
+}
+
+// walkTemplateDependencies inspects every definition, including branches that
+// did not execute. It never reads the environment or returns its values.
+func walkTemplateDependencies(data []byte, use func(string) error) error {
+	noop := func(...any) any { return nil }
+	t, err := template.New("frp").Funcs(template.FuncMap{"parseNumberRange": noop, "parseNumberRangePair": noop}).Parse(string(data))
+	if err != nil {
+		return failure("invalid_template")
 	}
 	var walk func(parse.Node) error
 	bareEnv := func(node parse.Node) bool {

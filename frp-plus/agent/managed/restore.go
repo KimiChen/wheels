@@ -49,7 +49,7 @@ type RestoreSummary struct {
 }
 
 func (m restoreMarker) valid(root string) bool {
-	if m.CheckpointVersion != 0 && m.CheckpointVersion != 2 || m.CheckpointVersion == 2 && !digestString(m.PlanDigest) || m.CheckpointVersion == 0 && m.PlanDigest != "" {
+	if m.CheckpointVersion != 0 && m.CheckpointVersion != 2 && m.CheckpointVersion != 3 || (m.CheckpointVersion == 2 || m.CheckpointVersion == 3) && !digestString(m.PlanDigest) || m.CheckpointVersion == 0 && m.PlanDigest != "" {
 		return false
 	}
 	if m.Version != 1 || !serviceIdentity.MatchString(m.Epoch) || !serviceIdentity.MatchString(m.ServiceID) || !serviceIdentity.MatchString(m.BackupServiceID) || (m.ReplacedServiceID != "" && !serviceIdentity.MatchString(m.ReplacedServiceID)) || !digestString(m.ManifestDigest) || !digestString(m.ContextRevision) || m.ConfigFile != filepath.Join(filepath.Dir(root), "agent.toml") || m.WorkingDir != filepath.Dir(root) || m.CreatedAtMS <= 0 || m.OperationsCount < 0 || m.OperationsCount > 1024 {
@@ -323,7 +323,7 @@ func validCheckpointPath(path string) bool {
 		return checkpointContextName(parts[1])
 	}
 	if len(parts) == 2 && parts[0] == "managed" {
-		return parts[1] == "store.json" || parts[1] == "identity.json" || parts[1] == "restore.json"
+		return parts[1] == "store.json" || parts[1] == "identity.json" || parts[1] == "restore.json" || parts[1] == contextHistoryName
 	}
 	if len(parts) != 3 || parts[0] != "managed" {
 		return false

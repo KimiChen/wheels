@@ -226,6 +226,8 @@ func resultCode(err error) string {
 		return e.Code
 	}
 	switch {
+	case errors.Is(err, managed.ErrContextChanged):
+		return "context_changed"
 	case errors.Is(err, managed.ErrCapacity):
 		return "managed_capacity"
 	case errors.Is(err, managed.ErrConflict):

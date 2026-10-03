@@ -360,6 +360,10 @@ func (o ConfigOperationView) Validate() error {
 		return invalid
 	}
 	switch o.MaterialsState {
+	case "context_changed":
+		if ConfigOperationActive(o.State) || o.MaterialsExpiredAtMS != nil || o.MaterialsExpiryReason != "" {
+			return invalid
+		}
 	case "", "retained":
 		if o.MaterialsExpiredAtMS != nil || o.MaterialsExpiryReason != "" {
 			return invalid

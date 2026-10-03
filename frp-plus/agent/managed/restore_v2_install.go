@@ -92,7 +92,7 @@ func installCheckpointV2(ctx context.Context, checkpoint, rootPath, digest strin
 	}
 	for _, name := range names {
 		switch name {
-		case ".lock", "store.json", "identity.json", "operations", "secrets", "restore.json", restorePlanName:
+		case ".lock", "store.json", "identity.json", "operations", "secrets", "restore.json", restorePlanName, contextHistoryName:
 		default:
 			return out, ErrRecovery
 		}
@@ -202,7 +202,7 @@ func installCheckpointV2(ctx context.Context, checkpoint, rootPath, digest strin
 		if Digest(desired) != entry.NewDigest {
 			return out, ErrRecovery
 		}
-		current, stamp, err := v2ReadTarget(installation, entry.Target, v2EntryLimit(entry.Payload))
+		current, stamp, err := v2ReadTarget(installation, entry.Target, v2TargetLimit(entry))
 		if err != nil {
 			return out, err
 		}
@@ -217,7 +217,7 @@ func installCheckpointV2(ctx context.Context, checkpoint, rootPath, digest strin
 			close()
 			return out, err
 		}
-		err = replaceV2Timed(dir, name, desired, entry.NewModifiedNS, entry.OldDigest, entry.OldModifiedNS, v2EntryLimit(entry.Payload), func(stage string) error { return call("target:" + entry.Target + ":" + stage) })
+		err = replaceV2Timed(dir, name, desired, entry.NewModifiedNS, entry.OldDigest, entry.OldModifiedNS, v2TargetLimit(entry), func(stage string) error { return call("target:" + entry.Target + ":" + stage) })
 		close()
 		if err != nil {
 			return out, err
@@ -276,10 +276,10 @@ func validateInstallPlanTargets(m CheckpointManifestV2, payload []checkpointPayl
 				return ErrRecovery
 			}
 			delete(expected, entry.Target)
-		} else if entry.NewExists || (!strings.HasPrefix(entry.Target, "managed/operations/") && !strings.HasPrefix(entry.Target, "managed/secrets/")) {
+		} else if entry.NewExists || (entry.Target != "managed/"+contextHistoryName && !strings.HasPrefix(entry.Target, "managed/operations/") && !strings.HasPrefix(entry.Target, "managed/secrets/")) {
 			return ErrRecovery
 		}
-		current, stamp, err := v2ReadTarget(installation, entry.Target, v2EntryLimit(entry.Payload))
+		current, stamp, err := v2ReadTarget(installation, entry.Target, v2TargetLimit(entry))
 		if err != nil {
 			return err
 		}

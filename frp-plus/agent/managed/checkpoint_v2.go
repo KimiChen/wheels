@@ -13,8 +13,9 @@ import (
 // StoreVariant is private material already validated against its operation
 // journal. Empty old snapshots preserve absence rather than an empty Store.
 type StoreVariant struct {
-	Path     string
-	Snapshot StoreSnapshot
+	Path       string
+	Snapshot   StoreSnapshot
+	Historical bool
 }
 type ContextSnapshotV2 struct {
 	ConfigFile, WorkingDir, Revision string
@@ -25,7 +26,9 @@ type ContextCaptureV2 func(context.Context, []StoreVariant) (ContextSnapshotV2, 
 type ContextValidatorV2 func(context.Context, CheckpointManifestV2, []ContextFile, []StoreVariant, []byte) error
 type CheckpointManifestV2 struct {
 	CheckpointManifest
-	GraphSHA256 string `json:"graph_sha256"`
+	GraphSHA256    string            `json:"graph_sha256"`
+	PolicySHA256   string            `json:"policy_sha256,omitempty"`
+	ContextSources []ContextSourceV3 `json:"context_sources,omitempty"`
 }
 
 func variantsFromPayload(payload []checkpointPayload) ([]StoreVariant, error) {
@@ -64,6 +67,22 @@ func variantsFromPayload(payload []checkpointPayload) ([]StoreVariant, error) {
 		out = append(out, StoreVariant{Path: prefix + ".old", Snapshot: StoreSnapshot{Exists: r.OldExists, Bytes: append([]byte(nil), old...)}}, StoreVariant{Path: prefix + ".new", Snapshot: StoreSnapshot{Exists: true, Bytes: append([]byte(nil), next...)}})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
+	for _, file := range payload {
+		if file.entry.Path == "managed/"+contextHistoryName {
+			var h contextHistory
+			if decodeCheckpointJSON(file.data, &h) != nil {
+				return nil, ErrRecovery
+			}
+			for _, entry := range h.Entries {
+				prefix := "managed/operations/" + idHash(entry.ID)
+				for i := range out {
+					if out[i].Path == prefix+".old" || out[i].Path == prefix+".new" {
+						out[i].Historical = true
+					}
+				}
+			}
+		}
+	}
 	return out, nil
 }
 
@@ -90,10 +109,13 @@ func validV2Context(path string) bool {
 	return validV2Relative(rel) && rel != "managed" && !strings.HasPrefix(rel, "managed/")
 }
 func validV2Payload(path string) bool {
-	return path == "GRAPH.json" || validV2Context(path) || path == "managed/restore-install.json" || validCheckpointPath(path) && strings.HasPrefix(path, "managed/")
+	return path == "POLICY.json" || path == "GRAPH.json" || validV2Context(path) || path == "managed/restore-install.json" || validCheckpointPath(path) && strings.HasPrefix(path, "managed/")
 }
 func v2EntryLimit(path string) int64 {
-	if path == "GRAPH.json" || path == "managed/restore-install.json" {
+	if path == "managed/"+contextHistoryName {
+		return contextHistoryLimit
+	}
+	if path == "POLICY.json" || path == "GRAPH.json" || path == "managed/restore-install.json" {
 		return MaxCheckpointManifestBytes
 	}
 	if strings.HasPrefix(path, "context/") {

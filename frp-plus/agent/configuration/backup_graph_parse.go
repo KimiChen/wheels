@@ -16,7 +16,14 @@ import (
 // Native decoding is strict and non-executing. Format is checked before the
 // native parser's format fallbacks, and templates are rejected before render.
 func decodeBackupFile(path string, data []byte) (*v1.ClientCommonConfig, []object, error) {
-	if bytes.Contains(data, []byte("{{")) || nativeconfig.DetectLegacyINIFormat(data) {
+	if bytes.Contains(data, []byte("{{")) {
+		return nil, nil, backupErr("unsupported_dependency")
+	}
+	return decodeBackupRendered(path, data)
+}
+
+func decodeBackupRendered(path string, data []byte) (*v1.ClientCommonConfig, []object, error) {
+	if nativeconfig.DetectLegacyINIFormat(data) {
 		return nil, nil, backupErr("unsupported_dependency")
 	}
 	format := strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")
@@ -81,7 +88,7 @@ func (b *backupGraphBuilder) collect() error {
 	if err != nil {
 		return err
 	}
-	common, objects, err := decodeBackupFile(b.policy.ConfigFile, main.data)
+	common, objects, err := b.decode(b.policy.ConfigFile, main.data)
 	if err != nil {
 		return err
 	}
@@ -149,7 +156,7 @@ func (b *backupGraphBuilder) collect() error {
 			if err != nil {
 				return err
 			}
-			_, included, err := decodeBackupFile(path, file.data)
+			_, included, err := b.decode(path, file.data)
 			if err != nil {
 				return err
 			}

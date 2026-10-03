@@ -26,6 +26,8 @@ type BackupGraphPolicy struct {
 	Roots      []BackupRoot
 	Mappings   []BackupMapping
 	Limits     BackupGraphLimits
+	// TemplateEnv is explicit caller-owned restore input, never manifest data.
+	TemplateEnv map[string]string `json:"-"`
 }
 type BackupRoot struct{ ID, Path string }
 type BackupMapping struct{ ID, Path string }
@@ -59,6 +61,7 @@ func backupWithin(path, root string) bool {
 }
 func normalizeBackupPolicy(in BackupGraphPolicy) (BackupGraphPolicy, string, error) {
 	p := in
+	p.TemplateEnv = nil
 	p.Roots = append([]BackupRoot(nil), in.Roots...)
 	p.Mappings = append([]BackupMapping(nil), in.Mappings...)
 	if !backupPath(p.ConfigFile) || !backupPath(p.WorkingDir) || !backupPath(p.StoreFile) || p.ConfigFile == p.StoreFile || len(p.Roots) == 0 || len(p.Roots)+len(p.Mappings) > backupmanifest.MaxFiles {
@@ -120,6 +123,10 @@ func normalizeBackupPolicy(in BackupGraphPolicy) (BackupGraphPolicy, string, err
 	data, err := json.Marshal(p)
 	if err != nil {
 		return p, "", backupErr("policy_invalid")
+	}
+	p.TemplateEnv = map[string]string{}
+	for name, value := range in.TemplateEnv {
+		p.TemplateEnv[name] = value
 	}
 	return p, backupmanifest.Digest(data), nil
 }
@@ -367,6 +374,9 @@ func buildBackupGraph(ctx context.Context, p BackupGraphPolicy, digest string, v
 	for _, path := range paths {
 		b.manifest.Directories = append(b.manifest.Directories, backupmanifest.Directory{Path: path, Entries: append([]backupmanifest.Entry{}, b.directories[path]...)})
 	}
+	sort.Slice(b.manifest.TemplateRequirements, func(i, j int) bool {
+		return b.manifest.TemplateRequirements[i].From < b.manifest.TemplateRequirements[j].From
+	})
 	data, err := backupmanifest.Encode(b.manifest)
 	if err != nil {
 		return nil, backupErr("limit_exceeded")

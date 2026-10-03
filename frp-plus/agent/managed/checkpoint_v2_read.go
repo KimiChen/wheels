@@ -26,7 +26,7 @@ func validateManagedCheckpointPayload(manifest CheckpointManifest, payload []che
 			return ErrRecovery
 		}
 		planBytes, exists := dataByPath["managed/"+restorePlanName]
-		if marker.CheckpointVersion == 2 {
+		if marker.CheckpointVersion == 2 || marker.CheckpointVersion == 3 {
 			var plan restoreInstallPlan
 			if !exists || checkpointHash(planBytes) != marker.PlanDigest || decodeCheckpointJSON(planBytes, &plan) != nil || !plan.valid() || !planMatchesMarker(&plan, &marker) {
 				return ErrRecovery
@@ -89,7 +89,8 @@ func validateManagedCheckpointPayload(manifest CheckpointManifest, payload []che
 			return ErrRecovery
 		}
 	}
-	return nil
+	_, err := contextHistoryPayload(payload, false)
+	return err
 }
 
 func readV2Payload(root *privateDir, path string, limit int64) (StoreSnapshot, error) {
@@ -118,7 +119,7 @@ func readCheckpointV2(root *privateDir, expected string) (CheckpointManifestV2, 
 	if err != nil || !file.Exists || !digestString(expected) || checkpointHash(file.Bytes) != expected || decodeCheckpointJSON(file.Bytes, &m) != nil {
 		return m, nil, ErrRecovery
 	}
-	if m.Version != 2 || m.Kind != "frp-managed-checkpoint" || !serviceIdentity.MatchString(m.ID) || !serviceIdentity.MatchString(m.ServiceID) || m.CreatedAtMS <= 0 || !filepath.IsAbs(m.Root) || filepath.Clean(m.Root) != m.Root || filepath.Base(m.Root) != "managed" || m.StoreName != "store.json" || m.ConfigFile != filepath.Join(filepath.Dir(m.Root), "agent.toml") || m.WorkingDir != filepath.Dir(m.Root) || !digestString(m.ContextRevision) || !digestString(m.StoreDigest) || !digestString(m.GraphSHA256) || len(m.Files) < 4 || len(m.Files) > MaxCheckpointFiles {
+	if (m.Version != 2 && m.Version != 3) || m.Kind != "frp-managed-checkpoint" || !serviceIdentity.MatchString(m.ID) || !serviceIdentity.MatchString(m.ServiceID) || m.CreatedAtMS <= 0 || !filepath.IsAbs(m.Root) || filepath.Clean(m.Root) != m.Root || filepath.Base(m.Root) != "managed" || m.StoreName != "store.json" || m.ConfigFile != filepath.Join(filepath.Dir(m.Root), "agent.toml") || m.WorkingDir != filepath.Dir(m.Root) || !digestString(m.ContextRevision) || !digestString(m.StoreDigest) || !digestString(m.GraphSHA256) || len(m.Files) < 4 || len(m.Files) > MaxCheckpointFiles {
 		return m, nil, ErrRecovery
 	}
 	allowed := map[string]bool{"CHECKPOINT.json": true}
@@ -139,7 +140,13 @@ func readCheckpointV2(root *privateDir, expected string) (CheckpointManifestV2, 
 		}
 		payload = append(payload, checkpointPayload{entry, file.Bytes})
 	}
-	if !allowed["GRAPH.json"] || !allowed["context/agent.toml"] || !allowed["context/installation.json"] || !allowed["managed/identity.json"] || allowed["managed/store.json"] != m.StoreExists {
+	if !allowed["GRAPH.json"] || m.Version == 2 && (!allowed["context/agent.toml"] || !allowed["context/installation.json"]) || !allowed["managed/identity.json"] || allowed["managed/store.json"] != m.StoreExists {
+		return m, nil, ErrRecovery
+	}
+	if err = validateV3Sources(m, payload); err != nil {
+		return m, nil, err
+	}
+	if m.Version == 2 && allowed["POLICY.json"] {
 		return m, nil, ErrRecovery
 	}
 	if err = checkpointTreeExact(root, "", allowed); err != nil {
@@ -164,7 +171,16 @@ func v2ContextFiles(m CheckpointManifestV2, payload []checkpointPayload) ([]Cont
 			graph = append([]byte(nil), file.data...)
 		}
 		if strings.HasPrefix(file.entry.Path, "context/") {
-			files = append(files, ContextFile{Path: filepath.Join(m.WorkingDir, filepath.FromSlash(strings.TrimPrefix(file.entry.Path, "context/"))), Bytes: append([]byte(nil), file.data...), ModifiedNS: file.entry.ModifiedNS})
+			path := filepath.Join(m.WorkingDir, filepath.FromSlash(strings.TrimPrefix(file.entry.Path, "context/")))
+			if m.Version == 3 {
+				for _, source := range m.ContextSources {
+					if source.Payload == file.entry.Path {
+						path = source.Path
+						break
+					}
+				}
+			}
+			files = append(files, ContextFile{Path: path, Bytes: append([]byte(nil), file.data...), ModifiedNS: file.entry.ModifiedNS})
 		}
 	}
 	return files, graph
@@ -177,8 +193,8 @@ func ValidateCheckpointV2(ctx context.Context, checkpoint, digest string, valida
 	}
 	defer root.close()
 	m, payload, err := readCheckpointV2(root, digest)
-	if err != nil {
-		return m, err
+	if err != nil || m.Version != 2 {
+		return m, ErrRecovery
 	}
 	if ctx.Err() != nil {
 		return m, ctx.Err()
@@ -210,10 +226,10 @@ func CheckpointVersion(checkpoint, digest string) (int, error) {
 		return 0, ErrRecovery
 	}
 	var m CheckpointManifestV2
-	if decodeCheckpointJSON(file.Bytes, &m) != nil || m.Kind != "frp-managed-checkpoint" || m.Version != 1 && m.Version != 2 {
+	if decodeCheckpointJSON(file.Bytes, &m) != nil || m.Kind != "frp-managed-checkpoint" || m.Version != 1 && m.Version != 2 && m.Version != 3 {
 		return 0, ErrRecovery
 	}
-	if m.Version == 1 && m.GraphSHA256 != "" {
+	if m.Version == 1 && (m.GraphSHA256 != "" || m.PolicySHA256 != "" || len(m.ContextSources) != 0) {
 		return 0, ErrRecovery
 	}
 	return m.Version, nil

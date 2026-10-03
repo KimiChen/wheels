@@ -65,6 +65,9 @@ func decodeManagedRecord(data []byte, name string) (record, snapshotPolicy, erro
 
 func visibleOperation(r *record) Operation {
 	op := r.Operation
+	if r.contextChanged && op.MaterialsState != MaterialsExpired {
+		op.MaterialsState = MaterialsContextChanged
+	}
 	if op.MaterialsState == "" {
 		op.MaterialsState = MaterialsRetained
 	}

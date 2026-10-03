@@ -24,7 +24,8 @@ var safeID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`)
 var serviceIdentity = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 
 type record struct {
-	Version int `json:"version"`
+	Version        int `json:"version"`
+	contextChanged bool
 	Operation
 	KeyDigest    string     `json:"key_digest"`
 	Fingerprint  string     `json:"fingerprint"`
@@ -103,7 +104,7 @@ func Open(options Options) (_ *Engine, resultErr error) {
 	}
 	name := filepath.Base(options.StorePath)
 	reserved := strings.ToLower(name)
-	if !safeID.MatchString(strings.TrimSuffix(name, ".json")) || strings.HasPrefix(name, ".") || reserved == "operations" || reserved == "secrets" || reserved == "identity.json" || reserved == "restore.json" || reserved == restorePlanName {
+	if !safeID.MatchString(strings.TrimSuffix(name, ".json")) || strings.HasPrefix(name, ".") || reserved == "operations" || reserved == "secrets" || reserved == "identity.json" || reserved == "restore.json" || reserved == restorePlanName || reserved == contextHistoryName {
 		return nil, ErrUnsafePath
 	}
 	root, err := openPrivateDir(options.Root)
@@ -320,7 +321,7 @@ func (e *Engine) load() error {
 			e.active = r.ID
 		}
 	}
-	return nil
+	return e.loadContextHistory()
 }
 
 func (e *Engine) snapshots(r *record) (StoreSnapshot, StoreSnapshot, error) {
@@ -612,6 +613,11 @@ func (e *Engine) Rollback(ctx context.Context, id string) (Operation, error) {
 		result := visibleOperation(r)
 		e.mu.Unlock()
 		return result, ErrNotFound
+	}
+	if r.contextChanged {
+		result := visibleOperation(r)
+		e.mu.Unlock()
+		return result, ErrContextChanged
 	}
 	if e.running {
 		if e.active != id {
