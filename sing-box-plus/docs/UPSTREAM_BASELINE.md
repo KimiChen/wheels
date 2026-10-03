@@ -11,11 +11,20 @@
 | prepared_tree_sha256 | `6342b9aeefec6eb9dcdf2a93b6d7b897bbc0724eccda1c0c4d09589d1051c9db` |
 | license | GPL-3.0-or-later（含「衍生作品不得使用该应用名称或暗示关联」的附加条款） |
 | go 最低版本 | 1.25.5（上游 `go.mod`） |
-| go 已验证版本 | 1.26.5 |
+| go 已验证版本 | 1.26.8 |
 | 轨道 | stable |
 
 权威来源是 `upstream.lock`，本文件只是它的可读副本。`scripts/verify.sh` 会重新准备一棵源码树、
 复算规范哈希并与 lock 比对，因此两者不一致时以 lock 为准、以 verify 的失败为信号。
+
+### Go 发布工具链：`go1.26.8`（2026-10-03）
+
+本轮只调整 `go_verified` 和发布门禁，不变更 Go module 依赖、上游核心基线或复制文件。
+发布脚本显式设置 `GOTOOLCHAIN=local`，要求本机安装的 `go env GOVERSION` 与锁定值
+精确一致；缺失锁定值、非补丁版本、旧版或更高版本均在取源及创建输出目录前失败。
+环境中设置 `GOTOOLCHAIN=auto` 或指定其它版本不能绕过此检查。门禁测试使用隔离 Git
+夹具验证拒绝路径与成功构建路径，实际兼容性须由完整 Go 测试、Linux 专项与可复现构建验证。
+旧版工具链的历史验证和性能数据保留原记录。
 
 ### Linux 网络监听依赖：`sing-tun v0.9.2`（2026-10-03）
 
@@ -129,6 +138,8 @@ v1.14.0 实测：`ssm-api` 的 `servers` 键缺前导 `/` 时 panic 退出（exi
 
 | 日期 | 内容 | 结果 |
 | --- | --- | --- |
+| 2026-10-03 | 官方 SHA-256 校验的 Go 1.26.8，独立模块缓存与原 go.sum；完整 verify.sh、go mod verify、Linux userstats 与隔离 netlink 回归 | 通过：规范上游漂移、构建、三轮 Go 测试（含 race）、107 项 Python 测试；Linux userstats 115 通过、1 项要求 race 的用例跳过；netlink overrun 回归 4.51 秒通过 |
+| 2026-10-03 | govulncheck v1.8.0 对 Go 1.26.8 Linux amd64 生产标签源码复扫 | 标准库告警及符号可达级告警为 0；仍有 9 项模块/包级告警。uTLS fork 的人工风险审查不由标准库升级自动关闭 |
 | 2026-10-03 | 固定 `sing-tun v0.9.2`，在 Linux 独立网络命名空间运行上游 `TestNetworkUpdateMonitorReceiveOverrun` | 通过（4.53 秒）；实际 socket drops 大于零，随后 2 秒 CPU 时间小于 200 毫秒，后续 link 变化仍触发通知 |
 | 2026-09-15 ~ 2026-09-18 | **门禁红窗**：`ea43087` 为访问审计排除名单引入 Google/Apple 的真实 CIDR，`scripts/check-sensitive.sh` 的允许清单未同步，退出码 1；`verify.sh` 带 `set -e`，因此这段时间内它从未跑到最后一行 | 期间落地的 `e5fa344`、`17a9416`、`1fd1643`、`603ab57` 未经完整门禁 |
 | 2026-09-18 | 允许清单改为独立文件 + 按 token 匹配 + 每条强制带理由 + `[public]` 条目陈旧即失败；补 17 项契约测试 | 通过 |

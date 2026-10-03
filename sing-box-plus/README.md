@@ -1381,13 +1381,19 @@ goroutine、内存随用户数/并发数增长，以及 exporter 被慢客户端
 
 | 项 | 值 |
 | --- | --- |
-| Go 工具链 | 钉具体版本并设 `GOTOOLCHAIN=local`；`v1.14.0` 的 `go.mod` 为 `go 1.25.5`，已验证 go1.26.5 可用 |
+| Go 工具链 | 发布锁定 go1.26.8（`upstream.lock` 的 `go_verified`）；`v1.14.0` 的 `go.mod` 仍为 `go 1.25.5`，最低版本与发布工具链分别管理 |
 | CGO | `CGO_ENABLED=0` |
 | 可复现参数 | `-trimpath -buildvcs=false -ldflags "-s -w -buildid= $(cat release/LDFLAGS)"`，外加从 `upstream.lock` 读取并注入的 `-X …/constant.Version=<tag>`（§4.7）；`release/LDFLAGS` 内容在 1.14 已改写，必须读取文件而非硬编码 |
 | **生产 tag 集** | **`with_utls` + `badlinkname` + 自有 `with_user_stats`** |
 | PoC tag 集 | 生产集再加 `with_v2ray_api`（仅里程碑 2；实测仅 +60 KiB）。PoC 集下 §4.6 第 7 条必须同时拒绝 `experimental.v2ray_api.listen` 非空 |
 | 裁剪收益 | linux/amd64、`CGO_ENABLED=0`、上述可复现参数，2026-09-05 实测 `./cmd/sing-box`：上游默认集 80,728,190 B（77.0 MiB）→ 生产集 36,589,694 B（34.9 MiB），**−54.7%**；零 tag 36,225,150 B |
 | registry 裁剪收益 | 同参数、tags `with_utls,with_quic,badlinkname,tfogo_checklinkname0`、linux/amd64：上游 `cmd/sing-box` 40.3 MB → 同一 wrapper main + `include.*Registry()` 38.6 MB → wrapper main + 最小 registry **20.8 MB**（§6）。**该组与上一行 tag 集不同，两组数字不可相减混算** |
+
+`scripts/build-linux-release.sh` 显式设置 `GOTOOLCHAIN=local`，从 PATH 选择已安装的 Go，
+并在取源、创建发布目录之前核对 `go env GOVERSION`。`go_verified` 缺失、格式错误，或
+实际版本与锁定版本不一致时立即失败；不会自动下载工具链，也不会把版本差异降为警告。
+升级工具链仍需完整验证，包括真实 TLS / Vision 握手、Linux 字节计量与两架构可复现构建；
+修改锁定值本身不是兼容性证明。此前 go1.26.5 的测量记录保留原日期与版本，不追溯改写。
 
 `badlinkname` 保留，不进裁剪清单——**它不是纯可选项，会改数据面**。带该 tag 时 `common/badtls`
 编译完整实现、Linux 上 `common/ktls` 编译 12 个文件；不带时 badtls 只剩 stub，

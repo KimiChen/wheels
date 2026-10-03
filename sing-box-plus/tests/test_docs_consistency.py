@@ -58,11 +58,17 @@ class UpstreamLockConsistencyTest(unittest.TestCase):
     def test_lock_has_required_fields(self):
         for key in (
             "schema_version", "repository", "tag", "commit", "prepared_tree_sha256",
-            "commit_date", "fetched_at", "license", "go_minimum", "track",
+            "commit_date", "fetched_at", "license", "go_minimum", "go_verified", "track",
         ):
             self.assertIn(key, self.lock, key)
         self.assertRegex(self.lock["commit"], r"^[0-9a-f]{40}$")
         self.assertRegex(self.lock["prepared_tree_sha256"], r"^[0-9a-f]{64}$")
+        self.assertRegex(self.lock["go_verified"], r"^[0-9]+\.[0-9]+\.[0-9]+$")
+
+    def test_release_toolchain_matches_documentation(self):
+        version = self.lock["go_verified"]
+        self.assertIn(f"| go 已验证版本 | {version} |", read("docs/UPSTREAM_BASELINE.md"))
+        self.assertIn(f"发布锁定 go{version}", read("README.md"))
 
     def test_commit_matches_copied_files_lock(self):
         header = read("cmd/sing-box-plus/copied-files.lock")

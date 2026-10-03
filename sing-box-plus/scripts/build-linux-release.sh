@@ -3,6 +3,10 @@ set -euo pipefail
 
 source "$(dirname "$0")/lib.sh"
 
+# 发布只能使用 PATH 中已经安装、随后与 lock 核对的工具链；禁止 Go 根据环境或
+# go.mod 的指示自动下载、切换到另一版本，否则门禁检查与实际编译可能脱节。
+export GOTOOLCHAIN=local
+
 # 可复现发布构建：两次独立路径构建逐字节一致才产出 manifest + SHA-256。
 #
 # 「两次」不是仪式：Go 的 -trimpath 之外仍有若干路径与环境泄漏点，一次构建的哈希
@@ -33,12 +37,13 @@ go_version="$(go env GOVERSION)"
 overlay_commit="$(git -C "$SING_BOX_PLUS_ROOT" rev-parse HEAD)"
 [[ -n "$overlay_commit" ]] || die "无法取得叠加层 commit"
 
-# 工具链对照 upstream.lock：go env GOVERSION 此前只被记进 manifest，从不与任何东西比对，
-# 于是「从未验证过的工具链构建并发布」是可能的。
-go_verified="$(lock_value go_verified || true)"
-if [[ -n "$go_verified" && "$go_version" != "go$go_verified" ]]; then
-  printf '注意：当前 Go 为 %s，upstream.lock 记录的已验证版本是 go%s\n' "$go_version" "$go_verified" >&2
-fi
+# 缺失、格式错误或不匹配都必须在取源及创建输出目录前失败。只提示警告会让未经
+# TLS / Vision / 计量验证的工具链进入生产发布。
+go_verified="$(lock_value go_verified)"
+[[ "$go_verified" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || \
+  die "upstream.lock go_verified 必须是明确的 Go 补丁版本：$go_verified"
+[[ "$go_version" == "go$go_verified" ]] || \
+  die "当前 Go 为 ${go_version}，发布要求 upstream.lock 锁定的 go${go_verified}；请切换 PATH 中的工具链后重试"
 
 temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/sing-box-plus.XXXXXX")"
 trap 'safe_remove_temp_dir "$temp_dir"' EXIT
