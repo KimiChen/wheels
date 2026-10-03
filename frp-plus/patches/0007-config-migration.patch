@@ -1,0 +1,216 @@
+diff --git a/cmd/frpc/sub/migration.go b/cmd/frpc/sub/migration.go
+new file mode 100644
+--- /dev/null
++++ b/cmd/frpc/sub/migration.go
+@@ -0,0 +1,110 @@
++package sub
++
++import (
++	"encoding/json"
++	"errors"
++	"os"
++	"path/filepath"
++
++	"github.com/fatedier/frp/extension/frpmonitor/agent/configuration"
++	"github.com/fatedier/frp/extension/frpmonitor/agent/migrationbundle"
++	"github.com/spf13/cobra"
++)
++
++func init() { rootCmd.AddCommand(newMigrationCommand()) }
++
++// This command never starts FRP or writes configuration source paths. Errors
++// are fixed codes because native/parser/filesystem messages may contain secrets.
++func newMigrationCommand() *cobra.Command {
++	command := &cobra.Command{Use: "config-migrate", Short: "Prepare private offline file-to-Store migration material", SilenceUsage: true}
++	command.SetFlagErrorFunc(func(*cobra.Command, error) error { return errors.New("migration_invalid_arguments") })
++	args := func(_ *cobra.Command, values []string) error {
++		if len(values) != 0 {
++			return errors.New("migration_invalid_arguments")
++		}
++		return nil
++	}
++	var root, storeName, output, revision string
++	var proxies, visitors []string
++	plan := &cobra.Command{Use: "plan", Short: "Create a private candidate and source recovery bundle without changing FRP", Args: args, SilenceUsage: true,
++		RunE: func(cmd *cobra.Command, _ []string) error {
++			if cfgDir != "" || !strictConfigMode || cfgFile == "" || output == "" || root == "" {
++				return errors.New("migration_invalid_arguments")
++			}
++			cwd, err := os.Getwd()
++			if err != nil {
++				return errors.New("migration_source_unavailable")
++			}
++			file, err := filepath.Abs(cfgFile)
++			if err != nil {
++				return errors.New("migration_source_unavailable")
++			}
++			store := filepath.Join(root, storeName)
++			input, err := configuration.LoadMigrationInput(file, cwd, store, allowUnsafe)
++			if err != nil {
++				return err
++			}
++			selection := []configuration.MigrationSelection{}
++			for _, name := range proxies {
++				selection = append(selection, configuration.MigrationSelection{Kind: "proxy", Name: name})
++			}
++			for _, name := range visitors {
++				selection = append(selection, configuration.MigrationSelection{Kind: "visitor", Name: name})
++			}
++			prepared, err := configuration.PlanMigration(input, configuration.MigrationRequest{ExpectedRevision: revision, TargetRoot: root, TargetStore: store, Select: selection})
++			if err != nil {
++				return err
++			}
++			if err = migrationbundle.Write(output, prepared); err != nil {
++				return err
++			}
++			if json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"state": "planned", "objects": len(prepared.Remove), "sources": len(prepared.Sources)}) != nil {
++				return errors.New("migration_output_unavailable")
++			}
++			return nil
++		}}
++	plan.Flags().StringVar(&root, "root", "", "Fixed absolute private managed root after maintenance")
++	plan.Flags().StringVar(&storeName, "store-name", "store.json", "Direct child Store filename")
++	plan.Flags().StringVar(&output, "output", "", "New absolute private bundle directory")
++	plan.Flags().StringVar(&revision, "revision", "", "Optional expected inspection revision")
++	plan.Flags().StringArrayVar(&proxies, "proxy", nil, "Exact native proxy name to move (repeatable)")
++	plan.Flags().StringArrayVar(&visitors, "visitor", nil, "Exact native visitor name to move (repeatable)")
++	var bundle string
++	var offline bool
++	check := &cobra.Command{Use: "check", Short: "Validate installed disk configuration after manual maintenance; never claim runtime health", Args: args, SilenceUsage: true,
++		RunE: func(cmd *cobra.Command, _ []string) error {
++			if !offline {
++				return errors.New("migration_offline_required")
++			}
++			if cfgDir != "" || !strictConfigMode || cfgFile == "" || bundle == "" {
++				return errors.New("migration_invalid_arguments")
++			}
++			prepared, err := migrationbundle.Read(bundle)
++			if err != nil {
++				return err
++			}
++			cwd, err := os.Getwd()
++			if err != nil {
++				return errors.New("migration_source_unavailable")
++			}
++			file, err := filepath.Abs(cfgFile)
++			if err != nil {
++				return errors.New("migration_source_unavailable")
++			}
++			input, err := configuration.LoadMigrationInput(file, cwd, prepared.TargetStore, allowUnsafe)
++			if err != nil {
++				return err
++			}
++			if err = configuration.CheckMigration(prepared, input, offline); err != nil {
++				return err
++			}
++			if json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"state": "disk_verified", "objects": len(prepared.Remove), "runtime_checked": false}) != nil {
++				return errors.New("migration_output_unavailable")
++			}
++			return nil
++		}}
++	check.Flags().StringVar(&bundle, "bundle", "", "Absolute private bundle directory")
++	check.Flags().BoolVar(&offline, "offline", false, "Acknowledge that you stopped the service for maintenance; no process detection is performed")
++	command.AddCommand(plan, check)
++	return command
++}
+diff --git a/cmd/frpc/sub/migration_test.go b/cmd/frpc/sub/migration_test.go
+new file mode 100644
+--- /dev/null
++++ b/cmd/frpc/sub/migration_test.go
+@@ -0,0 +1,96 @@
++package sub
++
++import (
++	"bytes"
++	"encoding/json"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++)
++
++func migrationCLI(t *testing.T, args ...string) (string, error) {
++	t.Helper()
++	cmd := newMigrationCommand()
++	var output bytes.Buffer
++	cmd.SetOut(&output)
++	cmd.SetErr(&output)
++	cmd.SetArgs(args)
++	err := cmd.Execute()
++	return output.String(), err
++}
++
++func TestMigrationCLIPrivatePlanCheckAndNoSourceMutation(t *testing.T) {
++	dir, err := filepath.EvalSymlinks(t.TempDir())
++	if err != nil {
++		t.Fatal(err)
++	}
++	os.Chmod(dir, 0700)
++	prior, priorDir, priorStrict := cfgFile, cfgDir, strictConfigMode
++	defer func() { cfgFile, cfgDir, strictConfigMode = prior, priorDir, priorStrict }()
++	cfgFile = filepath.Join(dir, "client.json")
++	cfgDir = ""
++	strictConfigMode = true
++	root, bundle := filepath.Join(dir, "managed"), filepath.Join(dir, "private-bundle")
++	token := filepath.Join(dir, "token")
++	os.WriteFile(token, []byte("private-controller-token"), 0600)
++	value := map[string]any{"serverAddr": "127.0.0.1", "telemetry": map[string]any{"enabled": true, "endpoint": "wss://monitor.invalid/agent/v1/ws", "tokenFile": token}, "proxies": []any{map[string]any{"name": "private-name", "type": "stcp", "localPort": 8080, "secretKey": "private-native-secret"}}}
++	before, _ := json.Marshal(value)
++	os.WriteFile(cfgFile, before, 0600)
++	output, err := migrationCLI(t, "plan", "--root", root, "--output", bundle, "--proxy", "private-name")
++	if err != nil || !strings.Contains(output, `"state":"planned"`) {
++		t.Fatal("CLI plan failed")
++	}
++	for _, secret := range []string{dir, "private-name", "private-native-secret", "private-controller-token"} {
++		if strings.Contains(output, secret) {
++			t.Fatal("private CLI output")
++		}
++	}
++	after, _ := os.ReadFile(cfgFile)
++	if !bytes.Equal(after, before) {
++		t.Fatal("plan modified source")
++	}
++	if _, err := os.Stat(root); !os.IsNotExist(err) {
++		t.Fatal("plan created managed service state")
++	}
++	if _, err := migrationCLI(t, "check", "--bundle", bundle); err == nil || err.Error() != "migration_offline_required" {
++		t.Fatal("missing offline acknowledgement accepted")
++	}
++	os.Mkdir(root, 0700)
++	candidate, _ := os.ReadFile(filepath.Join(bundle, "store.candidate.json"))
++	store := filepath.Join(root, "store.json")
++	os.WriteFile(store, candidate, 0600)
++	value["proxies"] = []any{}
++	value["store"] = map[string]string{"path": store}
++	value["telemetry"].(map[string]any)["configManagement"] = map[string]any{"enabled": true, "root": root}
++	data, _ := json.Marshal(value)
++	os.WriteFile(cfgFile, data, 0600)
++	output, err = migrationCLI(t, "check", "--bundle", bundle, "--offline")
++	if err != nil || !strings.Contains(output, `"state":"disk_verified"`) || !strings.Contains(output, `"runtime_checked":false`) {
++		t.Fatal("CLI check failed")
++	}
++	if strings.Contains(output, dir) || strings.Contains(output, "private-native-secret") {
++		t.Fatal("private check output")
++	}
++	os.WriteFile(store, append(candidate, ' '), 0600)
++	if _, err := migrationCLI(t, "check", "--bundle", bundle, "--offline"); err == nil {
++		t.Fatal("CLI accepted post-cutover Store drift")
++	}
++}
++
++func TestMigrationCLIErrorNeverPrintsUserPathsOrValues(t *testing.T) {
++	prior, priorDir, priorStrict := cfgFile, cfgDir, strictConfigMode
++	defer func() { cfgFile, cfgDir, strictConfigMode = prior, priorDir, priorStrict }()
++	cfgFile = "/private-sensitive-location/client.json"
++	cfgDir = ""
++	strictConfigMode = true
++	for _, args := range [][]string{{"plan", "--root", "/private-sensitive-location/target", "--output", "/private-sensitive-location/output", "--proxy", "private-object"}, {"check", "--bundle", "/private-sensitive-location/bundle", "--offline"}, {"check", "--offline=private-sensitive-value"}, {"plan", "private-sensitive-value"}} {
++		output, err := migrationCLI(t, args...)
++		if err == nil {
++			t.Fatal("bad command accepted")
++		}
++		if strings.Contains(output+err.Error(), "private-sensitive") || strings.Contains(output+err.Error(), "private-object") {
++			t.Fatal("CLI error leaked user input")
++		}
++	}
++}
