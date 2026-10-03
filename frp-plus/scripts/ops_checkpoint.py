@@ -1,6 +1,7 @@
 """Indexed format4 packaging; native code remains the managed Store installer."""
 from __future__ import annotations
 
+from contextlib import contextmanager
 import hashlib
 import io
 import json
@@ -209,12 +210,40 @@ def extract(api, fd, folder, destination, resolve):
     return envelope, manifest
 
 
+def trusted_restore_parent(info, uid):
+    return (stat.S_ISDIR(info.st_mode) and info.st_uid in (0, uid)
+            and not info.st_mode & 0o022)
+
+
+@contextmanager
+def restore_parent(api, path):
+    """A root-owned /var/lib is safe; extraction itself remains private."""
+    path = api.path_without_links(path)
+    parent_fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        before = os.fstat(parent_fd)
+        if not trusted_restore_parent(before, os.geteuid()):
+            raise ValueError('restore parent must have a trusted owner and no group/world write permission')
+        def check():
+            named = api.path_without_links(path).stat()
+            pinned = os.fstat(parent_fd)
+            identity = lambda value: (value.st_dev, value.st_ino, value.st_uid, stat.S_IMODE(value.st_mode))
+            if identity(named) != identity(before) or identity(pinned) != identity(before):
+                raise ValueError('restore parent changed during extraction')
+        check()
+        yield check
+        check()
+    finally:
+        os.close(parent_fd)
+
+
 def restore(api, fd, folder, *, offline, agent_binary):
     if not offline:
         raise ValueError('indexed restoration requires offline acknowledgement')
-    folder = api.path_without_links(folder); api.private_directory(folder.parent)
-    with tempfile.TemporaryDirectory(prefix='.frp-indexed-', dir=folder.parent) as temporary:
+    folder = api.path_without_links(folder)
+    with restore_parent(api, folder.parent) as check_parent, tempfile.TemporaryDirectory(prefix='.frp-indexed-', dir=folder.parent) as temporary:
         checkpoint = Path(temporary)
+        checkpoint.chmod(0o700)
         def resolve(kind, manifest):
             if kind == AGENT_KIND:
                 api.private_directory(folder)
@@ -222,6 +251,7 @@ def restore(api, fd, folder, *, offline, agent_binary):
             from ops_history import entries as server_entries
             return 'SERVER.json', server_entries(api, manifest, folder)
         envelope, manifest = extract(api, fd, folder, checkpoint, resolve)
+        check_parent()
         if envelope['kind'] == SERVER_KIND:
             from ops_history import restore as server_restore
             return server_restore(api, checkpoint, manifest, folder)

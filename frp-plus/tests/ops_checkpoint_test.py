@@ -7,6 +7,7 @@ from pathlib import Path
 import sys
 import tarfile
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -123,3 +124,18 @@ class IndexedCheckpointTests(unittest.TestCase):
             with mock.patch.object(ops, 'maintenance', side_effect=helper), mock.patch.object(ops, 'MANAGED_MAX_BYTES', 1 if kind == 'budget' else ops.MANAGED_MAX_BYTES):
                 with self.assertRaises((ValueError, OSError)): ops.backup(self.folder, destination, offline=True, dependency_graph=True)
             self.assertFalse(destination.exists())
+
+    def test_restore_parent_owner_policy_and_directory_replacement(self):
+        self.assertTrue(ops_checkpoint.trusted_restore_parent(SimpleNamespace(st_mode=0o40755, st_uid=0), 501))
+        self.assertTrue(ops_checkpoint.trusted_restore_parent(SimpleNamespace(st_mode=0o40700, st_uid=501), 501))
+        self.assertFalse(ops_checkpoint.trusted_restore_parent(SimpleNamespace(st_mode=0o40755, st_uid=502), 501))
+        self.assertFalse(ops_checkpoint.trusted_restore_parent(SimpleNamespace(st_mode=0o41777, st_uid=0), 501))
+        path = self.root / 'parent'; path.mkdir(mode=0o755)
+        with self.assertRaisesRegex(ValueError, 'parent changed'):
+            with ops_checkpoint.restore_parent(ops, path) as check:
+                path.rename(self.root / 'previous-parent'); path.mkdir(mode=0o755)
+                check()
+        path.rmdir(); path.symlink_to(self.root / 'previous-parent', target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, 'symlinks'):
+            with ops_checkpoint.restore_parent(ops, path):
+                self.fail('symlink parent was accepted')

@@ -16,6 +16,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 import local
 import ops
+import ops_checkpoint
 import ops_history
 
 
@@ -164,3 +165,29 @@ class CompleteHistoryTests(unittest.TestCase):
             helper.assert_not_called()
         self.assertEqual(ops.managed_files(self.folder), before)
         self.assertFalse((self.folder / 'managed').exists())
+
+    def test_same_path_master_restore_accepts_safe_0755_parent_and_keeps_private_target(self):
+        archive = self.backup('public-parent.tar.gz')
+        self.folder.rename(self.root / 'retained-parent-layout')
+        self.root.chmod(0o755)
+        try:
+            ops.restore(archive, self.folder, offline=True)
+            self.assertEqual(self.folder.stat().st_mode & 0o777, 0o700)
+            self.assertTrue(all(p.stat().st_mode & 0o777 == (0o700 if p.is_dir() else 0o600) for p in self.folder.rglob('*')))
+            self.assertEqual((self.history / 'data/small/part').read_bytes(), self.payload['data/small/part'])
+        finally:
+            self.root.chmod(0o700)
+
+    def test_unsafe_restore_parent_rejected_before_extraction(self):
+        archive = self.backup('unsafe-parent.tar.gz')
+        self.folder.rename(self.root / 'retained-unsafe-layout')
+        for mode in (0o770, 0o777):
+            self.root.chmod(mode)
+            with self.subTest(mode=mode), self.assertRaisesRegex(ValueError, 'trusted owner'):
+                ops.restore(archive, self.folder, offline=True)
+            self.assertFalse(self.folder.exists())
+        self.root.chmod(0o700)
+        with mock.patch.object(ops_checkpoint, 'trusted_restore_parent', return_value=False):
+            with self.assertRaisesRegex(ValueError, 'trusted owner'):
+                ops.restore(archive, self.folder, offline=True)
+        self.assertFalse(self.folder.exists())
