@@ -102,11 +102,12 @@ Visitor 的本地监听、远端连接、P2P 和 fallback 分开表示，没有�
 可靠区分时显示未知。详情中的修订摘要仅用于观察有效对象及 `start` 筛选的变化，
 **不作为完整原始配置的并发写入版本**。
 
-“配置管理 · 原生维护说明”目前只读：文件/include 由节点本机维护，先执行
+“配置管理 · 原生维护说明”保留原生文件维护入口：文件/include 由节点本机维护，先执行
 `frp-plus-agent verify -c <配置文件>`；Store 通过已启用的原生 frpc Dashboard/API 维护。
 同名 Store 项禁用或删除可能重新启用文件定义，应先检查来源。frpc reload 只能重载
 其支持的对象，不替换 serverAddr、认证、TLS、telemetry、Store 路径等全部启动配置；
-frps 的监听及 monitor 配置修改需要重启。远程编辑、应用与回退仍在后续开发阶段。
+frps 的监听及 monitor 配置修改需要重启。显式启用 Store 托管后的远程操作见下文；
+文件维护入口不会把文件内容自动转成可写的托管对象。
 
 可在主控原生配置中显式公布访问入口（重启生效，以下均为文档占位值）：
 
@@ -136,13 +137,14 @@ Dashboard 地址只接受 HTTPS 或字面量回环 HTTP，不允许 URL 内嵌�
 
 ## 配置事务开发状态
 
-阶段一已经完成本机验收；配置事务仍在开发，**G2 尚未通过，不应启用生产写管理**。
+阶段一和配置事务已完成本机验收，**G1/G2 通过；G3 运维与完整发布验收仍在开发**。
 具体任务与验收记录见 [todo.md](todo.md)。已接入原生生命周期、独立配置通道、
-候选校验与本地事务恢复；管理 API 与“隧道配置”页面正在联调。
+候选校验与本地事务恢复；管理页面、恢复接管、失败排障与原生进程联合流程通过，
+11 类型配置、互通和有限持续负载通过。写管理默认关闭，本机验收不等同生产部署。
 
-- 控制库 v4/v5/v6/v7 首次升级到 v8 前，会在数据库同目录生成 0600 的
-  `<数据库文件>.pre-v8-v<旧版本>-<随机值>.sqlite` 一致性备份，包含已提交 WAL。
-  备份或同步失败就停止升级；新建库及已有 v8 库不重复生成迁移备份。
+- 控制库 v4/v5/v6/v7/v8 首次升级到 v9 前，会在数据库同目录生成 0600 的
+  `<数据库文件>.pre-v9-v<旧版本>-<随机值>.sqlite` 一致性备份，包含已提交 WAL。
+  备份或同步失败就停止升级；新建库及已有 v9 库不重复生成迁移备份。
 - 操作与审计同事务保存；同一节点只允许一个活动操作。`outcome_unknown` 与
   `rollback_failed` 持续占用操作名额，超时、断线和删除节点均不自动抹去审计。
 - 原生校验准备包含全部 Proxy/Visitor（包括禁用项），保留未编辑的受支持高级内容；
@@ -150,8 +152,9 @@ Dashboard 地址只接受 HTTPS 或字面量回环 HTTP，不允许 URL 内嵌�
 - 本地恢复材料使用私有目录、0600 文件和跨进程锁；回退前同时检查 Store 原文及
   文件/includes/启动参数/实际模板依赖。普通重启保留 Service 身份，恢复工具需显式
   更新身份才能拒绝旧命令。秘密引用只在本机解析，原生 Store 与恢复材料仍可能有明文。
-- `scripts/ops.py` 现有 format 2 可以保留和恢复 v8 操作审计，但仍是原有备份范围，
-  **尚不包含 Agent 托管恢复目录或完整依赖备份**。完整恢复能力按阶段三继续实现。
+- `scripts/ops.py` 的 format 2 保留控制库操作与恢复接管审计；新增 format 3 支持
+  工具生成的单 Agent 托管安装，包含 Store、秘密引用和事务恢复材料。两者的范围不同，
+  均不能据此宣称完整 includes、外部依赖或跨主机一致备份。
 
 ### 隔离节点启用与维护边界
 
@@ -172,6 +175,87 @@ Dashboard 地址只接受 HTTPS 或字面量回环 HTTP，不允许 URL 内嵌�
 `frp-plus-agent verify -c <文件>` 只验证原生文件/include，**不包含 Store 内容**。
 Store 候选必须经过完整集合校验；纯本地校验不保证服务端策略接受，也不验证业务可达。
 
+### 托管 Agent 的离线备份与恢复接管
+
+首版 format 3 只接管新版 `agent-init` 生成、带托管安装标记且已启动完成身份初始化的
+单 Agent 安装：`agent.toml`、`managed/store.json`、
+实际引用的固定 Token/TLS 文件，以及身份、秘密引用、事务日志和旧新 Store 快照。
+备份清单记录相对路径、字节摘要、大小和修改时间；归档包含秘密，只能私下保管。
+`local.py` 双角色演示和无该标记的旧托管安装不在此范围。includes、环境模板、外部路径、
+管理目录或归档清单中的未知内容，以及缺失依赖会明确拒绝。原 format 2
+继续用于其原有安装范围，不会忽略托管目录后生成看似完整的备份。
+
+先停止 Agent，再备份；`--offline` 是操作者的停机确认，同时原生 helper 必须取得
+与运行实例相同的文件锁。仅传该参数无法绕过正在运行的进程。以下均为占位路径：
+
+```sh
+python3 scripts/ops.py backup --directory <安装绝对目录> \
+  --output <新建私有归档路径> --offline --agent-binary <当前Agent绝对路径>
+python3 scripts/ops.py restore --archive <私有归档路径> \
+  --directory <原安装绝对目录> --offline --agent-binary <当前Agent绝对路径>
+```
+
+恢复只支持原安装绝对目录，原安装目录与管理根必须仍存在且权限为 0700；保留锁文件，
+拒绝跨目录或替换锁目录。全部目录丢失后的灾后重建不在首版范围。
+安装恢复材料前先持久化门禁；中途失败保持关闭，可使用同一份已验证归档重试，
+不能手工删除门禁或恢复日志来绕过检查。安装成功返回新的 Service 身份、恢复 epoch
+与清单摘要；原命令的旧 Service 身份不能继续操作新实例。
+
+恢复分三次核对：
+
+1. 启动 Agent，本地恢复未完成事务并验证实际 Store、启动上下文和 Proxy/Visitor。
+   “隧道配置”仍只读；点击“恢复核对”读取当前实例事实，不用上次启动的成功记录冒充当前状态。
+2. 管理员核对恢复身份、摘要和原活动操作，勾选后点击“确认接管恢复状态”。主控先核对原日志，
+   记录接管审计再发送确认，并保留真实终态；不存在的旧事务以恢复接管事件结束，不伪装成回退成功。
+   接管确认本身仍不开放写入，回复丢失时重新核对同一 epoch，不能重新应用旧候选。
+3. 再停止 Agent，使用恢复结果中的 epoch 与清单摘要执行离线确认，然后启动并重新读取配置：
+
+```sh
+python3 scripts/ops.py restore-confirm --directory <原安装绝对目录> \
+  --epoch <恢复epoch> --manifest-digest <恢复清单摘要> \
+  --offline --agent-binary <当前Agent绝对路径>
+```
+
+离线确认会重新检查上下文、Store、事务状态与已确认的接管记录；重启后再验证一次，
+通过才允许写入。管理员接管、磁盘恢复和业务转发是不同事实，仍须实际验证业务协议。
+摘要用于检查材料一致性，不是归档来源签名；不要恢复不可信的材料。主控数据库、
+TSDB、服务单元和跨机器角色协调不在这个最小 Agent 恢复流程内，阶段三继续扩展。
+
+### 显式迁移文件对象到 Store
+
+`config-migrate` 适用于已开启 telemetry、尚未启用托管的单配置安装。先使用同一配置文件、
+工作目录及原生 unsafe-feature 设置生成计划，按原始名称逐个选择 Proxy/Visitor：
+
+```sh
+frp-plus-agent config-migrate plan -c /private/frp/frpc.toml \
+  --root /private/frp/managed --output /private/frp/migration-review \
+  --proxy service-a --visitor service-a-visitor
+```
+
+命令只新建 0700 的私有包：`manifest.private.json`、`store.candidate.json`、
+逐个原始来源备份及 `MAINTENANCE.txt`，文件均为 0600。包可能包含密钥，不能上传公开仓库。
+计划同时列出应从哪个主文件/include 移除哪些对象，并保留原 Store 的存在状态和原始字节。
+候选保留现有 Store、禁用项和可校验的高级配置；同名覆盖、未知字段、重复定义、模板和插件
+等无法安全迁移的输入直接拒绝，不自动改写既有文件。
+
+在维护窗口停止 frpc，保存整个恢复包，再按清单手工移除选定的原定义；未选定的对象、
+include 文件及匹配规则保持原样。将候选安装到计划中的固定 Store（0600、父目录 0700），
+只调整 `store.path` 与 `telemetry.configManagement.enabled/root`，随后执行：
+
+```sh
+frp-plus-agent config-migrate check -c /private/frp/frpc.toml \
+  --bundle /private/frp/migration-review --offline
+```
+
+`--offline` 是操作者对停机步骤的确认，工具不检测进程是否停止。成功仅返回
+`disk_verified` 与 `runtime_checked=false`：它验证完整配置集合等价、原定义确实移除、
+其他来源和 Store 未漂移。启动后仍须在管理页面重新读取来源，核对 Proxy/Visitor 资源及实际
+业务转发，才算完成迁移；普通 `verify` 不能代替这个检查。
+
+维护失败时保持停机，按私有清单恢复原来源字节、权限及原 Store 存在状态，再使用原文件模式。
+工具不提供任意路径自动恢复，不覆盖其他身份或事务日志。恢复包不记录 UID/GID、ACL、xattr，
+这些操作系统身份和权限需管理员保留并核对；摘要用于发现内容变化，不构成签名信任证明。
+
 ### 管理操作契约
 
 所有入口位于管理员会话与同源校验保护下的
@@ -181,27 +265,96 @@ Store 候选必须经过完整集合校验；纯本地校验不保证服务端�
 `operations/{operation_id}/apply` 提交版本与候选摘要。重连、刷新和主控重启只查询，
 不会自动补发 apply。页面丢失预览后需取消并重新校验。
 
-当前表单覆盖八种 Proxy（TCP、UDP、HTTP、HTTPS、TCPMUX、STCP、SUDP、XTCP）和三种
-Visitor（STCP、SUDP、XTCP）的基本字段。原生校验仍是最终约束；已有健康检查、分组等
-高级字段在 Agent 本地保留，插件对象保持原生只读管理。复制及改名从原始 Store 对象
-复制，改名在一个操作中删除旧名并新增新名，秘密不经浏览器 GET 往返。
+页面只编辑可管理 Store 中的对象；file/include、来源冲突和插件对象保持只读。
+新建、编辑、复制、启停、删除和改名都先生成草案、校验及预览，再显式确认应用。
+复制从原始 Store 对象取值；改名在同一操作中删除旧名并新增新名，保留已有秘密及
+可校验的高级字段，不经浏览器 GET 将原生对象整体写回。
+
+所有 Proxy 的共用字段是 `enabled`、`localIP/localPort`、
+`transport.useEncryption/useCompression/bandwidthLimit/bandwidthLimitMode/proxyProtocolVersion`。
+所有 Visitor 的共用字段是 `enabled`、`serverUser/serverName`、`bindAddr/bindPort`、
+`transport.useEncryption/useCompression`。下表补充类型字段；秘密通过下一段专用流程处理。
+
+| 对象 | 额外可编辑字段 | 已执行的隔离原生业务验收 |
+|---|---|---|
+| TCP Proxy | `remotePort` | TCP 回显 |
+| UDP Proxy | `remotePort` | UDP 数据报回显 |
+| HTTP Proxy | `customDomains`、`subdomain`、`locations`、`httpUser/httpPassword`、`hostHeaderRewrite`、`routeByHTTPUser` | 按 Host 路由的 HTTP 响应 |
+| HTTPS Proxy | `customDomains`、`subdomain` | SNI 转发至真实 TLS 后端，客户端校验 CA、主机名及响应 |
+| TCPMUX Proxy | `customDomains`、`subdomain`、`multiplexer`、`httpUser/httpPassword`、`routeByHTTPUser` | `httpconnect` 的 CONNECT 隧道回显 |
+| STCP Proxy | `allowUsers`、`secretKey` | 配对 STCP Visitor 的 TCP 回显 |
+| SUDP Proxy | `allowUsers`、`secretKey` | 配对 SUDP Visitor 的数据报回显 |
+| XTCP Proxy | `allowUsers`、`secretKey` | 实际注册；未据此验证 NAT 穿透 |
+| STCP Visitor | `secretKey` | TCP 回显 |
+| SUDP Visitor | `secretKey` | 数据报回显 |
+| XTCP Visitor | `secretKey`、`protocol`、`keepTunnelOpen`、`maxRetriesAnHour`、`minRetryInterval`、`fallbackTo/fallbackTimeoutMs` | 确定性的 STCP fallback；同时确认 P2P 失败状态，不宣称 P2P 成功 |
+
+八种 Proxy、三种 Visitor 都已执行 v1/v2 创建、非法候选无副作用、启停及压缩字段修改，
+并通过同一整集应用和逐字节回退流程。SUDP 配对对象另验证复制、改名和删除保留秘密。
+这不代表表内每个字段组合都已业务测试；域名/端口/引用、传输组合等仍由原生校验约束。
+`remotePort=0` 表示申请动态端口；Visitor 的 `bindPort=-1` 仅在原生支持的内部模式使用，
+不能解释为已开启网络监听。
+
+| 高级配置 | 当前管理边界 |
+|---|---|
+| Proxy 加密、压缩、限速及 PROXY 协议 | 上述共用表单开放，仍须通过原生整集校验 |
+| HTTP 路由、Host 重写、认证；TCPMUX HTTP 认证 | 按类型开放表中字段；密码只走秘密流程 |
+| `loadBalancer.group` | 不开放编辑，已有值在本机保留；`loadBalancer.groupKey` 可走秘密流程 |
+| `healthCheck`，含路径、间隔及检查请求头 | 不开放编辑，已有完整配置保留 |
+| `annotations`、`metadatas` | 不开放编辑，不把内容送入普通预览 |
+| HTTP `requestHeaders`、`responseHeaders` | 不开放编辑，已有值保留，不展示原始请求头秘密 |
+| XTCP Proxy/Visitor 的 `natTraversal` | 不开放编辑，已有可校验配置保留 |
+| Proxy/Visitor 插件及其参数 | 整个插件对象只读，包含启停、删除、复制和改名 |
+| 未知字段、动态或无法完整核对的文件依赖 | 拒绝托管写入；没有任意 JSON 高级编辑入口 |
+
+“保留”指修改其他获准字段时保留已有原生内容，再对完整候选校验；不能用脱敏占位符
+替换原值。启动项、`serverAddr/auth/TLS/telemetry/store.path` 和 frps 配置仍需本机
+文件维护及重启，页面的 Proxy/Visitor 管理不能改变这些启动事实。
 
 秘密使用保持、替换、清除或既有本机引用。一次 API 操作最多上传两个新秘密，引用可
 在同批对象中复用；明文仅用于专用写入请求，不进入主控数据库、审计、预览或浏览器
 持久存储。Agent Store、秘密引用库和私有回退快照可能含明文，必须按秘密文件保护。
 
-结果分别记录配置持久化、运行时加载、Proxy 登记/Visitor 监听和业务验证；目前原生
-适配器的 `business_checked=false`，真实业务需要独立测试。节点离线保留带观察时间的
-历史结果，不能把旧 confirmed 当作当前版本证明。断线不停止 Agent 本地看门狗；
-到期会串行恢复旧 Store/内存来源并重新验证。退出管理会话会清除浏览器草稿与秘密，
-已发出的 Agent 操作仍按本地日志完成确认或回退。
+结果分别记录配置持久化、运行时加载、Proxy 登记/Visitor 本地资源和业务验证。
+确认会核对候选 Store 摘要、完整启用集合及 Agent 实际 Proxy/Visitor 管理器；禁用或删除项
+须从运行集合消失，Proxy 须达到注册成功阶段，Visitor 须有实际监听或原生内部模式资源。
+Proxy 注册状态包含 frps 登记响应，但事务尚未关联主控独立的 frps 观察快照；Visitor 本地
+就绪也不证明远端会话、NAT 或业务连通。目前 `business_checked=false`，系统不会自动
+访问业务目标；实际业务需要独立的、已授权测试。
+
+页面预览同时显示受控字段差异、影响对象、验证警告、基础修订与候选摘要，并提示连接
+可能重建。页面操作默认期限为提交草案后 5 分钟，具体以操作记录为准；未应用预览到期
+取消，已应用但资源持续未就绪时由 Agent 本地看门狗进入串行回退。完整配置集合与当前
+控制连接核对后，本次明确的 Proxy 注册/本地启动或 Visitor 创建/监听失败会提前回退。
+正在等待注册、控制断线、锁忙和健康检查未通过继续按期限核对；Visitor 的远端连接、
+P2P 与 fallback 不被当成本地启动失败。错误指本次尝试失败，不表示配置永久无效。
+回退的检查、应用及验证各使用独立等待预算（默认每阶段 30 秒）；遇到回调未返回、
+来源漂移或材料损坏，不能把期限已到解释成
+恢复已完成。控制连接断开、管理员注销均不会取消已经下发的本地事务。
+
+节点离线仍可查看带观察时间的历史结果；旧 confirmed 不能证明当前版本仍相同。
+退出管理会话会清除浏览器草稿与秘密，已发出的操作仍按 Agent 本地日志确认或回退。
+
+节点 Token 轮换或删除节点会关闭旧管理连接并拒绝旧凭据；尚未入队的命令不执行，
+已下发但没有回复的操作保留 `outcome_unknown` 和审计，不能当作取消成功。轮换后安装新
+Token 并恢复连接，再查询原操作；删除节点也不删除其历史或证明 Agent 已回退。管理员
+注销只撤销浏览器会话，不会远程终止本地事务。Agent 禁用托管需要本机维护和重启：先处理
+未完成操作、确认实际 Store 与运行状态并备份，再关闭开关；不能通过关开关或删日志绕过恢复。
 
 手工回退以当前 Store 内容、存在状态与配置 Context 做 CAS；后续版本不匹配时返回
 conflict，保留历史 confirmed，不占用永久恢复名额。这里没有配置历史代际保证：若
 Store 字节和 Context 恰好恢复成相同值（ABA），仍允许显式回退。`rollback_failed`
-或无法判定的启动恢复必须保留材料并在本机处理，不能删除日志来强行解除保护。
+或无法判定的启动恢复保持写入门禁，页面不能宣称“已恢复”。本机处理顺序是：
 
-不能直接用旧二进制打开 v8 控制库；降级需先恢复适用的旧版本备份，并核对节点实际
+1. 记录操作 ID、错误码和最近的持久化/运行事实，停止 Agent，保留整个管理根、
+   当前 Store、主文件/include、所需环境及凭据材料，保留原始存在态与权限。
+2. 核对磁盘空间、权限、来源摘要和旧新快照。仅在确认原上下文后修复故障，再启动并
+   查询该操作；`verify` 只检查文件/include，不能证明 Store 已恢复或业务已通。
+3. 需要从备份恢复时使用上文离线安装、运行验证、管理员接管和离线确认流程。
+   不符合首版最小安装范围、没有可信备份或无法判定应保留版本时保持停机，交管理员
+   决策；不提供跳过 CAS 的通用强制覆盖命令，不删除身份、锁文件或事务日志解除门禁。
+
+不能直接用旧二进制打开 v9 控制库；降级需先恢复适用的旧版本备份，并核对节点实际
 配置。上述开发没有部署到生产，不改变前文记录的线上版本。
 
 ## 模块与职责

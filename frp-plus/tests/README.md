@@ -80,6 +80,91 @@ STCP fallback 实际使用与释放。本机场景不证明跨公网 NAT 穿透�
 所有子进程使用隔离环境；TLS 场景校验名称和 CA，超时强制结束会判失败。仅本机 Linux
 会产生完整内核指标，Darwin 合法返回 unsupported。退出后清理测试进程与临时文件。
 
+## 配置管理的真实联合验收
+
+`monitor/config_native_test.go` 用真实 Admin HTTP、SQLite、管理 WebSocket 与原生
+frps/frpc 验证校验、秘密引用、预览、应用回复丢失后的只查询恢复、实际 TCP/STCP Visitor
+转发及逐字节回退。只有外部 GitHub 身份提供者由测试替身响应，不需要真实账号。
+
+可选浏览器用例进一步加载同一个实际 Handler，所有配置写入经正常表单、预览和确认按钮。
+它不拦截或模拟 Admin API：移动端深色页面创建 TCP、STCP Proxy/Visitor，验证真实载荷，
+逆序恢复三次操作，并检查秘密未进入 DOM、浏览器存储或审计数据库。
+迁移用例先启动原文件代理验证转发，停机后执行真实 `config-migrate plan`，由测试显式
+完成源文件维护、安装候选并运行 `check --offline`；重新启动后完成同一浏览器闭环。
+删除迁移后的 Store 对象必须撤下监听，不能重新激活原文件同名对象；回退后恢复载荷转发。
+
+在已安装 Playwright 和 Chromium 的环境中，从子项目根目录设置绝对路径后运行：
+
+```sh
+export FRP_CONFIG_E2E_AGENT="$PWD/dist/darwin-arm64/frp-plus-agent"
+export FRP_CONFIG_E2E_SERVER="$PWD/dist/darwin-arm64/frp-plus-server"
+export FRP_CONFIG_E2E_BROWSER_HELPER="$PWD/tests/config_browser_e2e.mjs"
+export FRP_CONFIG_E2E_NODE="$(command -v node)"
+export PLAYWRIGHT_MODULE=/absolute/path/to/playwright/index.mjs
+export BROWSER_EXECUTABLE=/absolute/path/to/chromium
+cd .cache/upstream/worktree
+go test -race -mod=readonly ./extension/frpmonitor/monitor -run '^TestConfigNative' -count=1 -v
+```
+
+这些变量仅控制测试。未提供二进制或浏览器参数时，用例明确跳过；跳过不能计为联合验收通过。
+`TestConfigNativeUnmanagedAPIsEndToEnd` 还验证关闭托管时的原生 Dashboard 鉴权、
+Store 创建/读取/删除、文件 PUT 只落盘以及显式 reload 后文件/Store 独立转发。
+原生进程、管理端和浏览器使用临时回环端口及一次性凭据。浏览器凭据由 stdin 传递，
+失败只输出固定阶段名，不打印异常 DOM、请求体或私有日志。
+
+## 最小托管备份与真实恢复接管
+
+`monitor/config_restore_native_test.go` 在真实配置联合测试后保留一个 prepared 事务，
+强杀 Agent，通过原生 `managed-maintenance` 创建私有检查点并原地恢复，验证 Service
+身份更换、启动日志恢复、写入门禁、Admin 接管、第二次离线确认和 TCP/STCP Visitor。
+未接管不能离线确认；接管不会自动开放编辑。测试使用补丁 0008 的 Agent：
+
+```sh
+export FRP_CONFIG_RESTORE_E2E_AGENT="$PWD/dist/darwin-arm64/frp-plus-agent"
+export FRP_CONFIG_E2E_SERVER="$PWD/dist/darwin-arm64/frp-plus-server"
+cd .cache/upstream/worktree
+go test -race -mod=readonly ./extension/frpmonitor/monitor \
+  -run '^TestConfigRestoreNativeEndToEnd$' -count=1 -v
+```
+
+如同时设置前文的 Node、Playwright、Chromium 参数，并将
+`FRP_CONFIG_RESTORE_BROWSER_HELPER` 设为 `tests/config_restore_browser_e2e.mjs` 的绝对路径，
+同一测试会经真实页面执行接管确认；校验明确勾选、仅一次接管请求、配置写入仍关闭和
+离线确认说明，其后的真实数据库核对、停机确认、重启和业务转发断言仍执行。
+未提供浏览器 helper 只算 API/native 恢复验收，不算浏览器恢复验收。
+
+`ops_managed_test.py` 单独验证归档清单、路径/大小/解压预算、损坏拒绝、helper 调用
+及格式边界；Go 的 managed/configuration 测试负责文件锁、写入中断、上下文漂移和
+恢复状态机。模拟 helper 的 Python 单测不替代上述真实原生流程。
+
+## 明确失败与回退故障修复
+
+补丁 0009 的 `TestConfigEarlyFailureNativeEndToEnd` 使用
+`FRP_CONFIG_EARLY_FAILURE_E2E_AGENT` 与 `FRP_CONFIG_E2E_SERVER`：真实 frps 端口策略拒绝、
+真实 Visitor 本地端口冲突都会在 60 秒操作期限前回退，恢复精确 Store 字节；资源仍未就绪
+或控制连接正常等待的单元反例不提前失败。没有新增任意网络探测或业务成功声明。
+
+`TestConfigNativeRollbackFailureEndToEnd` 使用普通配置 E2E 参数：先成功运行 Visitor，
+删除后占用其原监听端口，手工回退实际失败。断言旧 Store 已恢复而运行确认位不能沿用旧成功，
+未完成操作继续阻止新草案；停机排除冲突再启动，本地日志恢复且主控只查询即可转为 rolled_back，
+TCP/Visitor 恢复转发，再准备/取消新候选证明操作名额已释放。
+
+## 配置变更下的有限持续负载
+
+```sh
+python3 tests/frp_config_smoke.py \
+  --agent dist/darwin-arm64/frp-plus-agent \
+  --server dist/darwin-arm64/frp-plus-server \
+  --wire v1 --wire v2 --soak-seconds 60 --timeout 40
+```
+
+可选 `--soak-seconds` 接受 30–3600 秒，默认关闭；同一 TCP socket 每秒连续回显，
+并发反复修改 HTTP 压缩配置、验证全部已开放类型并精确回退。脚本核对指标/会话持续
+推进、下行待处理数量和采样 RSS 上限；所有轮次完成后继续 CAS、断链看门狗与强杀恢复。
+等待期限和强杀用例暂停本机测试 frps 并确认 `wait start`，与明确的登记拒绝分开；
+暂停期间独立监控必须继续推进，正常路径与异常清理都会恢复进程。
+这只证明指定时间内的有界流程，不能作为吞吐、CPU、长时泄漏或生产容量结论。
+
 ## 原版 FRP 互通矩阵
 
 ```sh
