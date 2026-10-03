@@ -4,6 +4,7 @@ package managed
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -391,4 +392,88 @@ func TestConfirmedRollbackUncooperativeCheckKeepsOnlyTemporaryLease(t *testing.T
 		t.Fatal("late read-only callback mutated runtime")
 	}
 	prepareAfterRefusal(t, e, "next", newStore)
+}
+
+func TestConfirmedRollbackFailureDoesNotReuseCandidateVerification(t *testing.T) {
+	for _, stage := range []string{"apply", "verify"} {
+		t.Run(stage, func(t *testing.T) {
+			o := fixture(t)
+			e := opened(t, o)
+			runtime := &memoryRuntime{current: cloneSnapshot(oldStore)}
+			hooks := runtime.hooks()
+			originalApply, originalVerify := hooks.Apply, hooks.Verify
+			hooks.Apply = func(ctx context.Context, snapshot StoreSnapshot) error {
+				if stage == "apply" && Digest(snapshot) == Digest(oldStore) {
+					return ErrRuntime
+				}
+				return originalApply(ctx, snapshot)
+			}
+			hooks.Verify = func(ctx context.Context, snapshot StoreSnapshot) (Verification, error) {
+				if stage == "verify" && Digest(snapshot) == Digest(oldStore) {
+					return Verification{RuntimeLoaded: true, ResourcesReady: false}, nil
+				}
+				return originalVerify(ctx, snapshot)
+			}
+			if err := e.AttachRuntime(hooks); err != nil {
+				t.Fatal(err)
+			}
+			committed := confirmed(t, e, "confirmed-before-rollback", oldStore, newStore)
+			if !committed.Verification.RuntimeLoaded || !committed.Verification.ResourcesReady {
+				t.Fatal("fixture never verified candidate")
+			}
+			result, err := e.Rollback(context.Background(), committed.ID)
+			if !errors.Is(err, ErrOutcomeUnknown) || result.State != RollbackFailed || result.StorePersisted {
+				t.Fatal("rollback failure did not retain actual disk/state facts")
+			}
+			if result.Verification != (Verification{}) {
+				t.Fatal("rollback failure reused candidate verification")
+			}
+			disk(t, o.StorePath, oldStore)
+			var journal record
+			raw := operationJournal(t, e, result.ID)
+			if json.Unmarshal(raw, &journal) != nil || journal.Verification != (Verification{}) || journal.State != RollbackFailed {
+				t.Fatal("stale runtime confirmation persisted")
+			}
+			if _, err = e.Prepare(context.Background(), request("blocked-after-rollback")); !errors.Is(err, ErrBusy) {
+				t.Fatal("rollback failure released operation lease")
+			}
+		})
+	}
+}
+
+func TestConfirmedRollbackUnknownClearsPriorVerification(t *testing.T) {
+	o := fixture(t)
+	o.RollbackTimeout = 30 * time.Millisecond
+	e := opened(t, o)
+	runtime := &memoryRuntime{current: cloneSnapshot(oldStore)}
+	hooks := runtime.hooks()
+	apply := hooks.Apply
+	started, release := make(chan struct{}), make(chan struct{})
+	defer func() {
+		close(release)
+		eventually(t, func() bool { e.mu.Lock(); defer e.mu.Unlock(); return !e.running })
+	}()
+	hooks.Apply = func(ctx context.Context, snapshot StoreSnapshot) error {
+		if Digest(snapshot) == Digest(oldStore) {
+			close(started)
+			<-release
+		}
+		return apply(ctx, snapshot)
+	}
+	if err := e.AttachRuntime(hooks); err != nil {
+		t.Fatal(err)
+	}
+	committed := confirmed(t, e, "hung-rollback", oldStore, newStore)
+	call, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
+	defer cancel()
+	go e.Rollback(call, committed.ID)
+	<-started
+	eventually(t, func() bool { op, _ := e.Query(context.Background(), committed.ID); return op.State == OutcomeUnknown })
+	op, err := e.Query(context.Background(), committed.ID)
+	if err != nil || op.Verification != (Verification{}) {
+		t.Fatal("unknown rollback reused old runtime facts")
+	}
+	if _, err = e.Prepare(context.Background(), request("blocked-unknown")); !errors.Is(err, ErrBusy) {
+		t.Fatal("hung rollback released operation lease")
+	}
 }

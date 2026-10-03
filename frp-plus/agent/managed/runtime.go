@@ -304,6 +304,10 @@ func (e *Engine) rollbackAfterCheck(id string, startup bool, confirmed *Operatio
 	if confirmed != nil {
 		code = "rollback_requested"
 	}
+	// Once actual rollback starts, the old candidate's verification is no longer
+	// evidence for the restored version. Publish fresh facts only after Verify.
+	// A read-only CAS refusal below restores the untouched confirmed history.
+	r.Verification = Verification{}
 	// A durable applying/outcome_unknown journal already contains all recovery
 	// material if this phase update fails. Still attempt the old disk/runtime;
 	// a final journal failure prevents a false success and keeps the gate shut.
@@ -319,6 +323,7 @@ func (e *Engine) rollbackAfterCheck(id string, startup bool, confirmed *Operatio
 			r.Operation = *confirmed
 			if err = e.persist(r); err != nil {
 				r.State, r.ErrorCode = OutcomeUnknown, "journal_failed"
+				r.Verification = Verification{}
 				e.mu.Unlock()
 				return ErrStorage
 			}
