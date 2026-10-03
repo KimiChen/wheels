@@ -64,4 +64,4 @@ read counter 改为源读入 pipe 后立即触发，write counter 才按目标�
 - Linux 新 sing-tun 的 `TestNetworkUpdateMonitorReceiveOverrun`：4.52 秒通过，独立 netns 内实际
   制造接收溢出、检查空闲 CPU 和后续通知，未对生产网络执行故障注入。
 - Python 107 项通过，敏感信息扫描与 diff whitespace 检查通过。
-- 提交前纳入已发布工具链提交 `9bb67f8`；工具链锁为 Go 1.26.8。只保留本地候选分支，未构建发布包。
+- 提交前纳入已发布工具链提交 `9bb67f8`；工具链锁为 Go 1.26.8。保留独立研发分支供后续修复；未合并主线、未构建发布包或部署。
