@@ -99,6 +99,7 @@ type Service struct {
 	credentialError      atomic.Bool
 	admin                *adminState
 	configCoordinator    *configCoordinator
+	serverRestorePending bool // immutable startup latch; offline confirmation requires restart
 	serverProvider       shared.ServerProvider
 	serverSnapshot       atomic.Pointer[shared.ServerSnapshot]
 	tunnelProvider       shared.TunnelProvider
@@ -136,6 +137,7 @@ func StartWithTunnelProvider(ctx context.Context, cfg shared.MonitorConfig, serv
 
 	child, cancel := context.WithCancel(ctx)
 	s := &Service{cfg: cfg, ctx: child, cancel: cancel, location: time.Local, nodes: map[string]*node{}, control: db, connections: map[*websocket.Conn]credential{}, handshakes: make(chan struct{}, 32), streamsPublic: make(chan struct{}, 128), streamsAdmin: make(chan struct{}, 64), done: make(chan struct{}), rateTokens: 40, rateAt: time.Now()}
+	s.serverRestorePending = serverRestoreGateAtStart(cfg.DatabaseFile)
 	s.serverProvider, s.tunnelProvider = server, tunnel
 	s.admin, err = newAdmin(cfg)
 	if err != nil {

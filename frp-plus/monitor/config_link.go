@@ -85,6 +85,9 @@ func (s *Service) ConfigCommand(ctx context.Context, nodeID string, input shared
 	if !validNodeID(nodeID) {
 		return fail(ErrConfigInvalid)
 	}
+	if serverRestoreActionBlocked(s.serverRestorePending, input.Action) {
+		return fail(ErrServerRestorePending)
+	}
 	if err := ctx.Err(); err != nil {
 		return fail(err)
 	}

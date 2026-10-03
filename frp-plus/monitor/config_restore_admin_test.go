@@ -134,7 +134,7 @@ func TestRestoreAdminExplicitlySupersedesOnlyMissingOldJournal(t *testing.T) {
 
 func TestRestoreAdminPersistsOnlyMatchingConfirmedObservation(t *testing.T) {
 	s, _, admin := testAdmin(t)
-	cookie, _ := login(t, s, admin)
+	cookie, session := login(t, s, admin)
 	node, err := s.control.Get(context.Background(), "1")
 	if err != nil {
 		t.Fatal(err)
@@ -185,5 +185,24 @@ func TestRestoreAdminPersistsOnlyMatchingConfirmedObservation(t *testing.T) {
 	}
 	if count() != 1 {
 		t.Fatal("confirmed proof missing or replayed")
+	}
+	// A lost acknowledgement response can leave controller consent pending
+	// after the Agent has completed offline confirmation. The observation is
+	// genuine, but explicit takeover must still complete before the master gate.
+	check, err := s.control.CheckServerRestoreConfirmation(context.Background())
+	if err != nil || check.Ready {
+		t.Fatal("pending consent opened the master gate", check, err)
+	}
+	input := configRestoreRequest{ServiceID: service, Epoch: info.Epoch, ManifestDigest: info.ManifestDigest, ContextRevision: info.ContextRevision, StoreDigest: info.StoreDigest}
+	r = adminRequest(t, s, "POST", configAdminPath+"/restore/acknowledge", configBody(t, input), cookie, session.CSRF, nil)
+	expectStatus(t, r, 200)
+	var out configRestoreResponse
+	if json.NewDecoder(r.Body).Decode(&out) != nil || out.Receipt == nil || out.Receipt.State != "acknowledged" || out.Receipt.ID != receipt.ID || out.Restore.State != "confirmed" {
+		t.Fatal("explicit retry did not retain completed Agent recovery identity")
+	}
+	r.Body.Close()
+	check, err = s.control.CheckServerRestoreConfirmation(context.Background())
+	if err != nil || !check.Ready || count() != 1 {
+		t.Fatal("explicit retry did not complete takeover without replaying completion", check, err)
 	}
 }

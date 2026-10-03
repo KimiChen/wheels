@@ -491,7 +491,7 @@ class Pipeline:
                                       "SQLite control storage is required; embedded history is optional. Administration uses GitHub OAuth only.\n"
                                       "Operations and systemd instructions: packaging/README.md; tools require Python 3.11+.\n"
                                       "Build provenance and exact Go version: BUILD.json.\n").encode("utf-8")
-            for name in ("scripts/ops.py", "scripts/ops_checkpoint.py", "scripts/ops_history.py", "scripts/local.py", "packaging/README.md", "packaging/backup-set.example.json", "packaging/nginx.conf.example", ".env.example"):
+            for name in ("scripts/ops.py", "scripts/ops_checkpoint.py", "scripts/ops_history.py", "scripts/ops_server_checkpoint.py", "scripts/local.py", "packaging/README.md", "packaging/backup-set.example.json", "packaging/nginx.conf.example", ".env.example"):
                 payload[name] = read_regular(self.root / name)
             for schema in ("schema.sql", "audit_retention_schema.sql"):
                 payload["monitor/control/" + schema] = read_regular(self.root / "monitor/control" / schema)

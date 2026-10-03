@@ -187,7 +187,7 @@ def backup(api, folder, output, *, offline, agent_binary, policy=None, env_file=
         return write_archive(api, output, temporary, AGENT_KIND, folder, payload[0][1], payload[1:])
 
 
-def extract(api, fd, folder, destination, resolve, *, allow_relocation=False):
+def extract(api, fd, folder, destination, resolve, *, allow_relocation=False, allow_server_relocation=False):
     """Read strict sequential numbered payloads; source names never enter tar headers."""
     with api.read_archive(fd, api.MAX_TOTAL + 2 * api.MANAGED_MAX_FILE) as archive:
         def next_member(name, limit):
@@ -201,7 +201,7 @@ def extract(api, fd, folder, destination, resolve, *, allow_relocation=False):
         if (not isinstance(envelope, dict) or set(envelope) != {'format', 'kind', 'original_directory', 'manifest_sha256', 'created_at_ms', 'payload_count'}
                 or envelope['format'] != 4 or envelope['kind'] not in (AGENT_KIND, SERVER_KIND)
                 or not absolute(envelope['original_directory'])
-                or (envelope['original_directory'] != str(folder) and not (allow_relocation and envelope['kind'] == AGENT_KIND)) or type(envelope['created_at_ms']) is not int
+                or (envelope['original_directory'] != str(folder) and not (allow_relocation and envelope['kind'] == AGENT_KIND or allow_server_relocation and envelope['kind'] == SERVER_KIND)) or type(envelope['created_at_ms']) is not int
                 or envelope['created_at_ms'] <= 0 or type(envelope['payload_count']) is not int
                 or not 2 <= envelope['payload_count'] <= api.MANAGED_MAX_FILES + 1
                 or not isinstance(envelope['manifest_sha256'], str) or not api.HEX_DIGEST.fullmatch(envelope['manifest_sha256'])):
@@ -217,6 +217,10 @@ def extract(api, fd, folder, destination, resolve, *, allow_relocation=False):
             raise ValueError('explicit policies require a version3 Agent checkpoint')
         if envelope['kind'] == AGENT_KIND and manifest.get('version') == 3 and not allow_relocation:
             raise ValueError('version3 restoration requires both local policies')
+        if allow_server_relocation and (envelope['kind'] != SERVER_KIND or manifest.get('version') != 2):
+            raise ValueError('explicit server policies require version2 server checkpoint')
+        if envelope['kind'] == SERVER_KIND and manifest.get('version') == 2 and not allow_server_relocation:
+            raise ValueError('version2 server restoration requires local policies and server binary')
         if envelope['kind'] == AGENT_KIND and manifest.get('cwd') != envelope['original_directory']:
             raise ValueError('checkpoint source identity mismatch')
         name, values = resolve(envelope['kind'], manifest)
@@ -270,11 +274,13 @@ def restore_parent(api, path):
         os.close(parent_fd)
 
 
-def restore(api, fd, folder, *, offline, agent_binary, policy=None, source_policy=None, env_file=None, source_env_file=None):
+def restore(api, fd, folder, *, offline, agent_binary, policy=None, source_policy=None, env_file=None, source_env_file=None, server_binary=None):
     if not offline:
         raise ValueError('indexed restoration requires offline acknowledgement')
     if bool(policy) != bool(source_policy) or (env_file or source_env_file) and not policy:
         raise ValueError('explicit restoration requires both local policies')
+    if server_binary is not None and (not policy or agent_binary is not None):
+        raise ValueError('server restoration requires one server binary and both local policies')
     folder = api.path_without_links(folder)
     with restore_parent(api, folder.parent) as check_parent, tempfile.TemporaryDirectory(prefix='.frp-indexed-', dir=folder.parent) as temporary:
         checkpoint = Path(temporary)
@@ -283,11 +289,18 @@ def restore(api, fd, folder, *, offline, agent_binary, policy=None, source_polic
             if kind == AGENT_KIND:
                 api.private_directory(folder)
                 return 'CHECKPOINT.json', entries(api, manifest, Path(manifest['cwd']) if policy else folder)
+            if manifest.get('version') == 2:
+                from ops_server_checkpoint import entries as server_entries
+                return 'SERVER.json', server_entries(api, manifest, Path(manifest['original_directory']))
             from ops_history import entries as server_entries
             return 'SERVER.json', server_entries(api, manifest, folder)
-        envelope, manifest = extract(api, fd, folder, checkpoint, resolve, allow_relocation=bool(policy))
+        envelope, manifest = extract(api, fd, folder, checkpoint, resolve, allow_relocation=bool(policy) and server_binary is None, allow_server_relocation=server_binary is not None)
         check_parent()
         if envelope['kind'] == SERVER_KIND:
+            if manifest['version'] == 2:
+                from ops_server_checkpoint import restore as explicit_server_restore
+                return explicit_server_restore(api, checkpoint, manifest, folder, offline=offline, server_binary=server_binary,
+                    policy=policy, source_policy=source_policy, env_file=env_file, source_env_file=source_env_file)
             from ops_history import restore as server_restore
             return server_restore(api, checkpoint, manifest, folder)
         _, _, digest = directory(api, checkpoint, Path(manifest['cwd']) if policy else folder)

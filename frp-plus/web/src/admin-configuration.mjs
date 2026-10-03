@@ -44,15 +44,16 @@ export function createConfigPanel(container, {request}) {
     const state = controller.state;
     if (!state.nodeID) return;
     mount();
-    message.textContent = state.message || (state.pending ? "正在与 Agent 核对，请稍候…" : !state.online ? "节点监控离线；以下操作记录为历史信息，配置写入暂不可用。" : state.needsReload ? "操作状态已更新；下次编辑前请重新读取当前配置。" : state.inventory ? `当前来源${state.inventory.inventory.state === "ready" ? "可管理" : "只读"} · ${date(state.inventory.received_at_ms)}` : "无法读取配置来源。请确认 Agent 已显式启用 Store 托管与管理通道。");
+    message.textContent = state.message || (state.serverRestorePending ? configErrors.server_restore_pending : state.pending ? "正在与 Agent 核对，请稍候…" : !state.online ? "节点监控离线；以下操作记录为历史信息，配置写入暂不可用。" : state.needsReload ? "操作状态已更新；下次编辑前请重新读取当前配置。" : state.inventory ? `当前来源${state.inventory.inventory.state === "ready" ? "可管理" : "只读"} · ${date(state.inventory.received_at_ms)}` : "无法读取配置来源。请确认 Agent 已显式启用 Store 托管与管理通道。");
     reloadButton.textContent = state.draft ? "放弃草稿并重新读取" : "重新读取配置"; reloadButton.disabled = state.pending;
     if (lastInventory !== state.inventory) { lastInventory = state.inventory; renderInventory(); }
     if (lastResult !== state.result) { lastResult = state.result; renderResult(); renderPreview(); }
     if (lastHistory !== state.operations) { lastHistory = state.operations; renderHistory(); }
     if (lastRestoration !== state.restoration) { lastRestoration = state.restoration; renderRestoration(); }
-    const recovering = ["pending", "verified", "acknowledged"].includes(state.restoration?.restore?.state);
-    const blocked = state.pending || !state.online || recovering || state.inventory?.inventory?.state !== "ready";
+    const recovering = ["pending", "verified", "acknowledged"].includes(state.restoration?.restore?.state) || state.restoration?.receipt?.state === "pending";
+    const blocked = state.pending || !state.online || state.serverRestorePending || recovering || state.inventory?.inventory?.state !== "ready";
     for (const input of container.querySelectorAll("[data-config-write]")) input.disabled = blocked;
+    for (const input of container.querySelectorAll("[data-config-cancel]")) input.disabled = state.pending || !state.online || recovering;
     const editingBlocked = blocked || state.needsReload || state.operations.some(op => activeStates.has(op.state));
     for (const input of inventoryBox.querySelectorAll("[data-config-write]")) input.disabled = editingBlocked;
     for (const input of form?.querySelectorAll("input, select, textarea, button") ?? []) input.disabled = editingBlocked;
@@ -77,7 +78,7 @@ export function createConfigPanel(container, {request}) {
     for (const [label, text] of [["恢复 epoch", value.epoch], ["当前服务身份", data.service_id], ["备份服务身份", value.backup_service_id], ["被替换服务身份", value.replaced_service_id || "未记录"], ["恢复包摘要", value.manifest_digest], ["配置上下文摘要", value.context_revision], ["Store 摘要", value.store_digest || "尚未验证"], ["运行时 / 资源", value.runtime_loaded && value.resources_ready ? "已验证" : "未确认"], ["恢复操作记录", String(value.operations_count)], ["主控接管记录", data.receipt?.state === "acknowledged" ? "Agent 已确认" : data.receipt ? "已记录意图，Agent 结果待核对" : "尚未接管"]]) row(facts, label, text);
     restoreBox.append(facts);
     if (data.active_operation) restoreBox.append(element("p", `原活动操作 ${data.active_operation.operation_id} · ${operationLabels[data.active_operation.state]}。接管先查询真实记录；无法从恢复包继续核对的旧意图将以恢复取代事件留存，不能视为已回退。`, "wsk-alert wsk-warning fa-config-digest"));
-    if (["verified", "acknowledged"].includes(value.state) && data.receipt?.state !== "acknowledged") {
+    if ((["verified", "acknowledged"].includes(value.state) || value.state === "confirmed" && data.receipt?.state === "pending") && data.receipt?.state !== "acknowledged") {
       const consent = element("input"); consent.type = "checkbox";
       restoreBox.append(field("我已核对恢复身份与摘要，允许接管并保留旧操作处理审计", consent));
       acknowledgeButton = button("确认接管恢复状态", () => void controller.acknowledgeRestore());
@@ -197,7 +198,10 @@ export function createConfigPanel(container, {request}) {
     const reason = resultReason(result.agent); if (reason) resultBox.append(element("p", reason, "wsk-alert wsk-warning"));
     if (op.state === "verifying") resultBox.append(element("p", "正在等待实际登记与本地资源。本次明确注册或启动失败会触发回退；正常等待连接仍按操作期限核对，业务可达性需另行测试。", "fa-muted"));
     const actions = element("div", undefined, "fa-actions"); actions.append(button("查询实际结果", () => void controller.query()));
-    if (["prepared", "draft", "validated"].includes(op.state)) actions.append(button("取消未应用操作", () => void controller.action("cancel"), true));
+    if (["prepared", "draft"].includes(op.state)) {
+      const cancel = button("取消未应用操作", () => void controller.action("cancel"));
+      cancel.dataset.configCancel = ""; actions.append(cancel);
+    }
     if (canRollback(result)) {
       const rollback = button("准备回退", () => {
         rollback.disabled = true;

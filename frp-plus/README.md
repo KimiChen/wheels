@@ -368,6 +368,99 @@ v3 搬迁须先将主控和 Agent 一起更新到支持该状态的版本：旧 
 包装额外验证源与外部文件全删除后恢复、幂等 epoch/字节/mtime、语义变化无写拒绝和环境文件
 不入包。这里是隔离本机验收；已上线的 12 补丁版本不包含本节新 v3 能力。
 
+### 主控的显式依赖上下文与跨目录转换
+
+具备补丁 0014 的 `frp-plus-server` 提供本机 `server-maintenance capture/transform`。
+它校验普通配置依赖并生成私有上下文材料；SQLite 与 TSDB 由离线归档工具分别制作一致快照。
+helper 成功不表示数据库已备份、恢复已发布或业务已验证。完整操作使用下面的 Python
+包装，原生 helper 合同用于明确依赖与路径转换的验证边界。
+
+本地策略为 0600 JSON：`version: 1`、`config_file`、`working_dir`、
+`roots: [{"id":"installation","path":"/srv/frp-server"}]` 与
+`files: [{"id":"server-ca","path":"/srv/frp-private/ca.crt"}]`。
+路径均为规范绝对路径；`config_file` 可为 TOML、JSON 或 YAML 文件。根之间不得重叠，
+精确文件也不能重复包含在某个根中。源、目标保留相同 ID 与根/文件类型，只改变授权路径；
+归档内的策略不能替代本机提供的授权，精确文件也不授权其父目录。
+
+转换保持授权布局。源安装根内的数据库随整个根映射，不能额外拆到目标根外；需要单独
+迁移数据库或历史目录时，源安装就应采用独立授权位置。数据库可以由根或精确文件授权，
+TSDB 目录须由根授权；二者与普通依赖不能重叠。日志输出路径参与语义核对及路径转换，
+日志内容不进入普通依赖。旧恢复门禁、完成凭据、安装计划目录和数据库侧文件不能伪装成
+普通配置依赖。
+
+```sh
+frp-plus-server server-maintenance capture --offline -c <源配置绝对路径> \
+  --policy <源策略JSON> --env-file <源变量JSON> --output <新建私有上下文目录>
+frp-plus-server server-maintenance transform --offline \
+  --checkpoint <已封存上下文目录> --manifest-digest <CONTEXT.json的SHA256> \
+  --source-policy <源策略JSON> --policy <目标策略JSON> \
+  --source-env-file <源变量JSON> --env-file <目标变量JSON> \
+  --output <新建目标上下文目录>
+```
+
+模板支持静态 `.Envs.NAME` 与字面量 `index .Envs "NAME"`，只使用显式 0600 JSON 供值，
+不读取进程环境。没有模板可省略供值参数；省略 `--source-env-file` 时复用显式目标供值。
+输出保存原模板、变量名及渲染摘要，不保存变量映射或渲染后的秘密；原有字面量秘密、
+Token/私钥材料与必要的派生路径仍在私有备份中。供值文件不得同时成为依赖，也不能放在
+将被发布的目标授权根或目标精确文件中。
+
+严格解析按原扩展名执行原生 ServerConfig 校验，拒绝未知字段、重复键、大小写别名与
+YAML 锚点。普通依赖覆盖文件型 `auth.tokenSource`、transport/web/monitor TLS、
+`custom404Page`、SSH 已存在的私钥及 authorized keys、GitHub 客户端秘密文件。
+启用 SSH 自动生成路径时必须已有可读取的私钥；缺失时不重新生成身份。
+`webServer.assetsDir`、exec 型 tokenSource、动态模板索引和未知依赖均明确拒绝完整捕获。
+只重写已知路径字段，并比较全部非路径配置语义：Token、域名、身份、监听参数和业务配置
+必须保持一致。同一环境变量同时改变路径及业务值会失败；需要改写而无法保真保存的
+控制流模板也会失败。转换只读取封存材料，不访问或安装目标目录。
+
+输出目录为 0700，文件为 0600：`CONTEXT.json`、`POLICY.json` 与编号的 `context/f000001`
+等材料。清单记录摘要、原路径、纳秒修改时间及数据库/历史目录元信息；普通材料上限为
+128 个文件、单文件 1 MiB、合计 16 MiB。命令标准输出仅包含固定状态与摘要/计数，不输出
+原生错误、私有路径或秘密。离线工具在数据库/TSDB 快照前后两次捕获普通上下文并比较，
+用于发现源材料变化；这不构成跨机器原子备份。
+
+主控完整包装使用 format4、server manifest v2；安装目录内主文件为 `server.toml`。
+如有 `installation.json`，须声明单一 server 角色；旧 combined 生成安装仍走下面的旧格式流程。
+
+```sh
+python3 scripts/ops.py backup --directory <源主控目录> --output <新私有归档> \
+  --offline --server-binary <新版frp-plus-server> --policy <源策略JSON> --env-file <源变量JSON>
+python3 scripts/ops.py restore --archive <私有归档> --directory <目标主控目录> \
+  --offline --server-binary <新版frp-plus-server> --source-policy <源策略JSON> \
+  --policy <目标策略JSON> --source-env-file <源变量JSON> --env-file <目标变量JSON>
+# 启动后核对监控、历史和实际业务；通过管理页面查询/取消旧操作、完成各Agent恢复接管。
+# 停止主控，再使用恢复命令返回的 checkpoint_id 确认。最后重新启动并重新读取配置。
+python3 scripts/ops.py server-restore-confirm --directory <目标主控目录> \
+  --checkpoint-id <恢复检查点UUID> --offline --agents-reviewed \
+  --server-binary <新版frp-plus-server> --policy <目标策略JSON> --env-file <目标变量JSON>
+```
+
+源 SQLite/WAL 先复制到私有临时目录，再制作一致数据库，原文件字节和修改时间不变；
+存在 rollback journal 时拒绝，需先原生干净关闭。TSDB 持有原锁并两次比较完整目录。
+目标数据库及 WAL/SHM/journal/门禁必须不存在，目标历史目录也必须不存在；先将旧数据移开。
+普通外部依赖只有字节、0600 权限和纳秒修改时间完全相同时才复用；精确文件授权不允许
+创建父目录，现有父目录须为可信目录。其余新建目录/文件分别为 0700/0600。
+
+跨目录安装在目标根的父目录保存私有计划，绑定归档、源/目标授权及供值产生的上下文。
+先发布数据库旁的 `.restore-gate.json`，再安装数据，最后原子发布主安装目录。
+多个目录不能形成一次文件系统原子事务；中断后用同一归档和参数重试，仅续写该计划中
+仍缺失或完全匹配的内容，发现漂移即停止，不覆盖其他版本。
+
+**自动主控门禁仅适用于上述 server manifest v2。** 有标记的主控启动后仍可观察、查询、
+取消未应用操作并接管 Agent 恢复，但新建预览、应用和回退在 API 与发送队列前被拒绝。
+离线确认要求相同上下文/授权、schema12 完整数据库、无活动操作，并核对每个恢复接管记录：
+已接管且观察到 Agent 完成，或沿同节点/当前凭据的唯一后继替代链证明已被完成恢复取代。
+真实 Agent 完成观察与主控接管应答可乱序；应答丢失时，页面支持针对同一恢复身份补确认。
+工具只读账本，不伪造操作终态或 Agent 完成记录。旧库需先由新主控在门禁下完成正常迁移，
+再停机确认。没有 TSDB 时，`--offline` 是操作者的停机声明，不表示工具已发现全部进程。
+`--agents-reviewed` 表示操作者已核对相关 Agent，离线账本检查本身不证明当前在线或业务健康。
+确认保存私有完成凭据并移除标记；运行中的主控不会因此开放写入，必须重启。
+旧 format2/旧 server manifest v1 保留原恢复流程，由操作者执行停机对账，不具备此自动门禁。
+
+本机真实验收已覆盖外部 TLS/Token、模板原文保留且供值秘密不入归档、未 checkpoint 的 WAL
+提交、完整 TSDB、删除全部源后跨目录启动、TCP 逐字回显、旧主机/探测样本保留及新样本续写，
+并完成确认重启和再次备份；逐桶历史等价及生产结果由独立发布验收记录。
+
 ### 停机主控完整归档与 11 角色替换
 
 主控执行 `backup --complete --offline`，format 4 同组保存生成安装的私有配置、凭据、

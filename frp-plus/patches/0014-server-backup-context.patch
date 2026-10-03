@@ -1,0 +1,78 @@
+diff --git a/cmd/frps/server_maintenance.go b/cmd/frps/server_maintenance.go
+new file mode 100644
+--- /dev/null
++++ b/cmd/frps/server_maintenance.go
+@@ -0,0 +1,46 @@
++package main
++
++import (
++	"context"
++	"fmt"
++	"github.com/fatedier/frp/extension/frpmonitor/monitor/serverbackup"
++	"github.com/spf13/cobra"
++	"time"
++)
++
++func init() { rootCmd.AddCommand(newServerMaintenanceCommand(func() string { return cfgFile })) }
++func newServerMaintenanceCommand(configFile func() string) *cobra.Command {
++	parent := &cobra.Command{Use: "server-maintenance", Short: "Offline private server backup context", SilenceUsage: true, SilenceErrors: true}
++	for _, action := range []string{"capture", "transform"} {
++		request := serverbackup.CLIRequest{Action: action}
++		command := &cobra.Command{Use: action, SilenceUsage: true, SilenceErrors: true, Args: func(_ *cobra.Command, args []string) error {
++			if len(args) != 0 {
++				return fmt.Errorf("server_backup_arguments_invalid")
++			}
++			return nil
++		}, RunE: func(cmd *cobra.Command, _ []string) error {
++			request.ConfigFile = configFile()
++			ctx, cancel := context.WithTimeout(cmd.Context(), 60*time.Second)
++			defer cancel()
++			summary, err := serverbackup.RunCLI(ctx, request)
++			if err != nil {
++				fmt.Fprintln(cmd.ErrOrStderr(), err.Error())
++				return err
++			}
++			_, err = cmd.OutOrStdout().Write(serverbackup.MarshalSummary(summary))
++			return err
++		}}
++		command.Flags().BoolVar(&request.Offline, "offline", false, "Acknowledge that the server is stopped")
++		command.Flags().StringVar(&request.PolicyFile, "policy", "", "Private local path authorization JSON")
++		command.Flags().StringVar(&request.EnvFile, "env-file", "", "Private explicit template environment JSON")
++		command.Flags().StringVar(&request.Output, "output", "", "New private context output directory")
++		if action == "transform" {
++			command.Flags().StringVar(&request.SourcePolicyFile, "source-policy", "", "Private source path authorization JSON")
++			command.Flags().StringVar(&request.SourceEnvFile, "source-env-file", "", "Private source template environment JSON")
++			command.Flags().StringVar(&request.Checkpoint, "checkpoint", "", "Sealed source context directory")
++			command.Flags().StringVar(&request.ManifestDigest, "manifest-digest", "", "Expected CONTEXT.json SHA-256")
++		}
++		parent.AddCommand(command)
++	}
++	return parent
++}
+diff --git a/cmd/frps/server_maintenance_test.go b/cmd/frps/server_maintenance_test.go
+new file mode 100644
+--- /dev/null
++++ b/cmd/frps/server_maintenance_test.go
+@@ -0,0 +1,22 @@
++package main
++
++import (
++	"bytes"
++	"context"
++	"strings"
++	"testing"
++)
++
++func TestServerMaintenanceFixedFailure(t *testing.T) {
++	cmd := newServerMaintenanceCommand(func() string { return "/private/server.toml" })
++	var output bytes.Buffer
++	cmd.SetOut(&output)
++	cmd.SetErr(&output)
++	cmd.SetArgs([]string{"capture", "--offline", "--policy", "/private/not-a-real-policy", "--output", "/private/not-a-real-output"})
++	if err := cmd.ExecuteContext(context.Background()); err == nil {
++		t.Fatal("missing policy accepted")
++	}
++	if strings.Contains(output.String(), "/private/") || output.String() != "server_backup_policy_invalid\n" {
++		t.Fatal("CLI leaked paths or non-fixed diagnostics")
++	}
++}

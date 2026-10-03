@@ -42,6 +42,8 @@ func (c *configCoordinator) acquire(node string) (func(), bool) {
 }
 func configFailureCode(err error) string {
 	switch {
+	case errors.Is(err, ErrServerRestorePending):
+		return "server_restore_pending"
 	case errors.Is(err, ErrConfigBusy):
 		return "busy"
 	case errors.Is(err, ErrConfigServiceMismatch):

@@ -290,7 +290,7 @@ class PipelineTests(unittest.TestCase):
         license_path = self.root / "agent/collect/LICENSE.monitor-probe"
         license_path.parent.mkdir(parents=True, exist_ok=True)
         license_path.write_text("fixture MIT license\n")
-        for name in ("scripts/ops.py", "scripts/ops_checkpoint.py", "scripts/ops_history.py", "scripts/local.py", "packaging/README.md", "packaging/backup-set.example.json", "packaging/nginx.conf.example", ".env.example", "monitor/control/schema.sql", "monitor/control/audit_retention_schema.sql"):
+        for name in ("scripts/ops.py", "scripts/ops_checkpoint.py", "scripts/ops_history.py", "scripts/ops_server_checkpoint.py", "scripts/local.py", "packaging/README.md", "packaging/backup-set.example.json", "packaging/nginx.conf.example", ".env.example", "monitor/control/schema.sql", "monitor/control/audit_retention_schema.sql"):
             path = self.root / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("public operations fixture\n")
@@ -307,7 +307,7 @@ class PipelineTests(unittest.TestCase):
 
     def test_packages_are_deterministic_allowlisted_and_checksummed(self):
         pipeline = self.pipeline()
-        for name in ("scripts/ops.py", "scripts/ops_checkpoint.py", "scripts/ops_history.py", "scripts/local.py", "packaging/README.md", "packaging/backup-set.example.json", "packaging/nginx.conf.example", ".env.example", "monitor/control/schema.sql", "monitor/control/audit_retention_schema.sql"):
+        for name in ("scripts/ops.py", "scripts/ops_checkpoint.py", "scripts/ops_history.py", "scripts/ops_server_checkpoint.py", "scripts/local.py", "packaging/README.md", "packaging/backup-set.example.json", "packaging/nginx.conf.example", ".env.example", "monitor/control/schema.sql", "monitor/control/audit_retention_schema.sql"):
             path = self.root / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("public operations fixture\n")
@@ -344,7 +344,7 @@ class PipelineTests(unittest.TestCase):
                 members = {"/".join(Path(member.name).parts[1:]): archive.extractfile(member).read() for member in archive.getmembers()}
             self.assertNotIn(".env", members)
             self.assertIn("scripts/ops.py", members)
-            for name in ("scripts/ops_checkpoint.py", "scripts/ops_history.py", "monitor/control/audit_retention_schema.sql", "packaging/backup-set.example.json"):
+            for name in ("scripts/ops_checkpoint.py", "scripts/ops_history.py", "scripts/ops_server_checkpoint.py", "monitor/control/audit_retention_schema.sql", "packaging/backup-set.example.json"):
                 self.assertEqual(members[name], b"public operations fixture\n")
             self.assertIn("packaging/README.md", members)
             self.assertEqual(members["packaging/nginx.conf.example"], b"public operations fixture\n")

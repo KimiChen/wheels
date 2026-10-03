@@ -362,3 +362,18 @@ FRP_BACKUP_RELOCATION_E2E_AGENT=<新版Agent> FRP_BACKUP_RELOCATION_E2E_SERVER=<
 第二条覆盖 wire v1/v2、源与外部依赖删除、跨目录 mTLS/Token/include/HTTPS 插件/TCP 业务、
 真实管理端接管与离线确认、旧终态材料的只读谱系查询及本地拒绝回退、再备份同路径恢复。
 第一条未设置二进制时会明确跳过 3 项真实 CLI 测试；不能将纯包装通过等同原生恢复验收。
+
+
+主控显式策略恢复回归：
+
+```sh
+FRP_PLUS_TEST_SERVER=<新版主控绝对路径> python3 -m unittest discover -s tests -p 'ops_server_checkpoint_test.py'
+FRP_SERVER_BACKUP_E2E_SERVER=<新版主控绝对路径> FRP_SERVER_BACKUP_E2E_AGENT=<新版Agent绝对路径> \
+  python3 -m unittest discover -s tests -p 'ops_server_native_test.py' -v
+```
+
+第一条覆盖私有授权、WAL快照、外部安装CAS、中断续作、账本只读确认。第二条使用真实
+frps/frpc、独立WSS和TCP业务，删除全部源后异地
+恢复外部配置依赖/数据库/TSDB，验证原模板与ENV秘密边界、WAL提交保留、旧host/probe样本
+与新样本续写、门禁确认重启和再备份。本机首次通过12.507秒；未测试Dashboard密码登录、
+逐桶历史等价或复杂NAT，不能据此声称这些场景已验证。未提供binary时会明确跳过。

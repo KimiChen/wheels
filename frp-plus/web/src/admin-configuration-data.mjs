@@ -5,6 +5,7 @@ export const visitorTypes = ["stcp", "sudp", "xtcp"];
 export const operationLabels = {draft: "草案已记录", validated: "校验通过", prepared: "预览已准备", applying: "正在应用", verifying: "正在确认", confirmed: "配置已确认", rejected: "校验拒绝", conflict: "版本冲突", failed: "操作失败", outcome_unknown: "结果待核对", cancelled: "已取消", rolling_back: "正在回退", rolled_back: "已回退", rollback_failed: "回退失败，需本机处理"};
 export const activeStates = new Set(["draft", "validated", "prepared", "applying", "verifying", "outcome_unknown", "rolling_back", "rollback_failed"]);
 export const configErrors = {
+  server_restore_pending: "主控备份恢复尚待离线确认。可继续查询和核对恢复状态；在主控本机完成确认并重启后，重新读取配置以恢复写入。",
   unsupported: "此节点未启用 Store 托管能力，请在 Agent 本机按维护说明配置并重启。",
   unavailable: "节点配置通道暂不可用；稍后查询实际结果。", busy: "已有配置操作正在处理，请稍后核对。",
   audit_capacity: "审计记录已达到新操作准入上限，请查看配置审计的保留与容量状态；已有操作仍可查询和恢复。",
@@ -80,6 +81,7 @@ export function fieldValue(spec, text) {
 }
 export function inputText(value) { return value === null || value === undefined ? "" : Array.isArray(value) ? value.join("\n") : String(value); }
 export function readInventory(data, nodeID) {
+  readServerRestorePending(data);
   const inv = data?.inventory;
   if (!data || data.node_id !== nodeID || !validID(data.service_id) || !inv || !validDigest(inv.revision) || !validDigest(inv.context_revision) || !["ready", "read_only"].includes(inv.state) || !Array.isArray(inv.objects) || inv.objects.length > 1024 || !Array.isArray(inv.issues)) throw new Error("配置盘点响应无效。");
   for (const item of inv.objects) {
@@ -87,6 +89,10 @@ export function readInventory(data, nodeID) {
     if (!Array.isArray(item.fields) || !Array.isArray(item.secrets) || !Array.isArray(item.read_only_fields) || !Array.isArray(item.issues)) throw new Error("配置对象响应无效。");
   }
   return data;
+}
+function readServerRestorePending(data) {
+  if (data && Object.hasOwn(data, "server_restore_pending") && typeof data.server_restore_pending !== "boolean") throw new Error("invalid_response");
+  return data?.server_restore_pending;
 }
 export function makeEdit({mode, kind, type, name, source, inputs = {}, secrets = {}}, uuid = () => crypto.randomUUID()) {
   requireName(name);
@@ -171,7 +177,7 @@ export function readRestore(data, nodeID) {
 export function canAcknowledgeRestore(data, now = Date.now()) {
   const restore = data?.restore, active = data?.active_operation;
   return !!(data?.code === "ok" && data.received_at_ms <= now && now - data.received_at_ms <= 60000 &&
-    ["verified", "acknowledged"].includes(restore?.state) && data.receipt?.state !== "acknowledged" &&
+    (["verified", "acknowledged"].includes(restore?.state) || restore?.state === "confirmed" && data.receipt?.state === "pending") && data.receipt?.state !== "acknowledged" &&
     (!active || [restore.backup_service_id, restore.replaced_service_id].includes(active.service_id)));
 }
 export function restoreAcknowledgement(data) {
@@ -179,26 +185,27 @@ export function restoreAcknowledgement(data) {
     context_revision: data.restore.context_revision, store_digest: data.restore.store_digest,
     expected_active_operation_id: data.active_operation?.operation_id ?? "", expected_active_version: data.active_operation?.version ?? 0};
 }
-const restorationBlocksWrites = data => ["pending", "verified", "acknowledged"].includes(data?.restore?.state);
+const restorationBlocksWrites = data => ["pending", "verified", "acknowledged"].includes(data?.restore?.state) || data?.receipt?.state === "pending";
 
 // Clearing/switching invalidates every in-flight reply. Plaintext secrets are
 // passed directly to request and are not retained in this controller's state.
 export function createConfigController({request, onChange = () => {}, now = () => Date.now(), uuid = () => crypto.randomUUID()}) {
   let epoch = 0;
-  const state = {nodeID: null, inventory: null, operations: [], result: null, preview: null, restoration: null, pending: false, message: "", draft: false, online: false, needsReload: false};
+  const state = {nodeID: null, inventory: null, operations: [], result: null, preview: null, restoration: null, serverRestorePending: false, pending: false, message: "", draft: false, online: false, needsReload: false};
   const notify = () => onChange(state);
   const path = () => `/api/admin/v1/nodes/${encodeURIComponent(state.nodeID)}/configuration`;
   async function perform(work) {
     if (state.pending) return;
     const generation = epoch; state.pending = true; state.message = ""; notify();
     try { const result = await work(); if (generation === epoch) { state.pending = false; notify(); } return result; }
-    catch (error) { if (generation === epoch) { state.message = configErrors[error.code] ?? configErrors[error.message] ?? (error.status === 409 ? configErrors.conflict : error.status === 503 ? configErrors.unavailable : "请求未完成，请查询操作记录；不要重复应用。"); state.pending = false; notify(); } }
+    catch (error) { if (generation === epoch) { if ((error.code ?? error.message) === "server_restore_pending") state.serverRestorePending = true; state.message = configErrors[error.code] ?? configErrors[error.message] ?? (error.status === 409 ? configErrors.conflict : error.status === 503 ? configErrors.unavailable : "请求未完成，请查询操作记录；不要重复应用。"); state.pending = false; notify(); } }
   }
   async function load() {
     const generation = epoch, nodeID = state.nodeID, base = path();
     const [inventory, history] = await Promise.allSettled([request(base), request(`${base}/operations`)]);
     if (generation !== epoch) return;
     state.inventory = inventory.status === "fulfilled" ? readInventory(inventory.value, nodeID) : null;
+    if (state.inventory) state.serverRestorePending = readServerRestorePending(state.inventory) ?? state.serverRestorePending;
     state.needsReload = false;
     state.operations = history.status === "fulfilled" && Array.isArray(history.value?.operations) ? history.value.operations.slice(0, 100) : [];
     if (inventory.status === "rejected") throw inventory.reason;
@@ -206,6 +213,9 @@ export function createConfigController({request, onChange = () => {}, now = () =
   }
   function accept(result) {
     if (!result?.operation || result.operation.node_id !== state.nodeID || !validID(result.operation.operation_id) || !Object.hasOwn(operationLabels, result.operation.state)) throw new Error("invalid_response");
+    const serverRestorePending = readServerRestorePending(result);
+    if (state.serverRestorePending && serverRestorePending === false) state.needsReload = true;
+    state.serverRestorePending = serverRestorePending ?? state.serverRestorePending;
     if (state.result?.operation?.operation_id !== result.operation.operation_id) state.preview = null;
     state.result = result;
     if (result.preview) state.preview = result.preview;
@@ -215,7 +225,7 @@ export function createConfigController({request, onChange = () => {}, now = () =
   }
   return {
     state,
-    clear() { epoch++; Object.assign(state, {nodeID: null, inventory: null, operations: [], result: null, preview: null, restoration: null, pending: false, message: "", draft: false, online: false, needsReload: false}); notify(); },
+    clear() { epoch++; Object.assign(state, {nodeID: null, inventory: null, operations: [], result: null, preview: null, restoration: null, serverRestorePending: false, pending: false, message: "", draft: false, online: false, needsReload: false}); notify(); },
     setOnline(value) { state.online = value === true; notify(); },
     async open(nodeID, online = true) { if (state.nodeID === nodeID) { state.online = online; notify(); return; } this.clear(); state.nodeID = nodeID; state.online = online; await perform(load); },
     async reload() { if (state.pending) return; state.draft = false; state.preview = null; await perform(load); },
@@ -235,7 +245,7 @@ export function createConfigController({request, onChange = () => {}, now = () =
       });
     },
     async prepare(edit) {
-      if (!state.inventory || state.inventory.inventory.state !== "ready" || !state.online || restorationBlocksWrites(state.restoration) || state.needsReload || state.operations.some(op => activeStates.has(op.state))) return;
+      if (!state.inventory || state.inventory.inventory.state !== "ready" || !state.online || state.serverRestorePending || restorationBlocksWrites(state.restoration) || state.needsReload || state.operations.some(op => activeStates.has(op.state))) return;
       const generation = epoch, body = {service_id: state.inventory.service_id, base_revision: state.inventory.inventory.revision, idempotency_key: uuid(), deadline_at_ms: now() + 300000, ...edit};
       await perform(async () => { const result = await request(`${path()}/operations`, {method: "POST", body}); if (generation !== epoch) return; accept(result); state.draft = false; });
     },
@@ -246,6 +256,7 @@ export function createConfigController({request, onChange = () => {}, now = () =
     },
     async action(action) {
       if (!["apply", "cancel", "rollback"].includes(action) || !state.result || !state.online || restorationBlocksWrites(state.restoration)) return;
+      if (state.serverRestorePending && action !== "cancel") return;
       if (action === "apply" && !canApply(state.result, state.preview, now())) return;
       if (action === "rollback" && !canRollback(state.result)) return;
       const generation = epoch, op = state.result.operation, agent = state.result.agent, preview = state.preview;

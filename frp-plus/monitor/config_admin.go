@@ -31,23 +31,26 @@ type configActionRequest struct {
 	CandidateDigest string `json:"candidate_digest"`
 }
 type configOperationResponse struct {
-	Code              string                         `json:"code"`
-	Operation         *control.ConfigOperation       `json:"operation"`
-	Events            []control.ConfigOperationEvent `json:"events"`
-	Agent             *shared.ConfigOperationView    `json:"agent"`
-	AgentReceivedAtMS int64                          `json:"agent_received_at_ms"`
-	Preview           *shared.ConfigPreview          `json:"preview,omitempty"`
-	EventsTruncated   bool                           `json:"events_truncated"`
-	Replayed          bool                           `json:"replayed"`
+	Code                 string                         `json:"code"`
+	Operation            *control.ConfigOperation       `json:"operation"`
+	Events               []control.ConfigOperationEvent `json:"events"`
+	Agent                *shared.ConfigOperationView    `json:"agent"`
+	AgentReceivedAtMS    int64                          `json:"agent_received_at_ms"`
+	Preview              *shared.ConfigPreview          `json:"preview,omitempty"`
+	EventsTruncated      bool                           `json:"events_truncated"`
+	Replayed             bool                           `json:"replayed"`
+	ServerRestorePending bool                           `json:"server_restore_pending"`
 }
 
 func (s *Service) configResponse(ctx context.Context, o *control.ConfigOperation, code string, preview *shared.ConfigPreview, replayed bool) (configOperationResponse, error) {
 	events, err := s.control.ListRecentConfigOperationEvents(ctx, o.OperationID, 256)
-	return configOperationResponse{Code: code, Operation: o, Events: events, Agent: o.Agent, AgentReceivedAtMS: o.AgentReceivedAtMS, Preview: preview, Replayed: replayed, EventsTruncated: o.Version > int64(len(events))}, err
+	return configOperationResponse{Code: code, Operation: o, Events: events, Agent: o.Agent, AgentReceivedAtMS: o.AgentReceivedAtMS, Preview: preview, Replayed: replayed, EventsTruncated: o.Version > int64(len(events)), ServerRestorePending: s.serverRestorePending}, err
 }
 func configHTTPError(w http.ResponseWriter, err error) {
 	status, code := http.StatusServiceUnavailable, "unavailable"
 	switch {
+	case errors.Is(err, ErrServerRestorePending):
+		status, code = 409, "server_restore_pending"
 	case errors.Is(err, control.ErrAuditCapacity):
 		status, code = 503, "audit_capacity"
 	case errors.Is(err, control.ErrInvalid), errors.Is(err, ErrConfigInvalid):
@@ -138,12 +141,13 @@ func (s *Service) handleConfigAdmin(w http.ResponseWriter, r *http.Request, path
 			return true
 		}
 		adminJSON(w, 200, struct {
-			Code         string                  `json:"code"`
-			NodeID       string                  `json:"node_id"`
-			ServiceID    string                  `json:"service_id"`
-			ReceivedAtMS int64                   `json:"received_at_ms"`
-			Inventory    *shared.ConfigInventory `json:"inventory"`
-		}{"ok", nodeID, result.ServiceID, time.Now().UnixMilli(), result.Inventory})
+			Code                 string                  `json:"code"`
+			NodeID               string                  `json:"node_id"`
+			ServiceID            string                  `json:"service_id"`
+			ReceivedAtMS         int64                   `json:"received_at_ms"`
+			Inventory            *shared.ConfigInventory `json:"inventory"`
+			ServerRestorePending bool                    `json:"server_restore_pending"`
+		}{"ok", nodeID, result.ServiceID, time.Now().UnixMilli(), result.Inventory, s.serverRestorePending})
 		return true
 	}
 	if parts[3] == "restore" {
@@ -222,6 +226,9 @@ func (s *Service) handleConfigAdmin(w http.ResponseWriter, r *http.Request, path
 // Retry only an explicit local busy rejection, which guarantees the command
 // was not queued. Never retry an operation after a timeout or lost response.
 func (s *Service) pacedConfigCommand(ctx context.Context, node string, c shared.ConfigCommand, operation *control.ConfigOperation, actor string) (shared.ConfigResult, error) {
+	if serverRestoreActionBlocked(s.serverRestorePending, c.Action) {
+		return shared.ConfigResult{}, errors.Join(ErrConfigNotSent, ErrServerRestorePending)
+	}
 	for attempts := 0; attempts < 3; attempts++ {
 		kind, code := "dispatch", "dispatch_"+c.Action
 		if attempts > 0 {
@@ -245,6 +252,10 @@ func (s *Service) pacedConfigCommand(ctx context.Context, node string, c shared.
 	return shared.ConfigResult{}, ErrConfigBusy
 }
 func (s *Service) createConfigOperation(w http.ResponseWriter, r *http.Request, ctx context.Context, node, actor string) {
+	if s.serverRestorePending {
+		configHTTPError(w, ErrServerRestorePending)
+		return
+	}
 	var input configCreateRequest
 	if !decodeAdmin(w, r, &input) {
 		return
@@ -367,6 +378,10 @@ func (s *Service) createConfigOperation(w http.ResponseWriter, r *http.Request, 
 	}
 }
 func (s *Service) actionConfigOperation(w http.ResponseWriter, r *http.Request, ctx context.Context, o *control.ConfigOperation, action, actor string) {
+	if serverRestoreActionBlocked(s.serverRestorePending, action) {
+		configHTTPError(w, ErrServerRestorePending)
+		return
+	}
 	var input configActionRequest
 	if !decodeAdmin(w, r, &input) {
 		return

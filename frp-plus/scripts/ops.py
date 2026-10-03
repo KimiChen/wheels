@@ -604,7 +604,7 @@ def restore_confirm(directory, epoch, manifest_digest, *, offline=False, agent_b
                           '--manifest-digest', manifest_digest, *policy_arguments(policy, env_file)], folder, agent_binary)
     return restore_result(result, 'confirmed', manifest_digest)
 
-def backup(directory, output, *, offline=False, agent_binary=None, dependency_graph=False, complete=False, policy=None, env_file=None):
+def backup(directory, output, *, offline=False, agent_binary=None, dependency_graph=False, complete=False, policy=None, env_file=None, server_binary=None):
     if env_file and not policy:
         raise ValueError('local policy is required for template values')
     folder = private_directory(directory)
@@ -612,6 +612,11 @@ def backup(directory, output, *, offline=False, agent_binary=None, dependency_gr
     private_directory(output.parent)
     if output.exists() or output == folder or folder in output.parents:
         raise ValueError('backup output must be new and outside the runtime directory')
+    if server_binary is not None:
+        if agent_binary is not None or not policy:
+            raise ValueError('server checkpoints require one server binary and a local policy')
+        from ops_server_checkpoint import backup as server_backup
+        return server_backup(sys.modules[__name__], folder, output, offline=offline, server_binary=server_binary, policy=policy, env_file=env_file)
     if managed_profile(folder):
         if dependency_graph or complete or policy:
             from ops_checkpoint import backup as dependency_backup
@@ -659,7 +664,7 @@ def backup(directory, output, *, offline=False, agent_binary=None, dependency_gr
     return output
 
 
-def restore(archive_path, directory, *, offline=False, agent_binary=None, policy=None, source_policy=None, env_file=None, source_env_file=None):
+def restore(archive_path, directory, *, offline=False, agent_binary=None, policy=None, source_policy=None, env_file=None, source_env_file=None, server_binary=None):
     archive_path = path_without_links(archive_path)
     fd = os.open(archive_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     info = os.fstat(fd)
@@ -715,9 +720,9 @@ def restore(archive_path, directory, *, offline=False, agent_binary=None, policy
         version = archive_format(fd)
         if version == 4:
             from ops_checkpoint import restore as indexed_restore
-            return indexed_restore(sys.modules[__name__], fd, directory, offline=offline, agent_binary=agent_binary, policy=policy, source_policy=source_policy, env_file=env_file, source_env_file=source_env_file)
-        if policy or source_policy or env_file or source_env_file:
-            raise ValueError('explicit mapping requires format4 version3 Agent backup')
+            return indexed_restore(sys.modules[__name__], fd, directory, offline=offline, agent_binary=agent_binary, policy=policy, source_policy=source_policy, env_file=env_file, source_env_file=source_env_file, server_binary=server_binary)
+        if server_binary or policy or source_policy or env_file or source_env_file:
+            raise ValueError('explicit mapping requires a supported format4 checkpoint')
         if version == 3:
             return managed_restore(fd, directory, offline=offline, agent_binary=agent_binary)
         return new_directory(directory, write)
@@ -797,8 +802,10 @@ def main():
     load = commands.add_parser('restore')
     load.add_argument('--archive', required=True)
     load.add_argument('--directory', required=True)
-    load.add_argument('--offline', action='store_true', help='required for managed restore to the original directory')
+    load.add_argument('--offline', action='store_true', help='acknowledge stopped-service restoration')
     load.add_argument('--agent-binary', help='native Agent with managed-maintenance support')
+    for command in (save, load):
+        command.add_argument('--server-binary', help='native server with explicit-policy server-maintenance support')
     confirm = commands.add_parser('restore-confirm')
     confirm.add_argument('--directory', required=True)
     confirm.add_argument('--epoch', required=True)
@@ -806,10 +813,18 @@ def main():
     confirm.add_argument('--offline', action='store_true', help='required after runtime verification and administrator takeover')
     confirm.add_argument('--agent-binary', help='native Agent with managed-maintenance support')
     for command in (save, load, confirm):
-        command.add_argument('--policy', help='local private read/target policy for version3 Agent checkpoints')
+        command.add_argument('--policy', help='local private source/target policy for explicit Agent or server checkpoints')
         command.add_argument('--env-file', help='local private template values; never archived')
     load.add_argument('--source-policy', help='local authorization matching archived source roots and files')
     load.add_argument('--source-env-file', help='local source template values; defaults to target values')
+    server_confirm = commands.add_parser('server-restore-confirm')
+    server_confirm.add_argument('--directory', required=True)
+    server_confirm.add_argument('--checkpoint-id', required=True)
+    server_confirm.add_argument('--offline', action='store_true')
+    server_confirm.add_argument('--agents-reviewed', action='store_true', help='acknowledge review of Agent recovery outcomes')
+    server_confirm.add_argument('--server-binary', required=True)
+    server_confirm.add_argument('--policy', required=True, help='same local target authorization used for restoration')
+    server_confirm.add_argument('--env-file', help='local template values; never archived')
     unit = commands.add_parser('systemd')
     unit.add_argument('--role', choices=('server', 'agent'), required=True)
     unit.add_argument('--directory', default='/var/lib/frp-plus')
@@ -819,10 +834,16 @@ def main():
     try:
         if args.action == 'systemd':
             print(systemd_unit(args.role, args.directory, args.binary_directory, args.user), end='')
+        elif args.action == 'server-restore-confirm':
+            from ops_server_checkpoint import confirm as server_confirm_restore
+            result = server_confirm_restore(sys.modules[__name__], args.directory, args.checkpoint_id,
+                offline=args.offline, agents_reviewed=args.agents_reviewed, server_binary=args.server_binary,
+                policy=args.policy, env_file=args.env_file)
+            print(json.dumps(result, sort_keys=True))
         else:
             result = (server_init(args) if args.action == 'server-init' else agent_init(args) if args.action == 'agent-init'
-                      else backup(args.directory, args.output, offline=args.offline, agent_binary=args.agent_binary, dependency_graph=args.dependency_graph, complete=args.complete, policy=args.policy, env_file=args.env_file) if args.action == 'backup'
-                      else restore(args.archive, args.directory, offline=args.offline, agent_binary=args.agent_binary, policy=args.policy, source_policy=args.source_policy, env_file=args.env_file, source_env_file=args.source_env_file) if args.action == 'restore'
+                      else backup(args.directory, args.output, offline=args.offline, agent_binary=args.agent_binary, dependency_graph=args.dependency_graph, complete=args.complete, policy=args.policy, env_file=args.env_file, server_binary=args.server_binary) if args.action == 'backup'
+                      else restore(args.archive, args.directory, offline=args.offline, agent_binary=args.agent_binary, policy=args.policy, source_policy=args.source_policy, env_file=args.env_file, source_env_file=args.source_env_file, server_binary=args.server_binary) if args.action == 'restore'
                       else restore_confirm(args.directory, args.epoch, args.manifest_digest,
                                            offline=args.offline, agent_binary=args.agent_binary, policy=args.policy, env_file=args.env_file))
             if isinstance(result, dict):

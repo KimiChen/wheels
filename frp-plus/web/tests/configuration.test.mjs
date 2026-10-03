@@ -200,3 +200,84 @@ test('relocated material context remains separate from TTL expiry and cannot dis
 test("a restored identity without portable rollback authorization disables historical writes", () => {
   assert.equal(canRollback({code:"service_mismatch", operation:{state:"confirmed"}, agent:{materials_state:"retained"}}), false);
 });
+
+test('server restore gate keeps queries and cancel while refusing prepare/apply/rollback', async () => {
+  const requests = [];
+  const controller = createConfigController({now:()=>100000, uuid:()=>reference, request:async(path, options)=>{
+    requests.push([path, options]);
+    if (path.endsWith('/configuration')) return {...inventory(), server_restore_pending:true};
+    if (path.endsWith('/operations')) return {operations:[]};
+    if (path.endsWith('/cancel')) return {...result('cancelled'), server_restore_pending:true};
+    return {...result(), preview:preview(), server_restore_pending:true};
+  }});
+  await controller.open('1');
+  assert.equal(controller.state.serverRestorePending,true);
+  await controller.prepare({changes:[],secret_values:[]});
+  await controller.query(operation);
+  await controller.action('apply'); await controller.action('rollback');
+  assert.equal(requests.filter(([,options])=>options?.method==='POST').length,0);
+  await controller.action('cancel');
+  assert.equal(requests.at(-1)[0].endsWith('/cancel'),true);
+  assert.equal(controller.state.result.operation.state,'cancelled');
+  controller.clear(); assert.equal(controller.state.serverRestorePending,false);
+});
+
+test('server restore gate is learned from operation responses and fixed errors', async () => {
+  const controller = createConfigController({now:()=>100000, uuid:()=>reference, request:async(path, options)=>{
+    if (path.endsWith('/configuration')) return inventory();
+    if (path.endsWith('/operations') && !options) return {operations:[]};
+    if (options) throw Object.assign(new Error('server_restore_pending'), {code:'server_restore_pending',status:409});
+    return {...result('confirmed'),server_restore_pending:true};
+  }});
+  await controller.open('1');
+  await controller.prepare({changes:[],secret_values:[]});
+  assert.equal(controller.state.serverRestorePending,true);
+  assert.equal(controller.state.message,configErrors.server_restore_pending);
+  await controller.query(operation);
+  assert.equal(controller.state.serverRestorePending,true);
+});
+
+test('server restore gate accepts old responses and rejects nonboolean flags', () => {
+  assert.equal(readInventory(inventory(),'1').server_restore_pending,undefined);
+  for (const value of [0,1,'false',null,{}]) assert.throws(()=>readInventory({...inventory(),server_restore_pending:value},'1'));
+  assert.equal(readInventory({...inventory(),server_restore_pending:false},'1').server_restore_pending,false);
+});
+
+test('confirmed controller restart requires refreshed inventory before another edit', async () => {
+  let pending = true, writes = 0;
+  const controller = createConfigController({now:()=>100000,uuid:()=>reference,request:async(path, options)=>{
+    if (path.endsWith('/configuration')) return {...inventory(),server_restore_pending:pending};
+    if (path.endsWith('/operations') && !options) return {operations:[]};
+    if (options) { writes++; return {...result(),preview:preview(),server_restore_pending:pending}; }
+    return {...result('cancelled'),server_restore_pending:pending};
+  }});
+  await controller.open('1'); pending = false;
+  await controller.query(operation);
+  assert.equal(controller.state.serverRestorePending,false);
+  assert.equal(controller.state.needsReload,true);
+  await controller.prepare({changes:[],secret_values:[]}); assert.equal(writes,0);
+  await controller.reload(); await controller.prepare({changes:[],secret_values:[]}); assert.equal(writes,1);
+});
+
+test('lost takeover response can be acknowledged after Agent offline confirmation', async () => {
+  const requests = [];
+  const pending = restoreResponse('confirmed');
+  pending.restore.acknowledgement_id = reference;
+  pending.receipt = {id:reference,node_id:'1',service_id:service,epoch:reference,manifest_digest:base,context_revision:context,store_digest:candidate,state:'pending',version:1};
+  const controller = createConfigController({now:()=>120000,request:async(path, options)=>{
+    requests.push([path, options]);
+    if (path.endsWith('/configuration')) return {...inventory(),server_restore_pending:true};
+    if (path.endsWith('/operations')) return {operations:[]};
+    if (path.endsWith('/acknowledge')) return {...pending,receipt:{...pending.receipt,state:'acknowledged',version:2}};
+    return pending;
+  }});
+  await controller.open('1'); await controller.inspectRestore();
+  assert.equal(canAcknowledgeRestore(controller.state.restoration,120000),true);
+  await controller.prepare({changes:[],secret_values:[]});
+  assert.equal(requests.some(([,options])=>options?.method==='POST'),false);
+  await controller.acknowledgeRestore();
+  assert.equal(requests.at(-1)[0].endsWith('/restore/acknowledge'),true);
+  assert.equal(controller.state.restoration.receipt.state,'acknowledged');
+  assert.equal(controller.state.serverRestorePending,true);
+  assert.equal(canAcknowledgeRestore(controller.state.restoration,120000),false);
+});
