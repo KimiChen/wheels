@@ -10,6 +10,7 @@
 | `0003-persistence-shutdown.patch` | 监控启用时处理 TERM/INT，经原生退出路径取消并关闭监控存储；关闭监控时保留原生信号行为 |
 | `0004-frp-reconciliation.patch` | 从 Registry、Proxy Manager 和 Stats 提供有界只读快照，锁忙时返回 unavailable；保留身份与流量口径，不带认证秘密 |
 | `0005-frp-observation.patch` | 独立私有详情适配器、file/include/Store 来源、实际服务端入口、Proxy/Visitor/控制错误与恢复事件；不修改原生转发协议 |
+| `0006-config-management.patch` | 显式 Store 托管、原生写入口屏障、装载 Store 前恢复、整集内存替换，以及实际 Proxy/Visitor 运行验证；未托管模式保留原生行为 |
 
 补丁只包含上游既有文件的必要改动与相关测试，不提交完整上游树，不混入无关格式化。
 独立扩展通过 Overlay 映射到 `extension/frpmonitor/`。FRP wire protocol、原生命令、

@@ -69,6 +69,10 @@ type Service struct {
 	collector       sampler
 	snapshot        func() shared.FRP
 	detailProvider  shared.DetailProvider
+	configProvider  shared.ConfigProvider
+	configJobs      chan configJob
+	configBusy      atomic.Bool
+	configServiceID string
 	detailResults   chan shared.FRPDetail
 	detailPending   bool
 	mu              sync.Mutex
@@ -87,6 +91,16 @@ type Service struct {
 }
 
 func Start(ctx context.Context, cfg shared.AgentConfig, snapshot func() shared.FRP, providers ...shared.DetailProvider) (*Service, error) {
+	var detail shared.DetailProvider
+	if len(providers) != 0 {
+		detail = providers[0]
+	}
+	return StartWithProviders(ctx, cfg, snapshot, detail, nil)
+}
+
+// StartWithProviders preserves the original Start API. Management is opt-in
+// in local configuration and still requires explicit capability negotiation.
+func StartWithProviders(ctx context.Context, cfg shared.AgentConfig, snapshot func() shared.FRP, detail shared.DetailProvider, management shared.ConfigProvider) (*Service, error) {
 	if !cfg.Enabled {
 		return nil, nil
 	}
@@ -97,9 +111,16 @@ func Start(ctx context.Context, cfg shared.AgentConfig, snapshot func() shared.F
 	if err != nil {
 		return nil, errors.New("telemetry collector unavailable")
 	}
-	return start(ctx, cfg, snapshot, c, providers...)
+	return startWithProviders(ctx, cfg, snapshot, c, detail, management)
 }
 func start(ctx context.Context, cfg shared.AgentConfig, snapshot func() shared.FRP, c sampler, providers ...shared.DetailProvider) (*Service, error) {
+	var detail shared.DetailProvider
+	if len(providers) != 0 {
+		detail = providers[0]
+	}
+	return startWithProviders(ctx, cfg, snapshot, c, detail, nil)
+}
+func startWithProviders(ctx context.Context, cfg shared.AgentConfig, snapshot func() shared.FRP, c sampler, detail shared.DetailProvider, management shared.ConfigProvider) (*Service, error) {
 	token, err := readToken(cfg.TokenFile)
 	if err != nil {
 		return nil, err
@@ -120,8 +141,11 @@ func start(ctx context.Context, cfg shared.AgentConfig, snapshot func() shared.F
 	}
 	child, cancel := context.WithCancel(ctx)
 	s := &Service{ctx: child, cancel: cancel, cfg: cfg, token: token, collector: c, snapshot: snapshot, notify: make(chan struct{}, 1), intervalChanged: make(chan struct{}, 1), ready: make(chan struct{}), done: make(chan struct{}), dialer: websocket.Dialer{HandshakeTimeout: 5 * time.Second, TLSClientConfig: tlsCfg, ReadBufferSize: 4096, WriteBufferSize: 4096}}
-	if len(providers) != 0 {
-		s.detailProvider = providers[0]
+	s.detailProvider, s.configProvider = detail, management
+	if s.configEnabled() {
+		s.configJobs = make(chan configJob, 1)
+		s.wg.Add(1)
+		go s.guarded(s.configLoop)
 	}
 	s.interval.Store(int64(cfg.IntervalSeconds))
 	s.wg.Add(2)
@@ -426,12 +450,16 @@ func (s *Service) connect() (bool, bool) {
 	session := hex.EncodeToString(nonce[:])
 	current := s.current()
 	detailOffered := s.detailProvider != nil && response != nil && advertisedCapability(response.Header, shared.FRPDetailCapability)
+	configOffered := s.configEnabled() && response != nil && advertisedCapability(response.Header, shared.ConfigManageCapability)
 	hello := shared.Hello{Meta: shared.Meta{Schema: shared.SchemaVersion, SessionID: session, Sequence: 1, CollectedAt: current.at.Format(time.RFC3339Nano)}, Capabilities: []string{"metrics.v1", "frp.v1"}, Facts: current.facts, Extensions: extension(current.frp)}
 	if s.cfg.ProbeEnabled {
 		hello.Capabilities = append(hello.Capabilities, "ping.v1")
 	}
 	if detailOffered {
 		hello.Capabilities = append(hello.Capabilities, shared.FRPDetailCapability)
+	}
+	if configOffered {
+		hello.Capabilities = append(hello.Capabilities, shared.ConfigManageCapability)
 	}
 	if hello.Validate() != nil {
 		return false, false
@@ -451,7 +479,7 @@ func (s *Service) connect() (bool, bool) {
 	}
 	decoder := json.NewDecoder(strings.NewReader(string(data)))
 	decoder.DisallowUnknownFields()
-	if decoder.Decode(&answer) != nil || decoder.Decode(new(any)) != io.EOF || answer.JSONRPC != "2.0" || answer.ID != "hello" || answer.Result.Validate() != nil || answer.Result.SessionID != session || !capabilities(answer.Result.Capabilities, s.cfg.ProbeEnabled, detailOffered) {
+	if decoder.Decode(&answer) != nil || decoder.Decode(new(any)) != io.EOF || answer.JSONRPC != "2.0" || answer.ID != "hello" || answer.Result.Validate() != nil || answer.Result.SessionID != session || !capabilities(answer.Result.Capabilities, s.cfg.ProbeEnabled, detailOffered, configOffered) {
 		return false, false
 	}
 	negotiated := int64(answer.Result.ReportInterval)
@@ -467,8 +495,14 @@ func (s *Service) connect() (bool, bool) {
 	c.SetPongHandler(func(string) error { return c.SetReadDeadline(time.Now().Add(15 * time.Second)) })
 	var probes *probe.Engine
 	var results <-chan probe.Result
-	detailAccepted := false
+	detailAccepted, configAccepted := false, false
+	connectionCtx, connectionCancel := context.WithCancel(s.ctx)
+	defer connectionCancel()
+	configResults := make(chan shared.ConfigResult, 4)
 	for _, capability := range answer.Result.Capabilities {
+		if capability == shared.ConfigManageCapability {
+			configAccepted = true
+		}
 		if capability == shared.FRPDetailCapability {
 			detailAccepted = true
 		}
@@ -481,21 +515,26 @@ func (s *Service) connect() (bool, bool) {
 	readDone := make(chan struct{})
 	go func() {
 		defer close(readDone)
+		defer connectionCancel()
 		defer c.Close()
 		var taskSequence uint64
-		taskBudget, replenished := float64(4), time.Now()
+		burst, rate := float64(4), float64(1)
+		if configAccepted {
+			burst, rate = 8, 2
+		}
+		taskBudget, replenished := burst, time.Now()
 		for {
 			kind, data, err := c.ReadMessage()
 			if err != nil {
 				return
 			}
-			if kind != websocket.TextMessage || probes == nil {
+			if kind != websocket.TextMessage {
 				return
 			}
 			now := time.Now()
-			taskBudget += now.Sub(replenished).Seconds()
-			if taskBudget > 4 {
-				taskBudget = 4
+			taskBudget += now.Sub(replenished).Seconds() * rate
+			if taskBudget > burst {
+				taskBudget = burst
 			}
 			replenished = now
 			if taskBudget < 1 {
@@ -503,10 +542,25 @@ func (s *Service) connect() (bool, bool) {
 			}
 			taskBudget--
 			frame, err := shared.DecodeFrame(data)
-			if err != nil || frame.PingTasks == nil || frame.PingTasks.SessionID != session || frame.PingTasks.Sequence <= taskSequence || probes.Replace(*frame.PingTasks) != nil {
+			if err != nil {
 				return
 			}
-			taskSequence = frame.PingTasks.Sequence
+			switch {
+			case frame.ConfigCommand != nil && configAccepted:
+				command := *frame.ConfigCommand
+				if command.SessionID != session || command.Sequence <= taskSequence {
+					return
+				}
+				taskSequence = command.Sequence
+				s.dispatchConfig(configJob{ctx: connectionCtx, command: command, results: configResults})
+			case frame.PingTasks != nil && probes != nil:
+				if frame.PingTasks.SessionID != session || frame.PingTasks.Sequence <= taskSequence || probes.Replace(*frame.PingTasks) != nil {
+					return
+				}
+				taskSequence = frame.PingTasks.Sequence
+			default:
+				return
+			}
 			_ = c.SetReadDeadline(now.Add(15 * time.Second))
 		}
 	}()
@@ -578,6 +632,20 @@ func (s *Service) connect() (bool, bool) {
 			if !send() {
 				return stable(), false
 			}
+		case result := <-configResults:
+			if !configAccepted || result.SessionID != session {
+				continue
+			}
+			if !nextSequence(&sequence) {
+				return stable(), false
+			}
+			result.Meta = shared.Meta{Schema: shared.SchemaVersion, SessionID: session, Sequence: sequence, CollectedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+			if result.Validate() != nil {
+				continue
+			}
+			if writeFrame(c, "config.result", "", result) != nil {
+				return stable(), false
+			}
 		case result := <-results:
 			if !probes.Current(result.TaskVersion, result.TaskID) {
 				continue
@@ -592,12 +660,13 @@ func (s *Service) connect() (bool, bool) {
 		}
 	}
 }
-func capabilities(c []string, probeEnabled, detailOffered bool) bool {
+func capabilities(c []string, probeEnabled, detailOffered bool, configOptions ...bool) bool {
+	configOffered := len(configOptions) != 0 && configOptions[0]
 	metrics := false
 	for _, v := range c {
 		if v == "metrics.v1" {
 			metrics = true
-		} else if v != "frp.v1" && (v != "ping.v1" || !probeEnabled) && (v != shared.FRPDetailCapability || !detailOffered) {
+		} else if v != "frp.v1" && (v != "ping.v1" || !probeEnabled) && (v != shared.FRPDetailCapability || !detailOffered) && (v != shared.ConfigManageCapability || !configOffered) {
 			return false
 		}
 	}

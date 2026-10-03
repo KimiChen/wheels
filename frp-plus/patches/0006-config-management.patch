@@ -1,0 +1,1531 @@
+diff --git a/client/config_manager.go b/client/config_manager.go
+index 4476491..9cf8103 100644
+--- a/client/config_manager.go
++++ b/client/config_manager.go
+@@ -24,6 +24,9 @@ func newServiceConfigManager(svr *Service) configmgmt.ConfigManager {
+ }
+ 
+ func (m *serviceConfigManager) ReloadFromFile(strict bool) error {
++	if m.svr.managedEngine != nil {
++		return configmgmt.ErrConflict
++	}
+ 	if m.svr.configFilePath == "" {
+ 		return fmt.Errorf("%w: frpc has no config file path", configmgmt.ErrInvalidArgument)
+ 	}
+@@ -66,6 +69,9 @@ func (m *serviceConfigManager) ReadConfigFile() (string, error) {
+ }
+ 
+ func (m *serviceConfigManager) WriteConfigFile(content []byte) error {
++	if m.svr.managedEngine != nil {
++		return configmgmt.ErrConflict
++	}
+ 	if len(content) == 0 {
+ 		return fmt.Errorf("%w: body can't be empty", configmgmt.ErrInvalidArgument)
+ 	}
+@@ -176,6 +182,10 @@ func (m *serviceConfigManager) GetStoreProxy(name string) (v1.ProxyConfigurer, e
+ }
+ 
+ func (m *serviceConfigManager) CreateStoreProxy(cfg v1.ProxyConfigurer) (v1.ProxyConfigurer, error) {
++	if m.svr.managedEngine != nil {
++		return nil, configmgmt.ErrConflict
++	}
++
+ 	if err := m.validateStoreProxyConfigurer(cfg); err != nil {
+ 		return nil, fmt.Errorf("%w: validation error: %v", configmgmt.ErrInvalidArgument, err)
+ 	}
+@@ -198,6 +208,10 @@ func (m *serviceConfigManager) CreateStoreProxy(cfg v1.ProxyConfigurer) (v1.Prox
+ }
+ 
+ func (m *serviceConfigManager) UpdateStoreProxy(name string, cfg v1.ProxyConfigurer) (v1.ProxyConfigurer, error) {
++	if m.svr.managedEngine != nil {
++		return nil, configmgmt.ErrConflict
++	}
++
+ 	if name == "" {
+ 		return nil, fmt.Errorf("%w: proxy name is required", configmgmt.ErrInvalidArgument)
+ 	}
+@@ -230,6 +244,10 @@ func (m *serviceConfigManager) UpdateStoreProxy(name string, cfg v1.ProxyConfigu
+ }
+ 
+ func (m *serviceConfigManager) DeleteStoreProxy(name string) error {
++	if m.svr.managedEngine != nil {
++		return configmgmt.ErrConflict
++	}
++
+ 	if name == "" {
+ 		return fmt.Errorf("%w: proxy name is required", configmgmt.ErrInvalidArgument)
+ 	}
+@@ -276,6 +294,10 @@ func (m *serviceConfigManager) GetStoreVisitor(name string) (v1.VisitorConfigure
+ }
+ 
+ func (m *serviceConfigManager) CreateStoreVisitor(cfg v1.VisitorConfigurer) (v1.VisitorConfigurer, error) {
++	if m.svr.managedEngine != nil {
++		return nil, configmgmt.ErrConflict
++	}
++
+ 	if err := m.validateStoreVisitorConfigurer(cfg); err != nil {
+ 		return nil, fmt.Errorf("%w: validation error: %v", configmgmt.ErrInvalidArgument, err)
+ 	}
+@@ -299,6 +321,10 @@ func (m *serviceConfigManager) CreateStoreVisitor(cfg v1.VisitorConfigurer) (v1.
+ }
+ 
+ func (m *serviceConfigManager) UpdateStoreVisitor(name string, cfg v1.VisitorConfigurer) (v1.VisitorConfigurer, error) {
++	if m.svr.managedEngine != nil {
++		return nil, configmgmt.ErrConflict
++	}
++
+ 	if name == "" {
+ 		return nil, fmt.Errorf("%w: visitor name is required", configmgmt.ErrInvalidArgument)
+ 	}
+@@ -331,6 +357,10 @@ func (m *serviceConfigManager) UpdateStoreVisitor(name string, cfg v1.VisitorCon
+ }
+ 
+ func (m *serviceConfigManager) DeleteStoreVisitor(name string) error {
++	if m.svr.managedEngine != nil {
++		return configmgmt.ErrConflict
++	}
++
+ 	if name == "" {
+ 		return fmt.Errorf("%w: visitor name is required", configmgmt.ErrInvalidArgument)
+ 	}
+@@ -369,6 +399,10 @@ func (m *serviceConfigManager) storeSourceOrError() (*source.StoreSource, error)
+ func (m *serviceConfigManager) withStoreMutationAndReload(
+ 	fn func(storeSource *source.StoreSource) error,
+ ) error {
++	if m.svr.managedEngine != nil {
++		return configmgmt.ErrConflict
++	}
++
+ 	m.svr.reloadMu.Lock()
+ 	defer m.svr.reloadMu.Unlock()
+ 
+@@ -391,6 +425,10 @@ func (m *serviceConfigManager) withStoreProxyMutationAndReload(
+ 	name string,
+ 	fn func(storeSource *source.StoreSource) error,
+ ) (v1.ProxyConfigurer, error) {
++	if m.svr.managedEngine != nil {
++		return nil, configmgmt.ErrConflict
++	}
++
+ 	m.svr.reloadMu.Lock()
+ 	defer m.svr.reloadMu.Unlock()
+ 
+@@ -417,6 +455,10 @@ func (m *serviceConfigManager) withStoreVisitorMutationAndReload(
+ 	name string,
+ 	fn func(storeSource *source.StoreSource) error,
+ ) (v1.VisitorConfigurer, error) {
++	if m.svr.managedEngine != nil {
++		return nil, configmgmt.ErrConflict
++	}
++
+ 	m.svr.reloadMu.Lock()
+ 	defer m.svr.reloadMu.Unlock()
+ 
+diff --git a/client/managed.go b/client/managed.go
+new file mode 100644
+index 0000000..3f0d72c
+--- /dev/null
++++ b/client/managed.go
+@@ -0,0 +1,304 @@
++package client
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"os"
++	"sync/atomic"
++	"time"
++
++	"github.com/fatedier/frp/extension/frpmonitor/agent/configuration"
++	"github.com/fatedier/frp/extension/frpmonitor/agent/managed"
++	"github.com/fatedier/frp/pkg/config"
++	v1 "github.com/fatedier/frp/pkg/config/v1"
++	"github.com/fatedier/frp/pkg/policy/security"
++)
++
++var managedServiceInUse atomic.Bool
++
++func managedCommonClone(c *v1.ClientCommonConfig) (*v1.ClientCommonConfig, error) {
++	if c == nil {
++		return nil, managed.ErrRuntime
++	}
++	data, err := json.Marshal(c)
++	if err != nil {
++		return nil, managed.ErrRuntime
++	}
++	out := &v1.ClientCommonConfig{}
++	if json.Unmarshal(data, out) != nil {
++		return nil, managed.ErrRuntime
++	}
++	return out, nil
++}
++
++// Copy all memory under native locks and release them before disk inspection,
++// journaling, Engine calls or waits. Disabled objects remain in this snapshot.
++func (svr *Service) managedInput() (configuration.Input, error) {
++	if !svr.reloadMu.TryLock() {
++		return configuration.Input{}, managed.ErrBusy
++	}
++	defer svr.reloadMu.Unlock()
++	if !svr.cfgMu.TryRLock() {
++		return configuration.Input{}, managed.ErrBusy
++	}
++	defer svr.cfgMu.RUnlock()
++	if svr.configSource == nil || svr.storeSource == nil {
++		return configuration.Input{}, managed.ErrRuntime
++	}
++	startup, err := managedCommonClone(svr.common)
++	if err != nil {
++		return configuration.Input{}, err
++	}
++	reload, err := managedCommonClone(svr.reloadCommon)
++	if err != nil {
++		return configuration.Input{}, err
++	}
++	ps, vs, err := svr.configSource.SnapshotAll()
++	if err != nil {
++		return configuration.Input{}, managed.ErrRuntime
++	}
++	sp, sv, err := svr.storeSource.SnapshotAll()
++	if err != nil {
++		return configuration.Input{}, managed.ErrRuntime
++	}
++	cwd, err := os.Getwd()
++	if err != nil {
++		return configuration.Input{}, managed.ErrRuntime
++	}
++	env := map[string]string{}
++	for k, v := range config.GetValues().Envs {
++		env[k] = v
++	}
++	features := []string{}
++	for _, feature := range security.ClientUnsafeFeatures {
++		if svr.unsafeFeatures.IsEnabled(feature) {
++			features = append(features, feature)
++		}
++	}
++	return configuration.Input{ConfigFile: svr.configFilePath, StoreFile: svr.storeSource.Path(), WorkingDir: cwd, StartupCommon: startup, ReloadCommon: reload, FileMemory: configuration.Objects{Proxies: ps, Visitors: vs}, StoreMemory: configuration.Objects{Proxies: sp, Visitors: sv}, TemplateEnv: env, HTTPProxy: os.Getenv("http_proxy"), UnsafeFeatures: features, VirtualNetReady: svr.managedVNetReady.Load()}, nil
++}
++
++func (svr *Service) startManaged() error {
++	if svr.managedEngine == nil {
++		return nil
++	}
++	provider, err := configuration.NewProvider(svr.managedEngine, svr.managedInput)
++	if err != nil {
++		return managed.ErrRuntime
++	}
++	if err = svr.managedEngine.AttachRuntime(managed.Runtime{Check: svr.managedCheck, Apply: svr.managedApply, Verify: svr.managedVerify}); err != nil {
++		return managed.ErrRuntime
++	}
++	svr.managedProvider = provider
++	return nil
++}
++func (svr *Service) closeManaged() {
++	if svr.managedEngine != nil && svr.managedClosed.CompareAndSwap(false, true) {
++		if svr.managedEngine.Close() == nil {
++			managedServiceInUse.Store(false)
++		}
++	}
++}
++func (svr *Service) managedCheck(ctx context.Context, op managed.Operation, phase string) error {
++	if ctx.Err() != nil {
++		return ctx.Err()
++	}
++	in, err := svr.managedInput()
++	if err != nil {
++		return err
++	}
++	if phase == "apply" {
++		view, err := configuration.Inspect(in)
++		if err != nil || view.State != "ready" || view.Revision != op.BaseRevision || view.ContextRevision != op.ContextRevision {
++			return managed.ErrConflict
++		}
++	} else if phase == "rollback" || phase == "recovery" {
++		revision, err := configuration.InspectContext(in)
++		if err != nil || revision != op.ContextRevision {
++			return managed.ErrConflict
++		}
++	} else {
++		return managed.ErrInvalid
++	}
++	revision := op.ContextRevision
++	svr.managedContext.Store(&revision)
++	return nil
++}
++func (svr *Service) managedCheckContext(in configuration.Input) error {
++	expected := svr.managedContext.Load()
++	if expected == nil {
++		return managed.ErrConflict
++	}
++	current, err := configuration.InspectContext(in)
++	if err != nil || current != *expected {
++		return managed.ErrConflict
++	}
++	return nil
++}
++func managedStore(snapshot managed.StoreSnapshot) (configuration.Objects, error) {
++	if !snapshot.Exists {
++		if len(snapshot.Bytes) > 0 {
++			return configuration.Objects{}, managed.ErrInvalid
++		}
++		return configuration.Objects{}, nil
++	}
++	values, err := configuration.DecodeStore(snapshot.Bytes)
++	if err != nil {
++		return configuration.Objects{}, managed.ErrInvalid
++	}
++	return values, nil
++}
++func (svr *Service) managedApply(ctx context.Context, snapshot managed.StoreSnapshot) error {
++	if ctx.Err() != nil {
++		return ctx.Err()
++	}
++	values, err := managedStore(snapshot)
++	if err != nil {
++		return err
++	}
++	in, err := svr.managedInput()
++	if err != nil {
++		return err
++	}
++	if err = svr.managedCheckContext(in); err != nil {
++		return err
++	}
++	if !svr.reloadMu.TryLock() {
++		return managed.ErrBusy
++	}
++	defer svr.reloadMu.Unlock()
++	if ctx.Err() != nil {
++		return ctx.Err()
++	}
++	if svr.storeSource == nil {
++		return managed.ErrRuntime
++	}
++	if err = svr.storeSource.ReplaceManagedMemory(values.Proxies, values.Visitors); err != nil {
++		return managed.ErrRuntime
++	}
++	if err = svr.reloadConfigFromSourcesLocked(); err != nil {
++		return managed.ErrRuntime
++	}
++	return nil
++}
++func managedObjectsEqual(a, b configuration.Objects) bool {
++	encode := func(value configuration.Objects) ([]byte, error) {
++		values := map[string]any{}
++		for _, p := range value.Proxies {
++			if p == nil {
++				return nil, managed.ErrRuntime
++			}
++			key := "p/" + p.GetBaseConfig().Name
++			if _, ok := values[key]; ok {
++				return nil, managed.ErrRuntime
++			}
++			values[key] = p
++		}
++		for _, v := range value.Visitors {
++			if v == nil {
++				return nil, managed.ErrRuntime
++			}
++			key := "v/" + v.GetBaseConfig().Name
++			if _, ok := values[key]; ok {
++				return nil, managed.ErrRuntime
++			}
++			values[key] = v
++		}
++		return json.Marshal(values)
++	}
++	left, e1 := encode(a)
++	right, e2 := encode(b)
++	return e1 == nil && e2 == nil && string(left) == string(right)
++}
++func managedEffective(in configuration.Input, store configuration.Objects) configuration.Objects {
++	ps := append(append([]v1.ProxyConfigurer{}, in.FileMemory.Proxies...), store.Proxies...)
++	vs := append(append([]v1.VisitorConfigurer{}, in.FileMemory.Visitors...), store.Visitors...)
++	ps, vs = config.FilterClientConfigurers(in.ReloadCommon, ps, vs)
++	return configuration.Objects{Proxies: config.CompleteProxyConfigurers(ps), Visitors: config.CompleteVisitorConfigurers(vs)}
++}
++func (svr *Service) managedVerifyOnce(snapshot managed.StoreSnapshot) (managed.Verification, error) {
++	result := managed.Verification{}
++	desired, err := managedStore(snapshot)
++	if err != nil {
++		return result, err
++	}
++	in, err := svr.managedInput()
++	if err != nil {
++		return result, err
++	}
++	if err = svr.managedCheckContext(in); err != nil {
++		return result, err
++	}
++	if !managedObjectsEqual(desired, in.StoreMemory) {
++		return result, nil
++	}
++	expected := managedEffective(in, desired)
++	if !svr.cfgMu.TryRLock() {
++		return result, managed.ErrBusy
++	}
++	loaded := managedObjectsEqual(expected, configuration.Objects{Proxies: svr.proxyCfgs, Visitors: svr.visitorCfgs})
++	svr.cfgMu.RUnlock()
++	result.RuntimeLoaded = loaded
++	if !loaded {
++		return result, nil
++	}
++	if !svr.ctlMu.TryRLock() {
++		return result, managed.ErrBusy
++	}
++	ctl := svr.ctl
++	svr.ctlMu.RUnlock()
++	if ctl == nil || ctl.pm == nil || ctl.vm == nil {
++		return result, nil
++	}
++	select {
++	case <-ctl.Done():
++		return result, nil
++	default:
++	}
++	ps, pr, pa := ctl.pm.ManagedSnapshot()
++	vs, vr, va := ctl.vm.ManagedSnapshot()
++	if !pa || !va {
++		return result, managed.ErrBusy
++	}
++	result.RuntimeLoaded = managedObjectsEqual(expected, configuration.Objects{Proxies: ps, Visitors: vs})
++	result.ResourcesReady = result.RuntimeLoaded && pr && vr
++	if !svr.ctlMu.TryRLock() {
++		return result, managed.ErrBusy
++	}
++	current := svr.ctl == ctl
++	svr.ctlMu.RUnlock()
++	select {
++	case <-ctl.Done():
++		current = false
++	default:
++	}
++	if !current {
++		result.ResourcesReady = false
++	}
++	// No network probe is attempted; registration/listening is not business reachability.
++	return result, nil
++}
++func (svr *Service) managedVerify(ctx context.Context, snapshot managed.StoreSnapshot) (managed.Verification, error) {
++	ticker := time.NewTicker(50 * time.Millisecond)
++	defer ticker.Stop()
++	last := managed.Verification{}
++	for {
++		if ctx.Err() != nil {
++			return last, ctx.Err()
++		}
++		view, err := svr.managedVerifyOnce(snapshot)
++		last = view
++		if err != nil && !errors.Is(err, managed.ErrBusy) {
++			return last, err
++		}
++		if err == nil && view.RuntimeLoaded && view.ResourcesReady {
++			return view, nil
++		}
++		select {
++		case <-ctx.Done():
++			return last, ctx.Err()
++		case <-ticker.C:
++		}
++	}
++}
+diff --git a/client/managed_test.go b/client/managed_test.go
+new file mode 100644
+index 0000000..ceb6cd2
+--- /dev/null
++++ b/client/managed_test.go
+@@ -0,0 +1,228 @@
++package client
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"os"
++	"path/filepath"
++	"testing"
++	"time"
++
++	"github.com/fatedier/frp/client/configmgmt"
++	"github.com/fatedier/frp/client/proxy"
++	"github.com/fatedier/frp/client/visitor"
++	"github.com/fatedier/frp/extension/frpmonitor/agent/configuration"
++	"github.com/fatedier/frp/extension/frpmonitor/agent/managed"
++	"github.com/fatedier/frp/extension/frpmonitor/shared"
++	"github.com/fatedier/frp/pkg/config"
++	"github.com/fatedier/frp/pkg/config/source"
++	v1 "github.com/fatedier/frp/pkg/config/v1"
++	"github.com/fatedier/frp/pkg/policy/security"
++)
++
++func managedFixture(t *testing.T) *Service {
++	t.Helper()
++	dir, err := filepath.EvalSymlinks(t.TempDir())
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err = os.Chmod(dir, 0700); err != nil {
++		t.Fatal(err)
++	}
++	storePath := filepath.Join(dir, "store.json")
++	file := filepath.Join(dir, "frpc.json")
++	data, _ := json.Marshal(map[string]any{"serverAddr": "127.0.0.1", "store": map[string]any{"path": storePath}})
++	if err = os.WriteFile(file, data, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err = os.WriteFile(storePath, []byte(`{"proxies":[],"visitors":[]}`), 0600); err != nil {
++		t.Fatal(err)
++	}
++	result, err := config.LoadClientConfigResult(file, true)
++	if err != nil {
++		t.Fatal(err)
++	}
++	fs := source.NewConfigSource()
++	if err = fs.ReplaceAll(result.Proxies, result.Visitors); err != nil {
++		t.Fatal(err)
++	}
++	fs.ClaimManaged()
++	ss, err := source.NewStoreSource(source.StoreSourceConfig{Path: storePath, Managed: true})
++	if err != nil {
++		t.Fatal(err)
++	}
++	engine, err := managed.Open(managed.Options{Root: dir, StorePath: storePath})
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() { engine.Close() })
++	agg := source.NewAggregator(fs)
++	agg.SetStoreSource(ss)
++	return &Service{ctx: context.Background(), common: result.Common, reloadCommon: result.Common, configFilePath: file, configSource: fs, storeSource: ss, aggregator: agg, managedEngine: engine, unsafeFeatures: security.NewUnsafeFeatures(nil)}
++}
++func managedBase(t *testing.T, s *Service) managed.Operation {
++	t.Helper()
++	in, err := s.managedInput()
++	if err != nil {
++		t.Fatal(err)
++	}
++	view, err := configuration.Inspect(in)
++	if err != nil || view.State != "ready" {
++		t.Fatalf("invalid fixture: %v %#v", err, view)
++	}
++	return managed.Operation{BaseRevision: view.Revision, ContextRevision: view.ContextRevision}
++}
++func TestManagedNativeApplyVerifyAndWholeSetDeletion(t *testing.T) {
++	s := managedFixture(t)
++	ctx := context.Background()
++	op := managedBase(t, s)
++	if err := s.managedCheck(ctx, op, "apply"); err != nil {
++		t.Fatal(err)
++	}
++	desired := managed.StoreSnapshot{Exists: true, Bytes: []byte(`{"proxies":[{"name":"off","type":"tcp","localPort":80,"enabled":false}],"visitors":[{"name":"v","type":"stcp","serverName":"peer","bindPort":-1}]}`)}
++	if err := os.WriteFile(s.storeSource.Path(), desired.Bytes, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := s.managedApply(ctx, desired); err != nil {
++		t.Fatal(err)
++	}
++	data, _ := os.ReadFile(s.storeSource.Path())
++	if string(data) != string(desired.Bytes) {
++		t.Fatal("runtime apply rewrote disk")
++	}
++	ps, vs, _ := s.storeSource.SnapshotAll()
++	if len(ps) != 1 || len(vs) != 1 || len(s.proxyCfgs) != 0 || len(s.visitorCfgs) != 1 {
++		t.Fatal("disabled inventory or effective runtime incomplete")
++	}
++	view, err := s.managedVerifyOnce(desired)
++	if err != nil || !view.RuntimeLoaded || view.ResourcesReady {
++		t.Fatal("nil control reported resource readiness")
++	}
++	deadline, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
++	defer cancel()
++	view, err = s.managedVerify(deadline, desired)
++	if !errors.Is(err, context.DeadlineExceeded) || view.ResourcesReady {
++		t.Fatal("verification ignored missing control")
++	}
++	pm := proxy.NewManager(ctx, s.common, nil, nil, nil, "")
++	vm := visitor.NewManager(ctx, "run", s.common, nil, nil, nil)
++	defer pm.Close()
++	defer vm.Close()
++	s.ctl = &Control{ctx: ctx, pm: pm, vm: vm, doneCh: make(chan struct{})}
++	vm.UpdateAll(s.visitorCfgs)
++	view, err = s.managedVerifyOnce(desired)
++	if err != nil || !view.RuntimeLoaded || !view.ResourcesReady || view.BusinessChecked {
++		t.Fatal("real internal visitor not verified", err, view)
++	}
++	// Applying the empty entire Store removes both disabled inventory and running visitors.
++	empty := managed.StoreSnapshot{Exists: true, Bytes: []byte(`{"proxies":[],"visitors":[]}`)}
++	if err = os.WriteFile(s.storeSource.Path(), empty.Bytes, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err = s.managedApply(ctx, empty); err != nil {
++		t.Fatal(err)
++	}
++	view, err = s.managedVerifyOnce(empty)
++	if err != nil || !view.ResourcesReady {
++		t.Fatal("deletion not independently verified", err, view)
++	}
++	ps, vs, _ = s.storeSource.SnapshotAll()
++	if len(ps)+len(vs) != 0 {
++		t.Fatal("old Store entries retained")
++	}
++	close(s.ctl.doneCh)
++	view, _ = s.managedVerifyOnce(empty)
++	if view.ResourcesReady {
++		t.Fatal("closed control reported ready")
++	}
++}
++func TestManagedNativeCASAndWriteEntrypoints(t *testing.T) {
++	s := managedFixture(t)
++	ctx := context.Background()
++	op := managedBase(t, s)
++	manager := &serviceConfigManager{svr: s}
++	before, _ := os.ReadFile(s.configFilePath)
++	if !errors.Is(manager.ReloadFromFile(true), configmgmt.ErrConflict) || !errors.Is(manager.WriteConfigFile([]byte("invalid")), configmgmt.ErrConflict) {
++		t.Fatal("native file API bypassed ownership")
++	}
++	calls := 0
++	if !errors.Is(manager.withStoreMutationAndReload(func(*source.StoreSource) error { calls++; return nil }), configmgmt.ErrConflict) {
++		t.Fatal("Store mutation accepted")
++	}
++	if _, err := manager.withStoreProxyMutationAndReload("x", func(*source.StoreSource) error { calls++; return nil }); !errors.Is(err, configmgmt.ErrConflict) {
++		t.Fatal("proxy mutation accepted")
++	}
++	if _, err := manager.withStoreVisitorMutationAndReload("x", func(*source.StoreSource) error { calls++; return nil }); !errors.Is(err, configmgmt.ErrConflict) {
++		t.Fatal("visitor mutation accepted")
++	}
++	if calls != 0 {
++		t.Fatal("blocked mutation callback executed")
++	}
++	if !errors.Is(s.UpdateConfigSource(s.common, nil, nil), source.ErrManaged) || !errors.Is(s.UpdateAllConfigurer(nil, nil), source.ErrManaged) {
++		t.Fatal("supported native write bypassed ownership")
++	}
++	after, _ := os.ReadFile(s.configFilePath)
++	if string(after) != string(before) {
++		t.Fatal("blocked file edit wrote disk")
++	}
++	if err := s.managedCheck(ctx, op, "apply"); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(s.storeSource.Path(), []byte("changed raw Store"), 0600); err != nil {
++		t.Fatal(err)
++	}
++	if !errors.Is(s.managedCheck(ctx, op, "apply"), managed.ErrConflict) {
++		t.Fatal("full CAS omitted Store")
++	}
++	if err := s.managedCheck(ctx, op, "rollback"); err != nil {
++		t.Fatal("rollback incorrectly parsed Store", err)
++	}
++	if err := os.WriteFile(s.configFilePath, append(before, ' '), 0600); err != nil {
++		t.Fatal(err)
++	}
++	if !errors.Is(s.managedCheck(ctx, op, "recovery"), managed.ErrConflict) {
++		t.Fatal("context drift accepted during recovery")
++	}
++	if _, err := managedStore(managed.StoreSnapshot{Exists: true}); err == nil {
++		t.Fatal("existing empty Store accepted")
++	}
++	if _, err := managedStore(managed.StoreSnapshot{}); err != nil {
++		t.Fatal("missing Store not represented independently")
++	}
++}
++func TestManagedNativeLockBusyAndCancelledApply(t *testing.T) {
++	s := managedFixture(t)
++	s.reloadMu.Lock()
++	_, err := s.managedInput()
++	s.reloadMu.Unlock()
++	if !errors.Is(err, managed.ErrBusy) {
++		t.Fatal("snapshot waited behind reload")
++	}
++	ctx, cancel := context.WithCancel(context.Background())
++	cancel()
++	if !errors.Is(s.managedApply(ctx, managed.StoreSnapshot{}), context.Canceled) {
++		t.Fatal("cancelled callback continued")
++	}
++	if _, err = managedStore(managed.StoreSnapshot{Exists: true, Bytes: []byte(`{"proxies":[],"proxies":[]}`)}); err == nil {
++		t.Fatal("runtime snapshot allowed duplicate members")
++	}
++}
++
++func TestManagedNewServiceFailureReleasesEngine(t *testing.T) {
++	s := managedFixture(t)
++	s.common.Telemetry = shared.AgentConfig{Enabled: true, Endpoint: "ws://127.0.0.1:1/agent/v1/ws", TokenFile: filepath.Join(filepath.Dir(s.storeSource.Path()), "token"), AllowInsecureLoopback: true, ConfigManagement: &shared.ConfigManagementConfig{Enabled: true, Root: filepath.Dir(s.storeSource.Path())}}
++	s.common.Auth = v1.AuthClientConfig{Method: v1.AuthMethodOIDC, OIDC: v1.AuthOIDCClientConfig{TokenEndpointURL: "://invalid"}}
++	_, err := NewService(ServiceOptions{Common: s.common, ConfigSourceAggregator: s.aggregator, ConfigFilePath: s.configFilePath, ManagedEngine: s.managedEngine})
++	if err == nil {
++		t.Fatal("invalid startup succeeded")
++	}
++	reopened, err := managed.Open(managed.Options{Root: filepath.Dir(s.storeSource.Path()), StorePath: s.storeSource.Path()})
++	if err != nil {
++		t.Fatal("startup failure retained engine lock", err)
++	}
++	reopened.Close()
++	if managedServiceInUse.Load() {
++		t.Fatal("startup failure retained service claim")
++	}
++}
+diff --git a/client/proxy/managed.go b/client/proxy/managed.go
+new file mode 100644
+index 0000000..706db72
+--- /dev/null
++++ b/client/proxy/managed.go
+@@ -0,0 +1,27 @@
++package proxy
++
++import v1 "github.com/fatedier/frp/pkg/config/v1"
++
++// ManagedSnapshot observes actual manager objects and registration phases.
++// It never starts traffic and never waits behind proxy work.
++func (pm *Manager) ManagedSnapshot() ([]v1.ProxyConfigurer, bool, bool) {
++	if !pm.mu.TryRLock() {
++		return nil, false, false
++	}
++	defer pm.mu.RUnlock()
++	out := make([]v1.ProxyConfigurer, 0, len(pm.proxies))
++	ready := !pm.closed
++	for _, p := range pm.proxies {
++		if !p.mu.TryRLock() {
++			return nil, false, false
++		}
++		if p.Cfg == nil {
++			p.mu.RUnlock()
++			return nil, false, false
++		}
++		out = append(out, p.Cfg.Clone())
++		ready = ready && p.Phase == ProxyPhaseRunning
++		p.mu.RUnlock()
++	}
++	return out, ready, true
++}
+diff --git a/client/proxy/managed_test.go b/client/proxy/managed_test.go
+new file mode 100644
+index 0000000..aaa0e7f
+--- /dev/null
++++ b/client/proxy/managed_test.go
+@@ -0,0 +1,36 @@
++package proxy
++
++import (
++	v1 "github.com/fatedier/frp/pkg/config/v1"
++	"testing"
++)
++
++func TestManagedProxyRegistrationAndConfigSnapshot(t *testing.T) {
++	cfg := &v1.TCPProxyConfig{ProxyBaseConfig: v1.ProxyBaseConfig{Name: "p", Type: "tcp"}}
++	p := &Wrapper{WorkingStatus: WorkingStatus{Name: "p", Cfg: cfg, Phase: ProxyPhaseWaitStart}}
++	pm := &Manager{proxies: map[string]*Wrapper{"p": p}}
++	values, ready, available := pm.ManagedSnapshot()
++	if !available || ready || len(values) != 1 {
++		t.Fatal("pending registration reported ready")
++	}
++	values[0].GetBaseConfig().Name = "changed"
++	if cfg.Name != "p" {
++		t.Fatal("snapshot aliases config")
++	}
++	p.Phase = ProxyPhaseRunning
++	_, ready, _ = pm.ManagedSnapshot()
++	if !ready {
++		t.Fatal("registered proxy not ready")
++	}
++	p.Phase = ProxyPhaseStartErr
++	_, ready, _ = pm.ManagedSnapshot()
++	if ready {
++		t.Fatal("registration failure ready")
++	}
++	p.mu.Lock()
++	_, _, available = pm.ManagedSnapshot()
++	p.mu.Unlock()
++	if available {
++		t.Fatal("busy proxy snapshot succeeded")
++	}
++}
+diff --git a/client/service.go b/client/service.go
+index 28e0941..af57c8e 100644
+--- a/client/service.go
++++ b/client/service.go
+@@ -30,6 +30,7 @@ import (
+ 	"github.com/samber/lo"
+ 
+ 	"github.com/fatedier/frp/client/proxy"
++	"github.com/fatedier/frp/extension/frpmonitor/agent/managed"
+ 	agentmonitor "github.com/fatedier/frp/extension/frpmonitor/agent/service"
+ 	"github.com/fatedier/frp/extension/frpmonitor/shared"
+ 	"github.com/fatedier/frp/pkg/auth"
+@@ -76,6 +77,7 @@ type ServiceOptions struct {
+ 	// ConfigSourceAggregator manages internal config and optional store sources.
+ 	// It is required for creating a Service.
+ 	ConfigSourceAggregator *source.Aggregator
++	ManagedEngine          *managed.Engine
+ 
+ 	UnsafeFeatures *security.UnsafeFeatures
+ 
+@@ -117,6 +119,12 @@ func setServiceOptionsDefault(options *ServiceOptions) error {
+ 
+ // Service is the client service that connects to frps and provides proxy services.
+ type Service struct {
++	managedEngine    *managed.Engine
++	managedProvider  shared.ConfigProvider
++	managedVNetReady atomic.Bool
++	managedClosed    atomic.Bool
++	managedContext   atomic.Pointer[string]
++
+ 	monitorControlError atomic.Pointer[shared.FRPErrorDetail]
+ 	ctlMu               sync.RWMutex
+ 	// Stores gracefulShutdownDuration independently from ctlMu, because the
+@@ -168,7 +176,27 @@ type Service struct {
+ 	handleWorkConnCb func(*v1.ProxyBaseConfig, net.Conn, *msg.StartWorkConn) bool
+ }
+ 
+-func NewService(options ServiceOptions) (*Service, error) {
++func NewService(options ServiceOptions) (result *Service, err error) {
++	claimed := false
++	defer func() {
++		if err != nil && options.ManagedEngine != nil {
++			_ = options.ManagedEngine.Close()
++			if claimed {
++				managedServiceInUse.Store(false)
++			}
++		}
++	}()
++	opted := options.Common != nil && options.Common.Telemetry.ConfigManagement != nil && options.Common.Telemetry.ConfigManagement.Enabled
++	if opted != (options.ManagedEngine != nil) {
++		return nil, errors.New("configuration management requires its startup engine")
++	}
++	if opted {
++		if telemetryInUse.Load() || !managedServiceInUse.CompareAndSwap(false, true) {
++			return nil, errors.New("configuration management requires one service per process")
++		}
++		claimed = true
++	}
++
+ 	if err := setServiceOptionsDefault(&options); err != nil {
+ 		return nil, err
+ 	}
+@@ -184,6 +212,12 @@ func NewService(options ServiceOptions) (*Service, error) {
+ 
+ 	configSource := options.ConfigSourceAggregator.ConfigSource()
+ 	storeSource := options.ConfigSourceAggregator.StoreSource()
++	if opted && (storeSource == nil || !storeSource.IsManaged()) {
++		return nil, errors.New("configuration management requires an owned Store")
++	}
++	if opted {
++		configSource.ClaimManaged()
++	}
+ 
+ 	proxyCfgs, visitorCfgs, loadErr := options.ConfigSourceAggregator.Load()
+ 	if loadErr != nil {
+@@ -205,6 +239,7 @@ func NewService(options ServiceOptions) (*Service, error) {
+ 	}
+ 
+ 	s := &Service{
++		managedEngine:    options.ManagedEngine,
+ 		ctx:              context.Background(),
+ 		auth:             authRuntime,
+ 		webServer:        webServer,
+@@ -233,39 +268,14 @@ func NewService(options ServiceOptions) (*Service, error) {
+ 
+ func (svr *Service) Run(ctx context.Context) error {
+ 	ctx, cancel := context.WithCancelCause(ctx)
++	defer cancel(nil)
+ 	svr.ctx = xlog.NewContext(ctx, xlog.FromContextSafe(ctx))
+ 	svr.cancel = cancel
+ 
+-	// Monitoring starts before the first FRP login, and never owns the tunnel lifecycle.
+-	if svr.common.Telemetry.Enabled {
+-		if telemetryInUse.CompareAndSwap(false, true) {
+-			done := make(chan struct{})
+-			go func() {
+-				defer close(done)
+-				defer telemetryInUse.Store(false)
+-				defer func() {
+-					if recover() != nil {
+-						log.Warnf("frp-plus telemetry stopped after an internal failure")
+-					}
+-				}()
+-				telemetry, err := agentmonitor.Start(svr.ctx, svr.common.Telemetry, svr.monitorSnapshot, svr.monitorDetail)
+-				if err != nil {
+-					log.Warnf("frp-plus telemetry initialization failed: %v", err)
+-					return
+-				}
+-				<-svr.ctx.Done()
+-				telemetry.Close()
+-			}()
+-			defer func() {
+-				cancel(nil)
+-				select {
+-				case <-done:
+-				case <-time.After(2 * time.Second):
+-				}
+-			}()
+-		} else {
+-			log.Warnf("frp-plus telemetry already belongs to another service in this process")
+-		}
++	cleanupTelemetry := func() {}
++	defer func() { cleanupTelemetry() }()
++	if svr.managedEngine == nil {
++		cleanupTelemetry = svr.startTelemetry()
+ 	}
+ 
+ 	// set custom DNSServer
+@@ -280,7 +290,9 @@ func (svr *Service) Run(ctx context.Context) error {
+ 			svr.stop()
+ 			return err
+ 		}
++		svr.managedVNetReady.Store(true)
+ 		go func() {
++			defer svr.managedVNetReady.Store(false)
+ 			log.Infof("virtual network controller start...")
+ 			if err := vnetController.Run(); err != nil && !errors.Is(err, net.ErrClosed) {
+ 				log.Warnf("virtual network controller exit with error: %v", err)
+@@ -288,6 +300,15 @@ func (svr *Service) Run(ctx context.Context) error {
+ 		}()
+ 	}
+ 
++	if err := svr.startManaged(); err != nil {
++		svr.stop()
++		return err
++	}
++
++	if svr.managedEngine != nil {
++		cleanupTelemetry = svr.startTelemetry()
++	}
++
+ 	if svr.webServer != nil {
+ 		webServer := svr.webServer
+ 		go func() {
+@@ -413,6 +434,12 @@ func (svr *Service) loopLoginUntilSuccess(maxInterval time.Duration, firstLoginE
+ }
+ 
+ func (svr *Service) UpdateAllConfigurer(proxyCfgs []v1.ProxyConfigurer, visitorCfgs []v1.VisitorConfigurer) error {
++	if svr.managedEngine != nil {
++		return source.ErrManaged
++	}
++	return svr.updateAllConfigurer(proxyCfgs, visitorCfgs)
++}
++func (svr *Service) updateAllConfigurer(proxyCfgs []v1.ProxyConfigurer, visitorCfgs []v1.VisitorConfigurer) error {
+ 	svr.cfgMu.Lock()
+ 	svr.proxyCfgs = proxyCfgs
+ 	svr.visitorCfgs = visitorCfgs
+@@ -434,6 +461,10 @@ func (svr *Service) UpdateConfigSource(
+ 	visitorCfgs []v1.VisitorConfigurer,
+ 	origins ...map[string]string,
+ ) error {
++	if svr.managedEngine != nil {
++		return source.ErrManaged
++	}
++
+ 	svr.reloadMu.Lock()
+ 	defer svr.reloadMu.Unlock()
+ 
+@@ -477,6 +508,7 @@ func (svr *Service) GracefulClose(d time.Duration) {
+ }
+ 
+ func (svr *Service) stop() {
++	svr.closeManaged()
+ 	// Coordinate shutdown with reload/update paths that read source pointers.
+ 	svr.reloadMu.Lock()
+ 	if svr.aggregator != nil {
+@@ -576,7 +608,7 @@ func (svr *Service) reloadConfigFromSourcesLocked() error {
+ 	}
+ 
+ 	// Atomically replace the entire configuration
+-	if err := svr.UpdateAllConfigurer(proxies, visitors); err != nil {
++	if err := svr.updateAllConfigurer(proxies, visitors); err != nil {
+ 		return err
+ 	}
+ 	return nil
+@@ -666,3 +698,39 @@ func (svr *Service) monitorSnapshot() shared.FRP {
+ 	}
+ 	return out
+ }
++
++func (svr *Service) startTelemetry() func() {
++	// Monitoring starts before the first FRP login, and never owns the tunnel lifecycle.
++	if svr.common.Telemetry.Enabled {
++		if telemetryInUse.CompareAndSwap(false, true) {
++			done := make(chan struct{})
++			go func() {
++				defer close(done)
++				defer telemetryInUse.Store(false)
++				defer func() {
++					if recover() != nil {
++						log.Warnf("frp-plus telemetry stopped after an internal failure")
++					}
++				}()
++				telemetry, err := agentmonitor.StartWithProviders(svr.ctx, svr.common.Telemetry, svr.monitorSnapshot, svr.monitorDetail, svr.managedProvider)
++				if err != nil {
++					log.Warnf("frp-plus telemetry initialization failed: %v", err)
++					return
++				}
++				<-svr.ctx.Done()
++				telemetry.Close()
++			}()
++			return func() {
++				svr.cancel(nil)
++				select {
++				case <-done:
++				case <-time.After(2 * time.Second):
++				}
++			}
++		} else {
++			log.Warnf("frp-plus telemetry already belongs to another service in this process")
++		}
++	}
++
++	return func() {}
++}
+diff --git a/client/visitor/managed.go b/client/visitor/managed.go
+new file mode 100644
+index 0000000..5da0eaf
+--- /dev/null
++++ b/client/visitor/managed.go
+@@ -0,0 +1,39 @@
++package visitor
++
++import v1 "github.com/fatedier/frp/pkg/config/v1"
++
++// ManagedSnapshot includes failed/pending configurations and verifies existing
++// listeners or the internal-only negative bind-port mode. Remote sessions are
++// deliberately not required or opened as a side effect of verification.
++func (vm *Manager) ManagedSnapshot() ([]v1.VisitorConfigurer, bool, bool) {
++	if !vm.mu.TryRLock() {
++		return nil, false, false
++	}
++	defer vm.mu.RUnlock()
++	out := make([]v1.VisitorConfigurer, 0, len(vm.cfgs))
++	ready := !vm.monitorClosed && len(vm.visitors) == len(vm.cfgs)
++	for name, cfg := range vm.cfgs {
++		out = append(out, cfg.Clone())
++		v := vm.visitors[name]
++		local := false
++		switch typed := v.(type) {
++		case *STCPVisitor:
++			local = managedLocalReady(typed.BaseVisitor, cfg.GetBaseConfig().BindPort)
++		case *XTCPVisitor:
++			local = managedLocalReady(typed.BaseVisitor, cfg.GetBaseConfig().BindPort)
++		case *SUDPVisitor:
++			local = typed.udpConn != nil && !typed.observation.localClosed.Load()
++		}
++		ready = ready && local
++	}
++	return out, ready, true
++}
++func managedLocalReady(v *BaseVisitor, port int) bool {
++	if v == nil || v.observation.localClosed.Load() {
++		return false
++	}
++	if port > 0 {
++		return v.l != nil
++	}
++	return port < 0 && v.internalLn != nil
++}
+diff --git a/client/visitor/managed_test.go b/client/visitor/managed_test.go
+new file mode 100644
+index 0000000..03074d7
+--- /dev/null
++++ b/client/visitor/managed_test.go
+@@ -0,0 +1,53 @@
++package visitor
++
++import (
++	"context"
++	v1 "github.com/fatedier/frp/pkg/config/v1"
++	"net"
++	"testing"
++)
++
++func TestManagedVisitorRealListenerAndInternalOnlyMode(t *testing.T) {
++	listener, err := net.Listen("tcp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer listener.Close()
++	port := listener.Addr().(*net.TCPAddr).Port
++	cfg := &v1.STCPVisitorConfig{VisitorBaseConfig: v1.VisitorBaseConfig{Name: "v", Type: "stcp", ServerName: "peer", BindAddr: "127.0.0.1", BindPort: port}}
++	vm := NewManager(context.Background(), "run", &v1.ClientCommonConfig{}, nil, nil, nil)
++	defer vm.Close()
++	vm.UpdateAll([]v1.VisitorConfigurer{cfg})
++	values, ready, available := vm.ManagedSnapshot()
++	if !available || ready || len(values) != 1 {
++		t.Fatal("failed bind reported ready")
++	}
++	listener.Close()
++	vm.mu.Lock()
++	err = vm.startVisitor(cfg)
++	vm.mu.Unlock()
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, ready, _ = vm.ManagedSnapshot()
++	if !ready {
++		t.Fatal("actual listener not ready")
++	}
++	internal := cfg.Clone()
++	internal.GetBaseConfig().BindPort = -1
++	vm.UpdateAll([]v1.VisitorConfigurer{internal})
++	values, ready, _ = vm.ManagedSnapshot()
++	if !ready || values[0].GetBaseConfig().BindPort != -1 {
++		t.Fatal("internal listener mode missing")
++	}
++	vm.UpdateAll(nil)
++	values, ready, _ = vm.ManagedSnapshot()
++	if !ready || len(values) != 0 {
++		t.Fatal("deleted visitor retained")
++	}
++	vm.Close()
++	_, ready, _ = vm.ManagedSnapshot()
++	if ready {
++		t.Fatal("closed manager ready")
++	}
++}
+diff --git a/cmd/frpc/sub/managed.go b/cmd/frpc/sub/managed.go
+new file mode 100644
+index 0000000..d33d185
+--- /dev/null
++++ b/cmd/frpc/sub/managed.go
+@@ -0,0 +1,62 @@
++package sub
++
++import (
++	"context"
++	"errors"
++	"github.com/fatedier/frp/extension/frpmonitor/agent/configuration"
++	"github.com/fatedier/frp/extension/frpmonitor/agent/managed"
++	"github.com/fatedier/frp/pkg/config"
++	"github.com/fatedier/frp/pkg/config/source"
++	"github.com/fatedier/frp/pkg/policy/security"
++	"os"
++	"path/filepath"
++	"sync/atomic"
++)
++
++var managedCommandInUse atomic.Bool
++
++func openManagedEngine(result *config.ClientConfigLoadResult, fileSource *source.ConfigSource, storePath string, unsafe *security.UnsafeFeatures, configFile string) (*managed.Engine, error) {
++	opt := result.Common.Telemetry.ConfigManagement
++	if opt == nil || !opt.Enabled {
++		return nil, nil
++	}
++	if cfgDir != "" || !result.Common.Store.IsEnabled() || !filepath.IsAbs(storePath) || filepath.Dir(filepath.Clean(storePath)) != opt.Root {
++		return nil, errors.New("configuration management requires one explicit private Store")
++	}
++	if !managedCommandInUse.CompareAndSwap(false, true) {
++		return nil, errors.New("configuration management requires one service per process")
++	}
++	// This process owns a single managed service for its full command lifetime.
++	ps, vs, err := fileSource.SnapshotAll()
++	if err != nil {
++		managedCommandInUse.Store(false)
++		return nil, errors.New("configuration source unavailable")
++	}
++	cwd, err := os.Getwd()
++	if err != nil {
++		managedCommandInUse.Store(false)
++		return nil, errors.New("configuration context unavailable")
++	}
++	features := []string{}
++	for _, feature := range security.ClientUnsafeFeatures {
++		if unsafe.IsEnabled(feature) {
++			features = append(features, feature)
++		}
++	}
++	input := configuration.Input{ConfigFile: configFile, StoreFile: storePath, WorkingDir: cwd, StartupCommon: result.Common, ReloadCommon: result.Common, FileMemory: configuration.Objects{Proxies: ps, Visitors: vs}, TemplateEnv: config.GetValues().Envs, HTTPProxy: os.Getenv("http_proxy"), UnsafeFeatures: features}
++	engine, err := managed.Open(managed.Options{Root: opt.Root, StorePath: storePath, RecoveryCheck: func(ctx context.Context, op managed.Operation) error {
++		if ctx.Err() != nil {
++			return ctx.Err()
++		}
++		revision, err := configuration.InspectContext(input)
++		if err != nil || revision != op.ContextRevision {
++			return managed.ErrConflict
++		}
++		return nil
++	}})
++	if err != nil {
++		managedCommandInUse.Store(false)
++		return nil, errors.New("managed Store initialization failed")
++	}
++	return engine, nil
++}
+diff --git a/cmd/frpc/sub/managed_test.go b/cmd/frpc/sub/managed_test.go
+new file mode 100644
+index 0000000..80dfb71
+--- /dev/null
++++ b/cmd/frpc/sub/managed_test.go
+@@ -0,0 +1,75 @@
++package sub
++
++import (
++	"encoding/json"
++	"os"
++	"path/filepath"
++	"testing"
++
++	"github.com/fatedier/frp/extension/frpmonitor/shared"
++	"github.com/fatedier/frp/pkg/config"
++	"github.com/fatedier/frp/pkg/config/source"
++	"github.com/fatedier/frp/pkg/policy/security"
++)
++
++func TestManagedCommandOptInAndFixedStore(t *testing.T) {
++	dir, err := filepath.EvalSymlinks(t.TempDir())
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err = os.Chmod(dir, 0700); err != nil {
++		t.Fatal(err)
++	}
++	storePath := filepath.Join(dir, "store.json")
++	file := filepath.Join(dir, "frpc.json")
++	telemetry := shared.AgentConfig{Enabled: true, Endpoint: "ws://127.0.0.1:1/agent/v1/ws", TokenFile: filepath.Join(dir, "token"), AllowInsecureLoopback: true, ConfigManagement: &shared.ConfigManagementConfig{Enabled: true, Root: dir}}
++	data, _ := json.Marshal(map[string]any{"serverAddr": "127.0.0.1", "store": map[string]any{"path": storePath}, "telemetry": telemetry})
++	if err = os.WriteFile(file, data, 0600); err != nil {
++		t.Fatal(err)
++	}
++	result, err := config.LoadClientConfigResult(file, true)
++	if err != nil {
++		t.Fatal(err)
++	}
++	fs := source.NewConfigSource()
++	if err = fs.ReplaceAll(result.Proxies, result.Visitors); err != nil {
++		t.Fatal(err)
++	}
++	unsafe := security.NewUnsafeFeatures(nil)
++	opt := result.Common.Telemetry.ConfigManagement
++	result.Common.Telemetry.ConfigManagement = nil
++	engine, err := openManagedEngine(result, fs, storePath, unsafe, file)
++	if err != nil || engine != nil {
++		t.Fatal("disabled opt-in created an engine")
++	}
++	if _, err = os.Stat(filepath.Join(dir, "identity.json")); !os.IsNotExist(err) {
++		t.Fatal("disabled mode wrote private root")
++	}
++	result.Common.Telemetry.ConfigManagement = opt
++	if _, err = openManagedEngine(result, fs, filepath.Join(dir, "nested", "store.json"), unsafe, file); err == nil {
++		t.Fatal("nested Store path accepted")
++	}
++	savedDir := cfgDir
++	cfgDir = "synthetic"
++	_, err = openManagedEngine(result, fs, storePath, unsafe, file)
++	cfgDir = savedDir
++	if err == nil {
++		t.Fatal("multi-service command accepted")
++	}
++	engine, err = openManagedEngine(result, fs, storePath, unsafe, file)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer engine.Close()
++	defer managedCommandInUse.Store(false)
++	if _, err = os.Stat(storePath); !os.IsNotExist(err) {
++		t.Fatal("engine fabricated previously missing Store")
++	}
++	if _, err = openManagedEngine(result, fs, storePath, unsafe, file); err == nil {
++		t.Fatal("second managed command accepted")
++	}
++	store, err := source.NewStoreSource(source.StoreSourceConfig{Path: storePath, Managed: true})
++	if err != nil || !store.IsManaged() {
++		t.Fatal("post-recovery native Store creation failed")
++	}
++}
+diff --git a/cmd/frpc/sub/root.go b/cmd/frpc/sub/root.go
+index 2983f7f..fb4ec0d 100644
+--- a/cmd/frpc/sub/root.go
++++ b/cmd/frpc/sub/root.go
+@@ -29,6 +29,7 @@ import (
+ 	"github.com/spf13/cobra"
+ 
+ 	"github.com/fatedier/frp/client"
++	"github.com/fatedier/frp/extension/frpmonitor/agent/managed"
+ 	"github.com/fatedier/frp/extension/frpmonitor/shared"
+ 	"github.com/fatedier/frp/pkg/config"
+ 	"github.com/fatedier/frp/pkg/config/source"
+@@ -149,17 +150,21 @@ func runClientWithAggregator(result *config.ClientConfigLoadResult, unsafeFeatur
+ 
+ 	configSource.SetMonitorOrigins(result.ProxyOrigins, result.VisitorOrigins)
+ 
++	storePath := result.Common.Store.Path
++	if storePath != "" && cfgFilePath != "" && !filepath.IsAbs(storePath) {
++		storePath = filepath.Join(filepath.Dir(cfgFilePath), storePath)
++	}
++	engine, err := openManagedEngine(result, configSource, storePath, unsafeFeatures, cfgFilePath)
++	if err != nil {
++		return err
++	}
++	if engine != nil {
++		defer func() { engine.Close(); managedCommandInUse.Store(false) }()
++		configSource.ClaimManaged()
++	}
+ 	var storeSource *source.StoreSource
+-
+ 	if result.Common.Store.IsEnabled() {
+-		storePath := result.Common.Store.Path
+-		if storePath != "" && cfgFilePath != "" && !filepath.IsAbs(storePath) {
+-			storePath = filepath.Join(filepath.Dir(cfgFilePath), storePath)
+-		}
+-
+-		s, err := source.NewStoreSource(source.StoreSourceConfig{
+-			Path: storePath,
+-		})
++		s, err := source.NewStoreSource(source.StoreSourceConfig{Path: storePath, Managed: engine != nil})
+ 		if err != nil {
+ 			return fmt.Errorf("failed to create store source: %w", err)
+ 		}
+@@ -188,7 +193,7 @@ func runClientWithAggregator(result *config.ClientConfigLoadResult, unsafeFeatur
+ 		return err
+ 	}
+ 
+-	return startServiceWithAggregator(result.Common, aggregator, unsafeFeatures, cfgFilePath)
++	return startServiceWithAggregator(result.Common, aggregator, unsafeFeatures, cfgFilePath, engine)
+ }
+ 
+ func startServiceWithAggregator(
+@@ -196,6 +201,7 @@ func startServiceWithAggregator(
+ 	aggregator *source.Aggregator,
+ 	unsafeFeatures *security.UnsafeFeatures,
+ 	cfgFile string,
++	engines ...*managed.Engine,
+ ) error {
+ 	log.InitLogger(cfg.Log.To, cfg.Log.Level, int(cfg.Log.MaxDays), cfg.Log.DisablePrintColor)
+ 
+@@ -203,7 +209,12 @@ func startServiceWithAggregator(
+ 		log.Infof("start frpc service for config file [%s] with aggregated configuration", cfgFile)
+ 		defer log.Infof("frpc service for config file [%s] stopped", cfgFile)
+ 	}
++	var engine *managed.Engine
++	if len(engines) > 0 {
++		engine = engines[0]
++	}
+ 	svr, err := client.NewService(client.ServiceOptions{
++		ManagedEngine:          engine,
+ 		Common:                 cfg,
+ 		ConfigSourceAggregator: aggregator,
+ 		UnsafeFeatures:         unsafeFeatures,
+diff --git a/pkg/config/source/config_source.go b/pkg/config/source/config_source.go
+index dcc8530..4b12455 100644
+--- a/pkg/config/source/config_source.go
++++ b/pkg/config/source/config_source.go
+@@ -23,6 +23,7 @@ import (
+ // All operations are thread-safe.
+ type ConfigSource struct {
+ 	baseSource
++	managed               bool
+ 	monitorProxyOrigins   map[string]string
+ 	monitorVisitorOrigins map[string]string
+ }
+@@ -37,6 +38,9 @@ func NewConfigSource() *ConfigSource {
+ func (s *ConfigSource) ReplaceAll(proxies []v1.ProxyConfigurer, visitors []v1.VisitorConfigurer) error {
+ 	s.mu.Lock()
+ 	defer s.mu.Unlock()
++	if s.managed {
++		return ErrManaged
++	}
+ 
+ 	nextProxies := make(map[string]v1.ProxyConfigurer, len(proxies))
+ 	for _, p := range proxies {
+diff --git a/pkg/config/source/managed.go b/pkg/config/source/managed.go
+new file mode 100644
+index 0000000..e739a94
+--- /dev/null
++++ b/pkg/config/source/managed.go
+@@ -0,0 +1,68 @@
++package source
++
++import (
++	"errors"
++	v1 "github.com/fatedier/frp/pkg/config/v1"
++	"time"
++)
++
++var ErrManaged = errors.New("configuration is owned by the managed Store engine")
++
++// SnapshotAll clones both maps under one lock, including disabled objects.
++func (s *baseSource) SnapshotAll() ([]v1.ProxyConfigurer, []v1.VisitorConfigurer, error) {
++	s.mu.RLock()
++	defer s.mu.RUnlock()
++	ps := make([]v1.ProxyConfigurer, 0, len(s.proxies))
++	vs := make([]v1.VisitorConfigurer, 0, len(s.visitors))
++	for _, p := range s.proxies {
++		ps = append(ps, p)
++	}
++	for _, v := range s.visitors {
++		vs = append(vs, v)
++	}
++	return cloneConfigurers(ps, vs)
++}
++
++func (s *ConfigSource) ClaimManaged()  { s.mu.Lock(); defer s.mu.Unlock(); s.managed = true }
++func (s *StoreSource) IsManaged() bool { return s.config.Managed }
++func (s *StoreSource) Path() string    { return s.config.Path }
++
++// ReplaceManagedMemory is the engine adapter's only mutation surface. It does
++// not persist: the durable engine already owns disk and rollback sequencing.
++func (s *StoreSource) ReplaceManagedMemory(proxies []v1.ProxyConfigurer, visitors []v1.VisitorConfigurer) error {
++	if !s.config.Managed {
++		return ErrManaged
++	}
++	ps, vs, err := cloneConfigurers(proxies, visitors)
++	if err != nil {
++		return err
++	}
++	pm := make(map[string]v1.ProxyConfigurer, len(ps))
++	vm := make(map[string]v1.VisitorConfigurer, len(vs))
++	for _, p := range ps {
++		name, err := validateProxyName(p)
++		if err != nil {
++			return err
++		}
++		if _, ok := pm[name]; ok {
++			return ErrAlreadyExists
++		}
++		pm[name] = p
++	}
++	for _, v := range vs {
++		name, err := validateVisitorName(v)
++		if err != nil {
++			return err
++		}
++		if _, ok := vm[name]; ok {
++			return ErrAlreadyExists
++		}
++		vm[name] = v
++	}
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	s.proxies = pm
++	s.visitors = vm
++	s.monitorReadAt = time.Now().UTC()
++	return nil
++}
+diff --git a/pkg/config/source/managed_test.go b/pkg/config/source/managed_test.go
+new file mode 100644
+index 0000000..69a60d9
+--- /dev/null
++++ b/pkg/config/source/managed_test.go
+@@ -0,0 +1,82 @@
++package source
++
++import (
++	"errors"
++	v1 "github.com/fatedier/frp/pkg/config/v1"
++	"os"
++	"path/filepath"
++	"testing"
++)
++
++func TestManagedSourceOwnershipAndWholeSetMemory(t *testing.T) {
++	disabled := false
++	p := &v1.TCPProxyConfig{ProxyBaseConfig: v1.ProxyBaseConfig{Name: "p", Type: "tcp", Enabled: &disabled, ProxyBackend: v1.ProxyBackend{LocalPort: 80}}}
++	v := &v1.STCPVisitorConfig{VisitorBaseConfig: v1.VisitorBaseConfig{Name: "v", Type: "stcp", BindPort: -1, ServerName: "peer", Enabled: &disabled}}
++	file := NewConfigSource()
++	if err := file.ReplaceAll([]v1.ProxyConfigurer{p}, []v1.VisitorConfigurer{v}); err != nil {
++		t.Fatal(err)
++	}
++	ps, vs, err := file.SnapshotAll()
++	if err != nil || len(ps) != 1 || len(vs) != 1 {
++		t.Fatal("disabled source entries lost")
++	}
++	ps[0].GetBaseConfig().LocalPort = 81
++	vs[0].GetBaseConfig().ServerName = "changed"
++	ps, vs, _ = file.SnapshotAll()
++	if ps[0].GetBaseConfig().LocalPort != 80 || vs[0].GetBaseConfig().ServerName != "peer" {
++		t.Fatal("snapshot aliases source")
++	}
++	file.ClaimManaged()
++	if !errors.Is(file.ReplaceAll(nil, nil), ErrManaged) {
++		t.Fatal("owned file source accepted replacement")
++	}
++	path := filepath.Join(t.TempDir(), "store.json")
++	original := []byte(`{"proxies":[],"visitors":[]}`)
++	if err = os.WriteFile(path, original, 0600); err != nil {
++		t.Fatal(err)
++	}
++	store, err := NewStoreSource(StoreSourceConfig{Path: path, Managed: true})
++	if err != nil {
++		t.Fatal(err)
++	}
++	for _, mutation := range []func() error{func() error { return store.AddProxy(p) }, func() error { return store.UpdateProxy(p) }, func() error { return store.RemoveProxy("p") }, func() error { return store.AddVisitor(v) }, func() error { return store.UpdateVisitor(v) }, func() error { return store.RemoveVisitor("v") }} {
++		if !errors.Is(mutation(), ErrManaged) {
++			t.Fatal("native Store mutation bypassed ownership")
++		}
++	}
++	if err = store.ReplaceManagedMemory([]v1.ProxyConfigurer{p}, []v1.VisitorConfigurer{v}); err != nil {
++		t.Fatal(err)
++	}
++	ps, vs, _ = store.SnapshotAll()
++	if len(ps) != 1 || len(vs) != 1 {
++		t.Fatal("whole memory replacement lost disabled objects")
++	}
++	data, _ := os.ReadFile(path)
++	if string(data) != string(original) {
++		t.Fatal("memory adapter wrote Store")
++	}
++	if err = store.ReplaceManagedMemory([]v1.ProxyConfigurer{p, p}, nil); !errors.Is(err, ErrAlreadyExists) {
++		t.Fatal("duplicate replacement accepted")
++	}
++	ps, vs, _ = store.SnapshotAll()
++	if len(ps) != 1 || len(vs) != 1 {
++		t.Fatal("invalid whole-set replacement partially changed memory")
++	}
++	if err = store.ReplaceManagedMemory(nil, nil); err != nil {
++		t.Fatal(err)
++	}
++	ps, vs, _ = store.SnapshotAll()
++	if len(ps)+len(vs) != 0 {
++		t.Fatal("deletions not reflected")
++	}
++	ordinary, err := NewStoreSource(StoreSourceConfig{Path: filepath.Join(t.TempDir(), "store.json")})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !errors.Is(ordinary.ReplaceManagedMemory(nil, nil), ErrManaged) {
++		t.Fatal("unowned replacement accepted")
++	}
++	if err = ordinary.AddProxy(p); err != nil {
++		t.Fatal("unmanaged native mutation changed", err)
++	}
++}
+diff --git a/pkg/config/source/store.go b/pkg/config/source/store.go
+index 25eb59e..f1bdd50 100644
+--- a/pkg/config/source/store.go
++++ b/pkg/config/source/store.go
+@@ -26,7 +26,8 @@ import (
+ )
+ 
+ type StoreSourceConfig struct {
+-	Path string `json:"path"`
++	Path    string `json:"path"`
++	Managed bool   `json:"-"`
+ }
+ 
+ type storeData struct {
+@@ -208,6 +209,9 @@ func addStoreEntry[T any](
+ ) error {
+ 	s.mu.Lock()
+ 	defer s.mu.Unlock()
++	if s.config.Managed {
++		return ErrManaged
++	}
+ 
+ 	entries := entriesFn(s)
+ 	if _, exists := entries[name]; exists {
+@@ -229,6 +233,9 @@ func updateStoreEntry[T any](
+ ) error {
+ 	s.mu.Lock()
+ 	defer s.mu.Unlock()
++	if s.config.Managed {
++		return ErrManaged
++	}
+ 
+ 	entries := entriesFn(s)
+ 	old, exists := entries[name]
+@@ -254,6 +261,9 @@ func removeStoreEntry[T any](
+ 
+ 	s.mu.Lock()
+ 	defer s.mu.Unlock()
++	if s.config.Managed {
++		return ErrManaged
++	}
+ 
+ 	entries := entriesFn(s)
+ 	old, exists := entries[name]
