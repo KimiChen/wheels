@@ -167,7 +167,9 @@ func configNativeDecode(t *testing.T, data []byte) configOperationResponse {
 	return r
 }
 
-func TestConfigNativeAdminEndToEnd(t *testing.T) {
+func TestConfigNativeAdminEndToEnd(t *testing.T) { runConfigNativeAdmin(t, "default") }
+
+func runConfigNativeAdmin(t *testing.T, scenario string) {
 	agentBinary, serverBinary := os.Getenv("FRP_CONFIG_E2E_AGENT"), os.Getenv("FRP_CONFIG_E2E_SERVER")
 	if agentBinary == "" || serverBinary == "" {
 		t.Skip("native Admin E2E requires FRP_CONFIG_E2E_AGENT and FRP_CONFIG_E2E_SERVER")
@@ -180,7 +182,7 @@ func TestConfigNativeAdminEndToEnd(t *testing.T) {
 	}
 	agentBinary, _ = filepath.Abs(agentBinary)
 	serverBinary, _ = filepath.Abs(serverBinary)
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	root, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
@@ -378,6 +380,14 @@ func TestConfigNativeAdminEndToEnd(t *testing.T) {
 	}
 	configNativeWait(t, ctx, "TCP business forwarding", processes, func() bool { return configNativeEcho(remotePort) })
 	configNativeWait(t, ctx, "STCP Visitor business forwarding", processes, func() bool { return configNativeEcho(visitorPort) })
+	if scenario == "restore" {
+		runConfigNativeRestore(t, ctx, s, cookie, session.CSRF, root, agentBinary, agentConfig, server, client, inventory.ServiceID, remotePort, visitorPort)
+		return
+	}
+	if scenario == "rollback_failure" {
+		runConfigNativeRollbackFailure(t, ctx, s, cookie, session.CSRF, root, agentBinary, agentConfig, server, client, storePath, remotePort, visitorPort)
+		return
+	}
 	// Successful business checks above are external evidence; the native Agent
 	// still correctly leaves business_checked=false.
 	action = configActionRequest{ExpectedVersion: confirmed.Operation.Version, ContextRevision: confirmed.Agent.ContextRevision, CandidateDigest: confirmed.Operation.CandidateDigest}
