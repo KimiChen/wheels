@@ -9,3 +9,4 @@
 0008-managed-backup-restore.patch
 0009-managed-verification-failure.patch
 0010-frp-tunnel-observation.patch
+0011-managed-dependency-checkpoint.patch

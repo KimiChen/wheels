@@ -83,7 +83,7 @@ func migrationTarget(root, store string) error {
 	}
 	name := filepath.Base(store)
 	reserved := strings.ToLower(name)
-	if !migrationStoreName.MatchString(strings.TrimSuffix(name, ".json")) || strings.HasPrefix(name, ".") || reserved == "operations" || reserved == "secrets" || reserved == "identity.json" || reserved == "restore.json" {
+	if !migrationStoreName.MatchString(strings.TrimSuffix(name, ".json")) || strings.HasPrefix(name, ".") || reserved == "operations" || reserved == "secrets" || reserved == "identity.json" || reserved == "restore.json" || reserved == "restore-install.json" {
 		return failure("migration_target_unsafe")
 	}
 	for cursor := root; ; cursor = filepath.Dir(cursor) {

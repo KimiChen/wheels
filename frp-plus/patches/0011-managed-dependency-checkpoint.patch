@@ -1,0 +1,179 @@
+--- a/cmd/frpc/sub/maintenance.go
++++ b/cmd/frpc/sub/maintenance.go
+@@ -36,7 +36,7 @@
+ func newMaintenanceCommand() *cobra.Command {
+ 	command := &cobra.Command{Use: "managed-maintenance", Short: "Create or restore private offline managed checkpoints", SilenceUsage: true}
+ 	command.SetFlagErrorFunc(func(*cobra.Command, error) error { return errors.New("maintenance_invalid_arguments") })
+-	var offline bool
++	var offline, dependencyGraph bool
+ 	command.PersistentFlags().BoolVar(&offline, "offline", false, "Acknowledge that the local FRP agent must be stopped")
+ 	args := func(*cobra.Command, []string) error { return nil }
+ 	var output, checkpoint, root, digest, epoch string
+@@ -66,11 +66,27 @@
+ 			var result any
+ 			switch action {
+ 			case "checkpoint":
+-				result, err = managed.ExportCheckpoint(cmd.Context(), options, capture, output)
++				if dependencyGraph {
++					result, err = managed.ExportCheckpointV2(cmd.Context(), options, configuration.CheckpointCaptureV2(file), output)
++				} else {
++					result, err = managed.ExportCheckpoint(cmd.Context(), options, capture, output)
++				}
+ 			case "restore-install":
+-				result, err = managed.InstallCheckpoint(cmd.Context(), checkpoint, root, digest, capture, configuration.ValidateMaintenanceCheckpoint)
++				var version int
++				version, err = managed.CheckpointVersion(checkpoint, digest)
++				if err == nil && version == 2 {
++					result, err = managed.InstallCheckpointV2(cmd.Context(), checkpoint, root, digest, configuration.CheckpointCaptureV2(file), configuration.ValidateCheckpointContextV2)
++				} else if err == nil {
++					result, err = managed.InstallCheckpoint(cmd.Context(), checkpoint, root, digest, capture, configuration.ValidateMaintenanceCheckpoint)
++				}
+ 			case "restore-confirm":
+-				result, err = managed.ConfirmRestoration(cmd.Context(), options, epoch, digest, capture)
++				var version int
++				version, err = managed.RestoreCheckpointVersion(root)
++				if err == nil && version == 2 {
++					result, err = managed.ConfirmRestorationV2(cmd.Context(), options, epoch, digest, configuration.CheckpointCaptureV2(file))
++				} else if err == nil {
++					result, err = managed.ConfirmRestoration(cmd.Context(), options, epoch, digest, capture)
++				}
+ 			}
+ 			if err != nil {
+ 				return maintenanceError(err)
+@@ -82,6 +98,7 @@
+ 		}
+ 	}
+ 	export := &cobra.Command{Use: "checkpoint", Args: args, RunE: run("checkpoint"), SilenceUsage: true}
++	export.Flags().BoolVar(&dependencyGraph, "dependency-graph", false, "Include sealed nested dependencies for same-path restoration")
+ 	export.Flags().StringVar(&output, "output", "", "New absolute private checkpoint directory")
+ 	install := &cobra.Command{Use: "restore-install", Args: args, RunE: run("restore-install"), SilenceUsage: true}
+ 	install.Flags().StringVar(&checkpoint, "checkpoint", "", "Private checkpoint directory")
+--- /dev/null
++++ b/cmd/frpc/sub/maintenance_test.go
+@@ -0,0 +1,126 @@
++//go:build linux || darwin
++
++package sub
++
++import (
++	"bytes"
++	"encoding/json"
++	"fmt"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++
++	"github.com/fatedier/frp/extension/frpmonitor/agent/managed"
++)
++
++func maintenanceCLI(t *testing.T, args ...string) (string, error) {
++	t.Helper()
++	cmd := newMaintenanceCommand()
++	var output bytes.Buffer
++	cmd.SetOut(&output)
++	cmd.SetErr(&output)
++	cmd.SetArgs(args)
++	err := cmd.Execute()
++	return output.String(), err
++}
++func TestMaintenanceVersionDispatchAndOutputPrivacy(t *testing.T) {
++	t.Setenv("http_proxy", "")
++	prior, priorDir, priorStrict, priorUnsafe := cfgFile, cfgDir, strictConfigMode, allowUnsafe
++	defer func() { cfgFile, cfgDir, strictConfigMode, allowUnsafe = prior, priorDir, priorStrict, priorUnsafe }()
++	cfgDir, strictConfigMode, allowUnsafe = "", true, nil
++	for _, graph := range []bool{false, true} {
++		t.Run(fmt.Sprint(graph), func(t *testing.T) {
++			parent, err := filepath.EvalSymlinks(t.TempDir())
++			if err != nil {
++				t.Fatal(err)
++			}
++			if err = os.Chmod(parent, 0700); err != nil {
++				t.Fatal(err)
++			}
++			installation := filepath.Join(parent, "installation")
++			root := filepath.Join(installation, "managed")
++			if err = os.Mkdir(installation, 0700); err != nil {
++				t.Fatal(err)
++			}
++			if err = os.Mkdir(root, 0700); err != nil {
++				t.Fatal(err)
++			}
++			cfgFile = filepath.Join(installation, "agent.toml")
++			main := fmt.Sprintf("serverAddr='127.0.0.1'\n[store]\npath=%q\n[telemetry]\nenabled=true\nendpoint='ws://127.0.0.1:17401/agent/v1/ws'\ntokenFile=%q\nallowInsecureLoopback=true\n[telemetry.configManagement]\nenabled=true\nroot=%q\n", filepath.Join(root, "store.json"), filepath.Join(installation, "agent.token"), root)
++			files := map[string]string{"agent.toml": main, "agent.token": "synthetic-private-token", "installation.json": `{"format":2,"roles":["agent"],"managed":{"version":1,"root":"managed","store":"store.json"}}`}
++			if graph {
++				if err = os.Mkdir(filepath.Join(installation, "includes"), 0700); err != nil {
++					t.Fatal(err)
++				}
++				files["agent.toml"] = "includes=['includes/*.toml']\n" + main
++				files["includes/empty.toml"] = "# empty native include\n"
++			}
++			for name, data := range files {
++				if err = os.WriteFile(filepath.Join(installation, name), []byte(data), 0600); err != nil {
++					t.Fatal(err)
++				}
++			}
++			e, err := managed.Open(managed.Options{Root: root, StorePath: filepath.Join(root, "store.json")})
++			if err != nil {
++				t.Fatal(err)
++			}
++			if err = e.Close(); err != nil {
++				t.Fatal(err)
++			}
++			out := filepath.Join(parent, "checkpoint")
++			args := []string{"checkpoint", "--output", out, "--offline"}
++			if graph {
++				args = append(args, "--dependency-graph")
++			}
++			output, err := maintenanceCLI(t, args...)
++			if err != nil {
++				t.Fatal("checkpoint", err)
++			}
++			var summary managed.CheckpointSummary
++			if json.Unmarshal([]byte(output), &summary) != nil {
++				t.Fatal("summary")
++			}
++			wantVersion := 1
++			if graph {
++				wantVersion = 2
++			}
++			if got, err := managed.CheckpointVersion(out, summary.ManifestDigest); err != nil || got != wantVersion {
++				t.Fatal("version", got, err)
++			}
++			for _, private := range []string{parent, "synthetic-private-token"} {
++				if strings.Contains(output, private) {
++					t.Fatal("private export output")
++				}
++			}
++			output, err = maintenanceCLI(t, "restore-install", "--checkpoint", out, "--root", root, "--manifest-digest", summary.ManifestDigest, "--offline")
++			if err != nil {
++				t.Fatal("install", err)
++			}
++			var restored managed.RestoreSummary
++			if json.Unmarshal([]byte(output), &restored) != nil || restored.State != "pending" {
++				t.Fatal("restore")
++			}
++			output, err = maintenanceCLI(t, "restore-confirm", "--epoch", restored.Epoch, "--manifest-digest", restored.ManifestDigest, "--offline")
++			if err == nil || strings.Contains(output+err.Error(), parent) {
++				t.Fatal("unverified confirmation or private error")
++			}
++		})
++	}
++}
++func TestMaintenanceArgumentsNeverPrintPrivateInputs(t *testing.T) {
++	prior, priorDir, priorStrict, priorUnsafe := cfgFile, cfgDir, strictConfigMode, allowUnsafe
++	defer func() { cfgFile, cfgDir, strictConfigMode, allowUnsafe = prior, priorDir, priorStrict, priorUnsafe }()
++	cfgFile, cfgDir, strictConfigMode, allowUnsafe = "/private-sensitive/agent.toml", "", true, nil
++	for _, args := range [][]string{
++		{"checkpoint", "--output", "/private-sensitive/out", "--dependency-graph", "--offline"},
++		{"checkpoint", "--dependency-graph=private-sensitive"},
++		{"restore-install", "--checkpoint", "/private-sensitive/checkpoint", "--root", "/private-sensitive/managed", "--manifest-digest", "private-sensitive", "--offline"},
++		{"restore-confirm", "--epoch", "private-sensitive", "--manifest-digest", "private-sensitive", "--offline"},
++	} {
++		output, err := maintenanceCLI(t, args...)
++		if err == nil || strings.Contains(output+err.Error(), "private-sensitive") {
++			t.Fatal("private maintenance error")
++		}
++	}
++}

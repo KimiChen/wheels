@@ -171,6 +171,11 @@ func decodeCheckpointJSON(data []byte, target any) error {
 				if err != nil || !ok || seen[key] || key == "" || strings.ToLower(key) != key {
 					return ErrRecovery
 				}
+				for _, r := range key {
+					if !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_') {
+						return ErrRecovery
+					}
+				}
 				seen[key] = true
 				if err = walk(depth + 1); err != nil {
 					return err
@@ -249,7 +254,7 @@ func (l *OfflineLease) payload(ctx context.Context) ([]checkpointPayload, string
 	}
 	for _, name := range roots {
 		switch name {
-		case ".lock", "store.json", "identity.json", "operations", "secrets", "restore.json":
+		case ".lock", "store.json", "identity.json", "operations", "secrets", "restore.json", restorePlanName:
 		default:
 			return nil, "", StoreSnapshot{}, ErrRecovery
 		}
@@ -257,6 +262,15 @@ func (l *OfflineLease) payload(ctx context.Context) ([]checkpointPayload, string
 	marker, markerErr := readRestoreMarker(l.root)
 	if markerErr != nil || (marker != nil && (marker.State != "confirmed" || !marker.Activated)) {
 		return nil, "", StoreSnapshot{}, ErrRecovery
+	}
+	plan, planErr := readRestorePlan(l.root, "")
+	if planErr != nil || plan != nil && (marker == nil || marker.CheckpointVersion != 2) || marker != nil && marker.CheckpointVersion == 2 && !planMatchesMarker(plan, marker) {
+		return nil, "", StoreSnapshot{}, ErrRecovery
+	}
+	if marker != nil && marker.CheckpointVersion == 2 {
+		if _, err := readRestorePlan(l.root, marker.PlanDigest); err != nil {
+			return nil, "", StoreSnapshot{}, err
+		}
 	}
 	identity, _, err := l.root.readMetadata("identity.json", 1024)
 	if err != nil || !identity.Exists {
@@ -337,10 +351,13 @@ func (l *OfflineLease) payload(ctx context.Context) ([]checkpointPayload, string
 		payload = append(payload, checkpointPayload{CheckpointFile{Path: prefix + name, Size: int64(len(data.Bytes)), SHA256: checkpointHash(data.Bytes), ModifiedNS: mtime}, data.Bytes})
 		return nil
 	}
-	for _, name := range []string{"store.json", "identity.json", "restore.json"} {
+	for _, name := range []string{"store.json", "identity.json", "restore.json", restorePlanName} {
 		limit := l.options.MaxBytes
 		if name == "restore.json" {
 			limit = restoreMarkerLimit
+		}
+		if name == restorePlanName {
+			limit = MaxCheckpointManifestBytes
 		}
 		if err = add(l.root, name, "managed/", limit); err != nil {
 			return nil, "", StoreSnapshot{}, err
@@ -405,6 +422,11 @@ func ExportCheckpoint(ctx context.Context, options Options, capture ContextCaptu
 	files, identity, store, err := lease.payload(ctx)
 	if err != nil {
 		return summary, err
+	}
+	for _, file := range files {
+		if file.entry.Path == "managed/"+restorePlanName {
+			return summary, ErrRecovery
+		}
 	}
 	// A pending journal must match the captured restart context exactly.
 	engine := &Engine{opts: lease.options, root: lease.root, operations: lease.operations, storeName: "store.json", records: map[string]*record{}, keys: map[string]string{}}

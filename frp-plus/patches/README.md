@@ -15,6 +15,7 @@
 | `0008-managed-backup-restore.patch` | 原生离线检查点/恢复/确认入口、当前启动恢复验证和独立接管 Provider；恢复期间保持写管理关闭，离线确认后再激活 |
 | `0009-managed-verification-failure.patch` | 整集与当前控制连接核对后的本次 Proxy 注册/本地启动及 Visitor 创建/监听失败提前回退；等待连接、健康检查、远端 Visitor/P2P 状态仍独立处理 |
 | `0010-frp-tunnel-observation.patch` | 私有隧道实例、生命周期事件与独立累计计数；同名重建后的旧连接保留原实例归属，原生 Dashboard/Prometheus 口径保持；不支持的字节/连接观察分别标明 |
+| `0011-managed-dependency-checkpoint.patch` | 离线检查点显式 `--dependency-graph` 导出 v2；安装/确认按已验证的版本分派，同路径恢复 includes、Token/TLS/插件文件及事务旧新变体依赖 |
 
 补丁只包含上游既有文件的必要改动与相关测试，不提交完整上游树，不混入无关格式化。
 独立扩展通过 Overlay 映射到 `extension/frpmonitor/`。FRP wire protocol、原生命令、

@@ -27,7 +27,9 @@ type RestoreStatus struct {
 	OperationsCount   int    `json:"operations_count"`
 }
 type restoreMarker struct {
-	Version int `json:"version"`
+	Version           int    `json:"version"`
+	CheckpointVersion int    `json:"checkpoint_version,omitempty"`
+	PlanDigest        string `json:"plan_digest,omitempty"`
 	RestoreStatus
 	ServiceID    string `json:"service_id"`
 	ConfigFile   string `json:"config_file"`
@@ -47,6 +49,9 @@ type RestoreSummary struct {
 }
 
 func (m restoreMarker) valid(root string) bool {
+	if m.CheckpointVersion != 0 && m.CheckpointVersion != 2 || m.CheckpointVersion == 2 && !digestString(m.PlanDigest) || m.CheckpointVersion == 0 && m.PlanDigest != "" {
+		return false
+	}
 	if m.Version != 1 || !serviceIdentity.MatchString(m.Epoch) || !serviceIdentity.MatchString(m.ServiceID) || !serviceIdentity.MatchString(m.BackupServiceID) || (m.ReplacedServiceID != "" && !serviceIdentity.MatchString(m.ReplacedServiceID)) || !digestString(m.ManifestDigest) || !digestString(m.ContextRevision) || m.ConfigFile != filepath.Join(filepath.Dir(root), "agent.toml") || m.WorkingDir != filepath.Dir(root) || m.CreatedAtMS <= 0 || m.OperationsCount < 0 || m.OperationsCount > 1024 {
 		return false
 	}
@@ -90,6 +95,9 @@ func (e *Engine) loadRestore() error {
 	if err != nil {
 		return err
 	}
+	if err := checkRestorePlanStartup(e.root, marker); err != nil {
+		return err
+	}
 	if marker == nil {
 		return nil
 	}
@@ -100,6 +108,9 @@ func (e *Engine) loadRestore() error {
 		return ErrRecovery
 	}
 	if !marker.Activated {
+		if checkRestoreV2Sources(e.root, marker) != nil {
+			return ErrRecovery
+		}
 		if e.opts.RestoreCheck == nil {
 			return ErrRecovery
 		}
@@ -179,6 +190,9 @@ func (e *Engine) verifyRestoration() {
 	e.mu.Unlock()
 	current, err := e.readStore()
 	if err == nil {
+		err = checkRestoreV2Sources(e.root, &marker)
+	}
+	if err == nil {
 		err = checkSafely(runtime.Check, ctx, Operation{ID: marker.Epoch, ContextRevision: marker.ContextRevision}, "recovery")
 	}
 	var verified Verification
@@ -193,6 +207,9 @@ func (e *Engine) verifyRestoration() {
 		if readErr != nil || Digest(current) != Digest(after) {
 			err = ErrConflict
 		}
+	}
+	if err == nil {
+		err = checkRestoreV2Sources(e.root, &marker)
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -254,6 +271,9 @@ func (e *Engine) AcknowledgeRestore(ctx context.Context, epoch, manifest, contex
 		return e.restoreStatusLocked(), ErrBusy
 	}
 	if m.Epoch != epoch || m.ManifestDigest != manifest || m.ContextRevision != contextRevision || m.StoreDigest != storeDigest {
+		return m.RestoreStatus, ErrConflict
+	}
+	if err := checkRestoreV2Sources(e.root, &m); err != nil {
 		return m.RestoreStatus, ErrConflict
 	}
 	if m.State == "acknowledged" || m.State == "confirmed" {
@@ -369,66 +389,8 @@ func readCheckpoint(root *privateDir, expected string) (CheckpointManifest, []ch
 	}
 	// Validate identity, complete triples and Store digest through the same
 	// read-only validator used at export, using its payload directory as Root.
-	dataByPath := map[string][]byte{}
-	for _, file := range payload {
-		dataByPath[file.entry.Path] = file.data
-	}
-	var identity struct {
-		Version   int    `json:"version"`
-		ServiceID string `json:"service_id"`
-		StoreName string `json:"store_name"`
-	}
-	if decodeCheckpointJSON(dataByPath["managed/identity.json"], &identity) != nil || identity.Version != 1 || identity.ServiceID != manifest.ServiceID || identity.StoreName != manifest.StoreName || Digest(StoreSnapshot{Exists: manifest.StoreExists, Bytes: dataByPath["managed/store.json"]}) != manifest.StoreDigest {
-		return manifest, nil, ErrRecovery
-	}
-	if old, ok := dataByPath["managed/restore.json"]; ok {
-		var marker restoreMarker
-		if decodeCheckpointJSON(old, &marker) != nil || !marker.valid(manifest.Root) || marker.State != "confirmed" || !marker.Activated || marker.ServiceID != manifest.ServiceID {
-			return manifest, nil, ErrRecovery
-		}
-	}
-	records := map[string]record{}
-	keys := map[string]bool{}
-	active := 0
-	for _, file := range payload {
-		if !strings.HasPrefix(file.entry.Path, "managed/operations/") || !strings.HasSuffix(file.entry.Path, ".json") {
-			continue
-		}
-		var r record
-		if decodeCheckpointJSON(file.data, &r) != nil || r.Version != 1 || !safeID.MatchString(r.ID) || file.entry.Path != "managed/operations/"+idHash(r.ID)+".json" || !knownState(r.State) || !digestString(r.BaseRevision) || !digestString(r.ContextRevision) || !digestString(r.RequestDigest) || !digestString(r.KeyDigest) || keys[r.KeyDigest] || !digestString(r.Fingerprint) || r.CreatedAt.IsZero() || r.Deadline.IsZero() {
-			return manifest, nil, ErrRecovery
-		}
-		keys[r.KeyDigest] = true
-		records[idHash(r.ID)] = r
-		if !terminal(r.State) {
-			active++
-			if active > 1 || r.ContextRevision != manifest.ContextRevision || (manifest.StoreDigest != r.OldDigest && manifest.StoreDigest != r.NewDigest) {
-				return manifest, nil, ErrRecovery
-			}
-		}
-		prefix := "managed/operations/" + idHash(r.ID)
-		old, ok := dataByPath[prefix+".old"]
-		if !ok || (!r.OldExists && len(old) != 0) || Digest(StoreSnapshot{Exists: r.OldExists, Bytes: old}) != r.OldDigest {
-			return manifest, nil, ErrRecovery
-		}
-		next, ok := dataByPath[prefix+".new"]
-		if !ok || Digest(StoreSnapshot{Exists: true, Bytes: next}) != r.NewDigest {
-			return manifest, nil, ErrRecovery
-		}
-	}
-	if len(records) > 1024 {
-		return manifest, nil, ErrRecovery
-	}
-	for _, file := range payload {
-		if strings.HasPrefix(file.entry.Path, "managed/operations/") {
-			name := filepath.Base(file.entry.Path)
-			if _, ok := records[name[:64]]; !ok {
-				return manifest, nil, ErrRecovery
-			}
-		}
-		if strings.HasPrefix(file.entry.Path, "managed/secrets/") && !validSecretValue(string(file.data)) {
-			return manifest, nil, ErrRecovery
-		}
+	if err := validateManagedCheckpointPayload(manifest, payload); err != nil {
+		return manifest, nil, err
 	}
 	sort.Slice(payload, func(i, j int) bool { return payload[i].entry.Path < payload[j].entry.Path })
 	return manifest, payload, nil

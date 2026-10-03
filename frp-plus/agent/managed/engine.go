@@ -92,7 +92,7 @@ func Open(options Options) (_ *Engine, resultErr error) {
 	}
 	name := filepath.Base(options.StorePath)
 	reserved := strings.ToLower(name)
-	if !safeID.MatchString(strings.TrimSuffix(name, ".json")) || strings.HasPrefix(name, ".") || reserved == "operations" || reserved == "secrets" || reserved == "identity.json" || reserved == "restore.json" {
+	if !safeID.MatchString(strings.TrimSuffix(name, ".json")) || strings.HasPrefix(name, ".") || reserved == "operations" || reserved == "secrets" || reserved == "identity.json" || reserved == "restore.json" || reserved == restorePlanName {
 		return nil, ErrUnsafePath
 	}
 	root, err := openPrivateDir(options.Root)
@@ -112,6 +112,9 @@ func Open(options Options) (_ *Engine, resultErr error) {
 	marker, markerErr := readRestoreMarker(root)
 	if markerErr != nil || (marker != nil && marker.State == "installing") {
 		return nil, ErrRecovery
+	}
+	if err := checkRestorePlanStartup(root, marker); err != nil {
+		return nil, err
 	}
 	e.operations, err = root.subdir("operations")
 	if err != nil {

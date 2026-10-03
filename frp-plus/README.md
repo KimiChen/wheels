@@ -237,6 +237,16 @@ python3 scripts/ops.py restore-confirm --directory <原安装绝对目录> \
 摘要用于检查材料一致性，不是归档来源签名；不要恢复不可信的材料。主控数据库、
 TSDB、服务单元和跨机器角色协调不在这个最小 Agent 恢复流程内，阶段三继续扩展。
 
+### 依赖图检查点
+
+离线 `managed-maintenance checkpoint` 增加可选 `--dependency-graph`，生成包含依赖图的
+v2 检查点。默认仍为 v1；安装和确认按已校验的检查点版本分派。v2 覆盖同一安装根中的
+主文件、includes、Store、Token/TLS、插件证书，以及历史操作旧/新 Store 所引用的文件。
+恢复保留锁目录身份，记录可重试的安装计划，并按现有“运行验证 → 管理端接管 → 离线确认”
+流程恢复写管理。当前仅支持同目录、0700 目录/0600 文件；模板、外部映射和跨目录恢复
+仍未开放，依赖不完整时拒绝导出。运维 tar 归档工具尚在接入 v2，不能把旧 format3 当作
+完整依赖备份。此接口已通过真实 mTLS、Token 文件、include 和 HTTPS 插件恢复后转发验证。
+
 ### 显式迁移文件对象到 Store
 
 `config-migrate` 适用于已开启 telemetry、尚未启用托管的单配置安装。先使用同一配置文件、

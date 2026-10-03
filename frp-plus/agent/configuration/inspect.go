@@ -39,6 +39,9 @@ type snapshot struct {
 	originalStoreExists     bool
 	// Staged private materials are used only by offline restore closure validation.
 	material map[string]dependency
+	// Non-nil only for validated, sealed checkpoint material. Every requested
+	// include pattern must be present; absent entries never fall back to disk.
+	sealedIncludes map[string][]string
 }
 
 func (s *snapshot) issue(code string) {
@@ -227,6 +230,25 @@ func (s *snapshot) includes(patterns []string, parse bool) []object {
 		absolute := s.resolve(pattern)
 		dir := filepath.Dir(absolute)
 		match := includeMatch{Pattern: absolute, Files: []string{}}
+		if s.sealedIncludes != nil {
+			paths, ok := s.sealedIncludes[absolute]
+			if !ok {
+				s.issue("unsupported_dependency")
+				s.patterns = append(s.patterns, match)
+				continue
+			}
+			for _, path := range paths {
+				match.Files = append(match.Files, path)
+				if parse {
+					_, values := s.parseFile(path, "include")
+					out = append(out, values...)
+				} else {
+					s.read(path, "include", false)
+				}
+			}
+			s.patterns = append(s.patterns, match)
+			continue
+		}
 		// Native includes match only the basename inside a literal directory.
 		resolved, err := filepath.EvalSymlinks(dir)
 		if err != nil || resolved != dir {
@@ -332,7 +354,11 @@ func takeSnapshot(input Input, contextOnly ...bool) (*snapshot, error) {
 }
 
 func takeSnapshotMaterials(input Input, material map[string]dependency, contextOnly ...bool) (*snapshot, error) {
-	s := &snapshot{material: material, in: input, deps: []dependency{}, patterns: []includeMatch{}, issues: []Issue{}, conflicts: map[string]bool{}, referencedEnv: map[string]string{}}
+	return takeSnapshotSealed(input, material, nil, contextOnly...)
+}
+
+func takeSnapshotSealed(input Input, material map[string]dependency, includes map[string][]string, contextOnly ...bool) (*snapshot, error) {
+	s := &snapshot{material: material, sealedIncludes: includes, in: input, deps: []dependency{}, patterns: []includeMatch{}, issues: []Issue{}, conflicts: map[string]bool{}, referencedEnv: map[string]string{}}
 	var err error
 	if input.WorkingDir == "" {
 		s.in.WorkingDir, err = os.Getwd()
