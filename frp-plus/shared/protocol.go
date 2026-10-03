@@ -164,15 +164,17 @@ type PingResult struct {
 // Frame contains exactly one supported message body.
 // ID is present only for hello, which requires a JSON-RPC response.
 type Frame struct {
-	ID            string
-	Method        string
-	Hello         *Hello
-	Report        *Report
-	FRPDetail     *FRPDetailReport
-	ConfigCommand *ConfigCommand
-	ConfigResult  *ConfigResult
-	PingTasks     *PingTasks
-	PingResult    *PingResult
+	ID             string
+	Method         string
+	Hello          *Hello
+	Report         *Report
+	FRPDetail      *FRPDetailReport
+	ConfigCommand  *ConfigCommand
+	ConfigResult   *ConfigResult
+	RestoreCommand *RestoreCommand
+	RestoreResult  *RestoreResult
+	PingTasks      *PingTasks
+	PingResult     *PingResult
 }
 
 // DecodeFrame validates method frames for the v1 application profile of JSON-RPC
@@ -234,6 +236,22 @@ func DecodeFrame(data []byte) (*Frame, error) {
 		f.ConfigResult = new(ConfigResult)
 		if err = decodeObject(wire.Params, f.ConfigResult); err == nil {
 			err = f.ConfigResult.Validate()
+		}
+	case "config.restore.command":
+		if len(data) > MaxRestoreControlBytes {
+			return nil, errors.New("restore frame exceeds byte limit")
+		}
+		f.RestoreCommand = new(RestoreCommand)
+		if err = decodeObject(wire.Params, f.RestoreCommand); err == nil {
+			err = f.RestoreCommand.Validate()
+		}
+	case "config.restore.result":
+		if len(data) > MaxRestoreControlBytes {
+			return nil, errors.New("restore frame exceeds byte limit")
+		}
+		f.RestoreResult = new(RestoreResult)
+		if err = decodeObject(wire.Params, f.RestoreResult); err == nil {
+			err = f.RestoreResult.Validate()
 		}
 	case "ping.tasks":
 		f.PingTasks = new(PingTasks)

@@ -70,6 +70,7 @@ type Service struct {
 	snapshot        func() shared.FRP
 	detailProvider  shared.DetailProvider
 	configProvider  shared.ConfigProvider
+	restoreProvider shared.RestoreProvider
 	configJobs      chan configJob
 	configBusy      atomic.Bool
 	configServiceID string
@@ -101,6 +102,11 @@ func Start(ctx context.Context, cfg shared.AgentConfig, snapshot func() shared.F
 // StartWithProviders preserves the original Start API. Management is opt-in
 // in local configuration and still requires explicit capability negotiation.
 func StartWithProviders(ctx context.Context, cfg shared.AgentConfig, snapshot func() shared.FRP, detail shared.DetailProvider, management shared.ConfigProvider) (*Service, error) {
+	return StartWithRestoreProviders(ctx, cfg, snapshot, detail, management, nil)
+}
+
+// StartWithRestoreProviders independently negotiates the safe restore contract.
+func StartWithRestoreProviders(ctx context.Context, cfg shared.AgentConfig, snapshot func() shared.FRP, detail shared.DetailProvider, management shared.ConfigProvider, restore shared.RestoreProvider) (*Service, error) {
 	if !cfg.Enabled {
 		return nil, nil
 	}
@@ -111,7 +117,7 @@ func StartWithProviders(ctx context.Context, cfg shared.AgentConfig, snapshot fu
 	if err != nil {
 		return nil, errors.New("telemetry collector unavailable")
 	}
-	return startWithProviders(ctx, cfg, snapshot, c, detail, management)
+	return startWithProviders(ctx, cfg, snapshot, c, detail, management, restore)
 }
 func start(ctx context.Context, cfg shared.AgentConfig, snapshot func() shared.FRP, c sampler, providers ...shared.DetailProvider) (*Service, error) {
 	var detail shared.DetailProvider
@@ -120,7 +126,7 @@ func start(ctx context.Context, cfg shared.AgentConfig, snapshot func() shared.F
 	}
 	return startWithProviders(ctx, cfg, snapshot, c, detail, nil)
 }
-func startWithProviders(ctx context.Context, cfg shared.AgentConfig, snapshot func() shared.FRP, c sampler, detail shared.DetailProvider, management shared.ConfigProvider) (*Service, error) {
+func startWithProviders(ctx context.Context, cfg shared.AgentConfig, snapshot func() shared.FRP, c sampler, detail shared.DetailProvider, management shared.ConfigProvider, restores ...shared.RestoreProvider) (*Service, error) {
 	token, err := readToken(cfg.TokenFile)
 	if err != nil {
 		return nil, err
@@ -142,7 +148,10 @@ func startWithProviders(ctx context.Context, cfg shared.AgentConfig, snapshot fu
 	child, cancel := context.WithCancel(ctx)
 	s := &Service{ctx: child, cancel: cancel, cfg: cfg, token: token, collector: c, snapshot: snapshot, notify: make(chan struct{}, 1), intervalChanged: make(chan struct{}, 1), ready: make(chan struct{}), done: make(chan struct{}), dialer: websocket.Dialer{HandshakeTimeout: 5 * time.Second, TLSClientConfig: tlsCfg, ReadBufferSize: 4096, WriteBufferSize: 4096}}
 	s.detailProvider, s.configProvider = detail, management
-	if s.configEnabled() {
+	if len(restores) != 0 {
+		s.restoreProvider = restores[0]
+	}
+	if s.configEnabled() || s.restoreEnabled() {
 		s.configJobs = make(chan configJob, 1)
 		s.wg.Add(1)
 		go s.guarded(s.configLoop)
@@ -450,6 +459,7 @@ func (s *Service) connect() (bool, bool) {
 	session := hex.EncodeToString(nonce[:])
 	current := s.current()
 	detailOffered := s.detailProvider != nil && response != nil && advertisedCapability(response.Header, shared.FRPDetailCapability)
+	restoreOffered := s.restoreEnabled() && response != nil && advertisedCapability(response.Header, shared.ConfigRestoreCapability)
 	configOffered := s.configEnabled() && response != nil && advertisedCapability(response.Header, shared.ConfigManageCapability)
 	hello := shared.Hello{Meta: shared.Meta{Schema: shared.SchemaVersion, SessionID: session, Sequence: 1, CollectedAt: current.at.Format(time.RFC3339Nano)}, Capabilities: []string{"metrics.v1", "frp.v1"}, Facts: current.facts, Extensions: extension(current.frp)}
 	if s.cfg.ProbeEnabled {
@@ -460,6 +470,9 @@ func (s *Service) connect() (bool, bool) {
 	}
 	if configOffered {
 		hello.Capabilities = append(hello.Capabilities, shared.ConfigManageCapability)
+	}
+	if restoreOffered {
+		hello.Capabilities = append(hello.Capabilities, shared.ConfigRestoreCapability)
 	}
 	if hello.Validate() != nil {
 		return false, false
@@ -479,7 +492,7 @@ func (s *Service) connect() (bool, bool) {
 	}
 	decoder := json.NewDecoder(strings.NewReader(string(data)))
 	decoder.DisallowUnknownFields()
-	if decoder.Decode(&answer) != nil || decoder.Decode(new(any)) != io.EOF || answer.JSONRPC != "2.0" || answer.ID != "hello" || answer.Result.Validate() != nil || answer.Result.SessionID != session || !capabilities(answer.Result.Capabilities, s.cfg.ProbeEnabled, detailOffered, configOffered) {
+	if decoder.Decode(&answer) != nil || decoder.Decode(new(any)) != io.EOF || answer.JSONRPC != "2.0" || answer.ID != "hello" || answer.Result.Validate() != nil || answer.Result.SessionID != session || !capabilities(answer.Result.Capabilities, s.cfg.ProbeEnabled, detailOffered, configOffered, restoreOffered) {
 		return false, false
 	}
 	negotiated := int64(answer.Result.ReportInterval)
@@ -495,11 +508,15 @@ func (s *Service) connect() (bool, bool) {
 	c.SetPongHandler(func(string) error { return c.SetReadDeadline(time.Now().Add(15 * time.Second)) })
 	var probes *probe.Engine
 	var results <-chan probe.Result
-	detailAccepted, configAccepted := false, false
+	detailAccepted, configAccepted, restoreAccepted := false, false, false
 	connectionCtx, connectionCancel := context.WithCancel(s.ctx)
 	defer connectionCancel()
 	configResults := make(chan shared.ConfigResult, 4)
+	restoreResults := make(chan shared.RestoreResult, 4)
 	for _, capability := range answer.Result.Capabilities {
+		if capability == shared.ConfigRestoreCapability {
+			restoreAccepted = true
+		}
 		if capability == shared.ConfigManageCapability {
 			configAccepted = true
 		}
@@ -519,7 +536,7 @@ func (s *Service) connect() (bool, bool) {
 		defer c.Close()
 		var taskSequence uint64
 		burst, rate := float64(4), float64(1)
-		if configAccepted {
+		if configAccepted || restoreAccepted {
 			burst, rate = 8, 2
 		}
 		taskBudget, replenished := burst, time.Now()
@@ -546,6 +563,13 @@ func (s *Service) connect() (bool, bool) {
 				return
 			}
 			switch {
+			case frame.RestoreCommand != nil && restoreAccepted:
+				command := *frame.RestoreCommand
+				if command.SessionID != session || command.Sequence <= taskSequence {
+					return
+				}
+				taskSequence = command.Sequence
+				s.dispatchRestore(configJob{ctx: connectionCtx, restore: &command, restoreResults: restoreResults})
 			case frame.ConfigCommand != nil && configAccepted:
 				command := *frame.ConfigCommand
 				if command.SessionID != session || command.Sequence <= taskSequence {
@@ -632,6 +656,20 @@ func (s *Service) connect() (bool, bool) {
 			if !send() {
 				return stable(), false
 			}
+		case result := <-restoreResults:
+			if !restoreAccepted || result.SessionID != session {
+				continue
+			}
+			if !nextSequence(&sequence) {
+				return stable(), false
+			}
+			result.Meta = shared.Meta{Schema: shared.SchemaVersion, SessionID: session, Sequence: sequence, CollectedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+			if result.Validate() != nil {
+				continue
+			}
+			if writeFrame(c, "config.restore.result", "", result) != nil {
+				return stable(), false
+			}
 		case result := <-configResults:
 			if !configAccepted || result.SessionID != session {
 				continue
@@ -662,11 +700,12 @@ func (s *Service) connect() (bool, bool) {
 }
 func capabilities(c []string, probeEnabled, detailOffered bool, configOptions ...bool) bool {
 	configOffered := len(configOptions) != 0 && configOptions[0]
+	restoreOffered := len(configOptions) > 1 && configOptions[1]
 	metrics := false
 	for _, v := range c {
 		if v == "metrics.v1" {
 			metrics = true
-		} else if v != "frp.v1" && (v != "ping.v1" || !probeEnabled) && (v != shared.FRPDetailCapability || !detailOffered) && (v != shared.ConfigManageCapability || !configOffered) {
+		} else if v != "frp.v1" && (v != "ping.v1" || !probeEnabled) && (v != shared.FRPDetailCapability || !detailOffered) && (v != shared.ConfigManageCapability || !configOffered) && (v != shared.ConfigRestoreCapability || !restoreOffered) {
 			return false
 		}
 	}

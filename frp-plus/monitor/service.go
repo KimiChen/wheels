@@ -388,9 +388,11 @@ func (s *Service) handleWS(w http.ResponseWriter, r *http.Request) {
 	old := n.conn
 	n.configLink.stop()
 	var link *configLink
-	var commands <-chan shared.ConfigCommand
-	if hasCapability(hello.Capabilities, shared.ConfigManageCapability) {
+	var commands <-chan configOutgoing
+	if hasCapability(hello.Capabilities, shared.ConfigManageCapability) || hasCapability(hello.Capabilities, shared.ConfigRestoreCapability) {
 		link = newConfigLink()
+		link.configEnabled = hasCapability(hello.Capabilities, shared.ConfigManageCapability)
+		link.restoreEnabled = hasCapability(hello.Capabilities, shared.ConfigRestoreCapability)
 		commands = link.commands
 	}
 	n.configLink = link
@@ -474,7 +476,14 @@ func (s *Service) handleWS(w http.ResponseWriter, r *http.Request) {
 			case <-s.ctx.Done():
 				return
 			case command := <-commands:
-				if !s.sendConfigCommand(id, c, link, command, &sequence) {
+				ok := false
+				if command.config != nil {
+					ok = s.sendConfigCommand(id, c, link, *command.config, &sequence)
+				}
+				if command.restore != nil {
+					ok = s.sendRestoreCommand(id, c, link, *command.restore, &sequence)
+				}
+				if !ok {
 					c.Close()
 					return
 				}
@@ -493,7 +502,7 @@ func (s *Service) handleWS(w http.ResponseWriter, r *http.Request) {
 	}()
 	tokens, last := float64(8), time.Now()
 	rate, burst := float64(2), float64(8)
-	if hasCapability(hello.Capabilities, shared.FRPDetailCapability) || hasCapability(hello.Capabilities, shared.ConfigManageCapability) {
+	if hasCapability(hello.Capabilities, shared.FRPDetailCapability) || hasCapability(hello.Capabilities, shared.ConfigManageCapability) || hasCapability(hello.Capabilities, shared.ConfigRestoreCapability) {
 		rate, burst, tokens = 6, 16, 16
 	}
 	if hasCapability(hello.Capabilities, "ping.v1") {
@@ -520,9 +529,16 @@ func (s *Service) handleWS(w http.ResponseWriter, r *http.Request) {
 		}
 		tokens--
 		frame, err = shared.DecodeFrame(data)
-		if err != nil || (frame.Report == nil && frame.PingResult == nil && frame.FRPDetail == nil && frame.ConfigResult == nil) {
+		if err != nil || (frame.Report == nil && frame.PingResult == nil && frame.FRPDetail == nil && frame.ConfigResult == nil && frame.RestoreResult == nil) {
 			closeProtocol(c)
 			return
+		}
+		if frame.RestoreResult != nil {
+			if !s.acceptRestoreResult(id, c, now, *frame.RestoreResult) {
+				closeProtocol(c)
+				return
+			}
+			continue
 		}
 		if frame.ConfigResult != nil {
 			if !s.acceptConfigResult(id, c, now, *frame.ConfigResult) {
@@ -586,7 +602,7 @@ func supportedCapabilities(offered []string) []string {
 	accepted := make([]string, 0, len(offered))
 	for _, capability := range offered {
 		switch capability {
-		case "metrics.v1", "frp.v1", "ping.v1", shared.FRPDetailCapability, shared.ConfigManageCapability:
+		case "metrics.v1", "frp.v1", "ping.v1", shared.FRPDetailCapability, shared.ConfigManageCapability, shared.ConfigRestoreCapability:
 			accepted = append(accepted, capability)
 		}
 	}

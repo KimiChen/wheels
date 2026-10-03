@@ -9,9 +9,11 @@ import (
 )
 
 type configJob struct {
-	ctx     context.Context
-	command shared.ConfigCommand
-	results chan shared.ConfigResult
+	ctx            context.Context
+	command        shared.ConfigCommand
+	results        chan shared.ConfigResult
+	restore        *shared.RestoreCommand
+	restoreResults chan shared.RestoreResult
 }
 
 func (s *Service) configEnabled() bool {
@@ -70,6 +72,10 @@ func (s *Service) configLoop() {
 		case <-s.ctx.Done():
 			return
 		case job := <-s.configJobs:
+			if job.restore != nil {
+				s.runRestoreJob(job)
+				continue
+			}
 			if job.command.ValidateAt(time.Now()) != nil {
 				if fallback, ok := s.configError(job.command, "expired"); ok {
 					offerConfigResult(job.ctx, job.results, fallback)

@@ -29,21 +29,29 @@ type configPending struct {
 	secretReference string
 }
 
+type configOutgoing struct {
+	config  *shared.ConfigCommand
+	restore *shared.RestoreCommand
+}
+
 // Mutable fields are protected by Service.mu; socket writes have one owner.
 // A replaced connection owns a distinct link, queue and response namespace.
 type configLink struct {
-	commands    chan shared.ConfigCommand
-	closed      chan struct{}
-	closeOnce   sync.Once
-	pending     *configPending
-	recent      []string
-	serviceID   string
-	tokens      float64
-	replenished time.Time
+	commands       chan configOutgoing
+	restorePending *restorePending
+	configEnabled  bool
+	restoreEnabled bool
+	closed         chan struct{}
+	closeOnce      sync.Once
+	pending        *configPending
+	recent         []string
+	serviceID      string
+	tokens         float64
+	replenished    time.Time
 }
 
 func newConfigLink() *configLink {
-	return &configLink{commands: make(chan shared.ConfigCommand, 1), closed: make(chan struct{}), tokens: 4, replenished: time.Now()}
+	return &configLink{commands: make(chan configOutgoing, 1), configEnabled: true, closed: make(chan struct{}), tokens: 4, replenished: time.Now()}
 }
 func (l *configLink) stop() {
 	if l != nil {
@@ -82,7 +90,7 @@ func (s *Service) ConfigCommand(ctx context.Context, nodeID string, input shared
 	}
 	s.mu.Lock()
 	n := s.nodes[nodeID]
-	if n == nil || n.conn == nil || n.configLink == nil || s.credentialError.Load() {
+	if n == nil || n.conn == nil || n.configLink == nil || !n.configLink.configEnabled || s.credentialError.Load() {
 		s.mu.Unlock()
 		return fail(ErrConfigUnavailable)
 	}
@@ -135,7 +143,7 @@ func (s *Service) ConfigCommand(ctx context.Context, nodeID string, input shared
 		s.mu.Unlock()
 		return fail(ErrConfigServiceMismatch)
 	}
-	if link.pending != nil {
+	if link.pending != nil || link.restorePending != nil {
 		s.mu.Unlock()
 		return fail(ErrConfigBusy)
 	}
@@ -148,7 +156,7 @@ func (s *Service) ConfigCommand(ctx context.Context, nodeID string, input shared
 	}
 	link.pending = pending
 	select {
-	case link.commands <- command:
+	case link.commands <- configOutgoing{config: &command}:
 		link.tokens--
 		queued = true
 	default:
@@ -162,7 +170,7 @@ func (s *Service) ConfigCommand(ctx context.Context, nodeID string, input shared
 		if link.pending == pending {
 			link.pending = nil
 		}
-		link.remember(id)
+		link.remember("config:" + id)
 		s.mu.Unlock()
 	}()
 	waitCtx, cancel := context.WithDeadline(ctx, deadline)
@@ -213,14 +221,14 @@ func (s *Service) acceptConfigResult(nodeID string, conn *websocket.Conn, receiv
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	n := s.nodes[nodeID]
-	if n == nil || n.conn != conn || n.configLink == nil || n.sessionID != result.SessionID || result.Sequence <= n.sequence {
+	if n == nil || n.conn != conn || n.configLink == nil || !n.configLink.configEnabled || n.sessionID != result.SessionID || result.Sequence <= n.sequence {
 		return false
 	}
 	link := n.configLink
 	pending := link.pending
 	if pending == nil || pending.expected.RequestID != result.RequestID {
 		for _, id := range link.recent {
-			if id == result.RequestID {
+			if id == "config:"+result.RequestID {
 				n.sequence = result.Sequence
 				n.lastSeen = received
 				return true
@@ -247,7 +255,7 @@ func (s *Service) acceptConfigResult(nodeID string, conn *websocket.Conn, receiv
 	n.sequence = result.Sequence
 	n.lastSeen = received
 	link.pending = nil
-	link.remember(result.RequestID)
+	link.remember("config:" + result.RequestID)
 	select {
 	case pending.result <- result:
 	default:
@@ -259,5 +267,5 @@ func (s *Service) acceptConfigResult(nodeID string, conn *websocket.Conn, receiv
 // The management capability is only an upgrade advertisement; HTTP admin
 // authentication, local opt-in and current session ownership remain mandatory.
 func configCapabilitiesHeader() http.Header {
-	return http.Header{shared.CapabilitiesHeader: []string{shared.FRPDetailCapability + ", " + shared.ConfigManageCapability}}
+	return http.Header{shared.CapabilitiesHeader: []string{shared.FRPDetailCapability + ", " + shared.ConfigManageCapability + ", " + shared.ConfigRestoreCapability}}
 }
