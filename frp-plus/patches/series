@@ -7,3 +7,4 @@
 0006-config-management.patch
 0007-config-migration.patch
 0008-managed-backup-restore.patch
+0009-managed-verification-failure.patch

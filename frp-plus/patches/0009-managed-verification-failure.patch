@@ -1,0 +1,293 @@
+diff --git a/client/managed.go b/client/managed.go
+--- a/client/managed.go
++++ b/client/managed.go
+@@ -257,13 +257,13 @@
+ 		return result, nil
+ 	default:
+ 	}
+-	ps, pr, pa := ctl.pm.ManagedSnapshot()
+-	vs, vr, va := ctl.vm.ManagedSnapshot()
+-	if !pa || !va {
++	proxies := ctl.pm.ManagedSnapshotState()
++	visitors := ctl.vm.ManagedSnapshotState()
++	if !proxies.Available || !visitors.Available {
+ 		return result, managed.ErrBusy
+ 	}
+-	result.RuntimeLoaded = managedObjectsEqual(expected, configuration.Objects{Proxies: ps, Visitors: vs})
+-	result.ResourcesReady = result.RuntimeLoaded && pr && vr
++	result.RuntimeLoaded = managedObjectsEqual(expected, configuration.Objects{Proxies: proxies.Configurations, Visitors: visitors.Configurations})
++	result.ResourcesReady = result.RuntimeLoaded && proxies.Ready && visitors.Ready
+ 	if !svr.ctlMu.TryRLock() {
+ 		return result, managed.ErrBusy
+ 	}
+@@ -276,6 +276,11 @@
+ 	}
+ 	if !current {
+ 		result.ResourcesReady = false
++	} else if result.RuntimeLoaded && (proxies.AttemptRejected || visitors.AttemptRejected) {
++		// A current configuration attempt has actually failed. Do not wait out
++		// its deadline, but retain the ordinary deadline for pending control,
++		// health-check recovery, and Visitor remote/P2P/fallback uncertainty.
++		return result, managed.ErrRuntime
+ 	}
+ 	// No network probe is attempted; registration/listening is not business reachability.
+ 	return result, nil
+diff --git a/client/managed_test.go b/client/managed_test.go
+--- a/client/managed_test.go
++++ b/client/managed_test.go
+@@ -4,6 +4,7 @@
+ 	"context"
+ 	"encoding/json"
+ 	"errors"
++	"net"
+ 	"os"
+ 	"path/filepath"
+ 	"testing"
+@@ -226,3 +227,41 @@
+ 		t.Fatal("startup failure retained service claim")
+ 	}
+ }
++
++func TestManagedVerifyFailsCurrentLocalAttemptButWaitsOnClosedControl(t *testing.T) {
++	s := managedFixture(t)
++	ctx := context.Background()
++	op := managedBase(t, s)
++	if err := s.managedCheck(ctx, op, "apply"); err != nil {
++		t.Fatal(err)
++	}
++	listener, err := net.Listen("tcp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer listener.Close()
++	data, _ := json.Marshal(map[string]any{"proxies": []any{}, "visitors": []any{map[string]any{"name": "v", "type": "stcp", "serverName": "peer", "bindAddr": "127.0.0.1", "bindPort": listener.Addr().(*net.TCPAddr).Port}}})
++	desired := managed.StoreSnapshot{Exists: true, Bytes: data}
++	if err = os.WriteFile(s.storeSource.Path(), data, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err = s.managedApply(ctx, desired); err != nil {
++		t.Fatal(err)
++	}
++	pm := proxy.NewManager(ctx, s.common, nil, nil, nil, "")
++	vm := visitor.NewManager(ctx, "run", s.common, nil, nil, nil)
++	defer pm.Close()
++	defer vm.Close()
++	done := make(chan struct{})
++	s.ctl = &Control{ctx: ctx, pm: pm, vm: vm, doneCh: done}
++	vm.UpdateAll(s.visitorCfgs)
++	result, err := s.managedVerifyOnce(desired)
++	if !errors.Is(err, managed.ErrRuntime) || !result.RuntimeLoaded || result.ResourcesReady {
++		t.Fatal("definite local startup failure was treated as waiting")
++	}
++	close(done)
++	result, err = s.managedVerifyOnce(desired)
++	if err != nil || result.ResourcesReady {
++		t.Fatal("closed control reused an old local failure")
++	}
++}
+diff --git a/client/proxy/managed.go b/client/proxy/managed.go
+--- a/client/proxy/managed.go
++++ b/client/proxy/managed.go
+@@ -2,26 +2,40 @@
+ 
+ import v1 "github.com/fatedier/frp/pkg/config/v1"
+ 
+-// ManagedSnapshot observes actual manager objects and registration phases.
+-// It never starts traffic and never waits behind proxy work.
++// ManagedState records one actual registration attempt, not permanent validity
++// or remote business reachability. Unavailable snapshots are never rejections.
++type ManagedState struct {
++	Configurations  []v1.ProxyConfigurer
++	Ready           bool
++	Available       bool
++	AttemptRejected bool
++}
++
++// ManagedSnapshot preserves the existing internal observation contract.
+ func (pm *Manager) ManagedSnapshot() ([]v1.ProxyConfigurer, bool, bool) {
++	state := pm.ManagedSnapshotState()
++	return state.Configurations, state.Ready, state.Available
++}
++func (pm *Manager) ManagedSnapshotState() ManagedState {
+ 	if !pm.mu.TryRLock() {
+-		return nil, false, false
++		return ManagedState{}
+ 	}
+ 	defer pm.mu.RUnlock()
+-	out := make([]v1.ProxyConfigurer, 0, len(pm.proxies))
+-	ready := !pm.closed
++	out := ManagedState{Configurations: make([]v1.ProxyConfigurer, 0, len(pm.proxies)), Ready: !pm.closed, Available: true}
+ 	for _, p := range pm.proxies {
+ 		if !p.mu.TryRLock() {
+-			return nil, false, false
++			return ManagedState{}
+ 		}
+ 		if p.Cfg == nil {
+ 			p.mu.RUnlock()
+-			return nil, false, false
++			return ManagedState{}
+ 		}
+-		out = append(out, p.Cfg.Clone())
+-		ready = ready && p.Phase == ProxyPhaseRunning
++		out.Configurations = append(out.Configurations, p.Cfg.Clone())
++		out.Ready = out.Ready && p.Phase == ProxyPhaseRunning
++		// Only a received server rejection or a failed local proxy Run enters this
++		// phase. Missing replies, reconnects and failed health checks keep waiting.
++		out.AttemptRejected = out.AttemptRejected || (!pm.closed && p.Phase == ProxyPhaseStartErr && p.Err != "")
+ 		p.mu.RUnlock()
+ 	}
+-	return out, ready, true
++	return out
+ }
+diff --git a/client/proxy/managed_test.go b/client/proxy/managed_test.go
+--- a/client/proxy/managed_test.go
++++ b/client/proxy/managed_test.go
+@@ -34,3 +34,32 @@
+ 		t.Fatal("busy proxy snapshot succeeded")
+ 	}
+ }
++
++func TestManagedProxyDistinguishesRejectedAttemptFromWaiting(t *testing.T) {
++	cfg := &v1.TCPProxyConfig{ProxyBaseConfig: v1.ProxyBaseConfig{Name: "p", Type: "tcp"}}
++	p := &Wrapper{WorkingStatus: WorkingStatus{Name: "p", Cfg: cfg}}
++	pm := &Manager{proxies: map[string]*Wrapper{"p": p}}
++	for _, test := range []struct {
++		phase, message string
++		rejected       bool
++	}{
++		{ProxyPhaseNew, "", false}, {ProxyPhaseWaitStart, "previous failure", false}, {ProxyPhaseCheckFailed, "health check failed", false}, {ProxyPhaseRunning, "previous failure", false}, {ProxyPhaseStartErr, "", false}, {ProxyPhaseStartErr, "server rejected this attempt", true},
++	} {
++		p.Phase, p.Err = test.phase, test.message
++		state := pm.ManagedSnapshotState()
++		if !state.Available || state.AttemptRejected != test.rejected {
++			t.Fatal("waiting and rejected registration were conflated")
++		}
++	}
++	p.mu.Lock()
++	state := pm.ManagedSnapshotState()
++	p.mu.Unlock()
++	if state.Available || state.AttemptRejected {
++		t.Fatal("lock contention became registration rejection")
++	}
++	pm.closed = true
++	state = pm.ManagedSnapshotState()
++	if state.Ready || state.AttemptRejected {
++		t.Fatal("closed manager became registration rejection")
++	}
++}
+diff --git a/client/visitor/managed.go b/client/visitor/managed.go
+--- a/client/visitor/managed.go
++++ b/client/visitor/managed.go
+@@ -2,18 +2,27 @@
+ 
+ import v1 "github.com/fatedier/frp/pkg/config/v1"
+ 
+-// ManagedSnapshot includes failed/pending configurations and verifies existing
+-// listeners or the internal-only negative bind-port mode. Remote sessions are
+-// deliberately not required or opened as a side effect of verification.
++// ManagedState observes local creation/listening only. Remote connection,
++// P2P and fallback state are intentionally irrelevant to this verification.
++type ManagedState struct {
++	Configurations  []v1.VisitorConfigurer
++	Ready           bool
++	Available       bool
++	AttemptRejected bool
++}
++
+ func (vm *Manager) ManagedSnapshot() ([]v1.VisitorConfigurer, bool, bool) {
++	state := vm.ManagedSnapshotState()
++	return state.Configurations, state.Ready, state.Available
++}
++func (vm *Manager) ManagedSnapshotState() ManagedState {
+ 	if !vm.mu.TryRLock() {
+-		return nil, false, false
++		return ManagedState{}
+ 	}
+ 	defer vm.mu.RUnlock()
+-	out := make([]v1.VisitorConfigurer, 0, len(vm.cfgs))
+-	ready := !vm.monitorClosed && len(vm.visitors) == len(vm.cfgs)
++	out := ManagedState{Configurations: make([]v1.VisitorConfigurer, 0, len(vm.cfgs)), Ready: !vm.monitorClosed && len(vm.visitors) == len(vm.cfgs), Available: true}
+ 	for name, cfg := range vm.cfgs {
+-		out = append(out, cfg.Clone())
++		out.Configurations = append(out.Configurations, cfg.Clone())
+ 		v := vm.visitors[name]
+ 		local := false
+ 		switch typed := v.(type) {
+@@ -24,9 +33,14 @@
+ 		case *SUDPVisitor:
+ 			local = typed.udpConn != nil && !typed.observation.localClosed.Load()
+ 		}
+-		ready = ready && local
++		out.Ready = out.Ready && local
++		if !vm.monitorClosed && v == nil {
++			if err := vm.monitorErrors[name]; err != nil && err.RecoveredAt == "" && (err.Code == "plugin_failed" || err.Code == "listen_failed") {
++				out.AttemptRejected = true
++			}
++		}
+ 	}
+-	return out, ready, true
++	return out
+ }
+ func managedLocalReady(v *BaseVisitor, port int) bool {
+ 	if v == nil || v.observation.localClosed.Load() {
+diff --git a/client/visitor/managed_test.go b/client/visitor/managed_test.go
+--- a/client/visitor/managed_test.go
++++ b/client/visitor/managed_test.go
+@@ -3,6 +3,7 @@
+ import (
+ 	"context"
+ 	v1 "github.com/fatedier/frp/pkg/config/v1"
++	"github.com/fatedier/frp/pkg/util/monitorstate"
+ 	"net"
+ 	"testing"
+ )
+@@ -51,3 +52,49 @@
+ 		t.Fatal("closed manager ready")
+ 	}
+ }
++
++func TestManagedVisitorRejectsOnlyCurrentLocalStartupFailure(t *testing.T) {
++	cfg := &v1.STCPVisitorConfig{VisitorBaseConfig: v1.VisitorBaseConfig{Name: "v", Type: "stcp", ServerName: "peer", BindAddr: "127.0.0.1", BindPort: -1}}
++	vm := NewManager(context.Background(), "run", &v1.ClientCommonConfig{}, nil, nil, nil)
++	defer vm.Close()
++	vm.cfgs = map[string]v1.VisitorConfigurer{"v": cfg}
++	vm.monitorErrors = map[string]*monitorstate.Error{"v": {Code: "listen_failed", Stage: "visitor", At: "now"}}
++	state := vm.ManagedSnapshotState()
++	if !state.Available || state.Ready || !state.AttemptRejected {
++		t.Fatal("actual local startup failure was not rejected")
++	}
++	vm.monitorErrors["v"].RecoveredAt = "recovered"
++	state = vm.ManagedSnapshotState()
++	if state.AttemptRejected {
++		t.Fatal("historical local failure rejected current config")
++	}
++	vm.monitorErrors["v"] = &monitorstate.Error{Code: "peer_failed", Stage: "visitor", At: "now"}
++	state = vm.ManagedSnapshotState()
++	if state.AttemptRejected {
++		t.Fatal("remote failure became local startup rejection")
++	}
++	vm.mu.Lock()
++	err := vm.startVisitor(cfg)
++	vm.mu.Unlock()
++	if err != nil {
++		t.Fatal(err)
++	}
++	v := vm.visitors["v"].(*STCPVisitor)
++	v.observation.errors.Fail("peer_failed", "visitor")
++	v.observation.fallbackFailed.Store(true)
++	state = vm.ManagedSnapshotState()
++	if !state.Ready || state.AttemptRejected {
++		t.Fatal("remote/fallback uncertainty invalidated local listener")
++	}
++	vm.mu.Lock()
++	state = vm.ManagedSnapshotState()
++	vm.mu.Unlock()
++	if state.Available || state.AttemptRejected {
++		t.Fatal("busy visitor became startup rejection")
++	}
++	vm.Close()
++	state = vm.ManagedSnapshotState()
++	if state.Ready || state.AttemptRejected {
++		t.Fatal("closed visitor manager became startup rejection")
++	}
++}
