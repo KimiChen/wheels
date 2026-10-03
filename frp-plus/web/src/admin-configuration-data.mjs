@@ -11,11 +11,19 @@ export const configErrors = {
   ownership_conflict: "文件与 Store 存在同名对象，请先清理来源。", source_conflict: "配置来源冲突，请先在本机核对。",
   invalid_field: "字段值不符合该类型要求。", validation_failed: "原生整集校验未通过，请检查端口、引用和必填字段。",
   invalid_config: "配置请求不完整或格式不正确。", field_read_only: "此字段暂不支持远程编辑。",
+  source_read_only: "当前恢复或来源状态只允许核对，请完成本机维护后重新读取。",
+  verify_failed: "运行资源核对失败；请查看资源详情中的本次注册或本地启动错误，并核对回退结果。",
+  runtime_failed: "原生运行时应用未完成，请核对回退结果与本机恢复记录。",
   expired: "预览或操作已到期，请查询最终结果后重新准备。", timeout: "请求超时，实际结果仍需查询。",
   connection_lost: "管理连接已断开，Agent 会继续本地确认或回退。", outcome_unknown: "结果暂不明确，请查询 Agent 本地记录。",
   service_mismatch: "服务身份已变化，请在本机核对恢复状态。", operation_not_found: "Agent 未找到该操作，不能据此推断配置未改变。",
   rollback_failed: "本地回退未确认，请保留恢复材料并在本机处理。", invalid_request: "请求不符合配置管理约束。"
 };
+export function resultReason(agent) {
+  if (!agent?.error_code) return "";
+  if (agent.error_code === "recovered") return "已根据 Agent 本机事务日志完成恢复核对。";
+  return configErrors[agent.error_code] ?? "本次操作有未确认的原生结果，请查看状态与资源详情。";
+}
 const validDigest = value => typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
 const validID = value => typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);
 const byteLength = value => new TextEncoder().encode(value).length;
@@ -118,12 +126,53 @@ export function resultFacts(agent) {
 export function canApply(result, preview, now = Date.now()) {
   return result?.operation?.state === "prepared" && Number(result.operation.deadline_at_ms) > now && validDigest(preview?.candidate_digest) && preview.candidate_digest === result.operation.candidate_digest && preview.base_revision === result.operation.base_revision && validDigest(preview.context_revision);
 }
+export function readRestore(data, nodeID) {
+  const value = data?.restore;
+  const fail = () => { throw new Error("恢复核对响应无效。"); };
+  if (data?.node_id !== nodeID || !validID(data.service_id) || !value || !["none", "pending", "verified", "acknowledged", "confirmed"].includes(value.state) || !Number.isSafeInteger(data.received_at_ms) || data.received_at_ms <= 0 || typeof data.code !== "string" || !/^[a-z_]{1,64}$/.test(data.code)) fail();
+  const restore = {state: value.state};
+  if (value.state !== "none") {
+    for (const field of ["epoch", "backup_service_id"]) if (!validID(value[field])) fail();
+    if (value.replaced_service_id && !validID(value.replaced_service_id)) fail();
+    for (const field of ["manifest_digest", "context_revision"]) if (!validDigest(value[field])) fail();
+    if (!Number.isInteger(value.operations_count) || value.operations_count < 0 || value.operations_count > 1024) fail();
+    if (value.state !== "pending" && (!validDigest(value.store_digest) || value.runtime_loaded !== true || value.resources_ready !== true)) fail();
+    if (["acknowledged", "confirmed"].includes(value.state) && !validID(value.acknowledgement_id)) fail();
+    for (const field of ["epoch", "backup_service_id", "replaced_service_id", "manifest_digest", "context_revision", "store_digest", "acknowledgement_id", "runtime_loaded", "resources_ready", "operations_count"]) restore[field] = value[field];
+  }
+  let receipt = null, active = null;
+  if (data.receipt != null) {
+    const item = data.receipt;
+    if (!validID(item.id) || item.node_id !== nodeID || item.service_id !== data.service_id || item.epoch !== restore.epoch || item.manifest_digest !== restore.manifest_digest || item.context_revision !== restore.context_revision || item.store_digest !== restore.store_digest || !["pending", "acknowledged"].includes(item.state) || !Number.isSafeInteger(item.version) || item.version < 1) fail();
+    receipt = {id: item.id, state: item.state, version: item.version};
+  }
+  if (data.active_operation != null) {
+    const item = data.active_operation;
+    if (!validID(item.operation_id) || item.node_id !== nodeID || !validID(item.service_id) || !activeStates.has(item.state) || !Number.isSafeInteger(item.version) || item.version < 1) fail();
+    active = {operation_id: item.operation_id, node_id: item.node_id, service_id: item.service_id, state: item.state, version: item.version};
+  }
+  // Copy only safe contract fields; unexpected server properties never become
+  // persistent panel state or a subsequent acknowledgement request.
+  return {code: data.code, node_id: nodeID, service_id: data.service_id, received_at_ms: data.received_at_ms, restore, receipt, active_operation: active};
+}
+export function canAcknowledgeRestore(data, now = Date.now()) {
+  const restore = data?.restore, active = data?.active_operation;
+  return !!(data?.code === "ok" && data.received_at_ms <= now && now - data.received_at_ms <= 60000 &&
+    ["verified", "acknowledged"].includes(restore?.state) && data.receipt?.state !== "acknowledged" &&
+    (!active || [restore.backup_service_id, restore.replaced_service_id].includes(active.service_id)));
+}
+export function restoreAcknowledgement(data) {
+  return {service_id: data.service_id, epoch: data.restore.epoch, manifest_digest: data.restore.manifest_digest,
+    context_revision: data.restore.context_revision, store_digest: data.restore.store_digest,
+    expected_active_operation_id: data.active_operation?.operation_id ?? "", expected_active_version: data.active_operation?.version ?? 0};
+}
+const restorationBlocksWrites = data => ["pending", "verified", "acknowledged"].includes(data?.restore?.state);
 
 // Clearing/switching invalidates every in-flight reply. Plaintext secrets are
 // passed directly to request and are not retained in this controller's state.
 export function createConfigController({request, onChange = () => {}, now = () => Date.now(), uuid = () => crypto.randomUUID()}) {
   let epoch = 0;
-  const state = {nodeID: null, inventory: null, operations: [], result: null, preview: null, pending: false, message: "", draft: false, online: false, needsReload: false};
+  const state = {nodeID: null, inventory: null, operations: [], result: null, preview: null, restoration: null, pending: false, message: "", draft: false, online: false, needsReload: false};
   const notify = () => onChange(state);
   const path = () => `/api/admin/v1/nodes/${encodeURIComponent(state.nodeID)}/configuration`;
   async function perform(work) {
@@ -153,13 +202,27 @@ export function createConfigController({request, onChange = () => {}, now = () =
   }
   return {
     state,
-    clear() { epoch++; Object.assign(state, {nodeID: null, inventory: null, operations: [], result: null, preview: null, pending: false, message: "", draft: false, online: false, needsReload: false}); notify(); },
+    clear() { epoch++; Object.assign(state, {nodeID: null, inventory: null, operations: [], result: null, preview: null, restoration: null, pending: false, message: "", draft: false, online: false, needsReload: false}); notify(); },
     setOnline(value) { state.online = value === true; notify(); },
     async open(nodeID, online = true) { if (state.nodeID === nodeID) { state.online = online; notify(); return; } this.clear(); state.nodeID = nodeID; state.online = online; await perform(load); },
     async reload() { if (state.pending) return; state.draft = false; state.preview = null; await perform(load); },
     draft(value = true) { state.draft = value; state.preview = null; notify(); },
+    async inspectRestore() {
+      if (!state.online || state.pending) return;
+      const generation = epoch; state.restoration = null;
+      await perform(async () => { const response = await request(`${path()}/restore`); if (generation === epoch) state.restoration = readRestore(response, state.nodeID); });
+    },
+    async acknowledgeRestore() {
+      if (!state.online || !canAcknowledgeRestore(state.restoration, now())) return;
+      const generation = epoch, body = restoreAcknowledgement(state.restoration);
+      await perform(async () => {
+        const response = await request(`${path()}/restore/acknowledge`, {method: "POST", body});
+        if (generation !== epoch) return;
+        state.restoration = readRestore(response, state.nodeID); state.needsReload = true;
+      });
+    },
     async prepare(edit) {
-      if (!state.inventory || state.inventory.inventory.state !== "ready" || !state.online || state.needsReload || state.operations.some(op => activeStates.has(op.state))) return;
+      if (!state.inventory || state.inventory.inventory.state !== "ready" || !state.online || restorationBlocksWrites(state.restoration) || state.needsReload || state.operations.some(op => activeStates.has(op.state))) return;
       const generation = epoch, body = {service_id: state.inventory.service_id, base_revision: state.inventory.inventory.revision, idempotency_key: uuid(), deadline_at_ms: now() + 300000, ...edit};
       await perform(async () => { const result = await request(`${path()}/operations`, {method: "POST", body}); if (generation !== epoch) return; accept(result); state.draft = false; });
     },
@@ -169,7 +232,7 @@ export function createConfigController({request, onChange = () => {}, now = () =
       await perform(async () => { const result = await request(`${path()}/operations/${operationID}`); if (generation === epoch) accept(result); });
     },
     async action(action) {
-      if (!["apply", "cancel", "rollback"].includes(action) || !state.result || !state.online) return;
+      if (!["apply", "cancel", "rollback"].includes(action) || !state.result || !state.online || restorationBlocksWrites(state.restoration)) return;
       if (action === "apply" && !canApply(state.result, state.preview, now())) return;
       const generation = epoch, op = state.result.operation, agent = state.result.agent, preview = state.preview;
       const body = {expected_version: op.version, context_revision: preview?.context_revision ?? agent?.context_revision ?? "", candidate_digest: op.candidate_digest};

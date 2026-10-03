@@ -1,4 +1,4 @@
-import {proxyTypes, visitorTypes, operationLabels, activeStates, configErrors, fieldSpecs, secretPaths, inputText, makeEdit, resultFacts, canApply, createConfigController} from "./admin-configuration-data.mjs";
+import {proxyTypes, visitorTypes, operationLabels, activeStates, configErrors, fieldSpecs, secretPaths, inputText, makeEdit, resultFacts, resultReason, canApply, canAcknowledgeRestore, createConfigController} from "./admin-configuration-data.mjs";
 
 const labels = {enabled: "启用", localIP: "本地目标地址", localPort: "本地目标端口", remotePort: "远端端口（0 为动态）", customDomains: "域名（每行一个）", subdomain: "子域名", locations: "HTTP 路径（每行一个）", httpUser: "HTTP 用户", hostHeaderRewrite: "Host 重写", routeByHTTPUser: "按 HTTP 用户路由", multiplexer: "复用协议（httpconnect）", allowUsers: "允许用户（每行一个）", serverUser: "远端用户", serverName: "远端代理名称", bindAddr: "Visitor 本地监听地址", bindPort: "Visitor 端口（-1 为内部模式）", protocol: "Visitor 协议", keepTunnelOpen: "保持隧道", maxRetriesAnHour: "每小时最大重试", minRetryInterval: "最短重试间隔", fallbackTo: "fallback Visitor 名称", fallbackTimeoutMs: "fallback 超时（毫秒）", "transport.useEncryption": "代理加密", "transport.useCompression": "代理压缩", "transport.bandwidthLimit": "限速（如 1MB）", "transport.bandwidthLimitMode": "限速位置（client/server）", "transport.proxyProtocolVersion": "PROXY 协议版本", secretKey: "隧道密钥", httpPassword: "HTTP 密码", "loadBalancer.groupKey": "负载均衡密钥"};
 const modes = {create: "新建", update: "编辑", clone: "复制", rename: "改名", delete: "删除", enable: "启用", disable: "禁用"};
@@ -16,8 +16,9 @@ export function createConfigPanel(container, {request}) {
   };
   const row = (parent, label, value) => { const entry = element("div"); entry.append(element("dt", label), element("dd", value)); parent.append(entry); };
   const field = (label, control) => { const wrapper = element("label", undefined, "wsk-field"); wrapper.append(element("span", label, "wsk-label"), control); return wrapper; };
-  let mounted = false, lastInventory = null, lastResult = null, lastHistory = null, form = null, formMode = null, source = null, secretActions = [], poll = null;
+  let mounted = false, lastInventory = null, lastResult = null, lastHistory = null, lastRestoration = null, form = null, formMode = null, source = null, secretActions = [], poll = null;
   let message, inventoryBox, editorBox, previewBox, resultBox, historyBox, applyButton, reloadButton;
+  let restoreBox, restoreButton, acknowledgeButton;
   const controller = createConfigController({request, onChange: render});
   function mount() {
     if (mounted) return; mounted = true;
@@ -29,7 +30,11 @@ export function createConfigPanel(container, {request}) {
     for (const text of ["在 Agent 主机建立完整私有备份，记录当前 Store、主文件与 include 来源。关闭托管后才能使用原生写入口。", "启动配置、认证、TLS、telemetry、Store 路径及 frps 配置需在原生文件维护并重启。普通 frpc reload 不能替换所有启动配置。", "文件迁移到 Store 需要显式准备候选、清理原文件同名定义并核对完整有效集合。不要用同名覆盖代替迁移。", "重新启用托管并读取来源；只读、来源冲突、旧版本、多 Service 或恢复未完成时不开放写入。原生 Dashboard 地址见资源详情，由管理员显式配置。"] ) steps.append(element("li", text));
     native.append(steps);
     inventoryBox = element("div", undefined, "fa-config-inventory"); editorBox = element("div", undefined, "fa-config-editor"); previewBox = element("div", undefined, "fa-config-preview"); resultBox = element("div", undefined, "fa-config-result"); historyBox = element("div", undefined, "fa-config-history");
-    container.replaceChildren(heading, intro, message, reloadButton, native, inventoryBox, editorBox, previewBox, resultBox, historyBox);
+    const restoreSection = element("section", undefined, "fa-config-restoration");
+    restoreButton = button("恢复核对", () => void controller.inspectRestore());
+    restoreBox = element("div");
+    restoreSection.append(element("h4", "备份恢复接管"), element("p", "仅在本机离线安装恢复包后使用。先读取新身份与验证事实，再明确接管；接管不会直接开放配置写入。", "fa-muted"), restoreButton, restoreBox);
+    container.replaceChildren(heading, intro, message, reloadButton, native, restoreSection, inventoryBox, editorBox, previewBox, resultBox, historyBox);
   }
   function clearEditor() {
     if (form) { for (const input of form.querySelectorAll('input[type="password"]')) input.value = ""; form.reset(); }
@@ -44,18 +49,43 @@ export function createConfigPanel(container, {request}) {
     if (lastInventory !== state.inventory) { lastInventory = state.inventory; renderInventory(); }
     if (lastResult !== state.result) { lastResult = state.result; renderResult(); renderPreview(); }
     if (lastHistory !== state.operations) { lastHistory = state.operations; renderHistory(); }
-    const blocked = state.pending || !state.online || state.inventory?.inventory?.state !== "ready";
+    if (lastRestoration !== state.restoration) { lastRestoration = state.restoration; renderRestoration(); }
+    const recovering = ["pending", "verified", "acknowledged"].includes(state.restoration?.restore?.state);
+    const blocked = state.pending || !state.online || recovering || state.inventory?.inventory?.state !== "ready";
     for (const input of container.querySelectorAll("[data-config-write]")) input.disabled = blocked;
     const editingBlocked = blocked || state.needsReload || state.operations.some(op => activeStates.has(op.state));
     for (const input of inventoryBox.querySelectorAll("[data-config-write]")) input.disabled = editingBlocked;
     for (const input of form?.querySelectorAll("input, select, textarea, button") ?? []) input.disabled = editingBlocked;
     if (applyButton) applyButton.disabled = blocked || !canApply(state.result, state.preview) || !previewBox.querySelector('input[type="checkbox"]')?.checked;
+    restoreButton.disabled = state.pending || !state.online;
+    if (acknowledgeButton) acknowledgeButton.disabled = state.pending || !state.online || !canAcknowledgeRestore(state.restoration) || !restoreBox.querySelector('input[type="checkbox"]')?.checked;
     clearTimeout(poll);
     if (!state.pending && state.result?.operation.state === "prepared" && state.result.operation.deadline_at_ms > Date.now()) {
       poll = setTimeout(render, Math.min(1000, state.result.operation.deadline_at_ms - Date.now() + 1));
     } else if (!state.pending && state.result && activeStates.has(state.result.operation.state) && state.result.operation.state !== "rollback_failed" && state.online) {
       poll = setTimeout(() => { if (container.isConnected && !container.closest("[hidden]")) void controller.query(); }, 3000);
     }
+  }
+  function renderRestoration() {
+    restoreBox.replaceChildren(); acknowledgeButton = null;
+    const data = controller.state.restoration; if (!data) return;
+    const value = data.restore;
+    if (value.state === "none") { restoreBox.append(element("p", "Agent 当前没有恢复接管记录。", "fa-muted")); return; }
+    const labels = {pending: "本机恢复尚待运行验证", verified: "本机已验证，等待管理员接管", acknowledged: "接管已确认，等待离线确认", confirmed: "离线确认已记录"};
+    restoreBox.append(element("h5", labels[value.state]), element("p", `核对时间：${date(data.received_at_ms)}。业务连通仍需独立验证。`, "fa-muted"));
+    const facts = element("dl", undefined, "fa-detail-list fa-config-digest");
+    for (const [label, text] of [["恢复 epoch", value.epoch], ["当前服务身份", data.service_id], ["备份服务身份", value.backup_service_id], ["被替换服务身份", value.replaced_service_id || "未记录"], ["恢复包摘要", value.manifest_digest], ["配置上下文摘要", value.context_revision], ["Store 摘要", value.store_digest || "尚未验证"], ["运行时 / 资源", value.runtime_loaded && value.resources_ready ? "已验证" : "未确认"], ["恢复操作记录", String(value.operations_count)], ["主控接管记录", data.receipt?.state === "acknowledged" ? "Agent 已确认" : data.receipt ? "已记录意图，Agent 结果待核对" : "尚未接管"]]) row(facts, label, text);
+    restoreBox.append(facts);
+    if (data.active_operation) restoreBox.append(element("p", `原活动操作 ${data.active_operation.operation_id} · ${operationLabels[data.active_operation.state]}。接管先查询真实记录；无法从恢复包继续核对的旧意图将以恢复取代事件留存，不能视为已回退。`, "wsk-alert wsk-warning fa-config-digest"));
+    if (["verified", "acknowledged"].includes(value.state) && data.receipt?.state !== "acknowledged") {
+      const consent = element("input"); consent.type = "checkbox";
+      restoreBox.append(field("我已核对恢复身份与摘要，允许接管并保留旧操作处理审计", consent));
+      acknowledgeButton = button("确认接管恢复状态", () => void controller.acknowledgeRestore());
+      consent.addEventListener("change", render); restoreBox.append(acknowledgeButton);
+      restoreBox.append(element("p", "核对结果超过一分钟后请重新读取；接管请求失联时先核对记录，不重复应用配置。", "fa-muted"));
+    }
+    if (value.state === "acknowledged" || data.receipt?.state === "acknowledged") restoreBox.append(element("p", "下一步在 Agent 本机停止进程，使用上面的 epoch 与恢复包摘要运行 ops.py restore-confirm --directory <原安装目录> --epoch <epoch> --manifest-digest <摘要> --offline。随后重新启动、核对配置来源及实际业务；本页面不执行本机命令。", "wsk-alert wsk-warning"));
+    if (value.state === "confirmed") restoreBox.append(element("p", "请重新读取配置来源。只有本次启动重新核对通过、来源显示可管理时才能编辑；历史确认不代表当前业务可达。", "fa-muted"));
   }
   function renderInventory() {
     inventoryBox.replaceChildren();
@@ -161,6 +191,8 @@ export function createConfigPanel(container, {request}) {
     resultBox.append(element("p", `预览 / 确认期限：${date(op.deadline_at_ms)}。到期后只能查询或处理恢复，不能继续应用旧预览。`, "fa-muted"));
     const facts = element("dl", undefined, "fa-detail-list"); for (const [label, text] of resultFacts(result.agent)) row(facts, label, text); resultBox.append(facts);
     resultBox.append(element("p", `Agent 事实记录于 ${date(result.agent_received_at_ms)}；历史成功不代表后续配置仍保持该版本。业务连通需另行实际验证。`, "fa-muted"));
+    const reason = resultReason(result.agent); if (reason) resultBox.append(element("p", reason, "wsk-alert wsk-warning"));
+    if (op.state === "verifying") resultBox.append(element("p", "正在等待实际登记与本地资源。本次明确注册或启动失败会触发回退；正常等待连接仍按操作期限核对，业务可达性需另行测试。", "fa-muted"));
     const actions = element("div", undefined, "fa-actions"); actions.append(button("查询实际结果", () => void controller.query()));
     if (["prepared", "draft", "validated"].includes(op.state)) actions.append(button("取消未应用操作", () => void controller.action("cancel"), true));
     if (["confirmed", "rollback_failed"].includes(op.state)) {
@@ -192,7 +224,7 @@ export function createConfigPanel(container, {request}) {
   return {
     async open(nodeID, online) { mount(); await controller.open(nodeID, online); },
     setOnline(online) { controller.setOnline(online); },
-    clear() { clearTimeout(poll); clearEditor(); controller.clear(); mounted = false; lastInventory = lastResult = lastHistory = null; container.replaceChildren(); },
+    clear() { clearTimeout(poll); clearEditor(); controller.clear(); mounted = false; lastInventory = lastResult = lastHistory = lastRestoration = null; container.replaceChildren(); },
     state: controller.state
   };
 }

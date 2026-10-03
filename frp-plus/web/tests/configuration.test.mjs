@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {fieldSpecs, fieldValue, makeEdit, readInventory, proxyTypes, visitorTypes, canApply, resultFacts, createConfigController} from '../src/admin-configuration-data.mjs';
+import {fieldSpecs, fieldValue, makeEdit, readInventory, proxyTypes, visitorTypes, canApply, resultFacts, resultReason, createConfigController, readRestore, canAcknowledgeRestore, restoreAcknowledgement} from '../src/admin-configuration-data.mjs';
 const service = '10000000-0000-4000-8000-000000000001', operation = '20000000-0000-4000-8000-000000000001', reference = '30000000-0000-4000-8000-000000000001';
 const base = 'a'.repeat(64), context = 'b'.repeat(64), candidate = 'c'.repeat(64);
 const object = {kind: 'proxy', name: 'existing', type: 'tcp', source: 'store', writable: true, active: true, fields: [{path: 'localIP', value: '127.0.0.1'}, {path: 'localPort', value: 8080}], secrets: [{path: 'loadBalancer.groupKey', present: true}], read_only_fields: ['healthCheck'], issues: []};
@@ -95,4 +95,64 @@ test('opening a history entry never reuses another operation preview', async () 
   }});
   await controller.open('1',true); await controller.prepare(makeEdit({mode:'create',kind:'proxy',type:'tcp',name:'new'}));
   assert.ok(controller.state.preview); other=true; await controller.query(reference); assert.equal(controller.state.preview,null);
+});
+
+const restoreResponse = (state = 'verified') => ({code:'ok',node_id:'1',service_id:service,received_at_ms:100000,
+  restore:{state,epoch:reference,backup_service_id:operation,replaced_service_id:operation,manifest_digest:base,context_revision:context,store_digest:candidate,acknowledgement_id:state==='acknowledged'?reference:'',runtime_loaded:true,resources_ready:true,operations_count:3},receipt:null,active_operation:null});
+test('restore acknowledgement binds exact identity and active operation version', () => {
+  const input=restoreResponse();input.active_operation={...result('outcome_unknown').operation,service_id:operation,version:7};
+  const value=readRestore(input,'1');assert.equal(canAcknowledgeRestore(value,120000),true);
+  assert.deepEqual(restoreAcknowledgement(value),{service_id:service,epoch:reference,manifest_digest:base,context_revision:context,store_digest:candidate,expected_active_operation_id:operation,expected_active_version:7});
+  assert.equal(canAcknowledgeRestore(value,160001),false);assert.equal(canAcknowledgeRestore(value,99999),false);
+  value.active_operation.service_id=service;assert.equal(canAcknowledgeRestore(value,120000),false);
+});
+test('restore response rejects cross-node facts and strips unrecognized private properties', () => {
+  const value=restoreResponse();value.restore.secret='never-copy';value.private_path='/private/ignored';
+  assert(!JSON.stringify(readRestore(value,'1')).includes('never-copy'));assert(!JSON.stringify(readRestore(value,'1')).includes('/private/ignored'));
+  assert.throws(()=>readRestore(value,'2'));
+  assert.throws(()=>readRestore({...value,restore:{...value.restore,manifest_digest:'invalid'}},'1'));
+  assert.throws(()=>readRestore({...value,restore:{...value.restore,resources_ready:false}},'1'));
+  const pending=readRestore({...value,restore:{...value.restore,state:'pending',runtime_loaded:false,resources_ready:false,store_digest:''}},'1');
+  assert.equal(canAcknowledgeRestore(pending,120000),false);
+});
+test('restore receipt remains pending until Agent confirms and does not imply write access', async () => {
+  const calls=[];
+  const controller=createConfigController({now:()=>120000,request:async(path,options)=>{
+    calls.push([path,options]);
+    if(path.endsWith('/configuration'))return inventory();
+    if(path.endsWith('/operations'))return {operations:[]};
+    if(path.endsWith('/restore'))return restoreResponse();
+    const value=restoreResponse('acknowledged');
+    value.receipt={id:reference,node_id:'1',service_id:service,epoch:reference,manifest_digest:base,context_revision:context,store_digest:candidate,state:'acknowledged',version:2};
+    return value;
+  }});
+  await controller.open('1',true);assert(!calls.some(([path])=>path.endsWith('/restore')));
+  await controller.inspectRestore();assert(!calls.some(([,options])=>options?.method==='POST'));
+  await controller.prepare(makeEdit({mode:'create',kind:'proxy',type:'tcp',name:'blocked'}));
+  assert(!calls.some(([,options])=>options?.method==='POST'));
+  await controller.acknowledgeRestore();
+  assert(calls.at(-1)[0].endsWith('/restore/acknowledge'));assert.equal(calls.at(-1)[1].body.expected_active_version,0);
+  assert.equal(controller.state.needsReload,true);assert.equal(controller.state.restoration.receipt.state,'acknowledged');
+  const length=calls.length;await controller.acknowledgeRestore();assert.equal(calls.length,length);
+});
+test('late restore response is discarded after switching or clearing sessions', async () => {
+  let finish;
+  const controller=createConfigController({request:async path=>path.endsWith('/configuration')?inventory():path.endsWith('/restore')?new Promise(resolve=>{finish=resolve;}):{operations:[]}});
+  await controller.open('1',true);const pending=controller.inspectRestore();controller.clear();finish(restoreResponse());await pending;
+  assert.equal(controller.state.nodeID,null);assert.equal(controller.state.restoration,null);
+});
+test('restore inspect shares the pending gate with configuration and never queues after it', async () => {
+  let finish;const calls=[];
+  const controller=createConfigController({now:()=>120000,request:async(path)=>{calls.push(path);return path.endsWith('/configuration')?inventory():path.endsWith('/restore')?new Promise(resolve=>{finish=resolve;}):{operations:[]};}});
+  await controller.open('1',true);const pending=controller.inspectRestore();await controller.inspectRestore();await controller.reload();assert.equal(calls.filter(path=>path.endsWith('/restore')).length,1);
+  finish(restoreResponse());await pending;assert.equal(controller.state.pending,false);assert.equal(calls.length,3);
+});
+
+test('operation reasons separate runtime failure and recovery without exposing unknown raw errors', () => {
+  assert.match(resultReason({error_code:'verify_failed'}), /注册或本地启动/);
+  assert.match(resultReason({error_code:'recovered'}), /事务日志/);
+  assert.equal(resultReason({error_code:''}), '');
+  assert.equal(resultReason(null), '');
+  const privateError='untrusted-private-error';
+  assert(!resultReason({error_code:privateError}).includes(privateError));
 });
