@@ -70,6 +70,11 @@ sing-box-plus/
 纪律不变：所有实现都绑定到一个已记录的上游提交，`scripts/verify.sh` 会重新准备源码树并复算
 规范哈希与复制文件的双向漂移。
 
+Linux 网络监听依赖另行固定为 **`sing-tun v0.9.2`**，对应官方提交
+[`c11c2568b9dea0e60d194982946a1cd797d7f378`](https://github.com/SagerNet/sing-tun/commit/c11c2568b9dea0e60d194982946a1cd797d7f378)
+（2026-10-03 纳入）。它修复旧版 netlink 通知 channel 关闭后持续读取零值、占满单核 CPU 的
+问题；`sing-box v1.14.0` 基线与复制文件不变。修复机制、恢复边界和 Linux 专项见 §9.3。
+
 ## 2. 前提与约束
 
 ### 2.1 可以依赖的上游能力
@@ -617,6 +622,7 @@ inbound 注册表给单个 inbound 加自有字段（`adapter/inbound/registry.g
 | `max_open_files` | `256` | 同时打开的审计文件数 |
 | `exclude_hosts` | 空 | 不记录的目的主机名 |
 | `exclude_ips` | 空 | 不记录的目的网段 |
+| `exclude_ports` | 空 | 不记录的目的端口，`[]uint16`，每项 `1..=65535`；拒绝 0 和重复项，与目的主机无关，不影响计费 |
 
 `quota_control`（§4.9，默认关闭）：
 
@@ -1463,6 +1469,49 @@ windows/amd64 则会多编入 5 个 `*_checklinkname0.go`。本项目只发布 L
 轨道状态（2026-09-05 核对）：`origin/oldstable` = `v1.13.21-2`，`origin/stable` = `v1.14.0-16`，
 `origin/testing` 已进入 `v1.15.0-alpha.1`。1.13 已是 oldstable，按上游历史节奏很快停更，
 不在其上开发 overlay。
+
+### 9.3 Linux 网络监听器专项回归
+
+`sing-tun v0.9.2` 将 route/link/address 三个通知 channel 改成单个 nonblocking netlink socket，
+申请 1 MiB 接收缓冲，以一个容量为 1 的 channel 合并更新。接收缓冲溢出返回 `ENOBUFS` 时，
+继续读取并触发网络状态重新同步；不会因旧订阅退出、channel 关闭而持续空转。
+**持续恢复只覆盖 `ENOBUFS`**：其它读取错误仍会记录日志并退出读取循环，不承诺自动重建
+socket 或处理所有内核错误。该变更只升级官方依赖，没有修改上游源码或引入构建 overlay。
+
+普通 `scripts/verify.sh` 的 `go test ./...` 不包含依赖包用例。更新网络监听依赖时，另在具备
+root、网络命名空间与网络管理能力的 Linux 测试主机执行：
+
+```bash
+bash scripts/test-network-monitor.sh
+```
+
+脚本先按生产 tags 编译上游测试二进制，确认精确存在 `TestNetworkUpdateMonitorReceiveOverrun`，
+再用 `unshare --net` 创建独立网络命名空间运行，外层超时 120 秒。该用例创建 dummy 接口与
+4096 条路由，强制接收缓冲丢包，验证随后 2 秒 CPU 时间小于 200 毫秒，并验证后续网络变更仍
+触发通知。**不能在生产服务所在的网络命名空间直接运行**；`unshare` 不可用或隔离失败就报错，
+没有回退路径。
+
+macOS 可以交叉编译，再把测试二进制传到匹配架构的隔离 Linux 测试主机；编译成功不代表用例
+已经执行。例如从项目根目录构建 `linux/amd64`：
+
+```bash
+source scripts/lib.sh
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go test -c \
+  -tags "$(production_build_tags)" -o /tmp/network-monitor.test github.com/sagernet/sing-tun
+```
+
+在 Linux 测试主机以 root 执行前，同样先检查测试存在，再隔离运行：
+
+```bash
+set -euo pipefail
+[[ "$EUID" == 0 ]]
+test_name=TestNetworkUpdateMonitorReceiveOverrun
+test_binary=/tmp/network-monitor.test
+listed="$("$test_binary" -test.list "^${test_name}\$")"
+grep -Fxq "$test_name" <<<"$listed"
+timeout 120s unshare --net "$test_binary" \
+  -test.run "^${test_name}\$" -test.count=1 -test.timeout=110s -test.v
+```
 
 ## 10. 许可与命名
 

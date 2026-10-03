@@ -17,6 +17,32 @@
 权威来源是 `upstream.lock`，本文件只是它的可读副本。`scripts/verify.sh` 会重新准备一棵源码树、
 复算规范哈希并与 lock 比对，因此两者不一致时以 lock 为准、以 verify 的失败为信号。
 
+### Linux 网络监听依赖：`sing-tun v0.9.2`（2026-10-03）
+
+`go.mod` 单独固定 `github.com/sagernet/sing-tun v0.9.2`，官方 tag 对应
+[`c11c2568b9dea0e60d194982946a1cd797d7f378`](https://github.com/SagerNet/sing-tun/commit/c11c2568b9dea0e60d194982946a1cd797d7f378)
+（2026-09-09，修复 netlink receive overrun 后网络监听停滞）。`sing-box v1.14.0`、
+`upstream.lock` 和复制文件保持原基线；没有 vendoring、本地源码补丁或 `go -overlay`。
+
+旧版 `v0.9.0-beta.4` 的 `loopUpdate` 接收 route/link/address 三个 channel 时不检查关闭状态。
+底层订阅遇到接收错误退出并关闭 channel 后，读取立即返回，循环可持续占满一个 CPU 核心。
+`v0.9.2` 改用单个 nonblocking netlink socket，申请 1 MiB 接收缓冲，以容量为 1 的 channel
+合并通知；`ENOBUFS` 表示丢失了网络变更事件，因此触发状态重新同步并继续读取。
+**恢复边界是 `ENOBUFS`**，其它读取错误会记录日志并退出；未加入一般错误的退避或重建机制。
+
+[相对 beta.4 的官方比较](https://github.com/SagerNet/sing-tun/compare/v0.9.0-beta.4...v0.9.2)
+只有 3 个提交、5 个文件，公开 API 和模块依赖不变。除监听器实现与其回归测试，另包含
+TUN bypass verdict 转发修复，以及 nftables prerouting prematch 在 DNAT 前求值的优先级修复。
+升级采用官方发布版本，普通构建、测试和可复现 release 均通过 Go module 解析使用同一实现。
+
+上游 `TestNetworkUpdateMonitorReceiveOverrun` 会缩小接收缓冲、创建 dummy 接口与 4096 条
+路由，确认 socket drops 大于零；随后检查 2 秒空闲期 CPU 时间小于 200 毫秒，并验证再次改变
+链路仍有通知。用例需要 Linux root 和网络管理能力，**必须在独立网络命名空间运行**。
+`scripts/test-network-monitor.sh` 编译后先用 `-test.list` 防止零用例假成功，再通过
+`timeout 120s unshare --net` 执行，隔离失败即终止。一般 `go test ./...` 不会覆盖依赖包测试；
+macOS 可交叉编译后在匹配架构的隔离 Linux 测试主机运行，具体命令见 README §9.3。
+本节记录版本与验证方法；编译成功不能代替 Linux 内核专项执行结果。
+
 ## 复制文件
 
 `cmd/sing-box-plus/` 下有 9 个文件复制自上游 `cmd/sing-box/`，合计 608 行——
@@ -103,6 +129,7 @@ v1.14.0 实测：`ssm-api` 的 `servers` 键缺前导 `/` 时 panic 退出（exi
 
 | 日期 | 内容 | 结果 |
 | --- | --- | --- |
+| 2026-10-03 | 固定 `sing-tun v0.9.2`，在 Linux 独立网络命名空间运行上游 `TestNetworkUpdateMonitorReceiveOverrun` | 通过（4.53 秒）；实际 socket drops 大于零，随后 2 秒 CPU 时间小于 200 毫秒，后续 link 变化仍触发通知 |
 | 2026-09-15 ~ 2026-09-18 | **门禁红窗**：`ea43087` 为访问审计排除名单引入 Google/Apple 的真实 CIDR，`scripts/check-sensitive.sh` 的允许清单未同步，退出码 1；`verify.sh` 带 `set -e`，因此这段时间内它从未跑到最后一行 | 期间落地的 `e5fa344`、`17a9416`、`1fd1643`、`603ab57` 未经完整门禁 |
 | 2026-09-18 | 允许清单改为独立文件 + 按 token 匹配 + 每条强制带理由 + `[public]` 条目陈旧即失败；补 17 项契约测试 | 通过 |
 | 2026-09-18 | 无抑制 `-race` 轮改用 `go test -skip` 取补集，并先用 `go test -list` 断言每个被排除的名字存在 | 旧 `-run` 白名单含三个不存在的用例名，该轮实际只跑七个用例；现覆盖 40+ 个 |

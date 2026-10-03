@@ -160,13 +160,13 @@ func TestExcludeFilterPorts(t *testing.T) {
 		port   uint16
 		want   bool
 	}{
-		{"域名 + 命中端口", "pool.ntp.org", auditHostSourceSniff, 123, true},
-		{"地址 + 命中端口", "91.189.91.112", auditHostSourceIP, 123, true},
+		{"域名 + 命中端口", "time.example.com", auditHostSourceSniff, 123, true},
+		{"地址 + 命中端口", "192.0.2.123", auditHostSourceIP, 123, true},
 		// **这一条是端口规则存在的理由之一**：一条既没嗅探出域名、也拿不到
 		// 地址的连接，hosts 与 ips 都无从判起，而它的目的端口仍然是确定的。
 		{"host 为空 + 命中端口", "", auditHostSourceIP, 123, true},
 		{"NTS 密钥交换", "time.cloudflare.com", auditHostSourceSniff, 4460, true},
-		{"没命中的端口", "pool.ntp.org", auditHostSourceSniff, 443, false},
+		{"没命中的端口", "time.example.com", auditHostSourceSniff, 443, false},
 		{"host 为空且端口没命中", "", auditHostSourceIP, 443, false},
 	}
 	for _, item := range cases {
