@@ -588,12 +588,20 @@ SUDP 同/混 codec 的字节口径不同，首批字节量标记 unsupported，�
 验收：主文件 + includes + Store + TLS/Token + 活跃 WAL 的组合备份恢复，缺文件、损坏、
 跨目录、模板、外部依赖映射、旧格式与未完成事务恢复。新格式不能只测打包成功。
 
+Agent 依赖检查点首批（2026-10-03）：版本化依赖图与显式 `--dependency-graph` v2
+检查点已实现。真实新二进制双 wire v1/v2 完成 mTLS + Token 文件 + includes +
+`https2http` 插件证书的备份、破坏依赖、同路径恢复、再次 HTTPS 转发和恢复状态核对；
+未管理端接管时离线确认被拒绝。旧 ops format3 的真实 TCP 恢复回归通过。
+managed/configuration/cmd 全包 race 分别 13.597/5.345/1.707 秒通过，vet 通过；
+Linux amd64/arm64 编译通过（不等于运行验收）。当前仅同安装根、同路径，完整归档工具、
+主控 SQLite/TSDB 同组停机备份、模板与外部映射仍未完成，不据此勾选整个 P3-04。
+
 ### P3-05 原生互通与配置操作回归
 
 本任务维护跨阶段测试清单：G1/G2 所需的包测试、已开放功能 E2E、故障恢复及负载检查
 必须随对应功能提前执行。阶段三补全矩阵、统一报告和发布门禁，不作为前两阶段延迟验证的理由。
 
-- [ ] 扩展 `scripts/frp.py` 的测试集合，明确纳入受影响的 `client/...`、`server/...`、config/source、auth、wire、Visitor、插件等包。
+- [x] 扩展 `scripts/frp.py` 的测试集合，明确纳入受影响的 `client/...`、`server/...`、config/source、auth、wire、Visitor、插件等包。
 - [ ] 对快照、锁、应用协调与恢复逻辑执行 race/故障注入测试；生成物仍放 ignored 目录。
 - [ ] 保留增强/增强、原版/增强、增强/原版 × wire v1/v2 的 TCP/UDP/HTTP/STCP 基础矩阵。
 - [ ] 增加 HTTPS、TCPMUX、SUDP、XTCP；独立覆盖 TCP/KCP/QUIC/WS/WSS 控制传输，避免不必要的全笛卡尔积。
@@ -603,6 +611,14 @@ SUDP 同/混 codec 的字节口径不同，首批字节量标记 unsupported，�
 - [x] 原版测试产物由 `upstream.lock` 源码单独构建，记录 commit、源码状态、工具链及二进制摘要（`9792bd3`，阶段一互通验收）。
 - [x] 原版识别不再只依赖 `--monitor-version` 失败；增强版关闭监控不能作为原版基线（`9792bd3`，强制清单与实际产物摘要匹配）。
 - [x] 在私有环境盘点实际部署协议、传输和关键参数，产出脱敏的“实际使用能力清单”，作为发布必跑集合（2026-10-03 全部 10 台机器只读核验，见 1.4；候选版本升级回归仍待执行）。
+
+控制传输/认证补充（2026-10-03）：G2 九补丁原生产物运行
+`frp_transport_smoke.py`，wire v1/v2 各 11 例，共 22 例通过：五种传输、无复用、双向
+TLS、CA/名称/Token/客户端证书反例。`frp_oidc_smoke.py` 的 12 例通过，覆盖真实回环
+discovery、client credentials、JWKS/RS256 与五类拒绝。每个正常场景有四条实际加密/
+压缩 TCP 载荷，WSS 使用原生 `https2http` 终止插件，具体拓扑和证据边界见 tests/README。
+这批结果验证已有原生能力；P3 最终候选仍需用自身产物重新执行本次上线必需集合。
+相关 smoke 工具测试共 38 项通过；未将负载均衡、限速或复杂 NAT 视为已覆盖。
 
 建议分层门禁：
 

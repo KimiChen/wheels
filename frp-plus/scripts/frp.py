@@ -25,7 +25,11 @@ OVERLAYS = ("agent", "monitor", "shared", "web")
 CONFIG_KEYS = {"FRP_MONITOR_CACHE_DIR", "FRP_MONITOR_OUTPUT_DIR", "FRP_MONITOR_UPSTREAM_MIRROR"}
 BASELINE = "P4 SQLite node control, GitHub administration and optional embedded TSDB"
 LOCK_KEYS = {"schema_version", "repository", "tag", "tag_object", "commit", "license"}
-NATIVE_TESTS = ("./pkg/config/...", "./pkg/msg/...", "./pkg/util/...", "./pkg/metrics/...", "./client/...", "./server/...", "./extension/frpmonitor/...")
+NATIVE_TESTS = (
+    "./pkg/config/...", "./pkg/msg/...", "./pkg/util/...", "./pkg/metrics/...",
+    "./pkg/auth/...", "./pkg/proto/...", "./pkg/transport/...", "./pkg/plugin/...",
+    "./client/...", "./server/...", "./cmd/frpc/sub/...", "./extension/frpmonitor/...",
+)
 
 
 class PipelineError(Exception):

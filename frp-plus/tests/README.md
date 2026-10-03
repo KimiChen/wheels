@@ -15,8 +15,9 @@ node --test web/tests/*.test.mjs
 python3 scripts/frp.py build --native
 ```
 
-构建脚本准备固定上游和 Overlay，运行 FRP 配置、消息、工具、metrics、完整 `client/...`
-（含 Proxy/Visitor）、`server/...` 及所有监控扩展测试。采集的 17 组脱敏向量保存在
+构建脚本准备固定上游和 Overlay，运行 FRP 配置、消息、工具、metrics、auth、proto、
+transport、插件、原生 frpc 子命令、完整 `client/...`（含 Proxy/Visitor）、`server/...`
+及所有监控扩展测试。采集的 17 组脱敏向量保存在
 [fixtures/collect](fixtures/collect/README.md)，入口自动设置其路径。
 对并发/生命周期改动，在准备目录运行相关包的 `go test -race`；扩展包同时运行 `go vet`。
 `nginx_test.py` 另需本机 nginx 与 openssl；缺少时明确跳过。它在临时回环端口启动隔离反代，
@@ -79,6 +80,32 @@ STCP fallback 实际使用与释放。本机场景不证明跨公网 NAT 穿透�
 
 所有子进程使用隔离环境；TLS 场景校验名称和 CA，超时强制结束会判失败。仅本机 Linux
 会产生完整内核指标，Darwin 合法返回 unsupported。退出后清理测试进程与临时文件。
+
+## 控制传输、TLS 与 OIDC
+
+```sh
+python3 tests/frp_transport_smoke.py \
+  --agent dist/darwin-arm64/frp-plus-agent \
+  --server dist/darwin-arm64/frp-plus-server
+python3 tests/frp_oidc_smoke.py \
+  --agent dist/darwin-arm64/frp-plus-agent \
+  --server dist/darwin-arm64/frp-plus-server
+```
+
+传输脚本在 wire v1/v2 上分别验证 TCP/KCP/QUIC/WS/WSS，每例建立四条 TCP 业务连接，
+逐字节比较约 64 KiB 的加密/压缩载荷；另测关闭复用、双向 TLS、不信任 CA、名称不匹配、
+Token 错误和缺少客户端证书。TLS 拒绝例关闭复用以保留明确证书校验错误；不会将“连接关闭”
+或无关进程退出当作通过。已登记代理后的载荷超时、截断或改变直接失败，不自动重试。
+
+锁定原生 frps 只接收 WS。WSS 按上游测试拓扑，由第二个原生 frpc 的 `https2http` 插件
+终止 TLS，再经仅回环 WS 到 frps；这一场景的 frps `transport.tls.force=false`，其余场景
+均为 `true`。客户端验证终止端证书；这不是 frps 直接支持 WSS 或公网明文跳转的证明。
+
+OIDC 脚本启动仅回环 HTTP 的一次性身份服务，真实执行 discovery、client credentials、
+JWKS 和 RS256 签名验证。两种 wire 均检查正常业务，以及 audience、issuer、过期、签名、
+客户端凭据错误的明确拒绝；FRP 控制连接仍校验证书并使用 TLS。身份服务不是生产 IdP，
+该测试不覆盖外部 IdP 可用性、复杂 NAT 或长时间稳定性。脚本首先记录二进制 SHA256，
+不读取生产账号，临时秘密保持私有并在退出时清理。
 
 ## 配置管理的真实联合验收
 
