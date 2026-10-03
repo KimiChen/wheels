@@ -56,6 +56,7 @@ type observation struct {
 	facts      shared.Facts
 	metrics    shared.Metrics
 	frp        *shared.FRP
+	detail     *shared.FRPDetail
 	at         time.Time
 	generation uint64
 }
@@ -67,6 +68,9 @@ type Service struct {
 	dialer          websocket.Dialer
 	collector       sampler
 	snapshot        func() shared.FRP
+	detailProvider  shared.DetailProvider
+	detailResults   chan shared.FRPDetail
+	detailPending   bool
 	mu              sync.Mutex
 	latest          observation
 	conn            *websocket.Conn
@@ -82,7 +86,7 @@ type Service struct {
 	connectWarn     warnEvery
 }
 
-func Start(ctx context.Context, cfg shared.AgentConfig, snapshot func() shared.FRP) (*Service, error) {
+func Start(ctx context.Context, cfg shared.AgentConfig, snapshot func() shared.FRP, providers ...shared.DetailProvider) (*Service, error) {
 	if !cfg.Enabled {
 		return nil, nil
 	}
@@ -93,9 +97,9 @@ func Start(ctx context.Context, cfg shared.AgentConfig, snapshot func() shared.F
 	if err != nil {
 		return nil, errors.New("telemetry collector unavailable")
 	}
-	return start(ctx, cfg, snapshot, c)
+	return start(ctx, cfg, snapshot, c, providers...)
 }
-func start(ctx context.Context, cfg shared.AgentConfig, snapshot func() shared.FRP, c sampler) (*Service, error) {
+func start(ctx context.Context, cfg shared.AgentConfig, snapshot func() shared.FRP, c sampler, providers ...shared.DetailProvider) (*Service, error) {
 	token, err := readToken(cfg.TokenFile)
 	if err != nil {
 		return nil, err
@@ -116,6 +120,9 @@ func start(ctx context.Context, cfg shared.AgentConfig, snapshot func() shared.F
 	}
 	child, cancel := context.WithCancel(ctx)
 	s := &Service{ctx: child, cancel: cancel, cfg: cfg, token: token, collector: c, snapshot: snapshot, notify: make(chan struct{}, 1), intervalChanged: make(chan struct{}, 1), ready: make(chan struct{}), done: make(chan struct{}), dialer: websocket.Dialer{HandshakeTimeout: 5 * time.Second, TLSClientConfig: tlsCfg, ReadBufferSize: 4096, WriteBufferSize: 4096}}
+	if len(providers) != 0 {
+		s.detailProvider = providers[0]
+	}
 	s.interval.Store(int64(cfg.IntervalSeconds))
 	s.wg.Add(2)
 	go s.guarded(s.sampleLoop)
@@ -202,7 +209,7 @@ func (s *Service) Close() {
 	}
 }
 func (s *Service) sample() {
-	value := observation{facts: s.collector.Facts(), metrics: s.collector.Metrics(), frp: s.frpSnapshot(), at: time.Now().UTC()}
+	value := observation{facts: s.collector.Facts(), metrics: s.collector.Metrics(), frp: s.frpSnapshot(), detail: s.frpDetailSnapshot(), at: time.Now().UTC()}
 	if value.facts.Validate() != nil || value.metrics.Validate() != nil {
 		if s.sampleWarn.allow(time.Now(), 5*time.Minute) {
 			log.Warnf("frp-plus telemetry keeps dropping invalid local samples")
@@ -240,6 +247,70 @@ func extension(frp *shared.FRP) *shared.Extensions {
 		return nil
 	}
 	return &shared.Extensions{FRP: frp}
+}
+
+// Only the sampling loop owns detailPending and detailResults. A provider that
+// gets stuck may leave one call outstanding, but never stalls host sampling or
+// accumulates a new goroutine on every sample. Late results are discarded rather
+// than being presented with the next sample's fresh timestamp.
+func (s *Service) frpDetailSnapshot() *shared.FRPDetail {
+	if s.detailProvider == nil {
+		return nil
+	}
+	unavailable := shared.EmptyFRPDetail("unavailable")
+	if s.detailResults == nil {
+		s.detailResults = make(chan shared.FRPDetail, 1)
+	}
+	if s.detailPending {
+		select {
+		case <-s.detailResults:
+			s.detailPending = false
+		default:
+			return &unavailable
+		}
+	}
+	s.detailPending = true
+	results, provider := s.detailResults, s.detailProvider
+	go func() { results <- collectFRPDetail(provider) }()
+	timer := time.NewTimer(50 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case detail := <-results:
+		s.detailPending = false
+		return &detail
+	case <-timer.C:
+		return &unavailable
+	case <-s.ctx.Done():
+		return &unavailable
+	}
+}
+
+func collectFRPDetail(provider shared.DetailProvider) (out shared.FRPDetail) {
+	out = shared.EmptyFRPDetail("unavailable")
+	defer func() {
+		if recover() != nil {
+			out = shared.EmptyFRPDetail("unavailable")
+		}
+	}()
+	got := provider()
+	if len(got.Proxies) > shared.MaxDetailProxies || len(got.Visitors) > shared.MaxDetailVisitors {
+		return shared.EmptyFRPDetail("truncated")
+	}
+	if err := got.Validate(); err != nil {
+		if errors.Is(err, shared.ErrFRPDetailTooLarge) {
+			return shared.EmptyFRPDetail("truncated")
+		}
+		return out
+	}
+	data, err := json.Marshal(got)
+	if err != nil {
+		return out
+	}
+	// Detach all slices and pointers from provider-owned state before publishing.
+	if json.Unmarshal(data, &out) != nil {
+		return shared.EmptyFRPDetail("unavailable")
+	}
+	return out
 }
 func (s *Service) sampleLoop() {
 	s.sample()
@@ -354,9 +425,13 @@ func (s *Service) connect() (bool, bool) {
 	}
 	session := hex.EncodeToString(nonce[:])
 	current := s.current()
+	detailOffered := s.detailProvider != nil && response != nil && advertisedCapability(response.Header, shared.FRPDetailCapability)
 	hello := shared.Hello{Meta: shared.Meta{Schema: shared.SchemaVersion, SessionID: session, Sequence: 1, CollectedAt: current.at.Format(time.RFC3339Nano)}, Capabilities: []string{"metrics.v1", "frp.v1"}, Facts: current.facts, Extensions: extension(current.frp)}
 	if s.cfg.ProbeEnabled {
 		hello.Capabilities = append(hello.Capabilities, "ping.v1")
+	}
+	if detailOffered {
+		hello.Capabilities = append(hello.Capabilities, shared.FRPDetailCapability)
 	}
 	if hello.Validate() != nil {
 		return false, false
@@ -376,7 +451,7 @@ func (s *Service) connect() (bool, bool) {
 	}
 	decoder := json.NewDecoder(strings.NewReader(string(data)))
 	decoder.DisallowUnknownFields()
-	if decoder.Decode(&answer) != nil || decoder.Decode(new(any)) != io.EOF || answer.JSONRPC != "2.0" || answer.ID != "hello" || answer.Result.Validate() != nil || answer.Result.SessionID != session || !capabilities(answer.Result.Capabilities, s.cfg.ProbeEnabled) {
+	if decoder.Decode(&answer) != nil || decoder.Decode(new(any)) != io.EOF || answer.JSONRPC != "2.0" || answer.ID != "hello" || answer.Result.Validate() != nil || answer.Result.SessionID != session || !capabilities(answer.Result.Capabilities, s.cfg.ProbeEnabled, detailOffered) {
 		return false, false
 	}
 	negotiated := int64(answer.Result.ReportInterval)
@@ -392,7 +467,11 @@ func (s *Service) connect() (bool, bool) {
 	c.SetPongHandler(func(string) error { return c.SetReadDeadline(time.Now().Add(15 * time.Second)) })
 	var probes *probe.Engine
 	var results <-chan probe.Result
+	detailAccepted := false
 	for _, capability := range answer.Result.Capabilities {
+		if capability == shared.FRPDetailCapability {
+			detailAccepted = true
+		}
 		if capability == "ping.v1" {
 			probes = probe.New(s.ctx, probe.Config{AllowPrivate: s.cfg.ProbeAllowPrivate})
 			results = probes.Results()
@@ -438,7 +517,9 @@ func (s *Service) connect() (bool, bool) {
 		if latest.generation == lastGeneration {
 			return true
 		}
-		sequence++
+		if !nextSequence(&sequence) {
+			return false
+		}
 		report := shared.Report{Meta: shared.Meta{Schema: shared.SchemaVersion, SessionID: session, Sequence: sequence, CollectedAt: latest.at.Format(time.RFC3339Nano)}, Facts: &latest.facts, Metrics: &latest.metrics, Extensions: extension(latest.frp)}
 		if report.Validate() != nil {
 			return false
@@ -452,6 +533,27 @@ func (s *Service) connect() (bool, bool) {
 			report.Extensions = nil
 			if writeFrame(c, "report", "", report) != nil {
 				return false
+			}
+		}
+		if detailAccepted && latest.detail != nil {
+			if !nextSequence(&sequence) {
+				return false
+			}
+			detail := shared.FRPDetailReport{Meta: shared.Meta{Schema: shared.SchemaVersion, SessionID: session, Sequence: sequence, CollectedAt: latest.at.Format(time.RFC3339Nano)}, Detail: *latest.detail}
+			if err := detail.Validate(); err != nil {
+				detail.Detail = shared.EmptyFRPDetail("unavailable")
+				if errors.Is(err, shared.ErrFRPDetailTooLarge) {
+					detail.Detail = shared.EmptyFRPDetail("truncated")
+				}
+			}
+			if err := writeFrame(c, "frp.detail", "", detail); err != nil {
+				if !errors.Is(err, errFrameTooLarge) {
+					return false
+				}
+				detail.Detail = shared.EmptyFRPDetail("truncated")
+				if writeFrame(c, "frp.detail", "", detail) != nil {
+					return false
+				}
 			}
 		}
 		lastGeneration = latest.generation
@@ -480,7 +582,9 @@ func (s *Service) connect() (bool, bool) {
 			if !probes.Current(result.TaskVersion, result.TaskID) {
 				continue
 			}
-			sequence++
+			if !nextSequence(&sequence) {
+				return stable(), false
+			}
 			payload := shared.PingResult{Meta: shared.Meta{Schema: shared.SchemaVersion, SessionID: session, Sequence: sequence, CollectedAt: result.CollectedAt.Format(time.RFC3339Nano)}, TaskVersion: result.TaskVersion, TaskID: result.TaskID, LatencyMS: result.LatencyMS}
 			if payload.Validate() != nil || writeFrame(c, "ping.result", "", payload) != nil {
 				return stable(), false
@@ -488,16 +592,43 @@ func (s *Service) connect() (bool, bool) {
 		}
 	}
 }
-func capabilities(c []string, probeEnabled bool) bool {
+func capabilities(c []string, probeEnabled, detailOffered bool) bool {
 	metrics := false
 	for _, v := range c {
 		if v == "metrics.v1" {
 			metrics = true
-		} else if v != "frp.v1" && (v != "ping.v1" || !probeEnabled) {
+		} else if v != "frp.v1" && (v != "ping.v1" || !probeEnabled) && (v != shared.FRPDetailCapability || !detailOffered) {
 			return false
 		}
 	}
 	return metrics
+}
+
+func nextSequence(sequence *uint64) bool {
+	if *sequence == ^uint64(0) {
+		return false
+	}
+	*sequence++
+	return true
+}
+
+func advertisedCapability(header http.Header, capability string) bool {
+	values := header.Values(shared.CapabilitiesHeader)
+	size := 0
+	for _, value := range values {
+		size += len(value)
+		if size > 4096 {
+			return false
+		}
+	}
+	for _, value := range values {
+		for _, token := range strings.Split(value, ",") {
+			if strings.TrimSpace(token) == capability {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // errFrameTooLarge marks a frame that exceeds shared.MaxFrameBytes before any

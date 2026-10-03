@@ -137,6 +137,28 @@ id 对应请求、会话和能力子集匹配。协商拒绝时返回 JSON-RPC e
 
 ## JSON、大小限制与浏览器边界
 
+### 私有 FRP 观察详情
+
+`frp.detail.v1` 与原生 wire v1/v2 无关。新版 monitor 在已认证的 WebSocket 升级响应中
+发送 `X-Frp-Plus-Capabilities: frp.detail.v1`；仅看到该预告且有适配器的 Agent 才在
+旧结构 hello 的 capabilities 中声明它，收到接受后才发送 `frp.detail` 通知。
+没有响应头的旧服务端完全收不到新增能力或字段；新版服务端只授予客户端声明且自身
+支持的能力。首个 hello 和 `extensions.frp` 保持旧契约。
+
+详情复用连接 session/递增 sequence（与指标、探测共用序号），但有独立采样和接收时间。
+内容是允许字段组成的私有 DTO：Proxy、Visitor、配置来源与观察修订、最近来源读取时间、
+Dashboard 是否配置监听、传输摘要、入口、固定错误码及恢复时间。秘密、原始配置、
+插件选项、原始错误和文件路径不进入 DTO。锁忙、采集失败和超限分别退化为 busy、unavailable
+或 truncated，非 ready 不携带部分列表；最多 512 个 Proxy、512 个 Visitor、每对象
+32 个入口，详情序列化上限 192 KiB。采样最多一个异步任务、等待 50ms，不积压采样。
+
+管理列表/SSE 只包含 `frp_detail_state` 与 `frp_detail_at`，不广播整份详情；
+`GET /api/admin/v1/nodes/{id}/frp-detail` 使用同源管理员会话鉴权，返回
+`{node_id,state,received_at,detail}` 并禁止缓存。未协商、等待、过期、不可用、超限均
+返回 `detail:null`。公开 API/SSE 保持原有汇总字段，不包含新增详情或管理员公布链接。
+
+### 通用边界
+
 | 边界 | 限制 |
 |---|---|
 | 单帧原始 UTF-8 字节（含空白） | 256 KiB |

@@ -161,13 +161,14 @@ type PingResult struct {
 	LatencyMS   float64 `json:"latency_ms"`
 }
 
-// Frame contains exactly one of Hello, Report, PingTasks or PingResult.
+// Frame contains exactly one supported message body.
 // ID is present only for hello, which requires a JSON-RPC response.
 type Frame struct {
 	ID         string
 	Method     string
 	Hello      *Hello
 	Report     *Report
+	FRPDetail  *FRPDetailReport
 	PingTasks  *PingTasks
 	PingResult *PingResult
 }
@@ -216,6 +217,11 @@ func DecodeFrame(data []byte) (*Frame, error) {
 		f.Report = new(Report)
 		if err = decodeObject(wire.Params, f.Report); err == nil {
 			err = f.Report.Validate()
+		}
+	case "frp.detail":
+		f.FRPDetail = new(FRPDetailReport)
+		if err = decodeObject(wire.Params, f.FRPDetail); err == nil {
+			err = f.FRPDetail.Validate()
 		}
 	case "ping.tasks":
 		f.PingTasks = new(PingTasks)

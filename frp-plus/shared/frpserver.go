@@ -50,13 +50,14 @@ type ServerClient struct {
 }
 
 type ServerProxy struct {
-	Name         string  `json:"name"`
-	Type         string  `json:"type"`
-	User         string  `json:"user"`
-	ClientID     string  `json:"client_id"`
-	Online       bool    `json:"online"`
-	Connections  *string `json:"connections"`
-	TodayRXBytes *string `json:"today_rx_bytes"`
-	TodayTXBytes *string `json:"today_tx_bytes"`
-	AgentID      *string `json:"agent_id"`
+	Name         string        `json:"name"`
+	Type         string        `json:"type"`
+	User         string        `json:"user"`
+	ClientID     string        `json:"client_id"`
+	Online       bool          `json:"online"`
+	Connections  *string       `json:"connections"`
+	TodayRXBytes *string       `json:"today_rx_bytes"`
+	TodayTXBytes *string       `json:"today_tx_bytes"`
+	AgentID      *string       `json:"agent_id"`
+	Endpoints    []FRPEndpoint `json:"endpoints,omitempty"`
 }

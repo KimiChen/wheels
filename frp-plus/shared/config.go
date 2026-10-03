@@ -75,20 +75,21 @@ func (c AgentConfig) Validate() error {
 
 // MonitorConfig is embedded in the native frps configuration as [monitor].
 type MonitorConfig struct {
-	Enabled                bool     `json:"enabled,omitempty"`
-	BindAddr               string   `json:"bindAddr,omitempty"`
-	BindPort               int      `json:"bindPort,omitempty"`
-	ServerID               string   `json:"serverID,omitempty"`
-	CertFile               string   `json:"certFile,omitempty"`
-	KeyFile                string   `json:"keyFile,omitempty"`
-	ReportIntervalSeconds  int      `json:"reportIntervalSeconds,omitempty"`
-	DatabaseFile           string   `json:"databaseFile,omitempty"`
-	RetentionDays          int      `json:"retentionDays,omitempty"`
-	HistoryDataPath        string   `json:"historyDataPath,omitempty"`
-	GitHubClientID         string   `json:"githubClientID,omitempty"`
-	GitHubClientSecretFile string   `json:"githubClientSecretFile,omitempty"`
-	GitHubCallbackURL      string   `json:"githubCallbackURL,omitempty"`
-	GitHubAdminUsers       []string `json:"githubAdminUsers,omitempty"`
+	Enabled                bool                `json:"enabled,omitempty"`
+	BindAddr               string              `json:"bindAddr,omitempty"`
+	BindPort               int                 `json:"bindPort,omitempty"`
+	ServerID               string              `json:"serverID,omitempty"`
+	CertFile               string              `json:"certFile,omitempty"`
+	KeyFile                string              `json:"keyFile,omitempty"`
+	ReportIntervalSeconds  int                 `json:"reportIntervalSeconds,omitempty"`
+	DatabaseFile           string              `json:"databaseFile,omitempty"`
+	RetentionDays          int                 `json:"retentionDays,omitempty"`
+	HistoryDataPath        string              `json:"historyDataPath,omitempty"`
+	GitHubClientID         string              `json:"githubClientID,omitempty"`
+	GitHubClientSecretFile string              `json:"githubClientSecretFile,omitempty"`
+	GitHubCallbackURL      string              `json:"githubCallbackURL,omitempty"`
+	GitHubAdminUsers       []string            `json:"githubAdminUsers,omitempty"`
+	NativeAccess           *NativeAccessConfig `json:"nativeAccess,omitempty"`
 }
 
 func (c *MonitorConfig) Complete() error {
@@ -116,6 +117,9 @@ func (c *MonitorConfig) Complete() error {
 func (c MonitorConfig) Validate() error {
 	if !c.Enabled {
 		return nil
+	}
+	if err := c.NativeAccess.Validate(); err != nil {
+		return err
 	}
 	ip := net.ParseIP(c.BindAddr)
 	if ip == nil || c.BindPort < 1 || c.BindPort > 65535 {

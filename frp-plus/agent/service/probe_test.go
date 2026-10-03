@@ -31,7 +31,9 @@ func TestProbeNegotiationAndSharedReportSequence(t *testing.T) {
 	}()
 	completed := make(chan error, 4)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		c, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		header := http.Header{}
+		header.Set(shared.CapabilitiesHeader, shared.FRPDetailCapability)
+		c, err := (&websocket.Upgrader{}).Upgrade(w, r, header)
 		if err != nil {
 			return
 		}
@@ -56,7 +58,7 @@ func TestProbeNegotiationAndSharedReportSequence(t *testing.T) {
 			return
 		}
 		session := hello.Hello.SessionID
-		if err = c.WriteJSON(map[string]any{"jsonrpc": "2.0", "id": hello.ID, "result": shared.HelloResult{Schema: 1, SessionID: session, Capabilities: []string{"metrics.v1", "ping.v1"}, ReportInterval: 1}}); err != nil {
+		if err = c.WriteJSON(map[string]any{"jsonrpc": "2.0", "id": hello.ID, "result": shared.HelloResult{Schema: 1, SessionID: session, Capabilities: []string{"metrics.v1", "ping.v1", shared.FRPDetailCapability}, ReportInterval: 1}}); err != nil {
 			completed <- err
 			return
 		}
@@ -69,9 +71,9 @@ func TestProbeNegotiationAndSharedReportSequence(t *testing.T) {
 			return
 		}
 		sequence := uint64(1)
-		probes, reports := 0, 0
+		probes, reports, details := 0, 0, 0
 		seen := map[string]bool{}
-		for probes < 4 || reports < 2 {
+		for probes < 4 || reports < 2 || details < 2 {
 			_, data, err = c.ReadMessage()
 			if err != nil {
 				completed <- err
@@ -86,6 +88,9 @@ func TestProbeNegotiationAndSharedReportSequence(t *testing.T) {
 			if frame.Report != nil {
 				reports++
 				meta = frame.Report.Meta
+			} else if frame.FRPDetail != nil {
+				details++
+				meta = frame.FRPDetail.Meta
 			} else if frame.PingResult != nil {
 				result := frame.PingResult
 				if result.TaskVersion != 1 || result.LatencyMS < 0 || seen[result.TaskID] {
@@ -116,7 +121,7 @@ func TestProbeNegotiationAndSharedReportSequence(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.Endpoint = "ws" + strings.TrimPrefix(server.URL, "http") + "/agent/v1/ws"
 	cfg.ProbeEnabled, cfg.ProbeAllowPrivate = true, true
-	s, err := start(context.Background(), cfg, nil, fixtures(t))
+	s, err := start(context.Background(), cfg, nil, fixtures(t), readyDetail)
 	if err != nil {
 		t.Fatal(err)
 	}

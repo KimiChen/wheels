@@ -86,7 +86,7 @@ func eventually(t *testing.T, fn func() bool) {
 	}
 	t.Fatal("condition did not become true")
 }
-func TestAuthenticationAndCapabilityRejection(t *testing.T) {
+func TestAuthenticationAndCapabilityNegotiation(t *testing.T) {
 	s, token := testMonitor(t)
 	for _, auth := range []string{"", "Bearer invalid", "Bearer " + token + "x"} {
 		h := http.Header{}
@@ -111,8 +111,14 @@ func TestAuthenticationAndCapabilityRejection(t *testing.T) {
 	hello.Capabilities = append(hello.Capabilities, "future-unsupported.v1")
 	send(t, c, "hello", "probe", hello)
 	c.SetReadDeadline(time.Now().Add(time.Second))
-	if _, _, err = c.ReadMessage(); err == nil {
-		t.Fatal("unsupported capability accepted")
+	var answer struct {
+		Result shared.HelloResult `json:"result"`
+	}
+	if err = c.ReadJSON(&answer); err != nil {
+		t.Fatal(err)
+	}
+	if hasCapability(answer.Result.Capabilities, "future-unsupported.v1") || !hasCapability(answer.Result.Capabilities, "metrics.v1") {
+		t.Fatalf("capabilities must be a supported subset: %v", answer.Result.Capabilities)
 	}
 }
 func TestSessionOwnershipSequenceAndRedaction(t *testing.T) {

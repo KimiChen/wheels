@@ -48,6 +48,9 @@ type node struct {
 	facts               *shared.Facts
 	metrics             *shared.Metrics
 	frp                 *shared.FRP
+	frpDetail           *shared.FRPDetail
+	frpDetailAt         time.Time
+	frpDetailEnabled    bool
 	probeEnabled        bool
 }
 
@@ -323,7 +326,9 @@ func (s *Service) handleWS(w http.ResponseWriter, r *http.Request) {
 	defer releaseHandshake()
 	// Browser origins are unnecessary for an agent and would enable credential misuse from pages.
 	up := websocket.Upgrader{HandshakeTimeout: 5 * time.Second, ReadBufferSize: 4096, WriteBufferSize: 4096, CheckOrigin: func(r *http.Request) bool { return r.Header.Get("Origin") == "" }}
-	c, err := up.Upgrade(w, r, nil)
+	// Old servers reject unknown hello capabilities. Advertising on this
+	// authenticated upgrade lets new agents keep their first frame compatible.
+	c, err := up.Upgrade(w, r, http.Header{shared.CapabilitiesHeader: []string{shared.FRPDetailCapability}})
 	if err != nil {
 		return
 	}
@@ -382,6 +387,8 @@ func (s *Service) handleWS(w http.ResponseWriter, r *http.Request) {
 	n.lastSeen = time.Now()
 	n.facts = &hello.Facts
 	n.probeEnabled = hasCapability(hello.Capabilities, "ping.v1")
+	n.frpDetailEnabled = hasCapability(hello.Capabilities, shared.FRPDetailCapability)
+	n.frpDetail, n.frpDetailAt = nil, time.Time{}
 	n.frp = nil
 	if hello.Extensions != nil {
 		n.frp = hello.Extensions.FRP
@@ -391,7 +398,7 @@ func (s *Service) handleWS(w http.ResponseWriter, r *http.Request) {
 	if old != nil {
 		old.Close()
 	}
-	result := shared.HelloResult{Schema: shared.SchemaVersion, SessionID: hello.SessionID, Capabilities: append([]string(nil), hello.Capabilities...), ReportInterval: uint32(interval)}
+	result := shared.HelloResult{Schema: shared.SchemaVersion, SessionID: hello.SessionID, Capabilities: supportedCapabilities(hello.Capabilities), ReportInterval: uint32(interval)}
 	_ = c.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	if c.WriteJSON(struct {
 		JSONRPC string             `json:"jsonrpc"`
@@ -466,6 +473,9 @@ func (s *Service) handleWS(w http.ResponseWriter, r *http.Request) {
 	}()
 	tokens, last := float64(8), time.Now()
 	rate, burst := float64(2), float64(8)
+	if hasCapability(hello.Capabilities, shared.FRPDetailCapability) {
+		rate, burst, tokens = 4, 12, 12
+	}
 	if hasCapability(hello.Capabilities, "ping.v1") {
 		rate, burst, tokens = 40, 80, 80
 	}
@@ -490,12 +500,19 @@ func (s *Service) handleWS(w http.ResponseWriter, r *http.Request) {
 		}
 		tokens--
 		frame, err = shared.DecodeFrame(data)
-		if err != nil || (frame.Report == nil && frame.PingResult == nil) {
+		if err != nil || (frame.Report == nil && frame.PingResult == nil && frame.FRPDetail == nil) {
 			closeProtocol(c)
 			return
 		}
 		if frame.PingResult != nil {
 			if !hasCapability(hello.Capabilities, "ping.v1") || !s.acceptProbe(id, c, now, *frame.PingResult) {
+				closeProtocol(c)
+				return
+			}
+			continue
+		}
+		if frame.FRPDetail != nil {
+			if !s.acceptFRPDetail(id, c, now, *frame.FRPDetail) {
 				closeProtocol(c)
 				return
 			}
@@ -535,17 +552,18 @@ func (s *Service) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 }
 func allowedCapabilities(c []string) bool {
-	metrics := false
-	for _, v := range c {
-		switch v {
-		case "metrics.v1":
-			metrics = true
-		case "frp.v1", "ping.v1":
-		default:
-			return false
+	return hasCapability(c, "metrics.v1")
+}
+
+func supportedCapabilities(offered []string) []string {
+	accepted := make([]string, 0, len(offered))
+	for _, capability := range offered {
+		switch capability {
+		case "metrics.v1", "frp.v1", "ping.v1", shared.FRPDetailCapability:
+			accepted = append(accepted, capability)
 		}
 	}
-	return metrics
+	return accepted
 }
 func closeProtocol(c *websocket.Conn) {
 	_ = c.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "invalid monitor frame"), time.Now().Add(time.Second))
