@@ -1,6 +1,6 @@
 """Checks for smoke harness failure handling, without requiring FRP binaries."""
 
-from contextlib import redirect_stdout
+from contextlib import contextmanager, redirect_stdout
 import io
 import os
 from pathlib import Path
@@ -11,6 +11,20 @@ import unittest
 from unittest import mock
 
 import smoke
+
+
+ECHO_FIXTURE_PAYLOAD = b"smoke-helper\x00binary\xffpayload"
+
+
+@contextmanager
+def scripted_echo(chunks, clock=None):
+    connection = mock.MagicMock()
+    connection.__enter__.return_value = connection
+    connection.recv.side_effect = chunks
+    with mock.patch.object(smoke, "PAYLOAD", ECHO_FIXTURE_PAYLOAD), \
+            mock.patch.object(smoke.socket, "create_connection", return_value=connection), \
+            mock.patch.object(smoke.time, "monotonic", side_effect=clock, return_value=0):
+        yield connection
 
 
 class HarnessTests(unittest.TestCase):
@@ -71,6 +85,51 @@ class HarnessTests(unittest.TestCase):
     def test_echo_checks_full_binary_payload(self):
         with smoke.echo_server() as port:
             self.assertTrue(smoke.echo_matches(port))
+
+    def test_echo_complete_and_segmented_payloads_are_ready(self):
+        payload = ECHO_FIXTURE_PAYLOAD
+        for chunks in ([payload], [payload[:1], payload[1:7], payload[7:]]):
+            with self.subTest(chunks=len(chunks)), scripted_echo(chunks) as connection:
+                self.assertTrue(smoke.echo_matches(1))
+                connection.sendall.assert_called_once_with(payload)
+                self.assertEqual(connection.recv.call_count, len(chunks))
+
+    def test_echo_empty_or_valid_prefix_eof_is_not_ready(self):
+        for prefix in (b"", ECHO_FIXTURE_PAYLOAD[:1], ECHO_FIXTURE_PAYLOAD[:-1]):
+            chunks = [prefix, b""] if prefix else [b""]
+            with self.subTest(prefix_length=len(prefix)), scripted_echo(chunks):
+                self.assertFalse(smoke.echo_matches(1))
+
+    def test_echo_valid_prefix_deadline_is_not_ready(self):
+        with scripted_echo([ECHO_FIXTURE_PAYLOAD[:5]], clock=[0, .1, 1.1]) as connection:
+            self.assertFalse(smoke.echo_matches(1))
+            self.assertEqual(connection.recv.call_count, 1)
+
+    def test_echo_timeout_or_reset_after_valid_prefix_is_not_ready(self):
+        for error in (TimeoutError(), ConnectionResetError()):
+            with self.subTest(error=type(error).__name__), scripted_echo([ECHO_FIXTURE_PAYLOAD[:5], error]):
+                self.assertFalse(smoke.echo_matches(1))
+
+    def test_echo_altered_chunk_fails_before_later_network_error(self):
+        for prefix in (b"", ECHO_FIXTURE_PAYLOAD[:5]):
+            chunks = ([prefix] if prefix else []) + [b"incorrect", ConnectionResetError()]
+            with self.subTest(prefix_length=len(prefix)), scripted_echo(chunks) as connection:
+                with self.assertRaisesRegex(smoke.SmokeFailure, "altered payload"):
+                    smoke.echo_matches(1)
+                self.assertEqual(connection.recv.call_count, 2 if prefix else 1)
+
+    def test_echo_full_length_altered_payload_is_fatal(self):
+        payload = ECHO_FIXTURE_PAYLOAD
+        with scripted_echo([payload[:-1] + bytes([payload[-1] ^ 1])]):
+            with self.assertRaisesRegex(smoke.SmokeFailure, "altered payload"):
+                smoke.echo_matches(1)
+
+    def test_monitor_steady_traffic_does_not_retry_incomplete_echo(self):
+        import monitor_smoke
+        with scripted_echo([ECHO_FIXTURE_PAYLOAD[:5], b""]) as connection:
+            with self.assertRaisesRegex(smoke.SmokeFailure, "native FRP forwarding failed"):
+                monitor_smoke.exercise_tunnel(1, 1, ())
+            self.assertEqual(connection.recv.call_count, 2)
 
     def test_bridge_can_interrupt_and_restart_the_same_endpoint(self):
         with smoke.echo_server() as port:

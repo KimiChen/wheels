@@ -423,20 +423,23 @@ def echo_server() -> Iterator[int]:
 
 
 def echo_matches(port: int) -> bool:
+    # False means unavailable or incomplete: wait_for may retry within its
+    # readiness deadline, while steady traffic callers must fail immediately.
+    # Corrupt bytes always fail, even if a later read would raise OSError.
     try:
         with socket.create_connection((LOOPBACK, port), timeout=0.5) as connection:
             connection.settimeout(0.5)
             connection.sendall(PAYLOAD)
-            received = bytearray()
+            received = 0
             deadline = time.monotonic() + 1
-            while len(received) < len(PAYLOAD) and time.monotonic() < deadline:
-                data = connection.recv(min(16384, len(PAYLOAD) - len(received)))
+            while received < len(PAYLOAD) and time.monotonic() < deadline:
+                data = connection.recv(min(16384, len(PAYLOAD) - received))
                 if not data:
-                    break
-                received.extend(data)
-            if bytes(received) != PAYLOAD:
-                raise SmokeFailure("TCP echo returned a truncated or altered payload")
-            return True
+                    return False
+                if data != PAYLOAD[received:received + len(data)]:
+                    raise SmokeFailure("TCP echo returned an altered payload")
+                received += len(data)
+            return received == len(PAYLOAD)
     except OSError:
         return False
 
